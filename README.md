@@ -42,8 +42,17 @@ rowt corp add '*.intranet.example.com' '10.0.0.0/8'   # send a domain or CIDR in
 rowt use JP                   # pick a server (rowt ping shows the fastest)
 rowt status                   # is it working? (mode / server / proxy / reachability)
 rowt reload                   # after switching Wi-Fi ↔ wired ↔ hotspot
+rowt watch install            # (optional) auto-reload on every network change
 rowt down                     # stop everything
 ```
+
+Tired of running `rowt reload` by hand after every network switch? **`rowt watch
+install`** sets up a LaunchAgent that does it for you — it re-applies on each
+network change, but only while the router is up, and skips when nothing actually
+moved. `rowt watch status` shows whether it's active; `rowt watch uninstall`
+removes it. (It installs a scoped passwordless-sudo rule for just the
+`networksetup` proxy toggles so a Wi-Fi↔Ethernet switch doesn't prompt; that's
+removed on uninstall.)
 
 Forgot where you left off? **`rowt onboard`** (or just `rowt` with no arguments)
 prints a checklist of these steps with the exact next command to run.
@@ -252,6 +261,7 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 | `down` | tear everything down: system proxy off, **kill sing-box** (incl. strays), VM down. |
 | `restart` | bounce the tunnel in place (host or vm, whichever is active) — no re-render, no proxy change. Use if sing-box is stuck/high-CPU. |
 | `reload` | re-detect the network interface, re-render, restart, re-apply the proxy — run after switching Wi-Fi ↔ wired ↔ hotspot. |
+| `watch <install\|uninstall\|status>` | install/remove a LaunchAgent that runs `reload` automatically on every network change — but **only while the router is up**, debounced, and a no-op when neither the interface nor the active-service proxy moved. `install` also adds a scoped passwordless-sudo rule for the `networksetup` proxy toggles (so a Wi-Fi↔Ethernet switch doesn't prompt); `uninstall` removes both. |
 | `status` | mode, servers, proxy state, reachability **and config validity** (absorbs the old `doctor`). |
 | `route <domain\|ip>` | explain which lane a destination takes — `escape` (proxy), `corp` (into the corp VPN), or `direct` (pass-through) — and which rule matched. Mirrors the real rule order (corp domain → corp CIDR → escape domain → final); adds a live HTTP check if the router is running. |
 | `report` | full offline diagnostic (deps, configs, per-server reachability, DNS, through-proxy tests, log tail) → `~/.config/rowt/diag-*.txt`, **secrets masked**, for sharing. |

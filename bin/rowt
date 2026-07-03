@@ -45,7 +45,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="1.0.3"
+ROWT_VERSION="1.1.0"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -1452,6 +1452,142 @@ cmd_reload() {
   info "reloaded (mode=$(sget mode))."
 }
 
+# ---------- auto-reload on network change (LaunchAgent) ----------------------
+# A per-user LaunchAgent watches the resolver (which macOS rewrites on every
+# network/route transition) and runs 'watch tick' — a guarded, debounced reload
+# that only fires while the router is up. A scoped passwordless-sudo rule lets it
+# re-point the system proxy on a Wi-Fi<->Ethernet switch without a prompt.
+WATCH_LABEL="club.annaslife.rowt.watch"
+WATCH_PLIST="$HOME/Library/LaunchAgents/$WATCH_LABEL.plist"
+WATCH_SUDOERS="/etc/sudoers.d/rowt"          # no dot in the name, else sudo ignores it
+WATCH_LOG="$LOGDIR/watch.log"
+
+_watch_log() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$WATCH_LOG"; }
+# Absolute path to THIS rowt — prefer the PATH symlink (stable across upgrades).
+_watch_self() { command -v "$PROG" 2>/dev/null || echo "$HERE/bin/$PROG"; }
+# Only the networksetup proxy toggles get NOPASSWD — nothing else.
+_watch_sudoers_body() {
+  local u; u="$(id -un)"
+  cat <<EOF
+# Installed by 'rowt watch install'. Lets the rowt auto-reload LaunchAgent
+# re-apply the macOS system proxy on a network change without a password prompt.
+# Remove with:  rowt watch uninstall
+$u ALL=(root) NOPASSWD: /usr/sbin/networksetup -setsocksfirewallproxy *, /usr/sbin/networksetup -setsocksfirewallproxystate *, /usr/sbin/networksetup -setwebproxy *, /usr/sbin/networksetup -setwebproxystate *, /usr/sbin/networksetup -setsecurewebproxy *, /usr/sbin/networksetup -setsecurewebproxystate *, /usr/sbin/networksetup -setproxybypassdomains *
+EOF
+}
+
+cmd_watch() {
+  local action="${1:-status}"; [ "$#" -gt 0 ] && shift || true
+  case "$action" in
+    install)
+      local self; self="$(_watch_self)"
+      [ -x "$self" ] || die "cannot resolve the rowt binary path ($self)"
+      # LaunchAgents don't inherit your shell PATH/env, so bake in a PATH that
+      # finds jq/python3 (Homebrew) and pass through the config-location + tuning
+      # env this rowt was configured with, so the agent renders the same thing.
+      local agent_path d; agent_path="$(dirname "$self")"
+      for d in "$(brew --prefix 2>/dev/null)/bin" /opt/homebrew/bin /usr/local/bin /usr/bin /bin /usr/sbin /sbin; do
+        [ -n "$d" ] || continue
+        case ":$agent_path:" in *":$d:"*) ;; *) agent_path="$agent_path:$d" ;; esac
+      done
+      local envxml v val
+      envxml="    <key>PATH</key><string>$agent_path</string>"
+      for v in XDG_CONFIG_HOME ROWT_PORT ROWT_CLASH_PORT ROWT_FINAL ROWT_IFACE SINGBOX_VERSION ROWT_LOG_LEVEL; do
+        val="${!v:-}"; [ -n "$val" ] && envxml="$envxml
+    <key>$v</key><string>$val</string>"
+      done
+      mkdir -p "$(dirname "$WATCH_PLIST")"
+      cat > "$WATCH_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$WATCH_LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$self</string>
+    <string>watch</string>
+    <string>tick</string>
+  </array>
+  <key>WatchPaths</key>
+  <array>
+    <string>/etc/resolv.conf</string>
+    <string>/var/run/resolv.conf</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+$envxml
+  </dict>
+  <key>RunAtLoad</key><false/>
+  <key>ThrottleInterval</key><integer>5</integer>
+  <key>StandardOutPath</key><string>$WATCH_LOG</string>
+  <key>StandardErrorPath</key><string>$WATCH_LOG</string>
+</dict>
+</plist>
+PLIST
+      # scoped passwordless sudo for the proxy toggles (validated before install)
+      local tmp; tmp="$(mktemp)"; _watch_sudoers_body > "$tmp"
+      if sudo visudo -cf "$tmp" >/dev/null 2>&1; then
+        info "installing scoped passwordless-sudo rule ($WATCH_SUDOERS; needs admin once)"
+        sudo install -m 440 -o root -g wheel "$tmp" "$WATCH_SUDOERS" \
+          || err "could not install $WATCH_SUDOERS — a Wi-Fi<->Ethernet switch may prompt for a password"
+      else
+        err "generated sudoers failed validation — skipping it (service-change reloads may prompt)"
+      fi
+      rm -f "$tmp"
+      launchctl bootout "gui/$(id -u)/$WATCH_LABEL" 2>/dev/null || true
+      launchctl bootstrap "gui/$(id -u)" "$WATCH_PLIST" 2>/dev/null \
+        || launchctl load -w "$WATCH_PLIST" 2>/dev/null \
+        || die "could not load the LaunchAgent — try: launchctl bootstrap gui/$(id -u) $WATCH_PLIST"
+      info "watch installed — auto-reload on network changes (only while the router is up)."
+      echo "  agent:  $WATCH_PLIST"
+      echo "  log:    $WATCH_LOG"
+      echo "  status: $PROG watch status   ·   remove: $PROG watch uninstall"
+      ;;
+    uninstall)
+      launchctl bootout "gui/$(id -u)/$WATCH_LABEL" 2>/dev/null \
+        || launchctl unload "$WATCH_PLIST" 2>/dev/null || true
+      rm -f "$WATCH_PLIST"
+      if [ -f "$WATCH_SUDOERS" ]; then
+        info "removing $WATCH_SUDOERS (needs admin)"
+        sudo rm -f "$WATCH_SUDOERS" || err "could not remove $WATCH_SUDOERS — delete it by hand"
+      fi
+      info "watch uninstalled."
+      ;;
+    status)
+      if launchctl list "$WATCH_LABEL" >/dev/null 2>&1; then echo "watch: LOADED ($WATCH_LABEL)"
+      elif [ -f "$WATCH_PLIST" ]; then echo "watch: installed but NOT loaded — '$PROG watch install' to (re)load"
+      else echo "watch: not installed — '$PROG watch install' to enable auto-reload"; fi
+      echo "  agent:   $([ -f "$WATCH_PLIST" ] && echo "$WATCH_PLIST" || echo "(none)")"
+      echo "  sudoers: $([ -f "$WATCH_SUDOERS" ] && echo "$WATCH_SUDOERS (passwordless proxy toggles)" || echo "(none — service-change reloads may prompt)")"
+      [ -f "$WATCH_LOG" ] && { echo "  recent:"; tail -5 "$WATCH_LOG" | sed 's/^/    /'; }
+      ;;
+    tick)
+      # Fired by the LaunchAgent on a resolver change. Guard: do nothing unless the
+      # router is up ("only while the proxy is up"). Debounce via a lock dir + a
+      # short settle so a burst of resolv.conf writes = one reload. Skip entirely
+      # when neither the physical interface nor the active-service proxy actually
+      # moved, so a Wi-Fi flap doesn't needlessly bounce the tunnel.
+      host_running || exit 0
+      local lock="$CFG/watch.lock"
+      mkdir "$lock" 2>/dev/null || exit 0        # another tick already handling it
+      trap 'rmdir "$lock" 2>/dev/null || true' EXIT
+      sleep 2                                     # let the network settle
+      host_running || exit 0                      # may have gone down while we waited
+      local ifc cur svc need=0
+      ifc="$(detect_iface 2>/dev/null || true)"
+      cur="$(jq -r '.outbounds[]?|select(.tag=="direct")|.bind_interface // empty' "$HOST_CFG" 2>/dev/null || true)"
+      svc="$(active_service 2>/dev/null || true)"
+      [ -n "$ifc" ] && [ "$ifc" != "$cur" ] && need=1
+      [ -n "$svc" ] && { _proxy_pointing_ok "$svc" && _proxy_bypass_ok "$svc" || need=1; }
+      if [ "$need" -eq 0 ]; then _watch_log "resolver changed but iface=$ifc / proxy on '$svc' unchanged — skip"; exit 0; fi
+      _watch_log "network change (iface '$cur' -> '$ifc', service '$svc') — reloading"
+      cmd_reload >>"$WATCH_LOG" 2>&1 && _watch_log "reload ok" || _watch_log "reload FAILED"
+      ;;
+    *) die "usage: $PROG watch [install | uninstall | status]" ;;
+  esac
+}
+
 cmd_revert() {
   cmd_proxy off || true
   cmd_router down || true
@@ -1572,6 +1708,7 @@ c@lifecycle@up [host|vm] [--force]@set up & start (no arg = auto-detect the mode
 c@lifecycle@down@tear down: proxy off + stop sing-box + vm down
 o@lifecycle@restart@bounce the tunnel in place (no re-render / proxy change)
 c@lifecycle@reload@re-apply after a network switch (re-render + restart + proxy)
+o@lifecycle@watch <install|uninstall|status>@auto-reload on network change (while up)
 c@lifecycle@status@state + config validity + reachability
 o@lifecycle@route <domain|ip>@explain a destination's lane (escape / corp / direct)
 a@lifecycle@report@full diagnostic report to a file (masked; shareable)
@@ -1672,6 +1809,25 @@ $PROG reload — re-apply after a network switch.
 Re-detects the physical interface, re-renders (so the direct/escape binding is
 correct for the new network), restarts the router, and re-applies the system
 proxy + bypass. Run after switching Wi-Fi <-> wired <-> USB hotspot.
+EOF
+;;
+    watch) cat <<EOF
+$PROG watch <install|uninstall|status> — auto-run 'reload' on network changes.
+
+Installs a per-user LaunchAgent that watches the system resolver (which macOS
+rewrites on every network/route transition) and runs a guarded 'reload' — but
+ONLY while the router is up, so it never touches anything when rowt is stopped.
+It debounces a burst of changes into one reload and skips entirely when neither
+the physical interface nor the active-service proxy actually moved (so a Wi-Fi
+flap won't needlessly bounce the tunnel). A scoped passwordless-sudo rule
+($WATCH_SUDOERS) lets it re-point the system proxy on a Wi-Fi<->Ethernet switch
+without a password prompt — it grants NOPASSWD for the networksetup proxy
+toggles only, and 'uninstall' removes it.
+
+  install     write + load the LaunchAgent and the scoped sudoers rule (admin once)
+  uninstall   unload + remove both
+  status      is the agent loaded? sudoers present? recent reload log  [default]
+Log: $WATCH_LOG   ·   agent: ~/Library/LaunchAgents/$WATCH_LABEL.plist
 EOF
 ;;
     status) cat <<EOF
@@ -1866,6 +2022,7 @@ main() {
     down)       cmd_revert "$@" ;;
     restart)    cmd_restart "$@" ;;
     reload)     cmd_reload "$@" ;;
+    watch)      cmd_watch "$@" ;;
     status)     cmd_status "$@" ;;
     report)     cmd_diag "$@" ;;
     route)      cmd_route "$@" ;;
