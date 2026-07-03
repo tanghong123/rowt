@@ -5,21 +5,33 @@ VPN keeps the default route**, without the two clients fighting over the tunnel.
 
 ## TL;DR — the common path
 
+Do the whole setup with **Shadowrocket (or any working VPN) ON** — `rowt up`
+downloads sing-box for you, so there's no separate fetch step. Only switch to
+the corp VPN once it's up and working.
+
 ```sh
-# 1. install (symlinks `rowt` onto your PATH)
-./install.sh
+# --- with Shadowrocket ON the whole time ---
 
-# 2. while a working VPN is on (Shadowrocket), fetch sing-box from GitHub
-rowt fetch host       # host mode (the common one); use 'rowt fetch' for host+vm
+# 1. install
+brew install tanghong123/tap/rowt          # or: ./install.sh
 
-# 3. bring your servers in — easiest is straight from Shadowrocket:
+# 2. bring your servers in — easiest is straight from Shadowrocket:
 rowt server import            # writes an editable review file, prints a summary
 $EDITOR ~/.config/rowt/sr-review.json   # delete stale servers/subs
 rowt server import --apply    # (or: rowt server add '<vless://…>' / rowt sub add '<url>')
 
-# 4. turn Shadowrocket OFF, connect the CORP VPN, then start rowt
-rowt up                       # auto-detects host vs vm, starts the router + system proxy
+# 3. set up & start (auto-fetches sing-box if missing, then renders/starts/proxies)
+rowt up host                  # host mode (the common one); 'rowt up' auto-detects, 'up vm' forces vm
+
+# --- now switch networks ---
+# 4. quit Shadowrocket, connect the CORP VPN, then verify:
+rowt route www.google.com     # HTTP 200 through the tunnel
+rowt status                   # mode / server / proxy / reachability
 ```
+
+(Mode `vm` also needs its image — `up vm` fetches that too if it isn't cached.
+Probing for host-vs-vm is most accurate with the corp VPN on, so if you let
+`rowt up` auto-detect, re-run it once after connecting corp.)
 
 Day to day:
 
@@ -41,21 +53,16 @@ full command set.
 
 > **sing-box is fetched, not hand-installed.** rowt downloads a pinned `sing-box`
 > into `~/.config/rowt/bin/` — but that download needs internet **from GitHub**,
-> which in China usually means you must fetch it *while a working VPN (Shadowrocket)
-> is on*. So the intended first-run order is:
->
-> ```sh
-> # (Shadowrocket ON, or any network that can reach github.com)
-> rowt fetch host   # or 'rowt fetch vm' / 'rowt fetch' (both) — see below
-> # then turn Shadowrocket OFF, connect the corp VPN, and:
-> rowt up
-> ```
+> which in China means it must happen *while a working VPN (Shadowrocket) is on*.
+> `rowt up` auto-fetches it if it's missing, which is why the common path above
+> runs the whole setup (through `rowt up`) with Shadowrocket on, then switches to
+> the corp VPN. You can also pre-download explicitly with `rowt fetch [host|vm]`.
 >
 > For **mode `vm`** the guest can't borrow the host's VPN (it's bridged onto the
-> LAN), so `rowt fetch vm` pre-downloads the ubuntu image **and** the linux
-> sing-box into `~/.config/rowt/cache/` while the VPN is on; `rowt up vm` then
-> boots from the local image and installs sing-box into the guest from that cache
-> — the VM never reaches GitHub itself.
+> LAN), so `up vm` also fetches the ubuntu image + the linux sing-box into
+> `~/.config/rowt/cache/` (if not already there); it then boots from the local
+> image and installs sing-box into the guest from that cache — the VM never
+> reaches GitHub itself.
 >
 > Alternatives if GitHub is blocked: `brew install sing-box` (rowt will use it),
 > or download the tarball yourself and `SINGBOX_TARBALL=/path/to/it rowt fetch host`.
@@ -98,6 +105,12 @@ outbound differs (direct VLESS vs. SOCKS→VM), so switching modes is transparen
 
 ## Install
 
+**Homebrew** (recommended):
+```sh
+brew install tanghong123/tap/rowt
+```
+
+**From source:**
 ```sh
 ./install.sh          # copies to ~/.local/share/rowt, symlinks ~/.local/bin/rowt
 rowt version

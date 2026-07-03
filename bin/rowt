@@ -45,7 +45,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="1.0.0"
+ROWT_VERSION="1.0.1"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -978,6 +978,9 @@ vm_ip_detect() {
 # $VM_YAML directly, so a progress line can't leak into a command substitution).
 render_vm_yaml() {
   local img; img="$(ubuntu_img)"
+  # auto-fetch the image if it isn't cached yet (so 'up vm' works without a
+  # separate 'fetch vm'); needs internet — do it while a VPN is on.
+  [ -f "$img" ] || fetch_ubuntu_image
   cp "$HERE/lima/rowt-vm.yaml" "$VM_YAML"
   if [ -f "$img" ]; then
     sed -i.bak "s#location: \"https[^\"]*$(larch).img\"#location: \"$img\"#" "$VM_YAML" && rm -f "$VM_YAML.bak"
