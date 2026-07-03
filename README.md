@@ -287,7 +287,7 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 
 | command | what it does |
 | --- | --- |
-| `proxy status\|check\|on\|off\|env [--off]` | show / verify / set / unset the macOS system proxy; `env` prints CLI env exports. `on`/`off` are **idempotent** — they read the current state first (no sudo) and only invoke admin for what's actually wrong, so re-running never prompts if already correct. `check` exits 0 iff fully configured (used to re-apply after the OS config drifts). |
+| `proxy status\|check\|on\|off\|env [--off]` | show / verify / set / unset the macOS system proxy; `env` prints CLI env exports. `on`/`off` are **idempotent** — they read the current state first (no sudo) and only invoke admin for what's actually wrong, so re-running never prompts if already correct. `on` is a **no-op unless the router is running** (else it would just point the system proxy at a dead port and break traffic) — run `rowt up` first, or `proxy on --force` to override. `check` exits 0 iff fully configured (used to re-apply after the OS config drifts). |
 | `shell-init` | shell integration to `eval` in your rc — defines `rowt-proxy-on`/`-off` (idempotent). Add `eval "$(rowt shell-init)"` to `~/.zshrc`. |
 | `render` | regenerate the sing-box configs from current state. |
 | `fetch [host\|vm\|both]` | pre-download while a VPN is on so `up` works offline. `host` = the macOS sing-box binary; `vm` = the ubuntu image + linux sing-box tarball into `~/.config/rowt/cache/` (then `up vm` boots from the local image and installs sing-box into the guest from that cache — **the VM never reaches GitHub itself**). Default `both`. |

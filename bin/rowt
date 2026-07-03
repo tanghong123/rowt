@@ -45,7 +45,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="1.0.2"
+ROWT_VERSION="1.0.3"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -354,7 +354,8 @@ edit_list() {
         else printf '%s\n' "$e" >> "$file"; echo "  added: $e"; fi
       done ;;
     import)   # batch-add one domain per line from a file
-      touch "$file"; _list_add_file "$file" "${1:-}" "$label" ;;
+      [ -n "${1:-}" ] || die "usage: $PROG $label import <file>   (one domain per line)"
+      touch "$file"; _list_add_file "$file" "$1" "$label" ;;
     rm|remove)
       [ -f "$file" ] || die "$label list is empty"
       [ "$#" -ge 1 ] || die "usage: $PROG $label rm <entry>..."
@@ -757,7 +758,7 @@ servers_remove() {
 cmd_use() {
   local tag="${1:-}"
   [ -s "$SERVERS" ] || die "no servers imported"
-  if [ -z "$tag" ]; then cmd_servers; return 0; fi
+  if [ -z "$tag" ]; then servers_list; return 0; fi
   if [ "$tag" != "auto" ] && ! jq -e --arg t "$tag" 'any(.tag == $t)' "$SERVERS" >/dev/null; then
     die "unknown server '$tag' — see: $PROG server"
   fi
@@ -914,7 +915,8 @@ cmd_router() {
     status)
       if host_running; then echo "  router: running (pid $(cat "$(host_pidfile)")) on 127.0.0.1:$PORT"
       else echo "  router: stopped"; fi ;;
-    log) tail -f "$LOGDIR/host.log" ;;
+    log) [ -f "$LOGDIR/host.log" ] || die "no router log yet — start it first: $PROG up (or $PROG router up)"
+         tail -f "$LOGDIR/host.log" ;;
     *) die "usage: $PROG router up|down|restart|status|log" ;;
   esac
 }
@@ -1042,6 +1044,9 @@ cmd_vm() {
   local -a nopx=(env -u http_proxy -u https_proxy -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY)
   case "$action" in
     up)
+      # Check servers BEFORE the expensive path (brew install, sudo, ~1-2 min VM
+      # build) — otherwise we'd do all that and only then die at cmd_render.
+      [ -s "$SERVERS" ] || die "no servers — add some first: $PROG server add '<vless://...>' or $PROG sub add <url>"
       ensure_lima; lima_networks_setup
       if ! limactl list -q 2>/dev/null | grep -qx "$VM_NAME"; then
         info "creating VM '$VM_NAME' (~1-2 min)"
@@ -1111,7 +1116,7 @@ _proxy_any_on() {
     || networksetup -getsecurewebproxy "$1" 2>/dev/null | grep -q '^Enabled: Yes'
 }
 
-# rowt proxy [status | check | on | off | env [--off]]
+# rowt proxy [status | check | on [--force] | off | env [--off]]
 # All -get* reads are sudo-free, so 'on'/'off' only invoke sudo when a change is
 # actually needed — re-running (or install.sh) won't prompt if already correct.
 cmd_proxy() {
@@ -1119,7 +1124,7 @@ cmd_proxy() {
   case "$action" in
     env) cmd_env "$@"; return 0 ;;
     on|off|status|check) ;;
-    *) die "usage: $PROG proxy [status | check | on | off | env [--off]]" ;;
+    *) die "usage: $PROG proxy [status | check | on [--force] | off | env [--off]]" ;;
   esac
   local svc; svc="$(active_service)" || die "no active network service"
   case "$action" in
@@ -1137,6 +1142,19 @@ cmd_proxy() {
         echo "  ✗ system proxy not fully configured — run '$PROG proxy on'"; return 1
       fi ;;
     on)
+      # Refuse to point the system proxy at a dead port. If the router isn't
+      # running, 127.0.0.1:$PORT has nothing listening, so setting the proxy
+      # just breaks all traffic until 'up'/'reload'. No-op with guidance instead
+      # ('--force' overrides for the rare manual case). Every internal caller
+      # (up/reload/install.sh) starts the router first, so they pass this guard.
+      local force=0
+      for a in "$@"; do case "$a" in --force|-f) force=1 ;; esac; done
+      if [ "$force" -eq 0 ] && ! host_running; then
+        echo "  router not running — nothing is listening on 127.0.0.1:$PORT yet."
+        echo "  start it first:  $PROG up      (that renders, starts the router, and sets the proxy)"
+        echo "  override anyway: $PROG proxy on --force"
+        return 0
+      fi
       local set_proxy=1 set_bypass=1
       _proxy_pointing_ok "$svc" && set_proxy=0
       _proxy_bypass_ok "$svc"   && set_bypass=0
