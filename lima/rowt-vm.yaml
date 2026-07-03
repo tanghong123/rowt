@@ -1,0 +1,71 @@
+# rowt-vm — a minimal bridged Linux VM that runs sing-box as the VLESS tunnel
+# for mode "vm" (used when the corp client enforces its tunnel at the packet
+# filter and mode "host" can't bypass it).
+#
+# It joins the LAN via a bridged interface (own DHCP IP from your home router),
+# so its network stack is fully independent of the host's corp VPN. The host's
+# rule-router forwards escape traffic to sing-box's mixed proxy here over SOCKS.
+#
+# The bridged network "rowt-bridged" is defined by rowt in
+# ~/.lima/_config/networks.yaml. The tunnel config (with your VLESS secret) is
+# NOT baked in — rowt pushes it to /etc/rowt/vm.json via `limactl copy`
+# and enables the service afterwards, so no credentials live in this file.
+#
+# The sing-box binary is likewise installed by rowt after boot from a host-side
+# copy (rowt fetch vm; SINGBOX_VERSION in rowt), so the guest never downloads it.
+# The `images:` locations below are replaced with a local file by rowt when the
+# image has been pre-fetched (rowt fetch vm) — see render_vm_yaml in bin/rowt.
+
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
+    arch: "aarch64"
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
+    arch: "x86_64"
+
+cpus: 1
+memory: "1GiB"
+disk: "5GiB"
+
+# This VM only runs sing-box — no container runtime. Disabling containerd stops
+# Lima from downloading the (large) nerdctl archive from GitHub during boot.
+containerd:
+  system: false
+  user: false
+
+# Bridged NIC → own LAN IP, independent of the host routing table / corp VPN.
+networks:
+  - lima: rowt-bridged
+
+# No host mounts: the secret config is copied in explicitly, nothing is shared.
+mounts: []
+
+# NOTE: Lima auto-forwards the guest's listening ports onto the host's 127.0.0.1.
+# We do NOT rely on that (rowt reaches the VM via its bridge IP), and can't
+# reliably suppress it for 0.0.0.0-bound ports. Instead, rowt runs the guest
+# sing-box on DISTINCT ports (host PORT+1 / CLASH+1), so Lima forwarding them to
+# the host can't collide with the host router's own PORT/CLASH. See VM_PORT/
+# VM_CLASH in bin/rowt.
+
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux
+      mkdir -p /etc/rowt
+      cat > /etc/systemd/system/rowt-singbox.service <<'UNIT'
+      [Unit]
+      Description=escape sing-box VLESS tunnel
+      After=network-online.target
+      Wants=network-online.target
+      [Service]
+      ExecStart=/usr/local/bin/sing-box run -c /etc/rowt/vm.json
+      Restart=on-failure
+      RestartSec=3
+      [Install]
+      WantedBy=multi-user.target
+      UNIT
+      systemctl daemon-reload
+      # The sing-box binary and /etc/rowt/vm.json are installed AFTER boot by
+      # `rowt vm up`, from a copy the host pre-fetched (`rowt fetch vm`) — so the
+      # guest never downloads sing-box over its bare LAN. The service is enabled
+      # by rowt once both are in place.

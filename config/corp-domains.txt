@@ -1,0 +1,32 @@
+# Destinations routed INTO the corporate VPN (case 2). Everything here is sent
+# via the OS routing table with no interface binding, so the corp VPN's own
+# routes carry it — exactly as if rowt weren't running.
+#
+# Two kinds of entries (auto-detected):
+#   - a domain suffix:  corp.example.com   (matches host + all subdomains)
+#   - an IP CIDR:       10.0.0.0/8         (matches by resolved/destination IP)
+#
+# Corp domains also resolve via the *system* resolver (corp DNS), so internal
+# names resolve correctly; everything else resolves via a China resolver on the
+# physical NIC (no corp-DNS leak).
+#
+# Lines starting with # and blank lines are ignored. Add your organization's
+# intranet domains/CIDRs with:  rowt corp add <domain|cidr>
+# (or edit this file directly, then run:  rowt reload)
+#
+# The corp lane is specific to your organization, so it ships EMPTY. Uncomment
+# the line(s) for YOUR employer below (verify the exact intranet suffix — these
+# are common examples and can change), or add your own with `rowt corp add`.
+#
+#   alibaba-inc.com      # Alibaba
+#   oa.com               # Tencent
+#   bytedance.net        # ByteDance
+#   sankuai.com          # Meituan
+#   xiaojukeji.com       # Didi
+#   baidu.com            # Baidu  (scope to internal subdomains if this over-matches)
+#   jd.com               # JD     (scope to internal subdomains if this over-matches)
+#   corp.netease.com     # NetEase
+#
+# Intranet IP ranges usually go here too, e.g.:
+#   10.0.0.0/8
+#   172.16.0.0/12

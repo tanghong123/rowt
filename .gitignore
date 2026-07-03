@@ -1,0 +1,6 @@
+.state/
+diag.out
+diag-*.txt
+__pycache__/
+*.pyc
+bin/sing-box

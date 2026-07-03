@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Auto-bump rowt's revision (patch) version on every commit that touches the tool.
+# Skipped if a ROWT_VERSION change is already staged (i.e. you manually bumped the
+# minor/major version yourself, or it's the initial add).
+#
+# Enable in a fresh clone with:  git config core.hooksPath .githooks
+set -euo pipefail
+
+f="bin/rowt"
+# only bump on commits that touch the tool itself
+git diff --cached --name-only | grep -qE '^(bin/|config/|lima/|install\.sh|README\.md|DESIGN\.md)' || exit 0
+[ -f "$f" ] || exit 0
+
+# respect a manual version bump already staged in this commit (incl. the initial add)
+if git diff --cached -- "$f" | grep -qE '^\+ROWT_VERSION='; then
+  exit 0
+fi
+
+cur="$(grep -E '^ROWT_VERSION=' "$f" | head -1 | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/')"
+[ -n "$cur" ] || exit 0
+IFS=. read -r MA MI RE <<EOF
+$cur
+EOF
+new="$MA.$MI.$((RE + 1))"
+
+sed -i.bak -E "s/^ROWT_VERSION=\"[0-9]+\.[0-9]+\.[0-9]+\"/ROWT_VERSION=\"$new\"/" "$f"
+rm -f "$f.bak"
+git add "$f"
+echo "rowt: auto-bumped version $cur -> $new" >&2

@@ -1,0 +1,1810 @@
+#!/usr/bin/env bash
+#
+# rowt — split traffic three ways through one local proxy while a corporate
+# VPN owns the default route, without the two fighting.
+#
+# It runs sing-box on the host as a rule-router (mixed proxy on 127.0.0.1:PORT,
+# so the macOS system-proxy target never changes) with three destinations:
+#   escape  — escape-domains.txt -> personal VLESS tunnel   (e.g. google)
+#   corp    — corp-domains.txt   -> into the corp VPN       (e.g. intranet)
+#   direct  — everything else    -> straight out the physical NIC, bypassing
+#             both corp and escape                          (e.g. baidu / China)
+#
+# The escape outbound's tunnel uplink has two implementations, picked by `probe`:
+#
+#   mode host  — VLESS + bind_interface=<physical NIC>. The tunnel uplink is
+#                forced out the physical interface, bypassing the corp tunnel.
+#                Compact, no VM, works while travelling. FAILS if the corp
+#                client enforces via a packet filter instead of routes.
+#   mode vm    — a bridged Lima VM runs the VLESS tunnel; the host forwards
+#                escape traffic to it over SOCKS. The VM has its own network
+#                stack, so it bypasses corp enforcement of any kind.
+#
+# Multiple servers form a selector group "escape". Default is MANUAL: `use <tag>`
+# pins one server and a plain selector never health-checks its members, so
+# flaky/dead servers stay idle and can't spin the CPU. `use auto` switches to a
+# urltest that auto-picks the fastest LIVE server and re-probes them every
+# ROWT_AUTO_INTERVAL (default 20m). The selector lives wherever the tunnel runs
+# (host in mode host, the VM in mode vm).
+#
+# Servers are VLESS or AnyTLS, from manual links and/or subscriptions. Commands
+# are grouped by noun (run 'rowt help' for the full list):
+#
+#   lifecycle : up [host|vm] · down · restart · reload · status · route <dest> · report
+#   servers   : server {list|add|rm|clear|import} · sub {list|add|rm|update|clear|import|dump}
+#               use <tag>|auto · ping [tag] · probe
+#   lanes     : escape / corp  {list|add|rm|import <file>|dump [file]}
+#   proxy     : proxy {status|on|off|env}
+#   internals : render · fetch · router {up|down|restart|status|log} · vm {…} · version
+#
+# Env: ROWT_PORT   local mixed-proxy port (default 7890)
+#      ROWT_CLASH_PORT  clash API port for live switching (default 9090)
+#      ROWT_FINAL  bucket for unlisted traffic: direct|corp (default direct)
+#      ROWT_IFACE  force the physical interface (default: auto-detect)
+#      SINGBOX_VERSION  pinned sing-box release (default 1.13.14, >=1.12 AnyTLS)
+set -euo pipefail
+
+# ---------- paths & constants ------------------------------------------------
+ROWT_VERSION="1.0.0"
+# Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
+_src="${BASH_SOURCE[0]}"
+while [ -L "$_src" ]; do
+  _dir="$(cd -P "$(dirname "$_src")" && pwd)"
+  _src="$(readlink "$_src")"; [ "${_src#/}" = "$_src" ] && _src="$_dir/$_src"
+done
+HERE="$(cd -P "$(dirname "$_src")/.." && pwd)"                   # rowt/
+PROG="$(basename "${BASH_SOURCE[0]}")"
+CFG="${XDG_CONFIG_HOME:-$HOME/.config}/rowt"
+BIN="$CFG/bin"
+STATE="$CFG/state"
+LOGDIR="$CFG/log"
+CACHE="$CFG/cache"                   # pre-fetched artifacts (vm image, guest sing-box)
+OUTBOUND="$CFG/outbound.json"        # legacy single-server file (auto-migrated)
+SERVERS="$CFG/servers.json"          # array of VLESS outbounds (secret)
+HOST_CFG="$CFG/host.json"            # rendered rule-router config
+VM_CFG="$CFG/vm.json"                # rendered VM tunnel config
+VM_YAML="$CFG/rowt-vm.yaml"          # effective Lima config (rendered from template)
+PORT="${ROWT_PORT:-7890}"
+CLASH_PORT="${ROWT_CLASH_PORT:-9090}"   # sing-box clash API (live switching)
+# The VM guest listens on DIFFERENT ports than the host router. Lima auto-forwards
+# the guest's ports onto the host's 127.0.0.1; if they were the same (7890/9090)
+# that forward would steal the host router's ports ("address already in use").
+# Distinct ports make Lima's forward harmless. We reach the VM via its bridge IP.
+VM_PORT="$((PORT + 1))"                  # VM guest mixed-proxy port (host forwards escape here)
+VM_CLASH="$((CLASH_PORT + 1))"           # VM guest clash API port
+SINGBOX_VERSION="${SINGBOX_VERSION:-1.13.14}"   # >= 1.12 for AnyTLS support
+VM_NAME="rowt-vm"
+SB="$BIN/sing-box"                   # pinned host binary
+# repo files are templates; the live, user-editable lists live under $CFG
+DOMAINS_TMPL="$HERE/config/escape-domains.txt"
+CORP_TMPL="$HERE/config/corp-domains.txt"
+DOMAINS="$CFG/escape-domains.txt"                # -> escape (VLESS tunnel)
+CORP_DOMAINS="$CFG/corp-domains.txt"             # -> corp (into the corp VPN)
+PARSER="$HERE/config/vless-parse.py"
+SR_IMPORT="$HERE/config/sr-import.py"            # Shadowrocket importer
+SR_REVIEW="$CFG/sr-review.json"                  # editable Shadowrocket import (secret)
+MANUAL="$CFG/manual.json"                        # manually-imported servers (secret)
+SUBS_FILE="$CFG/subs.txt"                        # subscription URLs, one per line
+FINAL_ROUTE="${ROWT_FINAL:-direct}"            # bucket for unlisted traffic
+# ping liveness check: a globally-reachable URL (incl. from China exits) so a
+# node isn't marked dead just because it can't reach Google.
+PING_URL="${ROWT_PING_URL:-https://cp.cloudflare.com/generate_204}"
+PING_TIMEOUT="${ROWT_PING_TIMEOUT:-8}"          # seconds per server
+LOG_LEVEL="${ROWT_LOG_LEVEL:-warn}"             # sing-box log level (info is very noisy)
+AUTO_INTERVAL="${ROWT_AUTO_INTERVAL:-20m}"       # how often 'auto' re-probes all servers
+
+mkdir -p "$CFG" "$BIN" "$LOGDIR"
+
+err()  { echo "error: $*" >&2; }
+die()  { err "$*"; exit 1; }
+# Progress/diagnostics go to stderr so a function's stdout stays pure data — this
+# is what lets value-returning helpers (used in "$(...)") log safely.
+info() { echo "==> $*" >&2; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# state get/set — one key=value per line in $STATE
+sget() { [ -f "$STATE" ] && sed -n "s/^$1=//p" "$STATE" | tail -1 || true; }
+sset() {
+  local k="$1" v="$2" tmp
+  touch "$STATE"; tmp="$(mktemp)"
+  grep -v "^$k=" "$STATE" > "$tmp" 2>/dev/null || true
+  echo "$k=$v" >> "$tmp"; mv "$tmp" "$STATE"
+}
+
+# Persisted secret for the sing-box clash API (used for live server switching).
+clash_secret() {
+  local s; s="$(sget clash_secret)"
+  if [ -z "$s" ]; then
+    s="$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c1-24)"
+    sset clash_secret "$s"
+  fi
+  echo "$s"
+}
+
+# Clash API endpoint holding the selector: host in mode host, the VM in mode vm.
+controller() {
+  local mode; mode="$(sget mode)"; mode="${mode:-host}"
+  if [ "$mode" = "vm" ]; then
+    local ip; ip="$(sget vm_ip)"; [ -n "$ip" ] || return 1; echo "$ip:$VM_CLASH"
+  else
+    echo "127.0.0.1:$CLASH_PORT"
+  fi
+}
+
+clash_curl() { # $1=method $2=path [$3=json-body]
+  local ep sec; ep="$(controller)" || return 1; sec="$(clash_secret)"
+  # --noproxy '*' so a proxy env var doesn't hijack the localhost clash API call
+  if [ -n "${3:-}" ]; then
+    curl --noproxy '*' -sS -m 6 -X "$1" -H "Authorization: Bearer $sec" \
+      -H "Content-Type: application/json" -d "$3" "http://$ep$2"
+  else
+    curl --noproxy '*' -sS -m 6 -X "$1" -H "Authorization: Bearer $sec" "http://$ep$2"
+  fi
+}
+
+# The member the selector is currently on (auto or a server tag), live.
+clash_selected() { clash_curl GET /proxies/escape 2>/dev/null | jq -r '.now // empty' 2>/dev/null || true; }
+
+# Count non-comment, non-blank subscription lines (single clean integer).
+sub_count() {
+  [ -f "$SUBS_FILE" ] || { echo 0; return; }
+  awk '!/^[[:space:]]*(#|$)/{n++} END{print n+0}' "$SUBS_FILE"
+}
+
+# Seed the user-editable routing lists from the repo templates on first use.
+seed_lists() {
+  [ -f "$DOMAINS" ]      || { cp "$DOMAINS_TMPL" "$DOMAINS" 2>/dev/null || true; }
+  [ -f "$CORP_DOMAINS" ] || { cp "$CORP_TMPL" "$CORP_DOMAINS" 2>/dev/null || true; }
+}
+
+# Migrations to the current multi-source server model.
+migrate() {
+  seed_lists
+  # very old single-server file -> servers array
+  if [ ! -f "$SERVERS" ] && [ -f "$OUTBOUND" ]; then
+    jq '[. + {tag:"server-1"}]' "$OUTBOUND" > "$SERVERS" && chmod 600 "$SERVERS"
+    sset selected auto
+  fi
+  # servers.json from before manual/subs split -> treat it as the manual set,
+  # so rebuild_servers() won't wipe it
+  if [ -s "$SERVERS" ] && [ ! -f "$MANUAL" ] && [ ! -f "$SUBS_FILE" ]; then
+    cp "$SERVERS" "$MANUAL" && chmod 600 "$MANUAL"
+  fi
+}
+
+# ---------- dependency install ----------------------------------------------
+# semver >= compare ($1 >= $2)
+ver_ge() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]; }
+
+sb_ok() { # a usable sing-box binary at $1 ? (present, >= 1.12 for AnyTLS/schema)
+  [ -x "$1" ] || return 1
+  local v; v="$("$1" version 2>/dev/null | awk 'NR==1{print $3}')"
+  [ -n "$v" ] && ver_ge "$v" "1.12.0"
+}
+
+# Ensure a usable sing-box at $SB. Needs internet the first time — run
+# `rowt fetch` while you have connectivity (e.g. Shadowrocket on), then setup
+# works offline. Honors: an existing $SB, a system `sing-box` (brew), the
+# SINGBOX_TARBALL / SINGBOX_URL overrides, then GitHub + mirrors.
+ensure_singbox_host() {
+  sb_ok "$SB" && return 0
+
+  local arch; case "$(uname -m)" in arm64) arch=arm64 ;; x86_64) arch=amd64 ;; *) die "unsupported arch: $(uname -m)" ;; esac
+  local dir="sing-box-${SINGBOX_VERSION}-darwin-${arch}" tgz="sing-box-${SINGBOX_VERSION}-darwin-${arch}.tar.gz"
+  local tmp; tmp="$(mktemp -d)"
+
+  # (a) a pre-downloaded tarball
+  if [ -n "${SINGBOX_TARBALL:-}" ] && [ -f "$SINGBOX_TARBALL" ]; then
+    info "using SINGBOX_TARBALL=$SINGBOX_TARBALL"
+    cp "$SINGBOX_TARBALL" "$tmp/$tgz"
+  # (b) a system sing-box (e.g. `brew install sing-box`) that's new enough
+  elif command -v sing-box >/dev/null 2>&1 && sb_ok "$(command -v sing-box)"; then
+    ln -sf "$(command -v sing-box)" "$SB"; rm -rf "$tmp"
+    info "using system sing-box $("$SB" version | awk 'NR==1{print $3}') ($(command -v sing-box))"
+    return 0
+  else
+    # (c) download from GitHub over whatever connectivity you have. We deliberately
+    # do NOT use third-party GitHub mirror proxies here: this binary handles your
+    # traffic, so it should come from the real source (fetch it while Shadowrocket
+    # is on) or a source you explicitly trust via SINGBOX_URL / SINGBOX_TARBALL.
+    info "fetching sing-box $SINGBOX_VERSION (needs internet — e.g. Shadowrocket on)"
+    local got=0 b
+    for b in "${SINGBOX_URL:-}" \
+             "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/${tgz}"; do
+      [ -n "$b" ] || continue
+      info "  ↓ $b"
+      if curl -fL -# --connect-timeout 12 --retry 1 --retry-delay 1 "$b" -o "$tmp/$tgz"; then
+        got=1; break
+      fi
+      echo   # newline after a failed attempt's partial bar
+    done
+    if [ "$got" -ne 1 ]; then
+      rm -rf "$tmp"
+      err "could not reach GitHub to download sing-box (your network likely blocks it)."
+      err "do ONE of these:"
+      err "  • turn Shadowrocket ON, run '$PROG fetch', then turn it off and '$PROG up'"
+      err "  • brew install sing-box    (rowt will use it)"
+      err "  • download sing-box-${SINGBOX_VERSION}-darwin-${arch}.tar.gz yourself and"
+      err "    run:  SINGBOX_TARBALL=/path/to/that.tar.gz $PROG fetch"
+      die "sing-box unavailable"
+    fi
+  fi
+
+  tar -xzf "$tmp/$tgz" -C "$tmp" 2>/dev/null || { rm -rf "$tmp"; die "could not extract sing-box tarball"; }
+  local found; found="$tmp/$dir/sing-box"; [ -f "$found" ] || found="$(find "$tmp" -name sing-box -type f | head -1)"
+  [ -n "$found" ] && [ -f "$found" ] || { rm -rf "$tmp"; die "sing-box binary not found in tarball"; }
+  cp "$found" "$SB"; chmod +x "$SB"; rm -rf "$tmp"
+  sb_ok "$SB" || die "downloaded sing-box is not usable"
+  info "sing-box $("$SB" version | awk 'NR==1{print $3}') ready at $SB"
+}
+
+# Fetch/install sing-box now (run while you have connectivity).
+# linux arch tag used by both the ubuntu image and the guest sing-box tarball
+larch() { case "$(uname -m)" in arm64|aarch64) echo arm64 ;; *) echo amd64 ;; esac; }
+guest_sb_tgz() { echo "$CACHE/sing-box-${SINGBOX_VERSION}-linux-$(larch).tar.gz"; }
+ubuntu_img()   { echo "$CACHE/ubuntu-24.04-server-cloudimg-$(larch).img"; }
+
+# Pre-fetch the linux sing-box tarball onto the HOST so the VM never has to reach
+# GitHub over its bare LAN. Honours GUEST_SINGBOX_TARBALL (local file) / _URL.
+fetch_guest_singbox() {
+  local dest; dest="$(guest_sb_tgz)"
+  [ -f "$dest" ] && { info "guest sing-box already cached: $dest"; return 0; }
+  mkdir -p "$CACHE"
+  local tgz="sing-box-${SINGBOX_VERSION}-linux-$(larch).tar.gz" b got=0
+  info "fetching guest sing-box $SINGBOX_VERSION (linux/$(larch)) for the VM"
+  for b in "${GUEST_SINGBOX_TARBALL:-}" "${GUEST_SINGBOX_URL:-}" \
+           "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/${tgz}"; do
+    [ -n "$b" ] || continue
+    if [ -f "$b" ]; then cp "$b" "$dest" && { got=1; break; }; fi
+    info "  ↓ $b"
+    curl -fL -# --connect-timeout 12 --retry 1 "$b" -o "$dest" && { got=1; break; }; echo
+  done
+  [ "$got" = 1 ] || { rm -f "$dest"; die "could not fetch guest sing-box — turn Shadowrocket on, then '$PROG fetch vm'"; }
+  info "guest sing-box cached: $dest"
+}
+
+# Pre-fetch the ubuntu cloud image onto the HOST (Lima start uses it as a local
+# file, so no ~600MB download while Shadowrocket is off). Honours UBUNTU_IMG_URL.
+fetch_ubuntu_image() {
+  local dest; dest="$(ubuntu_img)"
+  [ -f "$dest" ] && { info "ubuntu image already cached: $dest"; return 0; }
+  mkdir -p "$CACHE"
+  local url="https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-$(larch).img"
+  info "fetching ubuntu 24.04 image (~600MB, once) for the VM"
+  info "  ↓ ${UBUNTU_IMG_URL:-$url}"
+  curl -fL -# --connect-timeout 12 --retry 1 "${UBUNTU_IMG_URL:-$url}" -o "$dest" \
+    || { rm -f "$dest"; die "could not fetch ubuntu image — turn Shadowrocket on, then '$PROG fetch vm'"; }
+  info "ubuntu image cached: $dest"
+}
+
+fetch_vm_artifacts() { fetch_ubuntu_image; fetch_guest_singbox; }
+
+# rowt fetch [host|vm|both] — pre-download while a working VPN is on, so 'up'
+# works after you switch to the corp VPN (Shadowrocket off).
+cmd_fetch() {
+  case "${1:-both}" in
+    host)         ensure_singbox_host ;;
+    vm)           fetch_vm_artifacts ;;
+    both|all|"")  ensure_singbox_host; fetch_vm_artifacts ;;
+    *) die "usage: $PROG fetch [host|vm|both]" ;;
+  esac
+  info "done — you can now run '$PROG up' without internet to GitHub."
+}
+
+# ---------- config rendering -------------------------------------------------
+# a rule-list file -> JSON array of its non-comment entries (optionally filtered)
+# $1=file  $2=filter: ""=all  "cidr"=only CIDRs  "domain"=everything else
+list_json() {
+  local f="$1" filt="${2:-}"
+  [ -f "$f" ] || { echo '[]'; return 0; }
+  grep -vE '^[[:space:]]*(#|$)' "$f" | sed 's/[[:space:]]//g' \
+    | case "$filt" in
+        cidr)   grep -E '/[0-9]+$' || true ;;
+        domain) grep -vE '/[0-9]+$' || true ;;
+        *)      cat ;;
+      esac \
+    | jq -R . | jq -s 'map(select(length>0))'
+}
+
+domains_json()    { list_json "$DOMAINS"; }                 # escape suffixes
+corp_domains_json() { list_json "$CORP_DOMAINS" domain; }   # corp suffixes
+corp_cidrs_json()   { list_json "$CORP_DOMAINS" cidr; }     # corp IP ranges
+
+# Re-render and restart the router if it is currently running.
+reload_if_running() {
+  if host_running; then info "reloading router"; cmd_render >/dev/null; cmd_router restart >/dev/null; fi
+}
+
+# list/add/rm entries in a routing list file, then hot-reload.
+#   $1=file  $2=label(escape|corp)  $3=action  $4..=entries
+# Read one entry per non-comment line of a file into $file, deduped. Echoes counts.
+_list_add_file() { # $1=list-file $2=source-file $3=label
+  [ -f "$2" ] || die "no such file: $2"
+  local line e added=0 already=0
+  touch "$1"
+  while IFS= read -r line; do
+    e="$(printf '%s' "$line" | tr -d '[:space:]')"
+    case "$e" in ''|\#*) continue ;; esac
+    if grep -qxF "$e" "$1" 2>/dev/null; then already=$((already + 1))
+    else printf '%s\n' "$e" >> "$1"; added=$((added + 1)); fi
+  done < "$2"
+  echo "  $3 += $added new, $already already present (from $2)"
+}
+
+# rowt escape / corp  [list | add <e>… | rm <e>… | import <file> | dump [file]]
+edit_list() {
+  local file="$1" label="$2" action="${3:-list}"; shift 3 2>/dev/null || true
+  case "$action" in
+    list)
+      echo "$label list:"
+      if grep -qvE '^[[:space:]]*(#|$)' "$file" 2>/dev/null; then
+        grep -vE '^[[:space:]]*(#|$)' "$file" | sed 's/^/  /'
+      else echo "  (empty)"; fi
+      echo "  $PROG $label add <e>… | rm <e>… | import <file> | dump [file]"
+      return 0 ;;
+    add)
+      [ "$#" -ge 1 ] || die "usage: $PROG $label add <entry>..."
+      touch "$file"; local e
+      for e in "$@"; do
+        e="$(printf '%s' "$e" | tr -d '[:space:]')"; [ -z "$e" ] && continue
+        if grep -qxF "$e" "$file" 2>/dev/null; then echo "  already present: $e"
+        else printf '%s\n' "$e" >> "$file"; echo "  added: $e"; fi
+      done ;;
+    import)   # batch-add one domain per line from a file
+      touch "$file"; _list_add_file "$file" "${1:-}" "$label" ;;
+    rm|remove)
+      [ -f "$file" ] || die "$label list is empty"
+      [ "$#" -ge 1 ] || die "usage: $PROG $label rm <entry>..."
+      local e tmp; tmp="$(mktemp)"
+      for e in "$@"; do
+        e="$(printf '%s' "$e" | tr -d '[:space:]')"
+        if grep -qxF "$e" "$file" 2>/dev/null; then
+          grep -vxF "$e" "$file" > "$tmp"; mv "$tmp" "$file"; echo "  removed: $e"
+        else echo "  not found: $e"; fi
+      done
+      rm -f "$tmp" 2>/dev/null || true ;;
+    dump)     # bare entries to stdout, or to a file if given (for backup/versioning)
+      local entries; entries="$(grep -vE '^[[:space:]]*(#|$)' "$file" 2>/dev/null || true)"
+      if [ -n "${1:-}" ]; then printf '%s\n' "$entries" > "$1"; echo "  dumped $label list -> $1" >&2
+      else printf '%s\n' "$entries"; fi
+      return 0 ;;
+    *) die "usage: $PROG $label [list | add <e>… | rm <e>… | import <file> | dump [file]]" ;;
+  esac
+  reload_if_running
+}
+
+cmd_escape() { local a="${1:-list}"; [ "$#" -gt 0 ] && shift; edit_list "$DOMAINS" escape "$a" "$@"; }
+cmd_corp()   { local a="${1:-list}"; [ "$#" -gt 0 ] && shift; edit_list "$CORP_DOMAINS" corp "$a" "$@"; }
+
+# Detect the physical (non-tunnel) interface: an enX with an IPv4 and a router.
+detect_iface() {
+  [ -n "${ROWT_IFACE:-}" ] && { echo "$ROWT_IFACE"; return 0; }
+  local i
+  for i in $(networksetup -listallhardwareports 2>/dev/null \
+              | awk '/Device:/{print $2}'); do
+    case "$i" in en*) ;; *) continue ;; esac
+    if ipconfig getifaddr "$i" >/dev/null 2>&1 \
+       && [ -n "$(ipconfig getoption "$i" router 2>/dev/null)" ]; then
+      echo "$i"; return 0
+    fi
+  done
+  return 1
+}
+
+# servers.json -> [ ...members, (urltest 'auto' when $sel=="auto"), escape(selector) ]
+# $1=servers-file  $2=bind-interface-or-empty  $3=selected-default
+# $sel=="auto" builds a urltest (probes every $AUTO_INTERVAL); anything else is a
+# plain selector that never probes its members (flaky/dead servers stay idle).
+group_jq() {
+  jq --arg if "$2" --arg sel "$3" --arg interval "$AUTO_INTERVAL" '
+    (if $if == "" then . else map(. + {bind_interface:$if}) end) as $m
+    | ($m | map(.tag)) as $tags
+    | (if $sel == "auto"                 # auto: urltest health-checks every $interval
+       then $m
+            + [{type:"urltest", tag:"auto", outbounds:$tags,
+                url:"https://www.gstatic.com/generate_204", interval:$interval}]
+            + [{type:"selector", tag:"escape", outbounds:(["auto"] + $tags), default:"auto"}]
+       else $m                           # manual: plain selector, nothing is probed
+            + [{type:"selector", tag:"escape", outbounds:$tags,
+                default:(if ($tags | index($sel)) then $sel else ($tags[0] // "block") end)}]
+       end)
+  ' "$1"
+}
+
+# The escape-related outbounds (a JSON array) for a render target:
+#   host      members(+bind) + auto + selector      (selector lives on the host)
+#   vm-guest  members         + auto + selector      (selector lives in the VM)
+#   vm-host   a single SOCKS hop to the VM           (host just forwards)
+build_escape_outbounds() {
+  local sel; sel="$(sget selected)"; sel="${sel:-auto}"
+  case "$1" in
+    host)
+      local ifc; ifc="$(detect_iface)" || die "no physical interface found"
+      group_jq "$SERVERS" "$ifc" "$sel" ;;
+    vm-guest)
+      group_jq "$SERVERS" "" "$sel" ;;
+    vm-host)
+      local vmip; vmip="$(sget vm_ip)"; [ -n "$vmip" ] || die "vm ip unknown (run: $PROG vm up)"
+      jq -n --arg s "$vmip" --argjson p "$VM_PORT" \
+        '[{type:"socks",tag:"escape",server:$s,server_port:$p,version:"5"}]' ;;
+    *) die "unknown target: $1" ;;
+  esac
+}
+
+# The VM guest config: everything it receives is escape traffic. Simple.
+#   $1=escape-outbounds (JSON array)  $2=listen-addr  $3=clash-listen
+assemble_vm() {
+  local escs="$1" listen="$2" clash="$3" secret; secret="$(clash_secret)"
+  jq -n --argjson escs "$escs" --arg listen "$listen" --argjson port "$VM_PORT" \
+        --arg clash "$clash" --arg secret "$secret" --arg lvl "$LOG_LEVEL" \
+    '{
+      log:{level:$lvl, timestamp:true},
+      dns:{servers:[{type:"local", tag:"local"}]},
+      inbounds:[{type:"mixed", tag:"in", listen:$listen, listen_port:$port}],
+      outbounds:($escs + [{type:"direct",tag:"direct"}, {type:"block",tag:"block"}]),
+      route:{rules:[{action:"sniff"}], final:"escape", auto_detect_interface:true,
+             default_domain_resolver:"local"}
+    }
+    + (if $clash=="" then {}
+       else {experimental:{clash_api:{external_controller:$clash, secret:$secret}}} end)'
+}
+
+# The HOST rule-router config with three destinations:
+#   escape  -> the VLESS selector (google, blocked sites)
+#   corp    -> direct WITHOUT interface binding: the OS routing table sends it,
+#              so corp-internal IPs/domains ride the corp VPN tunnel
+#   direct  -> direct BOUND to the physical NIC: bypasses corp AND escape
+#              (baidu / the general China internet)
+# DNS mirrors this: corp names resolve via the system resolver (corp DNS), the
+# rest via a China resolver over the physical NIC (no corp-DNS leak/poison).
+#   $1=escape-outbounds  $2=listen  $3=clash-listen
+assemble_host() {
+  local escs="$1" listen="$2" clash="$3" ifc secret
+  ifc="$(detect_iface)" || die "no physical interface found"
+  secret="$(clash_secret)"
+  jq -n \
+    --argjson escs "$escs" \
+    --arg listen "$listen" \
+    --argjson port "$PORT" \
+    --arg ifc "$ifc" \
+    --arg final "$FINAL_ROUTE" \
+    --arg clash "$clash" \
+    --arg secret "$secret" \
+    --arg lvl "$LOG_LEVEL" \
+    --argjson esc_dom "$(domains_json)" \
+    --argjson corp_dom "$(corp_domains_json)" \
+    --argjson corp_cidr "$(corp_cidrs_json)" \
+    '
+    # route rules, first match wins. sniff first so domain rules see host names.
+    ([ {action:"sniff"} ]
+     + [ if ($corp_dom|length)  > 0 then {domain_suffix:$corp_dom,  outbound:"corp"}   else empty end,
+         if ($corp_cidr|length) > 0 then {ip_cidr:$corp_cidr,       outbound:"corp"}   else empty end,
+         if ($esc_dom|length)   > 0 then {domain_suffix:$esc_dom,   outbound:"escape"} else empty end ]) as $rules
+    |
+    ([ {type:"local", tag:"local"},
+       {type:"udp", tag:"dns-direct", server:"223.5.5.5", detour:"direct"} ]) as $dns_servers
+    |
+    ([ if ($corp_dom|length) > 0 then {domain_suffix:$corp_dom, server:"local"} else empty end ]) as $dns_rules
+    |
+    {
+      log:{level:$lvl, timestamp:true},
+      dns:{servers:$dns_servers, rules:$dns_rules, final:"dns-direct"},
+      inbounds:[{type:"mixed", tag:"in", listen:$listen, listen_port:$port}],
+      outbounds:($escs + [
+        {type:"direct", tag:"corp"},                       # OS routing -> corp VPN
+        {type:"direct", tag:"direct", bind_interface:$ifc}, # forced onto physical NIC
+        {type:"block",  tag:"block"}
+      ]),
+      route:{rules:$rules, final:$final, auto_detect_interface:false,
+             default_domain_resolver:"dns-direct"}
+    }
+    + (if $clash=="" then {}
+       else {experimental:{clash_api:{external_controller:$clash, secret:$secret}}} end)'
+}
+
+cmd_render() {
+  [ -s "$SERVERS" ] || die "no servers — run: $PROG server add '<vless://...>' or $PROG sub add <url>"
+  ensure_singbox_host
+  local mode; mode="$(sget mode)"; mode="${mode:-host}"
+  info "rendering configs (mode=$mode, port=$PORT, servers=$(jq length "$SERVERS"))"
+  if [ "$mode" = "vm" ]; then
+    # host forwards escape traffic to the VM over SOCKS; selector lives in the VM
+    assemble_host "$(build_escape_outbounds vm-host)" "127.0.0.1" "" > "$HOST_CFG"
+  else
+    assemble_host "$(build_escape_outbounds host)" "127.0.0.1" "127.0.0.1:$CLASH_PORT" > "$HOST_CFG"
+  fi
+  # VM guest config (used only in mode vm): selector + clash API bound to the LAN
+  assemble_vm "$(build_escape_outbounds vm-guest)" "0.0.0.0" "0.0.0.0:$VM_CLASH" > "$VM_CFG"
+  "$SB" check -c "$HOST_CFG" || die "generated host config failed validation"
+  "$SB" check -c "$VM_CFG"   || die "generated vm config failed validation"
+  echo "  host: $HOST_CFG"
+  echo "  vm:   $VM_CFG"
+}
+
+# ---------- import / subscribe / servers ------------------------------------
+# The working set ($SERVERS) is rebuilt from two sources: manually-imported
+# servers ($MANUAL) plus every subscription in $SUBS_FILE, deduped + retagged.
+rebuild_servers() {
+  have python3 || die "python3 not found"
+  local acc; acc="$(mktemp)"; echo '[]' > "$acc"
+  [ -s "$MANUAL" ] && jq -s 'add' "$acc" "$MANUAL" > "$acc.n" && mv "$acc.n" "$acc"
+  if [ -f "$SUBS_FILE" ]; then
+    local url out
+    while IFS= read -r url; do
+      case "$url" in ''|\#*) continue ;; esac
+      if out="$(python3 "$PARSER" --sub "$url" 2>/dev/null)"; then
+        jq -s 'add' "$acc" <(printf '%s' "$out") > "$acc.n" && mv "$acc.n" "$acc"
+      else
+        err "subscription fetch failed: ${url%%\?*}…"
+      fi
+    done < "$SUBS_FILE"
+  fi
+  python3 "$PARSER" --combine < "$acc" > "$SERVERS.tmp" || { rm -f "$SERVERS.tmp" "$acc"; die "combine failed"; }
+  mv "$SERVERS.tmp" "$SERVERS"; chmod 600 "$SERVERS"; rm -f "$acc"
+  # keep the selection valid; default to the first real server (manual mode has no "auto")
+  local sel; sel="$(sget selected)"
+  local ok=0
+  [ "$sel" = "auto" ] && ok=1
+  [ -n "$sel" ] && jq -e --arg t "$sel" 'any(.tag==$t)' "$SERVERS" >/dev/null 2>&1 && ok=1
+  if [ "$ok" -ne 1 ]; then sset selected "$(jq -r '.[0].tag // "auto"' "$SERVERS")"; fi
+}
+
+after_import() {
+  local n; n="$(jq length "$SERVERS" 2>/dev/null || echo 0)"
+  info "$n server(s) available (selected: $(sget selected)):"
+  jq -r '.[] | "\(.tag)\t\(.type)\t\(.server):\(.server_port)"' "$SERVERS" \
+    | while IFS=$'\t' read -r a t b; do printf '  %-20s %-7s %s\n' "$a" "$t" "$b"; done | head -40
+  echo "  stored (secret) at: $SERVERS"
+  reload_if_running
+}
+
+cmd_import() {
+  [ "$#" -ge 1 ] || die "usage: $PROG server add '<vless://|anytls://...>' [more...]"
+  have python3 || die "python3 not found"
+  local new; new="$(printf '%s\n' "$@" | python3 "$PARSER" --multi)" || exit 1
+  # append to the manual set and dedupe it in place (so re-importing the same
+  # link is idempotent, not just deduped in the final servers.json)
+  [ -s "$MANUAL" ] || echo '[]' > "$MANUAL"
+  jq -s 'add' "$MANUAL" <(printf '%s' "$new") | python3 "$PARSER" --combine > "$MANUAL.n" \
+    && mv "$MANUAL.n" "$MANUAL"
+  chmod 600 "$MANUAL"
+  rebuild_servers; after_import
+}
+
+# subscribe <url> [url2...]        replace the subscription list
+# subscribe --add <url> [url2...]  append to it
+# Subscriptions: rowt sub [list | add <url>… | rm <n|url> | update | clear]
+cmd_sub() {
+  local action="${1:-list}"; [ "$#" -gt 0 ] && shift || true
+  case "$action" in
+    list)
+      echo "subscriptions:"
+      if [ -s "$SUBS_FILE" ]; then grep -nvE '^[[:space:]]*(#|$)' "$SUBS_FILE" | sed 's/:/  /' | sed 's/^/  /'
+      else echo "  (none)"; fi
+      echo "manual servers: $([ -s "$MANUAL" ] && jq length "$MANUAL" || echo 0)"
+      echo "  $PROG sub add <url> | rm <n|url> | update | clear"
+      ;;
+    add)
+      [ "$#" -ge 1 ] || die "usage: $PROG sub add <url> [url2...]"
+      printf '%s\n' "$@" >> "$SUBS_FILE"; sort -u "$SUBS_FILE" -o "$SUBS_FILE"
+      info "subscriptions ($(sub_count)): fetching…"; rebuild_servers; after_import ;;
+    rm|remove) subs_remove "$@" ;;
+    update)
+      [ -s "$SUBS_FILE" ] || die "no saved subscriptions — use: $PROG sub add <url>"
+      info "re-fetching $(sub_count) subscription(s)…"; rebuild_servers; after_import ;;
+    clear) : > "$SUBS_FILE"; info "all subscriptions removed"; rebuild_servers; after_import ;;
+    import) cmd_from_shadowrocket "$@" ;;    # from Shadowrocket (same as 'server import')
+    dump)
+      local entries; entries="$(grep -vE '^[[:space:]]*(#|$)' "$SUBS_FILE" 2>/dev/null || true)"
+      if [ -n "${1:-}" ]; then printf '%s\n' "$entries" > "$1"; echo "  dumped subscriptions -> $1" >&2
+      else printf '%s\n' "$entries"; fi ;;
+    *) die "usage: $PROG sub [list | add <url>… | rm <n|url> | update | clear | import [--apply] | dump [file]]" ;;
+  esac
+}
+
+# Remove subscription(s) by 1-based line number or by URL substring.
+subs_remove() {
+  [ "$#" -ge 1 ] || die "usage: $PROG sub rm <n|url>"
+  [ -s "$SUBS_FILE" ] || die "no subscriptions"
+  local arg tmp; tmp="$(mktemp)"
+  for arg in "$@"; do
+    if printf '%s' "$arg" | grep -qE '^[0-9]+$'; then
+      awk -v n="$arg" 'NR!=n' "$SUBS_FILE" > "$tmp" && mv "$tmp" "$SUBS_FILE"
+    else
+      grep -vF "$arg" "$SUBS_FILE" > "$tmp" 2>/dev/null; mv "$tmp" "$SUBS_FILE"
+    fi
+  done
+  info "removed; re-fetching remaining subscription(s)…"
+  rebuild_servers; after_import
+}
+
+# Import from Shadowrocket in two steps: dump an editable review file, let the
+# user prune stale entries, then --apply what remains.
+cmd_from_shadowrocket() {
+  have python3 || die "python3 not found"
+  if [ "${1:-}" = "--apply" ]; then
+    shift
+    local src="${1:-$SR_REVIEW}"
+    [ -s "$src" ] || die "no review file — run '$PROG server import' first (without --apply)"
+    jq -e . "$src" >/dev/null 2>&1 || die "review file is not valid JSON: $src"
+    apply_sr "$src"
+    return 0
+  fi
+  # dump/review step
+  python3 "$SR_IMPORT" > "$SR_REVIEW.tmp" 2>"$SR_REVIEW.err" \
+    || { cat "$SR_REVIEW.err" >&2; rm -f "$SR_REVIEW.tmp" "$SR_REVIEW.err"; die "could not read Shadowrocket data"; }
+  cat "$SR_REVIEW.err" >&2 2>/dev/null; rm -f "$SR_REVIEW.err"
+  mv "$SR_REVIEW.tmp" "$SR_REVIEW"; chmod 600 "$SR_REVIEW"
+  echo "Extracted from Shadowrocket:"
+  jq -r '.servers[] | "\(.tag)\t\(.type)\t\(.server):\(.server_port)"' "$SR_REVIEW" \
+    | while IFS=$'\t' read -r a t b; do printf '  %-20s %-7s %s\n' "$a" "$t" "$b"; done | head -40
+  echo "  ($(jq '.servers|length' "$SR_REVIEW") servers, $(jq '.subscriptions|length' "$SR_REVIEW") subscriptions, $(jq '.proxy_domains|length' "$SR_REVIEW") proxy-domains)"
+  jq -r '.skipped | to_entries[] | "  skipped \(.value) \(.key) server(s) — unsupported by escape"' "$SR_REVIEW"
+  echo
+  echo "Review file written to:"
+  echo "  $SR_REVIEW"
+  echo "Edit it — delete unwanted entries from \"servers\" / \"subscriptions\""
+  echo "(tip: keep your own nodes under \"servers\", delete ones that come from a"
+  echo " subscription since those are fetched fresh) — then import what remains:"
+  echo "  $PROG server import --apply"
+}
+
+apply_sr() {
+  local j="$1"
+  [ -s "$MANUAL" ] || echo '[]' > "$MANUAL"
+  jq -s '.[0] + (.[1].servers // [])' "$MANUAL" "$j" > "$MANUAL.n" && mv "$MANUAL.n" "$MANUAL"
+  chmod 600 "$MANUAL"
+  jq -r '.subscriptions[]?.url // empty' "$j" >> "$SUBS_FILE"
+  sort -u "$SUBS_FILE" -o "$SUBS_FILE"
+  # merge PROXY domains into escape-domains.txt (dedupe non-comment lines)
+  local merged; merged="$(mktemp)"
+  { cat "$DOMAINS"; echo "# --- imported from Shadowrocket ---"; jq -r '.proxy_domains[]? // empty' "$j"; } > "$merged"
+  awk '!/^[[:space:]]*#/ && NF {if(seen[$0]++)next} {print}' "$merged" > "$DOMAINS"
+  rm -f "$merged"
+  info "importing… rebuilding server set (this fetches the subscriptions)"
+  rebuild_servers; after_import
+  info "escape-domains now has $(domains_json | jq length) domains. Next: $PROG up"
+}
+
+# Server pool: rowt server [list | add <link>… | rm <tag>… | clear | import [--apply]]
+cmd_server() {
+  local action="${1:-list}"; [ "$#" -gt 0 ] && shift || true
+  case "$action" in
+    list)      servers_list ;;
+    add)       cmd_import "$@" ;;               # parse vless:// / anytls:// link(s)
+    rm|remove) servers_remove "$@" ;;
+    clear)     echo '[]' > "$MANUAL"; chmod 600 "$MANUAL"; info "manual servers cleared"; rebuild_servers; after_import ;;
+    import)    cmd_from_shadowrocket "$@" ;;    # from Shadowrocket (servers + subs)
+    dump)      # export the manual servers (JSON) for backup; subs -> 'sub dump'
+      local out; out="$([ -s "$MANUAL" ] && jq . "$MANUAL" 2>/dev/null || echo '[]')"
+      if [ -n "${1:-}" ]; then printf '%s\n' "$out" > "$1"; chmod 600 "$1"; echo "  dumped manual servers -> $1 (contains secrets, chmod 600)" >&2
+      else printf '%s\n' "$out"; fi ;;
+    *) die "usage: $PROG server [list | add <link>… | rm <tag>… | clear | import [--apply] | dump [file]]" ;;
+  esac
+}
+
+servers_list() {
+  [ -s "$SERVERS" ] || die "no servers — '$PROG server add <link>' or '$PROG sub add <url>'"
+  local sel now; sel="$(sget selected)"; now="$(clash_selected)"
+  echo "servers (selected: $sel${now:+, live: $now}):"
+  jq -r '.[] | "\(.tag)\t\(.type)\t\(.server):\(.server_port)"' "$SERVERS" \
+    | while IFS=$'\t' read -r a t b; do
+        mark="  "; [ "$a" = "$now" ] && mark="* "
+        printf '%s%-18s %-7s %s\n' "$mark" "$a" "$t" "$b"
+      done
+  echo "pin: $PROG use <tag>   auto: $PROG use auto   ping: $PROG ping   rm: $PROG server rm <tag>"
+}
+
+# Remove server(s) by tag. Only manual servers can be removed persistently;
+# a server that comes from a subscription is dropped by removing that sub.
+servers_remove() {
+  [ "$#" -ge 1 ] || die "usage: $PROG server rm <tag>..."
+  local tag entry srv port
+  for tag in "$@"; do
+    entry="$(jq -c --arg t "$tag" '.[] | select(.tag==$t)' "$SERVERS" 2>/dev/null)"
+    [ -n "$entry" ] || { err "no server tagged '$tag'"; continue; }
+    srv="$(printf '%s' "$entry" | jq -r .server)"
+    port="$(printf '%s' "$entry" | jq -r .server_port)"
+    if [ -s "$MANUAL" ] && jq -e --arg s "$srv" --argjson p "$port" \
+         'any(.server==$s and .server_port==$p)' "$MANUAL" >/dev/null 2>&1; then
+      jq --arg s "$srv" --argjson p "$port" \
+        'map(select(.server!=$s or .server_port!=$p))' "$MANUAL" > "$MANUAL.n" && mv "$MANUAL.n" "$MANUAL"
+      echo "  removed manual server: $tag ($srv:$port)"
+    else
+      err "'$tag' comes from a subscription — remove that subscription: $PROG sub rm <n>"
+    fi
+  done
+  chmod 600 "$MANUAL" 2>/dev/null || true
+  rebuild_servers; after_import
+}
+
+# Select the escape server:
+#   use <tag>   pin one server (manual selector; nothing is health-checked)
+#   use auto    auto-pick the fastest live server, re-probed every $AUTO_INTERVAL
+# Toggling auto<->manual changes the config shape (urltest present/absent), so we
+# re-render and restart; a plain tag->tag change in manual mode can switch live.
+cmd_use() {
+  local tag="${1:-}"
+  [ -s "$SERVERS" ] || die "no servers imported"
+  if [ -z "$tag" ]; then cmd_servers; return 0; fi
+  if [ "$tag" != "auto" ] && ! jq -e --arg t "$tag" 'any(.tag == $t)' "$SERVERS" >/dev/null; then
+    die "unknown server '$tag' — see: $PROG server"
+  fi
+  local prev; prev="$(sget selected)"
+  sset selected "$tag"
+  cmd_render >/dev/null
+  if ! host_running; then info "escape -> $tag (applies on next '$PROG router up')"; return 0; fi
+  # same mode + concrete tag -> live switch; any auto toggle -> restart to (de)activate urltest
+  if [ "$prev" != "auto" ] && [ "$tag" != "auto" ] && clash_curl PUT /proxies/escape "{\"name\":\"$tag\"}" >/dev/null 2>&1; then
+    info "escape -> $tag (live)"
+  else
+    cmd_router restart >/dev/null
+    [ "$tag" = "auto" ] && info "escape -> auto (fastest live server, re-probed every $AUTO_INTERVAL)" \
+                        || info "escape -> $tag"
+  fi
+}
+
+# Latency-test one server (or all) through the running router's clash API.
+# Test reachability + latency of all (or one) servers, THROUGH the real tunnel
+# (clash API delay test — so it handles AnyTLS etc., unlike the plain-HTTPS probe).
+# Runs the tests in parallel and prints fastest-first; * marks the active server.
+cmd_ping() {
+  [ -s "$SERVERS" ] || die "no servers imported"
+  if ! host_running; then info "starting router for the test…"; cmd_router up >/dev/null 2>&1 || die "could not start router"; fi
+  local target="${1:-}" tags t now ep sec enc
+  if [ -n "$target" ]; then tags="$target"; else tags="$(jq -r '.[].tag' "$SERVERS")"; fi
+  now="$(clash_selected)"
+  ep="$(controller)" || die "clash API endpoint unknown (is the router/VM up?)"
+  sec="$(clash_secret)"
+  enc="$(python3 -c 'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=""))' "$PING_URL" 2>/dev/null || echo "$PING_URL")"
+  info "testing latency to $PING_URL through the tunnel (parallel, ${PING_TIMEOUT}s each)…"
+  local dir; dir="$(mktemp -d)" pids=""
+  for t in $tags; do
+    (
+      # curl max-time must exceed the clash delay timeout, else it cuts early
+      ms="$(curl --noproxy '*' -sS -m "$((PING_TIMEOUT + 3))" -H "Authorization: Bearer $sec" \
+            "http://$ep/proxies/$t/delay?timeout=${PING_TIMEOUT}000&url=$enc" 2>/dev/null \
+            | jq -r '.delay // empty' 2>/dev/null || true)"
+      case "$ms" in ''|null) printf '999999\t%s\tunreachable\n' "$t" ;;
+                    *)       printf '%06d\t%s\t%s ms\n' "$ms" "$t" "$ms" ;; esac
+    ) > "$dir/$t.out" &
+    pids="$pids $!"
+  done
+  wait $pids   # only the test subshells, NOT the sing-box we may have started
+  cat "$dir"/*.out 2>/dev/null | sort -n | while IFS=$'\t' read -r _ t disp; do
+    mark="  "; [ "$t" = "$now" ] && mark="* "
+    printf '%s%-20s %s\n' "$mark" "$t" "$disp"
+  done
+  rm -rf "$dir"
+  echo "  * = active. 'unreachable' = server didn't answer in ${PING_TIMEOUT}s (down, or can't reach the test URL)."
+}
+
+# ---------- probe ------------------------------------------------------------
+# Resolve a host to an IP without trusting corp DNS (echo empty on failure).
+resolve_ip() {
+  case "$1" in
+    *[a-zA-Z]*) { have dig && dig +short @223.5.5.5 "$1" A | grep -m1 -E '^[0-9.]+$'; } || true ;;
+    *) echo "$1" ;;
+  esac
+}
+
+# curl-through-interface: 0 if the TCP layer reached the server (any TLS/HTTP
+# result), 1 if it could not connect (exit 7 refused / 28 timeout).
+PROBE_TIMEOUT="${ROWT_PROBE_TIMEOUT:-5}"           # per-connect probe timeout (s)
+tcp_reaches() { # $1=iface-or-empty  $2=ip  $3=port
+  local ec=0
+  # --noproxy '*' so a proxy env var (http_proxy/all_proxy) doesn't hijack the
+  # direct reachability test (we're testing the server, not a proxy).
+  if [ -n "$1" ]; then
+    curl --interface "$1" --noproxy '*' -sS --connect-timeout "$PROBE_TIMEOUT" -m "$PROBE_TIMEOUT" -o /dev/null "https://$2:$3/" 2>/dev/null || ec=$?
+  else
+    curl --noproxy '*' -sS --connect-timeout "$PROBE_TIMEOUT" -m "$PROBE_TIMEOUT" -o /dev/null "https://$2:$3/" 2>/dev/null || ec=$?
+  fi
+  case "$ec" in 7|28|6) return 1 ;; *) return 0 ;; esac
+}
+
+# Probe ALL servers in parallel (via the default route AND bound to the physical
+# NIC), print a full status table, then decide the mode: HOST if any server is
+# reachable when bound to the NIC, else VM if any is reachable via the default
+# route, else fail. (mode is a property of corp enforcement, but we still show
+# every server so you can see which are usable.)
+cmd_probe() {
+  [ -s "$SERVERS" ] || die "import/subscribe servers first: $PROG server add '<vless://...>'"
+  local iface n; iface="$(detect_iface)" || die "no physical interface detected"
+  n="$(jq length "$SERVERS")"
+  info "probing $n server(s) in parallel via default route and via $iface (corp VPN should be up)…"
+  local dir pids="" i
+  dir="$(mktemp -d)"
+  for ((i=0; i<n; i++)); do
+    (
+      tag="$(jq -r ".[$i].tag" "$SERVERS")"
+      host="$(jq -r ".[$i].server" "$SERVERS")"
+      port="$(jq -r ".[$i].server_port" "$SERVERS")"
+      ip="$(resolve_ip "$host")"
+      if [ -z "$ip" ]; then printf '%s\t%s\t-\t-\n' "$tag" "DNS-FAIL ($host)"; exit 0; fi
+      d=✗; b=✗
+      tcp_reaches "" "$ip" "$port" && d=ok
+      tcp_reaches "$iface" "$ip" "$port" && b=ok
+      printf '%s\t%s\t%s\t%s\n' "$tag" "$ip:$port" "$d" "$b"
+    ) > "$dir/$(printf '%03d' "$i").r" &
+    pids="$pids $!"
+  done
+  wait $pids
+  local any_default=0 any_bind=0 f tag ipp d b
+  for f in "$dir"/*.r; do
+    IFS=$'\t' read -r tag ipp d b < "$f"
+    [ "$d" = ok ] && any_default=1
+    [ "$b" = ok ] && any_bind=1
+    printf '  %-18s %-24s default:%-3s %s:%s\n' "$tag" "$ipp" "$d" "$iface" "$b"
+  done
+  rm -rf "$dir"
+  echo
+  if [ "$any_default" -eq 0 ]; then
+    echo "  ✗ no server reachable via the default route — check connectivity/servers"
+    echo "  (or skip probing: $PROG up host / $PROG up vm)"
+    return 1
+  fi
+  if [ "$any_bind" -eq 1 ]; then
+    sset mode host
+    echo "→ mode HOST works (bind_interface bypasses the corp tunnel)."
+  else
+    sset mode vm
+    echo "→ bind failed while default works → corp enforces via packet filter → mode VM."
+  fi
+}
+
+# ---------- rule-router -------------------------------------------------
+host_pidfile() { echo "$CFG/host.pid"; }
+host_running() { local p; p="$(cat "$(host_pidfile)" 2>/dev/null || true)"; [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }
+
+cmd_router() {
+  local action="${1:-up}"
+  case "$action" in
+    up)
+      host_running && { echo "  router already running (pid $(cat "$(host_pidfile)"))"; return 0; }
+      [ -f "$HOST_CFG" ] || cmd_render
+      ensure_singbox_host
+      info "starting rule-router on 127.0.0.1:$PORT"
+      "$SB" run -c "$HOST_CFG" >"$LOGDIR/host.log" 2>&1 &
+      echo $! > "$(host_pidfile)"
+      sleep 1
+      host_running || { err "router failed to start — see $LOGDIR/host.log"; tail -5 "$LOGDIR/host.log" >&2; return 1; }
+      echo "  ✓ running (pid $(cat "$(host_pidfile)"))"
+      ;;
+    down)
+      local p; p="$(cat "$(host_pidfile)" 2>/dev/null || true)"
+      [ -n "$p" ] && kill "$p" 2>/dev/null || true
+      rm -f "$(host_pidfile)"
+      # reap any orphaned sing-box started from our config (crash / port conflict / ping auto-start)
+      pkill -f "$SB run -c $HOST_CFG" 2>/dev/null || true
+      echo "  router stopped"
+      ;;
+    restart) cmd_router down; cmd_router up ;;
+    status)
+      if host_running; then echo "  router: running (pid $(cat "$(host_pidfile)")) on 127.0.0.1:$PORT"
+      else echo "  router: stopped"; fi ;;
+    log) tail -f "$LOGDIR/host.log" ;;
+    *) die "usage: $PROG router up|down|restart|status|log" ;;
+  esac
+}
+
+# ---------- bridged Lima VM (mode vm) ---------------------------------------
+ensure_lima() {
+  have limactl || { info "installing lima + socket_vmnet"; brew install lima socket_vmnet; }
+  have limactl || die "lima install failed"
+}
+
+SVM_PATH=""   # set by ensure_socket_vmnet
+
+# Lima requires the socket_vmnet binary to be owned by root along its whole path.
+# Homebrew installs it under the user-owned prefix (uid 502 on Apple Silicon),
+# which Lima rejects, so copy it to the Lima-recommended root-owned location
+# /opt/socket_vmnet. Idempotent: skips the sudo copy once it's already root-owned.
+ensure_socket_vmnet() {
+  local secure="/opt/socket_vmnet/bin/socket_vmnet"
+  if [ -x "$secure" ] && [ "$(stat -f %u "$secure" 2>/dev/null)" = "0" ]; then
+    info "socket_vmnet already root-owned at /opt/socket_vmnet — skipping sudo"
+    SVM_PATH="$secure"; return 0
+  fi
+  local cellar ver; cellar="$(brew --prefix 2>/dev/null)/Cellar/socket_vmnet"
+  ver="$(ls "$cellar" 2>/dev/null | sort -V | tail -1)"
+  if [ -z "$ver" ]; then                       # not a brew Cellar install; let Lima report
+    SVM_PATH="$(brew --prefix 2>/dev/null)/opt/socket_vmnet/bin/socket_vmnet"; return 0
+  fi
+  info "installing socket_vmnet to /opt/socket_vmnet (root-owned; Lima requires this; needs admin)"
+  sudo mkdir -p /opt/socket_vmnet \
+    && sudo cp -R "$cellar/$ver/." /opt/socket_vmnet/ \
+    && sudo chown -R root:wheel /opt/socket_vmnet \
+    || die "could not install socket_vmnet to /opt/socket_vmnet"
+  SVM_PATH="$secure"
+}
+
+lima_networks_setup() {
+  local net="$HOME/.lima/_config/networks.yaml"
+  # /etc is a symlink to /private/etc on macOS, and Lima rejects symlinks in path
+  # components — use the real path (same as varRun uses /private/var/...).
+  local sudoers="/private/etc/sudoers.d/lima"
+  ensure_socket_vmnet; local svm="$SVM_PATH"
+  mkdir -p "$(dirname "$net")"
+  local rewrote=0
+  # (re)write when missing, missing our network, or any of the required fields is
+  # absent/wrong. Match EXACT quoted paths — a bare grep would false-positive
+  # (e.g. "/opt/socket_vmnet/…" is a substring of the old brew path, and an old
+  # "/etc/sudoers.d/lima" would satisfy a bare "sudoers:" check).
+  if [ ! -f "$net" ] \
+     || ! grep -q "rowt-bridged" "$net" 2>/dev/null \
+     || ! grep -qF "socketVMNet: \"$svm\"" "$net" 2>/dev/null \
+     || ! grep -q "varRun:" "$net" 2>/dev/null \
+     || ! grep -qF "sudoers: \"$sudoers\"" "$net" 2>/dev/null; then
+    info "configuring lima bridged network (socket_vmnet at $svm)"
+    # Lima needs a full networks config: socketVMNet + an absolute varRun + the
+    # sudoers path (so it knows the file grants passwordless socket_vmnet and
+    # doesn't fall back to requiring generic passwordless sudo) + group.
+    cat > "$net" <<YAML
+paths:
+  socketVMNet: "$svm"
+  varRun: "/private/var/run/lima"
+  sudoers: "$sudoers"
+group: "everyone"
+networks:
+  rowt-bridged:
+    mode: bridged
+    interface: "$(detect_iface || echo en0)"
+YAML
+    rewrote=1
+  fi
+  # The sudoers file encodes the socketVMNet path, so regenerate it whenever we
+  # changed the network config (or it isn't authorized yet); otherwise skip sudo.
+  if [ "$rewrote" = 1 ] || [ ! -f "$sudoers" ]; then
+    info "authorizing socket_vmnet (sudo; writes $sudoers)"
+    limactl sudoers | sudo tee "$sudoers" >/dev/null
+  else
+    info "socket_vmnet already authorized ($sudoers present) — skipping sudo"
+  fi
+}
+
+vm_ip_detect() {
+  # The BRIDGED network is Lima's added interface, named lima0/lima1/… (it holds
+  # the real-LAN address we forward escape to and that egresses independently).
+  # eth0 is Lima's internal NAT (192.168.x, unreachable from the host) — NOT it.
+  limactl shell "$VM_NAME" ip -4 -o addr show 2>/dev/null \
+    | awk '$2 ~ /^lima[0-9]/ {print $4}' | cut -d/ -f1 | head -1
+}
+
+# Produce the effective Lima config: the repo template, but with our arch's image
+# location repointed at the pre-fetched local file when it exists (so 'limactl
+# start' doesn't download ~600MB while Shadowrocket is off).
+# Writes the effective Lima config to $VM_YAML (does NOT echo it — callers use
+# $VM_YAML directly, so a progress line can't leak into a command substitution).
+render_vm_yaml() {
+  local img; img="$(ubuntu_img)"
+  cp "$HERE/lima/rowt-vm.yaml" "$VM_YAML"
+  if [ -f "$img" ]; then
+    sed -i.bak "s#location: \"https[^\"]*$(larch).img\"#location: \"$img\"#" "$VM_YAML" && rm -f "$VM_YAML.bak"
+    info "using cached ubuntu image: $img"
+  fi
+}
+
+# Install sing-box into the running guest from the host-side cache — the VM never
+# reaches GitHub itself. Fetches to the cache first if missing (needs internet;
+# prefer '$PROG fetch vm' while a VPN is on).
+ensure_guest_singbox_installed() {
+  if limactl shell "$VM_NAME" sh -c "sing-box version 2>/dev/null | grep -q '$SINGBOX_VERSION'" 2>/dev/null; then
+    info "guest sing-box $SINGBOX_VERSION already installed"; return 0
+  fi
+  local tgz; tgz="$(guest_sb_tgz)"
+  [ -f "$tgz" ] || fetch_guest_singbox
+  info "installing sing-box $SINGBOX_VERSION into the VM (from the host cache)"
+  limactl copy "$tgz" "$VM_NAME:/tmp/sb.tgz"
+  limactl shell "$VM_NAME" sudo sh -c 'cd /tmp && tar -xzf sb.tgz && install -m755 sing-box-*/sing-box /usr/local/bin/sing-box && systemctl daemon-reload' \
+    || die "failed to install sing-box in the VM"
+}
+
+cmd_vm() {
+  local action="${1:-up}"
+  # Lima must not route its own image/tooling downloads through rowt's proxy
+  # (127.0.0.1:7890) — everything the VM needs is cached locally, and the guest is
+  # bridged so it doesn't use the host proxy. Clear the proxy env for limactl.
+  local -a nopx=(env -u http_proxy -u https_proxy -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY)
+  case "$action" in
+    up)
+      ensure_lima; lima_networks_setup
+      if ! limactl list -q 2>/dev/null | grep -qx "$VM_NAME"; then
+        info "creating VM '$VM_NAME' (~1-2 min)"
+        render_vm_yaml
+        "${nopx[@]}" limactl start --tty=false --name "$VM_NAME" "$VM_YAML"
+      elif [ "$(limactl list "$VM_NAME" --format '{{.Status}}' 2>/dev/null)" != "Running" ]; then
+        info "starting existing VM '$VM_NAME'"; "${nopx[@]}" limactl start "$VM_NAME"
+      else
+        echo "  VM already running"
+      fi
+      local vmip; vmip="$(vm_ip_detect)"; [ -n "$vmip" ] || die "could not read VM bridged IP"
+      sset vm_ip "$vmip"; sset mode vm
+      info "VM bridged IP: $vmip  (escape proxy on $vmip:$VM_PORT, clash API on $vmip:$VM_CLASH)"
+      # install sing-box into the guest from the HOST cache (no in-guest download)
+      ensure_guest_singbox_installed
+      # ALWAYS render fresh (this vm_ip may have changed on reboot; server list /
+      # selection may have changed) and push it, then (re)start the guest service.
+      cmd_render
+      limactl copy "$VM_CFG" "$VM_NAME:/tmp/vm.json"
+      limactl shell "$VM_NAME" sudo install -m600 /tmp/vm.json /etc/rowt/vm.json
+      limactl shell "$VM_NAME" sudo systemctl enable --now rowt-singbox
+      limactl shell "$VM_NAME" sudo systemctl restart rowt-singbox   # apply the fresh config
+      echo "  ✓ VM tunnel active"
+      ;;
+    down)
+      limactl list -q 2>/dev/null | grep -qx "$VM_NAME" && limactl stop "$VM_NAME" || true
+      echo "  VM stopped"
+      ;;
+    restart)
+      vm_running && limactl shell "$VM_NAME" sudo systemctl restart rowt-singbox 2>/dev/null \
+        && echo "  VM tunnel restarted" || cmd_vm up ;;
+    status)
+      limactl list 2>/dev/null | grep -E "NAME|$VM_NAME" || echo "  no VM yet"
+      ;;
+    log)
+      vm_running || die "VM not running"
+      limactl shell "$VM_NAME" sudo journalctl -u rowt-singbox -n 40 -f ;;
+    delete)
+      limactl delete -f "$VM_NAME" 2>/dev/null || true; echo "  VM deleted"
+      ;;
+    *) die "usage: $PROG vm up|down|restart|status|log|delete" ;;
+  esac
+}
+
+# ---------- macOS system proxy ----------------------------------------------
+# Apply to the active physical network service.
+active_service() {
+  local dev; dev="$(detect_iface)" || return 1
+  networksetup -listnetworkserviceorder | awk -v d="$dev" '
+    /Hardware Port/ { svc=$0; sub(/.*Hardware Port: /,"",svc); sub(/,.*/,"",svc) }
+    $0 ~ ("Device: " d ")") { print svc; exit }'
+}
+
+# desired local/mDNS/private-range bypass (quoted so globs don't expand)
+_proxy_bypass_want() { printf '%s\n' '*.local' '169.254/16' '127.0.0.1' 'localhost' '*.arpa' '10.0.0.0/8' '172.16.0.0/12' '192.168.0.0/16'; }
+# is one proxy type enabled AND pointing at 127.0.0.1:$PORT ?  ($2 = getter flag)
+_proxy_type_ok() {
+  networksetup "$2" "$1" 2>/dev/null | awk -v p="$PORT" '
+    /^Enabled:/{e=$2} /^Server:/{s=$2} /^Port:/{pt=$2}
+    END{ exit !(e=="Yes" && s=="127.0.0.1" && pt==p) }'
+}
+_proxy_pointing_ok() { _proxy_type_ok "$1" -getsocksfirewallproxy && _proxy_type_ok "$1" -getwebproxy && _proxy_type_ok "$1" -getsecurewebproxy; }
+_proxy_bypass_ok() { [ "$(networksetup -getproxybypassdomains "$1" 2>/dev/null | sed '/^$/d' | sort | tr '\n' ' ')" = "$(_proxy_bypass_want | sort | tr '\n' ' ')" ]; }
+_proxy_any_on() {
+  networksetup -getsocksfirewallproxy "$1" 2>/dev/null | grep -q '^Enabled: Yes' \
+    || networksetup -getwebproxy "$1" 2>/dev/null | grep -q '^Enabled: Yes' \
+    || networksetup -getsecurewebproxy "$1" 2>/dev/null | grep -q '^Enabled: Yes'
+}
+
+# rowt proxy [status | check | on | off | env [--off]]
+# All -get* reads are sudo-free, so 'on'/'off' only invoke sudo when a change is
+# actually needed — re-running (or install.sh) won't prompt if already correct.
+cmd_proxy() {
+  local action="${1:-status}"; [ "$#" -gt 0 ] && shift || true
+  case "$action" in
+    env) cmd_env "$@"; return 0 ;;
+    on|off|status|check) ;;
+    *) die "usage: $PROG proxy [status | check | on | off | env [--off]]" ;;
+  esac
+  local svc; svc="$(active_service)" || die "no active network service"
+  case "$action" in
+    status)
+      echo "system proxy (service '$svc'):"
+      echo "  socks:  $(networksetup -getsocksfirewallproxy "$svc" 2>/dev/null | awk '/Enabled/{print $2} /Server/{s=$2} /Port/{print "         "s":"$2}' | tr '\n' ' ')"
+      echo "  https:  $(networksetup -getsecurewebproxy "$svc" 2>/dev/null | awk '/Enabled/{print $2} /Server/{s=$2} /Port/{print "         "s":"$2}' | tr '\n' ' ')"
+      echo "  bypass: $(networksetup -getproxybypassdomains "$svc" 2>/dev/null | tr '\n' ' ')"
+      echo "  CLI env: eval \"\$($PROG proxy env)\"   (off: $PROG proxy env --off)"
+      ;;
+    check)   # exit 0 iff fully configured (proxy pointing + local bypass). No sudo.
+      if _proxy_pointing_ok "$svc" && _proxy_bypass_ok "$svc"; then
+        echo "  ✓ system proxy fully configured for '$svc' (127.0.0.1:$PORT + local bypass)"; return 0
+      else
+        echo "  ✗ system proxy not fully configured — run '$PROG proxy on'"; return 1
+      fi ;;
+    on)
+      local set_proxy=1 set_bypass=1
+      _proxy_pointing_ok "$svc" && set_proxy=0
+      _proxy_bypass_ok "$svc"   && set_bypass=0
+      if [ "$set_proxy" = 0 ] && [ "$set_bypass" = 0 ]; then
+        echo "  ✓ '$svc' already proxied to 127.0.0.1:$PORT with local bypass — no change (no sudo)"
+      else
+        if [ "$set_proxy" = 1 ]; then
+          info "pointing '$svc' system proxy at 127.0.0.1:$PORT (SOCKS + HTTP; needs admin)"
+          sudo networksetup -setsocksfirewallproxy "$svc" 127.0.0.1 "$PORT" \
+            && sudo networksetup -setsocksfirewallproxystate "$svc" on \
+            && sudo networksetup -setwebproxy "$svc" 127.0.0.1 "$PORT" \
+            && sudo networksetup -setwebproxystate "$svc" on \
+            && sudo networksetup -setsecurewebproxy "$svc" 127.0.0.1 "$PORT" \
+            && sudo networksetup -setsecurewebproxystate "$svc" on \
+            || die "could not set system proxy (admin required). Run: sudo -v, then '$PROG proxy on'"
+        else
+          echo "  proxy already pointing at 127.0.0.1:$PORT — left as is"
+        fi
+        if [ "$set_bypass" = 1 ]; then
+          # Never proxy local/mDNS/link-local names & private ranges — otherwise
+          # Bonjour (*.local) traffic hits the proxy, fails to resolve, and the apps
+          # retry in a tight loop that pegs the CPU.
+          sudo networksetup -setproxybypassdomains "$svc" \
+            "*.local" "169.254/16" "127.0.0.1" "localhost" "*.arpa" \
+            "10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16" >/dev/null 2>&1 || true
+          echo "  ✓ local/mDNS bypass set (*.local / private ranges)"
+        else
+          echo "  ✓ local/mDNS bypass already set — left as is"
+        fi
+      fi
+      ;;
+    off)
+      if _proxy_any_on "$svc"; then
+        sudo networksetup -setsocksfirewallproxystate "$svc" off || true
+        sudo networksetup -setwebproxystate "$svc" off || true
+        sudo networksetup -setsecurewebproxystate "$svc" off || true
+        echo "  proxy off for '$svc'"
+      else
+        echo "  proxy already off for '$svc' — no change (no sudo)"
+      fi
+      ;;
+  esac
+}
+
+# Proxy env exports for terminal/CLI tools (curl, git, npm...) that ignore the
+# macOS system proxy. Usage:  eval "$(rowt env)"   /   rowt env --off
+cmd_env() {
+  if [ "${1:-}" = "--off" ]; then
+    echo "unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY"
+    return 0
+  fi
+  local p="http://127.0.0.1:$PORT"
+  printf 'export http_proxy=%s https_proxy=%s all_proxy=%s\n' "$p" "$p" "socks5h://127.0.0.1:$PORT"
+  printf 'export HTTP_PROXY=%s HTTPS_PROXY=%s ALL_PROXY=%s\n' "$p" "$p" "socks5h://127.0.0.1:$PORT"
+}
+
+# ---------- orchestration ----------------------------------------------------
+vm_running() { [ "$(limactl list "$VM_NAME" --format '{{.Status}}' 2>/dev/null)" = "Running" ]; }
+
+# cmd_setup [host|vm]   — an explicit mode arg skips probing and forces that mode
+#   ('rowt setup' probes; 'rowt setup-host' / 'rowt setup-vm' force it).
+cmd_setup() {
+  local forced="" force=0 a
+  for a in "$@"; do
+    case "$a" in
+      --force|-f) force=1 ;;
+      host|vm)    forced="$a" ;;
+      "")         ;;
+      *)          die "usage: $PROG up [host|vm] [--force]" ;;
+    esac
+  done
+  [ -s "$SERVERS" ] || die "first import servers: $PROG server add '<vless://...>' or $PROG sub add <url>"
+  # idempotency: already fully set up in the requested mode? no-op — BUT in vm
+  # mode the bridged DHCP IP can change (reboot, new lease, network switch), so
+  # re-detect it first and re-wire if it moved; only then declare nothing-to-do.
+  # '--force' skips the shortcut entirely and does a full rebuild.
+  if [ "$force" -eq 0 ] && [ -n "$forced" ] && [ "$(sget mode)" = "$forced" ] && host_running \
+     && { [ "$forced" = "host" ] || vm_running; }; then
+    if [ "$forced" = "vm" ]; then
+      local cur; cur="$(vm_ip_detect)"
+      if [ -n "$cur" ] && [ "$cur" != "$(sget vm_ip)" ]; then
+        info "VM bridged IP changed ($(sget vm_ip) -> $cur) — re-wiring"
+        cmd_vm up; cmd_render; cmd_router restart; cmd_proxy on
+        info "re-wired to $cur."
+        return 0
+      fi
+    fi
+    info "already set up in '$forced' mode (router running) — nothing to do."
+    echo "  re-detect/re-wire: $PROG reload   (or '$PROG vm up' to refresh the VM)"
+    return 0
+  fi
+  # ensure sing-box up front (may need internet); fails fast with guidance if offline
+  ensure_singbox_host
+  case "$forced" in
+    host) sset mode host; info "mode forced to 'host' (skipping probe)" ;;
+    vm)   info "mode: vm (skipping probe) — bringing up the VM first"
+          cmd_vm up ;;   # sets mode=vm + vm_ip only on success; dies otherwise (mode unchanged)
+    "")   cmd_probe || true ;;
+    *)    die "setup mode must be 'host' or 'vm'" ;;
+  esac
+  local mode; mode="$(sget mode)"; mode="${mode:-host}"
+  # probe may have chosen vm without starting it yet
+  [ "$mode" = "vm" ] && ! vm_running && cmd_vm up
+  cmd_render
+  cmd_router restart               # restart (not just up) so a mode switch takes effect
+  cmd_proxy on
+  # switched to host mode: the VM is now dead weight (RAM/CPU/battery) and its
+  # Lima port-forwards would clash with the router — so power it down.
+  if [ "$mode" = "host" ] && vm_running; then
+    info "stopping the '$VM_NAME' VM — unused in host mode"
+    cmd_vm down
+  fi
+  echo
+  info "done — mode=$mode. Listed domains now route through your escape VPN."
+  echo "  switch anytime: $PROG up host / $PROG up vm"
+  echo "  edit lanes:     $PROG escape add <domain> / $PROG corp add <domain>"
+}
+
+# ---------- onboarding ------------------------------------------------------
+_ob_ok()   { echo "  [✓] $1"; }
+_ob_todo() { echo "  [ ] $1"; echo "      → $2"; }
+
+# A state-aware getting-started checklist: shows how far you are and the exact
+# next command. Safe to run anytime — reads state, changes nothing.
+cmd_onboard() {
+  echo "rowt onboarding — where you are and what to do next:"
+  echo
+  local pending=0 mode; mode="$(sget mode)"; mode="${mode:-?}"
+
+  # 1. installed on PATH
+  if command -v "$PROG" >/dev/null 2>&1; then _ob_ok "installed on PATH"
+  else _ob_todo "install" "from the repo run:  ./install.sh   (symlinks '$PROG' onto your PATH)"; pending=$((pending+1)); fi
+
+  # 2. sing-box present (host binary)
+  if sb_ok "$SB" 2>/dev/null; then _ob_ok "sing-box ready ($("$SB" version 2>/dev/null | awk 'NR==1{print $3}'))"
+  else _ob_todo "fetch sing-box" "turn a working VPN (Shadowrocket) ON, then:  $PROG fetch host   (or '$PROG fetch' for host+vm)"; pending=$((pending+1)); fi
+
+  # 3. at least one server configured
+  local nsrv; nsrv="$(jq length "$SERVERS" 2>/dev/null || echo 0)"
+  if [ "${nsrv:-0}" -gt 0 ]; then _ob_ok "$nsrv server(s) configured (selected: $(sget selected))"
+  else _ob_todo "add servers" "from Shadowrocket:  $PROG server import  →  edit the review file  →  $PROG server import --apply
+        or add directly:  $PROG server add '<vless://…>'   /   $PROG sub add '<url>'"; pending=$((pending+1)); fi
+
+  # 4. router up
+  if host_running; then _ob_ok "router running (mode $mode) — check with '$PROG status'"
+  else _ob_todo "start" "connect the CORP VPN (Shadowrocket OFF), then:  $PROG up"; pending=$((pending+1)); fi
+
+  echo
+  if [ "$pending" -eq 0 ]; then
+    cat <<EOF
+✓ All set. Day to day:
+    rowt-proxy-on / rowt-proxy-off  point THIS shell's curl/git/npm/… at rowt (or undo)
+    $PROG escape add <domain>      route another site through the tunnel
+    $PROG corp add <domain|cidr>   send a site/subnet into the corp VPN
+    $PROG use <tag>  ·  $PROG ping  pick / test servers
+    $PROG route <domain|ip>        which lane will a destination take?
+    $PROG status                   is it working?
+    $PROG reload                   after switching Wi-Fi / wired / hotspot
+    $PROG down                     stop everything
+EOF
+  else
+    echo "→ do the first unchecked [ ] step above. Re-run '$PROG onboard' to see progress."
+  fi
+}
+
+# ---------- route explainer ------------------------------------------------
+is_ipv4() { printf '%s' "$1" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; }
+_ipint() { local a b c d; IFS=. read -r a b c d <<EOF
+$1
+EOF
+  printf '%s' $(( (a<<24) + (b<<16) + (c<<8) + d )); }
+# rc 0 if IPv4 $1 falls inside CIDR $2
+_cidr_has() {
+  local ip="$1" net="${2%/*}" bits="${2#*/}"
+  is_ipv4 "$net" || return 1
+  case "$2" in */*) ;; *) bits=32 ;; esac
+  local mask; [ "$bits" -eq 0 ] && mask=0 || mask=$(( (0xFFFFFFFF << (32 - bits)) & 0xFFFFFFFF ))
+  [ "$(( $(_ipint "$ip") & mask ))" -eq "$(( $(_ipint "$net") & mask ))" ]
+}
+resolve_ip() {
+  local d="$1" ip=""
+  have dig && ip="$(dig +short +time=2 +tries=1 A "$d" 2>/dev/null | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' | head -1)"
+  [ -z "$ip" ] && ip="$(dscacheutil -q host -a name "$d" 2>/dev/null | awk '/ip_address/{print $2; exit}')"
+  printf '%s' "$ip"
+}
+# Scan a lane file; echo the matching entry (rc 0) or nothing (rc 1).
+# mode=domain -> sing-box domain_suffix (HasSuffix) over non-CIDR lines
+# mode=cidr   -> IPv4-in-CIDR over CIDR lines (with $1 an IP)
+_list_hit() {
+  local val="$1" f="$2" mode="$3" e
+  [ -f "$f" ] || return 1
+  while IFS= read -r e; do
+    e="$(printf '%s' "$e" | sed 's/[[:space:]]//g')"; case "$e" in ''|\#*) continue ;; esac
+    case "$mode" in
+      cidr)   case "$e" in */[0-9]*) ;; *) continue ;; esac
+              _cidr_has "$val" "$e" && { echo "$e"; return 0; } ;;
+      domain) case "$e" in */[0-9]*) continue ;; esac
+              case "$val" in *"$e") echo "$e"; return 0 ;; esac ;;
+    esac
+  done < "$f"
+  return 1
+}
+
+# Explain which lane a destination takes. Mirrors the render rule order exactly:
+# corp domain_suffix -> corp ip_cidr (on resolved IP) -> escape domain_suffix -> final.
+cmd_route() {
+  local dest="${1:-}"; [ -n "$dest" ] || die "usage: $PROG route <domain|ip>"
+  dest="$(printf '%s' "$dest" | sed -E 's#^[a-zA-Z]+://##; s#/.*$##; s#:[0-9]+$##' | tr 'A-Z' 'a-z')"
+  local lane="" why="" ip="" m
+  if is_ipv4 "$dest"; then
+    ip="$dest"
+    if m="$(_list_hit "$dest" "$CORP_DOMAINS" cidr)"; then lane=corp; why="corp CIDR '$m'"
+    else lane="$FINAL_ROUTE"; why="no corp CIDR matched; final route = $FINAL_ROUTE"; fi
+  elif m="$(_list_hit "$dest" "$CORP_DOMAINS" domain)"; then
+    lane=corp; why="corp-domains suffix '$m'"
+  else
+    ip="$(resolve_ip "$dest")"
+    if [ -n "$ip" ] && m="$(_list_hit "$ip" "$CORP_DOMAINS" cidr)"; then lane=corp; why="resolves to $ip — in corp CIDR '$m'"
+    elif m="$(_list_hit "$dest" "$DOMAINS" domain)"; then lane=escape; why="escape-domains suffix '$m'"
+    else lane="$FINAL_ROUTE"; why="no escape/corp rule; final route = $FINAL_ROUTE"; fi
+  fi
+  local desc
+  case "$lane" in
+    escape) desc="personal VLESS tunnel — through the proxy" ;;
+    corp)   desc="into the corp VPN via the OS route" ;;
+    direct) desc="straight out the physical NIC — pass-through" ;;
+  esac
+  printf '%s%s  ->  %s   (%s)\n' "$dest" "${ip:+ ($ip)}" "$(printf '%s' "$lane" | tr 'a-z' 'A-Z')" "$desc"
+  echo "  matched: $why"
+  if host_running; then
+    # NOTE: do NOT pass --noproxy '*' here — it overrides -x and makes curl go
+    # DIRECT (which fails in China), instead of through the router we're testing.
+    # -x already beats any env *_proxy. '|| true' avoids a set -e abort on failure.
+    local code; code="$(curl -sS -m 8 -x "http://127.0.0.1:$PORT" -o /dev/null -w '%{http_code}' "https://$dest/" 2>/dev/null || true)"; code="${code:-000}"
+    echo "  live:    HTTP $code through the router$([ "$code" = 000 ] && echo '  (000 = lane not reachable)')"
+  fi
+}
+
+# At-a-glance state + config validity (this absorbs the old 'doctor').
+cmd_status() {
+  local mode; mode="$(sget mode)"; mode="${mode:-?}"
+  echo "mode:         $mode"
+  echo "servers:      $(jq length "$SERVERS" 2>/dev/null || echo 0)  (selected: $(sget selected), subs: $(sub_count))"
+  local now; now="$(clash_selected)"; [ -n "$now" ] && echo "active:       $now"
+  [ "$mode" = "vm" ] && echo "vm ip:        $(sget vm_ip)"
+  echo "router:       $(host_running && echo "running (pid $(cat "$(host_pidfile)"))" || echo stopped) on 127.0.0.1:$PORT"
+  local svc; svc="$(active_service 2>/dev/null || true)"
+  [ -n "$svc" ] && printf 'system proxy: %s (%s)\n' "$(networksetup -getsecurewebproxy "$svc" 2>/dev/null | awk '/Enabled/{print $2}' | head -1)" "$svc"
+  echo "buckets:      escape=$(domains_json | jq length) corp=$(( $(corp_domains_json | jq length) + $(corp_cidrs_json | jq length) )) final=$FINAL_ROUTE"
+  if [ -x "$SB" ] && [ -f "$HOST_CFG" ]; then
+    "$SB" check -c "$HOST_CFG" >/dev/null 2>&1 && echo "config:       host.json OK" || echo "config:       host.json INVALID (run '$PROG render')"
+  fi
+  if host_running; then
+    local vc; vc="$(curl -sS -m 8 -x "http://127.0.0.1:$PORT" -o /dev/null -w '%{http_code}' https://www.google.com/ 2>/dev/null || true)"; vc="${vc:-000}"
+    echo "via proxy:    HTTP $vc (google, escape lane)$([ "$vc" = 000 ] && echo '  — tunnel not reachable')"
+  fi
+}
+
+# Bounce the tunnel in place — restart whichever mode is active, no re-render,
+# no proxy change. Use when sing-box is stuck; use 'reload' after a network change.
+cmd_restart() {
+  [ -s "$SERVERS" ] || die "nothing to restart — run '$PROG up' first"
+  if [ "$(sget mode)" = "vm" ]; then cmd_vm restart; else cmd_router restart; fi
+}
+
+# Re-detect the network interface, re-render, restart, re-apply the proxy.
+# Run this after switching networks (Wi-Fi <-> wired <-> USB hotspot).
+cmd_reload() {
+  [ -s "$SERVERS" ] || die "nothing to reload — run '$PROG up' first"
+  info "reloading for the current network…"
+  if [ "$(sget mode)" = "vm" ] && vm_running; then
+    cmd_vm up                             # re-detects the VM's bridged IP, re-renders, re-pushes guest
+  else
+    cmd_render                            # re-detects the physical NIC -> new bind_interface
+  fi
+  if host_running; then cmd_router restart; else cmd_router up; fi
+  cmd_proxy on                            # proxy + bypass on the now-active service
+  info "reloaded (mode=$(sget mode))."
+}
+
+cmd_revert() {
+  cmd_proxy off || true
+  cmd_router down || true
+  cmd_vm down || true
+  # last-resort: kill ANY sing-box started from our pinned binary (stray/high-CPU)
+  pkill -f "$SB run" 2>/dev/null || true
+  rm -f "$(host_pidfile)"
+  info "stopped — system proxy off, sing-box down (servers kept at $SERVERS)."
+}
+
+# ---------- diagnostics ------------------------------------------------------
+# Full self-contained report you can run offline and hand back. Secrets masked.
+_d() { printf '%s\n' "$*"; }                       # a report line
+_run() { echo "\$ $*"; "$@" 2>&1 | sed 's/^/  /' || true; }   # show a command + output
+
+diag_body() {
+  _d "===== rowt diag ====="
+  _d "when:      $(date '+%Y-%m-%d %H:%M:%S %z')"
+  _d "rowt:      $ROWT_VERSION   ($HERE/bin/$PROG)"
+  _d "macOS:     $(sw_vers -productVersion 2>/dev/null)  $(uname -m)  shell=$SHELL"
+  _d "config:    $CFG"
+  _d ""
+  _d "----- dependencies -----"
+  local t
+  for t in "$SB" jq python3 curl limactl; do
+    if [ "$t" = "$SB" ]; then
+      [ -x "$SB" ] && _d "  sing-box   $("$SB" version 2>/dev/null | awk 'NR==1{print $3}')  ($SB)" || _d "  sing-box   MISSING (auto-installs on first render)"
+    elif command -v "$t" >/dev/null 2>&1; then _d "  $(printf '%-10s' "$t") $(command -v "$t")"
+    else _d "  $(printf '%-10s' "$t") MISSING"; fi
+  done
+  _d ""
+  _d "----- state -----"
+  _d "  mode:     $(sget mode)      selected: $(sget selected)      final: $FINAL_ROUTE"
+  _d "  ports:    proxy=$PORT  clash=$CLASH_PORT   iface(detected): $(detect_iface 2>/dev/null || echo none)"
+  _d "  vm_ip:    $(sget vm_ip)"
+  _d ""
+  _d "----- servers (secrets masked) -----"
+  if [ -s "$SERVERS" ]; then
+    jq -r '.[] | "  \(.tag)\t\(.type)\t\(.server):\(.server_port)"' "$SERVERS" \
+      | while IFS=$'\t' read -r a ty b; do printf '  %-20s %-7s %s\n' "$a" "$ty" "$b"; done
+  else _d "  (none)"; fi
+  _d "  subscriptions: $(sub_count)"
+  [ -s "$SUBS_FILE" ] && sed -E 's#(https?://.{10}).*#  \1…(masked)#' "$SUBS_FILE" | grep -vE '^\s*#' || true
+  _d "  buckets: escape=$(domains_json | jq length) corp=$(( $(corp_domains_json | jq length) + $(corp_cidrs_json | jq length) ))"
+  _d ""
+  _d "----- generated configs -----"
+  if [ -x "$SB" ]; then
+    [ -f "$HOST_CFG" ] && { "$SB" check -c "$HOST_CFG" >/dev/null 2>&1 && _d "  host.json: OK" || { _d "  host.json: INVALID"; "$SB" check -c "$HOST_CFG" 2>&1 | sed 's/^/    /'; }; } || _d "  host.json: not rendered"
+    [ -f "$VM_CFG" ]   && { "$SB" check -c "$VM_CFG"   >/dev/null 2>&1 && _d "  vm.json:   OK" || _d "  vm.json:   INVALID"; } || _d "  vm.json: not rendered"
+  else _d "  (sing-box not installed yet)"; fi
+  _d ""
+  _d "----- network context -----"
+  _run route -n get default
+  _d "  VPN services (scutil):"
+  scutil --nc list 2>/dev/null | sed 's/^/    /' || true
+  _d "  physical iface addr: $(detect_iface >/dev/null 2>&1 && ipconfig getifaddr "$(detect_iface)" 2>/dev/null || echo n/a)"
+  _d ""
+  _d "----- runtime -----"
+  if host_running; then _d "  router: RUNNING (pid $(cat "$(host_pidfile)" 2>/dev/null)) on 127.0.0.1:$PORT"
+  else _d "  router: stopped"; fi
+  local svc; svc="$(active_service 2>/dev/null || true)"
+  [ -n "$svc" ] && _d "  system proxy on '$svc': $(networksetup -getsecurewebproxy "$svc" 2>/dev/null | awk '/Enabled/{print $2}' | head -1)"
+  _d ""
+  _d "----- reachability: each server via default route AND physical NIC -----"
+  _d "  (default ok + iface FAIL => corp enforces via packet filter => use mode vm)"
+  local ifc n i tag host port ip
+  ifc="$(detect_iface 2>/dev/null || echo '')"
+  if [ -s "$SERVERS" ] && [ -n "$ifc" ]; then
+    n="$(jq length "$SERVERS")"
+    for ((i=0; i<n; i++)); do
+      tag="$(jq -r ".[$i].tag" "$SERVERS")"; host="$(jq -r ".[$i].server" "$SERVERS")"; port="$(jq -r ".[$i].server_port" "$SERVERS")"
+      ip="$(resolve_ip "$host" 2>/dev/null || echo '')"
+      if [ -z "$ip" ]; then _d "  $(printf '%-20s' "$tag") DNS-FAIL ($host)"; continue; fi
+      local d="FAIL" b="FAIL"
+      tcp_reaches "" "$ip" "$port" && d="ok" || true
+      tcp_reaches "$ifc" "$ip" "$port" && b="ok" || true
+      _d "  $(printf '%-20s %-21s' "$tag" "$ip:$port") default:$d  $ifc:$b"
+    done
+  else _d "  (no servers or no interface)"; fi
+  _d ""
+  _d "----- DNS checks -----"
+  _run bash -c "dig +short +time=3 @223.5.5.5 www.baidu.com A | head -3"
+  local cd; cd="$(grep -vE '^[[:space:]]*(#|$)' "$CORP_DOMAINS" 2>/dev/null | grep -vE '/[0-9]+$' | head -1 || true)"
+  [ -n "$cd" ] && { _d "  corp name '$cd' via system resolver:"; _run bash -c "dscacheutil -q host -a name $cd | grep ip_address | head -3"; }
+  _d ""
+  _d "----- through-proxy tests (only meaningful if router is running) -----"
+  if host_running; then
+    local px="socks5h://127.0.0.1:$PORT"
+    _d "  direct bucket  (baidu.com):  HTTP $(curl -sS -m 10 -x "$px" -o /dev/null -w '%{http_code}' https://www.baidu.com/ 2>/dev/null)"
+    _d "  escape bucket  (google.com): HTTP $(curl -sS -m 12 -x "$px" -o /dev/null -w '%{http_code}' https://www.google.com/ 2>/dev/null)  (000 = escape tunnel not reachable)"
+    _d "  escape live     $(clash_selected 2>/dev/null || echo '?')   (clash API $(controller 2>/dev/null))"
+  else _d "  (router stopped — start it: $PROG router up, then re-run diag)"; fi
+  _d ""
+  _d "----- router log (last 25 lines) -----"
+  [ -f "$LOGDIR/host.log" ] && tail -25 "$LOGDIR/host.log" | sed 's/^/  /' || _d "  (no log yet)"
+  _d ""
+  _d "===== end rowt diag ====="
+}
+
+cmd_diag() {
+  local out="$CFG/diag-$(date +%Y%m%d-%H%M%S).txt"
+  diag_body 2>&1 | tee "$out"
+  # keep only the 5 most recent diag reports
+  ls -t "$CFG"/diag-*.txt 2>/dev/null | tail -n +6 | while read -r f; do rm -f "$f"; done
+  echo
+  info "saved to: $out"
+  info "secrets (uuid/password/keys) are NOT included — safe to share for debugging."
+}
+
+# ---------- help system -----------------------------------------------------
+# A single registry drives BOTH the overview ('help') and per-command detail
+# ('<cmd> --help'). One record per command:  LEVEL@GROUP@USAGE@SUMMARY
+#   LEVEL: c = everyday    o = occasional    a = advanced / power-user
+_reg() {
+cat <<'REG'
+c@lifecycle@onboard@guided getting-started checklist (what to run next)
+c@lifecycle@up [host|vm] [--force]@set up & start (no arg = auto-detect the mode)
+c@lifecycle@down@tear down: proxy off + stop sing-box + vm down
+o@lifecycle@restart@bounce the tunnel in place (no re-render / proxy change)
+c@lifecycle@reload@re-apply after a network switch (re-render + restart + proxy)
+c@lifecycle@status@state + config validity + reachability
+o@lifecycle@route <domain|ip>@explain a destination's lane (escape / corp / direct)
+a@lifecycle@report@full diagnostic report to a file (masked; shareable)
+o@servers & selection@server <list|add|rm|clear|import|dump>@manage the server pool
+o@servers & selection@sub <list|add|rm|update|clear|import|dump>@manage subscriptions
+c@servers & selection@use <tag>|auto@pin a server (manual) or auto-pick fastest live
+c@servers & selection@ping [tag]@parallel latency test through the tunnel (fastest first)
+a@servers & selection@probe@detect which mode works (host vs vm) with corp VPN up
+c@routing lanes@escape <list|add|rm|import|dump>@edit the escape lane (VPN tunnel)
+o@routing lanes@corp <list|add|rm|import|dump>@edit the corp lane (into the corp VPN)
+o@proxy@proxy <status|check|on|off|env>@macOS system proxy + CLI env exports
+a@internals@render@regenerate the sing-box configs from current state
+o@internals@fetch [host|vm]@pre-download artifacts so 'up' works offline
+a@internals@router <up|down|restart|status|log>@the local rule-router process
+a@internals@vm <up|down|restart|status|log|delete>@the bridged Lima VM
+a@internals@version@print the version
+REG
+}
+
+usage() {
+  cat <<EOF
+$PROG — split traffic three ways from one local proxy (127.0.0.1:$PORT) while a
+corporate VPN keeps the default route:
+  escape  domains in escape-domains.txt  -> personal VLESS tunnel (e.g. google)
+  corp    domains/CIDRs in corp-domains.txt -> into the corp VPN (e.g. intranet)
+  direct  everything else                -> straight out the physical NIC, bypassing
+                                            corp AND escape (e.g. baidu / China)
+
+Usage:  $PROG <command> [args]      ($PROG help, or no args, shows this)
+Detail: $PROG <command> --help      (or: $PROG help <command>)
+Legend: ● everyday   ◐ occasional   ○ advanced / power-user
+EOF
+  _reg | awk -F@ -v prog="$PROG" '
+    function mark(l){ return (l=="c")?"●":(l=="o")?"◐":"○" }
+    { if ($2!=g){ g=$2; printf "\n %s\n", g }
+      printf "  %s %s %-42s %s\n", mark($1), prog, $3, $4 }'
+  cat <<EOF
+
+Notes:
+  • 'server import' and 'sub import' both import from Shadowrocket (servers + subs).
+  • Unlisted traffic goes to '$FINAL_ROUTE' (override with ROWT_FINAL=corp|direct).
+  • 'use <tag>' (manual) never probes servers, so flaky/dead ones can't spin the CPU.
+  • Modes: host = VLESS bound to the physical NIC; vm = a bridged Lima VM runs the tunnel.
+  • Shell aliases (from install.sh): rowt-proxy-on / rowt-proxy-off point this shell's
+    CLI proxy env at rowt (they wrap 'proxy env'; see '$PROG proxy --help').
+
+Edit which domains escape:  $DOMAINS
+Env: ROWT_PORT ($PORT)  ROWT_CLASH_PORT ($CLASH_PORT)  ROWT_IFACE (auto)  SINGBOX_VERSION ($SINGBOX_VERSION)
+EOF
+}
+
+# Detailed help for one command. All the long text lives HERE (nowhere else).
+help_detail() {
+  case "$1" in
+    onboard) cat <<EOF
+$PROG onboard — guided getting-started checklist.
+
+Shows how far along setup you are (installed → sing-box fetched → servers added
+→ router up) and the exact next command for the first unfinished step, with the
+prerequisite reminders (VPN on for 'fetch', corp VPN on for 'up'). Reads state
+only — safe to run anytime. Running '$PROG' with no arguments shows this too,
+followed by the full command list.
+EOF
+;;
+    up) cat <<EOF
+$PROG up [host|vm] [--force] — set up and start everything.
+
+Ensures sing-box is installed, renders the configs, starts the router, and
+points the macOS system proxy at 127.0.0.1:$PORT. With no argument it runs
+'probe' first to auto-pick the mode; pass one to skip probing:
+  $PROG up host   force host mode (VLESS bound to the physical NIC)
+  $PROG up vm     force vm mode (a bridged Lima VM runs the tunnel)
+Idempotent — a no-op if already up in the requested mode, EXCEPT in vm mode it
+re-detects the VM's (DHCP) bridged IP and re-wires if it changed.
+  --force / -f    skip the no-op shortcut and do a full rebuild (re-detect,
+                  re-render, restart, re-apply proxy) even if nothing looks changed.
+EOF
+;;
+    down) cat <<EOF
+$PROG down — tear everything down.
+
+Turns the macOS system proxy off, kills the sing-box router (including strays),
+and stops the VM. Use to fully stop rowt, or if sing-box is stuck/high-CPU.
+EOF
+;;
+    restart) cat <<EOF
+$PROG restart — bounce the tunnel in place.
+
+Restarts whichever mode is active (host or vm) WITHOUT re-rendering configs or
+touching the system proxy. Use when sing-box is stuck. After a *network* change
+use 'reload' instead (it also re-renders and re-applies the proxy).
+EOF
+;;
+    reload) cat <<EOF
+$PROG reload — re-apply after a network switch.
+
+Re-detects the physical interface, re-renders (so the direct/escape binding is
+correct for the new network), restarts the router, and re-applies the system
+proxy + bypass. Run after switching Wi-Fi <-> wired <-> USB hotspot.
+EOF
+;;
+    status) cat <<EOF
+$PROG status — at-a-glance state and health.
+
+Shows mode, server count + selected/active server, the host-router pid/port, the
+system-proxy state, the routing buckets, sing-box config validity, and a live
+'via proxy' reachability check. (Absorbs the old 'doctor'.)
+EOF
+;;
+    route) cat <<EOF
+$PROG route <domain|ip> — explain a destination's lane.
+
+Prints whether a destination goes through the escape proxy, into the corp VPN
+(the OS route), or direct (pass-through), and which rule matched. Mirrors the
+real rule order: corp domain -> corp CIDR (on the resolved IP) -> escape domain
+-> final route. Accepts a bare domain, an IP, or a URL; adds a live HTTP check
+when the router is running.
+  $PROG route www.google.com
+  $PROG route 30.1.2.3
+EOF
+;;
+    report) cat <<EOF
+$PROG report — full diagnostic report.
+
+Writes a detailed report (deps, state, configs, per-server reachability, DNS,
+through-proxy tests, log tail) to ~/.config/rowt/diag-*.txt, secrets masked —
+safe to share when something is wrong. Keeps the last 5.
+EOF
+;;
+    server) cat <<EOF
+$PROG server <subcommand> — manage the server pool.
+
+  list                 list servers; * marks the live one            [default]
+  add '<link>' [more]  add manual server(s) from vless:// / anytls:// links
+  rm <tag> [more]      remove a manual server (for a subscription node, remove the sub)
+  clear                remove all manual servers
+  import [--apply]     import from Shadowrocket (servers + subs): run once to dump
+                       an editable review file, prune it, then re-run with --apply
+  dump [file]          export the manual servers as JSON (backup; has secrets).
+                       Subscription servers come from their subs — see 'sub dump'.
+EOF
+;;
+    sub) cat <<EOF
+$PROG sub <subcommand> — manage subscriptions.
+
+  list                 list subscription URLs + manual server count  [default]
+  add <url> [more]     add subscription link(s) and fetch them
+  rm <n|url>           remove a subscription by number or URL substring
+  update               re-fetch all saved subscriptions
+  clear                remove all subscriptions
+  import [--apply]     same as '$PROG server import' (Shadowrocket)
+  dump [file]          print the subscription URLs (or write them to a file)
+EOF
+;;
+    use) cat <<EOF
+$PROG use <tag> | use auto — select the escape server.
+
+  use <tag>   pin one server. A plain selector that NEVER health-checks its
+              members, so flaky/dead servers just sit idle (no CPU spin).
+  use auto    switch to a urltest that auto-picks the fastest LIVE server and
+              re-probes every ROWT_AUTO_INTERVAL (default $AUTO_INTERVAL).
+Pinned<->pinned switches are live (Clash API); toggling auto restarts the
+router. Run '$PROG ping' first to find a fast server. No arg = list servers.
+EOF
+;;
+    ping) cat <<EOF
+$PROG ping [tag] — latency-test servers through the tunnel.
+
+Tests all servers (or one) in parallel via the running router's Clash API and
+prints them fastest-first; * marks the active one. Starts the router if needed.
+Goes through the real tunnel, so it handles AnyTLS too (unlike a plain TCP
+probe). Tunables: ROWT_PING_URL, ROWT_PING_TIMEOUT.
+EOF
+;;
+    probe) cat <<EOF
+$PROG probe — detect which escape mode works.
+
+With the corp VPN up, tests every server both via the default route and bound to
+the physical NIC, prints a status table, and picks 'host' (binding works) or
+'vm' (corp enforces via a packet filter, so a bridged VM is needed). '$PROG up'
+runs this for you when you don't name a mode.
+EOF
+;;
+    escape|corp) cat <<EOF
+$PROG $1 <subcommand> — edit the $1 lane$([ "$1" = escape ] && echo " (domains that use the VPN tunnel)" || echo " (domains/CIDRs sent into the corp VPN)").
+
+  (no verb)            list the lane                                 [default]
+  add <entry> [more]   add domain(s)$([ "$1" = corp ] && echo "; corp also accepts CIDRs, e.g. 10.0.0.0/8")
+  rm <entry> [more]    remove entries
+  import <file>        batch-add one entry per line from a file (# comments ok)
+  dump [file]          print the lane (or write it to a file) for backup/versioning
+Edits auto-reload the router if it is running.
+EOF
+;;
+    proxy) cat <<EOF
+$PROG proxy <status|check|on|off|env> — macOS system proxy + CLI env.
+
+  status        show the proxy state, target, and bypass list       [default]
+  check         exit 0 if fully configured (proxy + local bypass); else 1. No sudo.
+  on            point the system proxy (SOCKS+HTTP+HTTPS) at 127.0.0.1:$PORT and
+                set the *.local / private-range bypass. Idempotent: reads the
+                current state first and only uses sudo for what's actually wrong,
+                so re-running (or a reset after the OS config drifts) won't prompt
+                for a password if everything is already correct.
+  off           turn the system proxy off (skips sudo if already off)
+  env [--off]   print shell exports for CLI tools that ignore the system proxy:
+                  eval "\$($PROG proxy env)"      /      eval "\$($PROG proxy env --off)"
+
+install.sh also adds shell aliases that wrap the two evals above:
+  rowt-proxy-on    = eval "\$($PROG proxy env)"      (point this shell's CLI at rowt)
+  rowt-proxy-off   = eval "\$($PROG proxy env --off)" (unset them)
+EOF
+;;
+    render) cat <<EOF
+$PROG render — regenerate the sing-box configs (host + vm) from current state.
+Rarely run by hand — 'up', 'reload', and lane edits render for you.
+EOF
+;;
+    fetch) cat <<EOF
+$PROG fetch [host|vm|both] — pre-download artifacts while a working VPN is on.
+
+Run this with Shadowrocket (or any GitHub-reachable network) up; afterwards
+'$PROG up' works even with only the corp VPN connected. Default is 'both'.
+  host   the macOS sing-box binary -> ~/.config/rowt/bin/
+  vm     the ubuntu cloud image + the linux sing-box tarball -> ~/.config/rowt/cache/
+         'up vm' then installs sing-box INTO the guest from that cache and boots
+         from the local image, so the VM never reaches GitHub over its bare LAN.
+Overrides: SINGBOX_TARBALL / SINGBOX_URL (host binary),
+           GUEST_SINGBOX_TARBALL / GUEST_SINGBOX_URL (guest binary),
+           UBUNTU_IMG_URL (vm image); or 'brew install sing-box' for the host.
+EOF
+;;
+    router) cat <<EOF
+$PROG router <up|down|restart|status|log> — the local rule-router process directly.
+This is the always-on proxy on 127.0.0.1:$PORT (the front door your system proxy
+points at) — it runs in BOTH modes. Power-user access to the sing-box process
+that up/down/restart/reload manage; 'router' is NOT a mode (use 'up host'/'up vm').
+EOF
+;;
+    vm) cat <<EOF
+$PROG vm <up|down|restart|status|log|delete> — the bridged Lima VM directly.
+Power-user access to the mode-vm guest (Lima + socket_vmnet).
+EOF
+;;
+    version) cat <<EOF
+$PROG version — print the version ($ROWT_VERSION).
+EOF
+;;
+    *) return 1 ;;
+  esac
+}
+
+# Route help requests: 'help', 'help <cmd>', and '<cmd> --help' all land here.
+show_help() {
+  local c="${1:-}"
+  { [ -z "$c" ] || [ "$c" = "help" ]; } && { usage; return 0; }
+  help_detail "$c" && return 0
+  err "unknown command: $c"; echo; usage; return 1
+}
+
+main() {
+  migrate
+  # no args: greet with the onboarding checklist, then the full command list
+  if [ "$#" -eq 0 ]; then cmd_onboard; echo; usage; return 0; fi
+  local cmd="$1"; shift
+  # help routing (single system): 'help [cmd]', top-level -h/--help, and the
+  # systematic '<cmd> --help' / '<cmd> -h' for every subcommand.
+  case "$cmd" in
+    help)         show_help "${1:-}"; return $? ;;
+    -h|--help)    usage; return 0 ;;
+    --version|-V) echo "$PROG $ROWT_VERSION"; return 0 ;;
+  esac
+  case " $* " in *" --help "*|*" -h "*) show_help "$cmd"; return $? ;; esac
+  case "$cmd" in
+    # lifecycle
+    onboard)    cmd_onboard "$@" ;;
+    up)         cmd_setup "$@" ;;          # up [host|vm]
+    down)       cmd_revert "$@" ;;
+    restart)    cmd_restart "$@" ;;
+    reload)     cmd_reload "$@" ;;
+    status)     cmd_status "$@" ;;
+    report)     cmd_diag "$@" ;;
+    route)      cmd_route "$@" ;;
+    # servers & selection
+    server)     cmd_server "$@" ;;
+    sub)        cmd_sub "$@" ;;
+    use)        cmd_use "$@" ;;
+    ping)       cmd_ping "$@" ;;
+    probe)      cmd_probe "$@" ;;
+    # routing lanes
+    escape)     cmd_escape "$@" ;;
+    corp)       cmd_corp "$@" ;;
+    # proxy
+    proxy)      cmd_proxy "$@" ;;
+    # internals / power-user
+    render)     cmd_render "$@" ;;
+    fetch)      cmd_fetch "$@" ;;
+    router)     cmd_router "$@" ;;
+    vm)         cmd_vm "$@" ;;
+    version)    echo "$PROG $ROWT_VERSION" ;;
+    *) err "unknown command: $cmd"; echo; usage; exit 1 ;;
+  esac
+}
+
+main "$@"

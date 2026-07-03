@@ -1,0 +1,28 @@
+# Domains routed through the escape VPN (case 1). This is one of three buckets:
+#   escape-domains.txt  -> escape (this file: the VLESS tunnel, e.g. google)
+#   corp-domains.txt    -> corp   (into the corporate VPN, e.g. intranet)
+#   (everything else)   -> direct (straight out the physical NIC, e.g. baidu)
+#
+# One domain suffix per line. A suffix matches the domain and all subdomains:
+#   google.com   matches  google.com, www.google.com, mail.google.com
+#
+# Lines starting with # and blank lines are ignored. Edit and re-run:
+#   rowt reload
+#
+# Fail-closed: if the escape tunnel is down, connections to these domains
+# FAIL rather than leak onto your direct/corp path.
+
+google.com
+googleapis.com
+gstatic.com
+youtube.com
+ytimg.com
+ggpht.com
+github.com
+githubusercontent.com
+githubassets.com
+wikipedia.org
+wikimedia.org
+x.com
+twitter.com
+twimg.com
