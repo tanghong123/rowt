@@ -1,0 +1,44 @@
+# block-domains.txt — domains refused instantly (no DNS, no dial).
+#
+# This is the "block" lane: an ad/telemetry sinkhole that runs BEFORE
+# corp/escape/direct. It exists to stop the direct-lane retry storm — dead
+# ad/tracker/telemetry hosts being retried in a tight loop — that spikes
+# sing-box CPU.
+#
+# This hand list is ADDITIVE on top of the big geosite ad/tracker rule-set
+# (thousands of domains), which `rowt fetch host` caches and rowt renders in
+# automatically when present. Put your own additions here.
+#
+#   rowt block add <domain>     rowt block rm <domain>     rowt block list
+#
+# Matching is domain_suffix (HasSuffix), same as the escape/corp lists — so
+# `360yield.com` also covers `ad.360yield.com`. One entry per line; # = comment.
+
+# --- top offenders observed pegging the direct lane ---
+googleadservices.com
+360yield.com
+eskimi.com
+iqzone.com
+disqus.com
+# NOTE: NOT blocking aliyuncs.com — Alibaba Cloud's general domain (OSS/CDN/APIs,
+# heavily used by legit sites in China). The offender was a *-log.* telemetry
+# subdomain; add a narrow entry yourself if it recurs (e.g. 'rowt block add
+# <exact-subdomain>') rather than sinkholing the whole cloud.
+
+# --- common ad / tracker / telemetry (geosite covers most; these are belt-and-suspenders) ---
+doubleclick.net
+googlesyndication.com
+google-analytics.com
+googletagmanager.com
+googletagservices.com
+adservice.google.com
+adnxs.com
+rubiconproject.com
+pubmatic.com
+casalemedia.com
+scorecardresearch.com
+moatads.com
+adsrvr.org
+criteo.com
+taboola.com
+outbrain.com

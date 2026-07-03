@@ -45,7 +45,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="1.1.0"
+ROWT_VERSION="1.2.0"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -78,8 +78,14 @@ SB="$BIN/sing-box"                   # pinned host binary
 # repo files are templates; the live, user-editable lists live under $CFG
 DOMAINS_TMPL="$HERE/config/escape-domains.txt"
 CORP_TMPL="$HERE/config/corp-domains.txt"
+BLOCK_TMPL="$HERE/config/block-domains.txt"
 DOMAINS="$CFG/escape-domains.txt"                # -> escape (VLESS tunnel)
 CORP_DOMAINS="$CFG/corp-domains.txt"             # -> corp (into the corp VPN)
+BLOCK_DOMAINS="$CFG/block-domains.txt"           # -> block (ad/telemetry sinkhole)
+# Pre-compiled geosite ad/tracker rule-set (blocks thousands of domains). Cached
+# like the other artifacts so 'up' works offline; rendered in only when present.
+ADS_SRS="$CACHE/geosite-category-ads-all.srs"
+ADS_SRS_URL="${ROWT_ADS_SRS_URL:-https://github.com/SagerNet/sing-geosite/raw/rule-set/geosite-category-ads-all.srs}"
 PARSER="$HERE/config/vless-parse.py"
 SR_IMPORT="$HERE/config/sr-import.py"            # Shadowrocket importer
 SR_REVIEW="$CFG/sr-review.json"                  # editable Shadowrocket import (secret)
@@ -153,8 +159,9 @@ sub_count() {
 
 # Seed the user-editable routing lists from the repo templates on first use.
 seed_lists() {
-  [ -f "$DOMAINS" ]      || { cp "$DOMAINS_TMPL" "$DOMAINS" 2>/dev/null || true; }
-  [ -f "$CORP_DOMAINS" ] || { cp "$CORP_TMPL" "$CORP_DOMAINS" 2>/dev/null || true; }
+  [ -f "$DOMAINS" ]       || { cp "$DOMAINS_TMPL" "$DOMAINS" 2>/dev/null || true; }
+  [ -f "$CORP_DOMAINS" ]  || { cp "$CORP_TMPL" "$CORP_DOMAINS" 2>/dev/null || true; }
+  [ -f "$BLOCK_DOMAINS" ] || { cp "$BLOCK_TMPL" "$BLOCK_DOMAINS" 2>/dev/null || true; }
 }
 
 # Migrations to the current multi-source server model.
@@ -279,13 +286,31 @@ fetch_ubuntu_image() {
 
 fetch_vm_artifacts() { fetch_ubuntu_image; fetch_guest_singbox; }
 
+# Pre-fetch the geosite ad/tracker rule-set (.srs) onto the HOST. Needs GitHub —
+# do it while a VPN is on. Best-effort by default ($1=optional): rendering works
+# without it (the hand list still blocks), it just misses the big geosite set.
+fetch_ads_ruleset() {
+  [ -f "$ADS_SRS" ] && { info "ad-block rule-set already cached: $ADS_SRS"; return 0; }
+  mkdir -p "$CACHE"
+  info "fetching geosite ad/tracker rule-set for the block lane"
+  info "  ↓ $ADS_SRS_URL"
+  if curl -fL -# --connect-timeout 12 --retry 1 "$ADS_SRS_URL" -o "$ADS_SRS"; then
+    info "ad-block rule-set cached: $ADS_SRS"
+  else
+    rm -f "$ADS_SRS"
+    [ "${1:-}" = "--required" ] && die "could not fetch the ad-block rule-set — turn a VPN on, then '$PROG fetch host'"
+    err "could not fetch the ad-block rule-set (skipping — the hand list still blocks; retry with '$PROG fetch host' when online)"
+    return 1
+  fi
+}
+
 # rowt fetch [host|vm|both] — pre-download while a working VPN is on, so 'up'
 # works after you switch to the corp VPN (Shadowrocket off).
 cmd_fetch() {
   case "${1:-both}" in
-    host)         ensure_singbox_host ;;
+    host)         ensure_singbox_host; fetch_ads_ruleset --required ;;
     vm)           fetch_vm_artifacts ;;
-    both|all|"")  ensure_singbox_host; fetch_vm_artifacts ;;
+    both|all|"")  ensure_singbox_host; fetch_ads_ruleset --required; fetch_vm_artifacts ;;
     *) die "usage: $PROG fetch [host|vm|both]" ;;
   esac
   info "done — you can now run '$PROG up' without internet to GitHub."
@@ -309,6 +334,7 @@ list_json() {
 domains_json()    { list_json "$DOMAINS"; }                 # escape suffixes
 corp_domains_json() { list_json "$CORP_DOMAINS" domain; }   # corp suffixes
 corp_cidrs_json()   { list_json "$CORP_DOMAINS" cidr; }     # corp IP ranges
+block_domains_json() { list_json "$BLOCK_DOMAINS" domain; } # block suffixes (extra, on top of the geosite set)
 
 # Re-render and restart the router if it is currently running.
 reload_if_running() {
@@ -381,6 +407,7 @@ edit_list() {
 
 cmd_escape() { local a="${1:-list}"; [ "$#" -gt 0 ] && shift; edit_list "$DOMAINS" escape "$a" "$@"; }
 cmd_corp()   { local a="${1:-list}"; [ "$#" -gt 0 ] && shift; edit_list "$CORP_DOMAINS" corp "$a" "$@"; }
+cmd_block()  { local a="${1:-list}"; [ "$#" -gt 0 ] && shift; edit_list "$BLOCK_DOMAINS" block "$a" "$@"; }
 
 # Detect the physical (non-tunnel) interface: an enX with an IPv4 and a router.
 detect_iface() {
@@ -465,9 +492,12 @@ assemble_vm() {
 # rest via a China resolver over the physical NIC (no corp-DNS leak/poison).
 #   $1=escape-outbounds  $2=listen  $3=clash-listen
 assemble_host() {
-  local escs="$1" listen="$2" clash="$3" ifc secret
+  local escs="$1" listen="$2" clash="$3" ifc secret ads=""
   ifc="$(detect_iface)" || die "no physical interface found"
   secret="$(clash_secret)"
+  # geosite ad/tracker rule-set: rendered in ONLY when the .srs is cached, so a
+  # first render offline still works (the hand list keeps working regardless).
+  [ -f "$ADS_SRS" ] && ads="$ADS_SRS"
   jq -n \
     --argjson escs "$escs" \
     --arg listen "$listen" \
@@ -477,13 +507,19 @@ assemble_host() {
     --arg clash "$clash" \
     --arg secret "$secret" \
     --arg lvl "$LOG_LEVEL" \
+    --arg ads "$ads" \
     --argjson esc_dom "$(domains_json)" \
     --argjson corp_dom "$(corp_domains_json)" \
     --argjson corp_cidr "$(corp_cidrs_json)" \
+    --argjson block_dom "$(block_domains_json)" \
     '
     # route rules, first match wins. sniff first so domain rules see host names.
+    # block goes BEFORE corp/escape so ad/tracker domains are sunk with no DNS
+    # lookup and no dial (the fix for the direct-lane retry storm that pegs CPU).
     ([ {action:"sniff"} ]
-     + [ if ($corp_dom|length)  > 0 then {domain_suffix:$corp_dom,  outbound:"corp"}   else empty end,
+     + [ if $ads != ""                  then {rule_set:["geosite-ads"], outbound:"block"} else empty end,
+         if ($block_dom|length) > 0      then {domain_suffix:$block_dom, outbound:"block"} else empty end,
+         if ($corp_dom|length)  > 0 then {domain_suffix:$corp_dom,  outbound:"corp"}   else empty end,
          if ($corp_cidr|length) > 0 then {ip_cidr:$corp_cidr,       outbound:"corp"}   else empty end,
          if ($esc_dom|length)   > 0 then {domain_suffix:$esc_dom,   outbound:"escape"} else empty end ]) as $rules
     |
@@ -501,8 +537,11 @@ assemble_host() {
         {type:"direct", tag:"direct", bind_interface:$ifc}, # forced onto physical NIC
         {type:"block",  tag:"block"}
       ]),
-      route:{rules:$rules, final:$final, auto_detect_interface:false,
-             default_domain_resolver:"dns-direct"}
+      # prefer_ipv4 stops the AAAA storm (IPv6 no-route / 0.0.0.0 fast-fail retries)
+      # and halves load on the single direct DNS socket.
+      route:(({rules:$rules, final:$final, auto_detect_interface:false,
+               default_domain_resolver:{server:"dns-direct", strategy:"prefer_ipv4"}})
+             + (if $ads != "" then {rule_set:[{type:"local", tag:"geosite-ads", format:"binary", path:$ads}]} else {} end))
     }
     + (if $clash=="" then {}
        else {experimental:{clash_api:{external_controller:$clash, secret:$secret}}} end)'
@@ -1265,6 +1304,9 @@ cmd_setup() {
   fi
   # ensure sing-box up front (may need internet); fails fast with guidance if offline
   ensure_singbox_host
+  # best-effort: grab the ad-block rule-set while we (probably) have a VPN up.
+  # Non-fatal — the block hand-list works without it; 'fetch host' retries later.
+  [ -f "$ADS_SRS" ] || fetch_ads_ruleset || true
   case "$forced" in
     host) sset mode host; info "mode forced to 'host' (skipping probe)" ;;
     vm)   info "mode: vm (skipping probe) — bringing up the VM first"
@@ -1376,7 +1418,9 @@ _list_hit() {
 }
 
 # Explain which lane a destination takes. Mirrors the render rule order exactly:
-# corp domain_suffix -> corp ip_cidr (on resolved IP) -> escape domain_suffix -> final.
+# block domain_suffix -> corp domain_suffix -> corp ip_cidr (on resolved IP) ->
+# escape domain_suffix -> final. (The geosite ad rule-set also blocks, but it's a
+# binary .srs we can't cheaply inspect here — so a hit there won't show below.)
 cmd_route() {
   local dest="${1:-}"; [ -n "$dest" ] || die "usage: $PROG route <domain|ip>"
   dest="$(printf '%s' "$dest" | sed -E 's#^[a-zA-Z]+://##; s#/.*$##; s#:[0-9]+$##' | tr 'A-Z' 'a-z')"
@@ -1385,23 +1429,28 @@ cmd_route() {
     ip="$dest"
     if m="$(_list_hit "$dest" "$CORP_DOMAINS" cidr)"; then lane=corp; why="corp CIDR '$m'"
     else lane="$FINAL_ROUTE"; why="no corp CIDR matched; final route = $FINAL_ROUTE"; fi
+  elif m="$(_list_hit "$dest" "$BLOCK_DOMAINS" domain)"; then
+    lane=block; why="block-domains suffix '$m'"
   elif m="$(_list_hit "$dest" "$CORP_DOMAINS" domain)"; then
     lane=corp; why="corp-domains suffix '$m'"
   else
     ip="$(resolve_ip "$dest")"
     if [ -n "$ip" ] && m="$(_list_hit "$ip" "$CORP_DOMAINS" cidr)"; then lane=corp; why="resolves to $ip — in corp CIDR '$m'"
     elif m="$(_list_hit "$dest" "$DOMAINS" domain)"; then lane=escape; why="escape-domains suffix '$m'"
-    else lane="$FINAL_ROUTE"; why="no escape/corp rule; final route = $FINAL_ROUTE"; fi
+    else lane="$FINAL_ROUTE"; why="no block/escape/corp rule; final route = $FINAL_ROUTE"; fi
   fi
   local desc
   case "$lane" in
     escape) desc="personal VLESS tunnel — through the proxy" ;;
     corp)   desc="into the corp VPN via the OS route" ;;
     direct) desc="straight out the physical NIC — pass-through" ;;
+    block)  desc="refused — ad/telemetry sinkhole (no DNS, no dial)" ;;
   esac
   printf '%s%s  ->  %s   (%s)\n' "$dest" "${ip:+ ($ip)}" "$(printf '%s' "$lane" | tr 'a-z' 'A-Z')" "$desc"
   echo "  matched: $why"
-  if host_running; then
+  [ -f "$ADS_SRS" ] && [ "$lane" != block ] && echo "  note:    the geosite ad rule-set may still block this (not shown — binary set)"
+  if [ "$lane" = block ]; then echo "  live:    (skipped — blocked by design)"
+  elif host_running; then
     # NOTE: do NOT pass --noproxy '*' here — it overrides -x and makes curl go
     # DIRECT (which fails in China), instead of through the router we're testing.
     # -x already beats any env *_proxy. '|| true' avoids a set -e abort on failure.
@@ -1420,7 +1469,7 @@ cmd_status() {
   echo "router:       $(host_running && echo "running (pid $(cat "$(host_pidfile)"))" || echo stopped) on 127.0.0.1:$PORT"
   local svc; svc="$(active_service 2>/dev/null || true)"
   [ -n "$svc" ] && printf 'system proxy: %s (%s)\n' "$(networksetup -getsecurewebproxy "$svc" 2>/dev/null | awk '/Enabled/{print $2}' | head -1)" "$svc"
-  echo "buckets:      escape=$(domains_json | jq length) corp=$(( $(corp_domains_json | jq length) + $(corp_cidrs_json | jq length) )) final=$FINAL_ROUTE"
+  echo "buckets:      escape=$(domains_json | jq length) corp=$(( $(corp_domains_json | jq length) + $(corp_cidrs_json | jq length) )) block=$(block_domains_json | jq length)$([ -f "$ADS_SRS" ] && echo '+geosite') final=$FINAL_ROUTE"
   if [ -x "$SB" ] && [ -f "$HOST_CFG" ]; then
     "$SB" check -c "$HOST_CFG" >/dev/null 2>&1 && echo "config:       host.json OK" || echo "config:       host.json INVALID (run '$PROG render')"
   fi
@@ -1631,7 +1680,7 @@ diag_body() {
   else _d "  (none)"; fi
   _d "  subscriptions: $(sub_count)"
   [ -s "$SUBS_FILE" ] && sed -E 's#(https?://.{10}).*#  \1…(masked)#' "$SUBS_FILE" | grep -vE '^\s*#' || true
-  _d "  buckets: escape=$(domains_json | jq length) corp=$(( $(corp_domains_json | jq length) + $(corp_cidrs_json | jq length) ))"
+  _d "  buckets: escape=$(domains_json | jq length) corp=$(( $(corp_domains_json | jq length) + $(corp_cidrs_json | jq length) )) block=$(block_domains_json | jq length)$([ -f "$ADS_SRS" ] && echo ' +geosite-ads')"
   _d ""
   _d "----- generated configs -----"
   if [ -x "$SB" ]; then
@@ -1719,6 +1768,7 @@ c@servers & selection@ping [tag]@parallel latency test through the tunnel (faste
 a@servers & selection@probe@detect which mode works (host vs vm) with corp VPN up
 c@routing lanes@escape <list|add|rm|import|dump>@edit the escape lane (VPN tunnel)
 o@routing lanes@corp <list|add|rm|import|dump>@edit the corp lane (into the corp VPN)
+o@routing lanes@block <list|add|rm|import|dump>@edit the block lane (ad/telemetry sinkhole)
 o@proxy@proxy <status|check|on|off|env>@macOS system proxy + CLI env exports
 a@internals@render@regenerate the sing-box configs from current state
 o@internals@fetch [host|vm]@pre-download artifacts so 'up' works offline
@@ -1925,6 +1975,24 @@ $PROG $1 <subcommand> — edit the $1 lane$([ "$1" = escape ] && echo " (domains
 Edits auto-reload the router if it is running.
 EOF
 ;;
+    block) cat <<EOF
+$PROG block <subcommand> — edit the block lane (ad/telemetry sinkhole).
+
+Domains here are refused instantly — no DNS lookup, no dial — which is the fix
+for the direct-lane retry storm (dead ad/tracker hosts being retried in a tight
+loop) that spikes sing-box CPU. This hand list is ADDITIVE on top of the big
+geosite ad/tracker rule-set (thousands of domains), which is fetched + cached by
+'$PROG fetch host' and rendered in automatically when present (offline-safe: the
+hand list still works without it). Block runs BEFORE corp/escape/direct.
+
+  (no verb)            list the lane                                 [default]
+  add <entry> [more]   add domain(s) to block
+  rm <entry> [more]    remove entries
+  import <file>        batch-add one entry per line from a file (# comments ok)
+  dump [file]          print the lane (or write it to a file) for backup/versioning
+Edits auto-reload the router if it is running.
+EOF
+;;
     proxy) cat <<EOF
 $PROG proxy <status|check|on|off|env> — macOS system proxy + CLI env.
 
@@ -2035,6 +2103,7 @@ main() {
     # routing lanes
     escape)     cmd_escape "$@" ;;
     corp)       cmd_corp "$@" ;;
+    block)      cmd_block "$@" ;;
     # proxy
     proxy)      cmd_proxy "$@" ;;
     # internals / power-user

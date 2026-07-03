@@ -39,6 +39,7 @@ Day to day:
 rowt-proxy-on                 # point THIS shell's curl/git/npm/… at rowt (rowt-proxy-off to undo)
 rowt escape add youtube.com   # send another site through the personal tunnel
 rowt corp add '*.intranet.example.com' '10.0.0.0/8'   # send a domain or CIDR into the corp VPN
+rowt block add ads.example.com   # sinkhole an ad/telemetry domain (no DNS, no dial)
 rowt use JP                   # pick a server (rowt ping shows the fastest)
 rowt status                   # is it working? (mode / server / proxy / reachability)
 rowt reload                   # after switching Wi-Fi ↔ wired ↔ hotspot
@@ -288,10 +289,18 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 
 | command | what it does |
 | --- | --- |
-| `escape` / `corp` (no verb) | list the lane. |
+| `escape` / `corp` / `block` (no verb) | list the lane. |
 | `… add <d>…` / `… rm <d>…` | add / remove domains (corp also takes CIDRs). Reloads if running. |
 | `… import <file>` | batch-add one domain per line from a file. |
 | `… dump [file]` | export the lane (stdout, or to a file for backup/versioning). |
+
+The **block** lane is an ad/telemetry sinkhole: matching domains are refused
+instantly — no DNS lookup, no dial — which stops the direct-lane retry storm
+(dead ad/tracker hosts retried in a tight loop) that can spike sing-box CPU. It's
+additive on top of a large **geosite** ad/tracker rule-set (thousands of
+domains) that `rowt fetch host` caches and rowt renders in automatically when
+present (offline-safe: the hand list works without it). Block runs **before**
+corp/escape/direct.
 
 **Proxy & internals**
 
