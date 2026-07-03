@@ -264,9 +264,12 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 | `server add '<vless://\|anytls://…>' [more…]` | add manual server(s) from link(s), deduped. |
 | `server rm <tag>` / `server clear` | remove a manual server / clear all manual. |
 | `server import [--apply]` | import from Shadowrocket (servers **and** subs) via an editable review file. |
+| `server import <file.json>` | restore manual servers from a `server dump` (round-trips). |
 | `server dump [file]` | export the manual servers as JSON (backup; has secrets). Subscription servers come from their subs — use `sub dump`. |
 | `sub list\|add <url>\|rm <n>\|update\|clear` | manage subscriptions. |
-| `sub import [--apply]` | same as `server import`. `sub dump [file]` exports the URLs. |
+| `sub import [--apply]` | same as `server import` (Shadowrocket). |
+| `sub import <file>` | restore subscriptions from a `sub dump` (round-trips). |
+| `sub dump [file]` | export the subscription URLs (one per line). |
 | `use <tag>` / `use auto` | pin a server (manual, nothing probed) or auto-pick the fastest live server. |
 | `ping [tag]` | **parallel** latency test through the tunnel (fastest first, `*`=active). `ROWT_PING_URL` (default Cloudflare) / `ROWT_PING_TIMEOUT` (8s). |
 | `probe` | with corp VPN up, test all servers (default route vs physical NIC) and pick `host` or `vm`. |
@@ -285,6 +288,7 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 | command | what it does |
 | --- | --- |
 | `proxy status\|check\|on\|off\|env [--off]` | show / verify / set / unset the macOS system proxy; `env` prints CLI env exports. `on`/`off` are **idempotent** — they read the current state first (no sudo) and only invoke admin for what's actually wrong, so re-running never prompts if already correct. `check` exits 0 iff fully configured (used to re-apply after the OS config drifts). |
+| `shell-init` | shell integration to `eval` in your rc — defines `rowt-proxy-on`/`-off` (idempotent). Add `eval "$(rowt shell-init)"` to `~/.zshrc`. |
 | `render` | regenerate the sing-box configs from current state. |
 | `fetch [host\|vm\|both]` | pre-download while a VPN is on so `up` works offline. `host` = the macOS sing-box binary; `vm` = the ubuntu image + linux sing-box tarball into `~/.config/rowt/cache/` (then `up vm` boots from the local image and installs sing-box into the guest from that cache — **the VM never reaches GitHub itself**). Default `both`. |
 | `router up\|down\|restart\|status\|log` | the local rule-router process — the always-on proxy on `127.0.0.1:7890` (the front door your system proxy points at), which runs in **both** modes. (`router` is a process, not a mode — switch modes with `up host`/`up vm`.) |

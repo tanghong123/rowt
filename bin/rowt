@@ -45,7 +45,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="1.0.1"
+ROWT_VERSION="1.0.2"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -334,6 +334,9 @@ _list_add_file() { # $1=list-file $2=source-file $3=label
 # rowt escape / corp  [list | add <e>… | rm <e>… | import <file> | dump [file]]
 edit_list() {
   local file="$1" label="$2" action="${3:-list}"; shift 3 2>/dev/null || true
+  # snapshot so we only reload the router if the list ACTUALLY changed (adding an
+  # already-present entry, or removing a missing one, is a no-op — no restart).
+  local _before=""; [ -f "$file" ] && _before="$(cat "$file")"
   case "$action" in
     list)
       echo "$label list:"
@@ -370,7 +373,9 @@ edit_list() {
       return 0 ;;
     *) die "usage: $PROG $label [list | add <e>… | rm <e>… | import <file> | dump [file]]" ;;
   esac
-  reload_if_running
+  # only re-render/restart if the list changed
+  local _after=""; [ -f "$file" ] && _after="$(cat "$file")"
+  [ "$_before" != "$_after" ] && reload_if_running || true
 }
 
 cmd_escape() { local a="${1:-list}"; [ "$#" -gt 0 ] && shift; edit_list "$DOMAINS" escape "$a" "$@"; }
@@ -571,6 +576,18 @@ cmd_import() {
   rebuild_servers; after_import
 }
 
+# Restore manual servers from a `server dump` JSON (an array of outbounds).
+# Merged into the manual set and deduped, so re-importing is idempotent.
+server_load_dump() {
+  local f="$1"
+  jq -e 'type=="array"' "$f" >/dev/null 2>&1 || die "not a 'server dump' (expected a JSON array): $f"
+  [ -s "$MANUAL" ] || echo '[]' > "$MANUAL"
+  jq -s 'add' "$MANUAL" "$f" | python3 "$PARSER" --combine > "$MANUAL.n" && mv "$MANUAL.n" "$MANUAL"
+  chmod 600 "$MANUAL"
+  info "loaded $(jq length "$f") server(s) from $f"
+  rebuild_servers; after_import
+}
+
 # subscribe <url> [url2...]        replace the subscription list
 # subscribe --add <url> [url2...]  append to it
 # Subscriptions: rowt sub [list | add <url>… | rm <n|url> | update | clear]
@@ -593,7 +610,19 @@ cmd_sub() {
       [ -s "$SUBS_FILE" ] || die "no saved subscriptions — use: $PROG sub add <url>"
       info "re-fetching $(sub_count) subscription(s)…"; rebuild_servers; after_import ;;
     clear) : > "$SUBS_FILE"; info "all subscriptions removed"; rebuild_servers; after_import ;;
-    import) cmd_from_shadowrocket "$@" ;;    # from Shadowrocket (same as 'server import')
+    import)
+      # a file (not --apply) restores a `sub dump`; otherwise Shadowrocket
+      if [ -n "${1:-}" ] && [ "$1" != "--apply" ] && [ -f "$1" ]; then
+        local n=0 line
+        while IFS= read -r line; do
+          line="$(printf '%s' "$line" | tr -d '[:space:]')"; case "$line" in ''|\#*) continue ;; esac
+          printf '%s\n' "$line" >> "$SUBS_FILE"; n=$((n + 1))
+        done < "$1"
+        sort -u "$SUBS_FILE" -o "$SUBS_FILE"
+        info "loaded $n subscription URL(s) from $1; fetching…"; rebuild_servers; after_import
+      else
+        cmd_from_shadowrocket "$@"    # from Shadowrocket (same as 'server import')
+      fi ;;
     dump)
       local entries; entries="$(grep -vE '^[[:space:]]*(#|$)' "$SUBS_FILE" 2>/dev/null || true)"
       if [ -n "${1:-}" ]; then printf '%s\n' "$entries" > "$1"; echo "  dumped subscriptions -> $1" >&2
@@ -674,7 +703,9 @@ cmd_server() {
     add)       cmd_import "$@" ;;               # parse vless:// / anytls:// link(s)
     rm|remove) servers_remove "$@" ;;
     clear)     echo '[]' > "$MANUAL"; chmod 600 "$MANUAL"; info "manual servers cleared"; rebuild_servers; after_import ;;
-    import)    cmd_from_shadowrocket "$@" ;;    # from Shadowrocket (servers + subs)
+    import)    # a JSON file (not --apply) restores a `server dump`; else Shadowrocket
+      if [ -n "${1:-}" ] && [ "$1" != "--apply" ] && [ -f "$1" ]; then server_load_dump "$1"
+      else cmd_from_shadowrocket "$@"; fi ;;    # from Shadowrocket (servers + subs)
     dump)      # export the manual servers (JSON) for backup; subs -> 'sub dump'
       local out; out="$([ -s "$MANUAL" ] && jq . "$MANUAL" 2>/dev/null || echo '[]')"
       if [ -n "${1:-}" ]; then printf '%s\n' "$out" > "$1"; chmod 600 "$1"; echo "  dumped manual servers -> $1 (contains secrets, chmod 600)" >&2
@@ -1162,6 +1193,23 @@ cmd_env() {
   printf 'export HTTP_PROXY=%s HTTPS_PROXY=%s ALL_PROXY=%s\n' "$p" "$p" "socks5h://127.0.0.1:$PORT"
 }
 
+# Shell integration to eval from your rc:  eval "$(rowt shell-init)"
+# Emits the rowt-proxy-on / rowt-proxy-off aliases. IDEMPOTENT — the guard makes
+# re-sourcing your rc a no-op, and the sentinel is NOT exported so each new
+# interactive shell (and subshell) re-applies it cleanly. Homebrew won't edit
+# your rc, so this is how brew installs enable the aliases.
+cmd_shell_init() {
+  cat <<'SH'
+# >>> rowt shell integration >>>
+if [ -z "${_ROWT_SHELL_INIT:-}" ]; then
+  _ROWT_SHELL_INIT=1
+  alias rowt-proxy-on='eval "$(rowt proxy env)"'
+  alias rowt-proxy-off='eval "$(rowt proxy env --off)"'
+fi
+# <<< rowt shell integration <<<
+SH
+}
+
 # ---------- orchestration ----------------------------------------------------
 vm_running() { [ "$(limactl list "$VM_NAME" --format '{{.Status}}' 2>/dev/null)" = "Running" ]; }
 
@@ -1521,6 +1569,7 @@ a@internals@render@regenerate the sing-box configs from current state
 o@internals@fetch [host|vm]@pre-download artifacts so 'up' works offline
 a@internals@router <up|down|restart|status|log>@the local rule-router process
 a@internals@vm <up|down|restart|status|log|delete>@the bridged Lima VM
+a@internals@shell-init@shell integration to eval in your rc (proxy aliases)
 a@internals@version@print the version
 REG
 }
@@ -1644,6 +1693,7 @@ $PROG server <subcommand> — manage the server pool.
   clear                remove all manual servers
   import [--apply]     import from Shadowrocket (servers + subs): run once to dump
                        an editable review file, prune it, then re-run with --apply
+  import <file.json>   restore manual servers from a 'server dump' (round-trip)
   dump [file]          export the manual servers as JSON (backup; has secrets).
                        Subscription servers come from their subs — see 'sub dump'.
 EOF
@@ -1657,6 +1707,7 @@ $PROG sub <subcommand> — manage subscriptions.
   update               re-fetch all saved subscriptions
   clear                remove all subscriptions
   import [--apply]     same as '$PROG server import' (Shadowrocket)
+  import <file>        restore subscriptions from a 'sub dump' (round-trip)
   dump [file]          print the subscription URLs (or write them to a file)
 EOF
 ;;
@@ -1750,6 +1801,17 @@ $PROG vm <up|down|restart|status|log|delete> — the bridged Lima VM directly.
 Power-user access to the mode-vm guest (Lima + socket_vmnet).
 EOF
 ;;
+    shell-init) cat <<EOF
+$PROG shell-init — shell integration to eval from your rc file.
+
+Add ONE line to your ~/.zshrc (or ~/.bashrc), after 'brew shellenv':
+  eval "\$($PROG shell-init)"
+It defines rowt-proxy-on / rowt-proxy-off (point this shell's CLI proxy env at
+rowt / clear it). Idempotent: guarded so re-sourcing your rc is a no-op, and each
+new shell re-applies it. This is how a Homebrew install enables the aliases
+(Homebrew doesn't edit your rc).
+EOF
+;;
     version) cat <<EOF
 $PROG version — print the version ($ROWT_VERSION).
 EOF
@@ -1805,6 +1867,7 @@ main() {
     fetch)      cmd_fetch "$@" ;;
     router)     cmd_router "$@" ;;
     vm)         cmd_vm "$@" ;;
+    shell-init) cmd_shell_init "$@" ;;
     version)    echo "$PROG $ROWT_VERSION" ;;
     *) err "unknown command: $cmd"; echo; usage; exit 1 ;;
   esac
