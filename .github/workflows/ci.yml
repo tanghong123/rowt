@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: bash syntax check
+        run: |
+          for f in bin/rowt install.sh .githooks/pre-commit; do
+            echo "bash -n $f"; bash -n "$f"
+          done
+      - name: shellcheck (errors only, advisory)
+        continue-on-error: true
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          shellcheck --shell=bash --severity=error bin/rowt install.sh .githooks/pre-commit
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install ruff
+        run: pipx install ruff
+      - name: ruff check
+        run: ruff check config/
+      - name: ruff format --check
+        run: ruff format --check config/
+      - name: py_compile
+        run: python -m py_compile config/*.py
