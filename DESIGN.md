@@ -189,3 +189,17 @@ as the only VPN, "direct" just meant "off my tunnel". escape splits that
   order: corp rules are evaluated before escape. `rowt status` prints the
   bucket counts and validates the generated config.
 ```
+
+## 9. Ideas / TODO (not built yet — need design)
+
+- **TUI monitoring view.** A live terminal UI, launchable from the CLI (e.g.
+  `rowt monitor` / `rowt top`), that shows real-time state in one screen: active
+  connections per lane (escape/corp/direct/block) with throughput, the selected
+  server + latency, recent per-lane errors, router/proxy/mode status, and CPU.
+  Would build on the data we already have — the clash API (`/connections`,
+  `/traffic`) that `rowt connections` reads, the per-lane `lane-*.log` files that
+  `rowt <lane> errors` summarizes, and `rowt status`. Design questions: refresh
+  model + dependency footprint (pure-bash/ANSI redraw vs. a dep like a Go/Rust
+  TUI or Python `textual`/`rich` — rowt currently only needs `jq`/`python3`);
+  keyboard actions (switch server, toggle proxy, pause a lane); and whether it's
+  a subcommand vs. a separate small binary the CLI launches.

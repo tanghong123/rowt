@@ -45,7 +45,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="1.3.10"
+ROWT_VERSION="1.3.11"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -1694,7 +1694,7 @@ cmd_onboard() {
     $PROG escape add <domain>      route another site through the tunnel
     $PROG corp add <domain|cidr>   send a site/subnet into the corp VPN
     $PROG use <tag>  ·  $PROG ping  pick / test servers
-    $PROG route <domain|ip>        which lane will a destination take?
+    $PROG explain <domain|ip>      which lane will a destination take?
     $PROG status                   is it working?
     $PROG reload                   after switching Wi-Fi / wired / hotspot
     $PROG down                     stop everything
@@ -1746,8 +1746,8 @@ _list_hit() {
 # block domain_suffix -> corp domain_suffix -> corp ip_cidr (on resolved IP) ->
 # escape domain_suffix -> final. (The geosite ad rule-set also blocks, but it's a
 # binary .srs we can't cheaply inspect here — so a hit there won't show below.)
-cmd_route() {
-  local dest="${1:-}"; [ -n "$dest" ] || die "usage: $PROG route <domain|ip>"
+cmd_explain() {
+  local dest="${1:-}"; [ -n "$dest" ] || die "usage: $PROG explain <domain|ip>"
   dest="$(printf '%s' "$dest" | sed -E 's#^[a-zA-Z]+://##; s#/.*$##; s#:[0-9]+$##' | tr 'A-Z' 'a-z')"
   local lane="" why="" ip="" m
   if is_ipv4 "$dest"; then
@@ -1918,7 +1918,8 @@ cmd_watch() {
   <dict>
 $envxml
   </dict>
-  <key>RunAtLoad</key><false/>
+  <key>RunAtLoad</key><true/>  <!-- also fire once at login: clear a stale proxy rowt left set -->
+
   <key>ThrottleInterval</key><integer>5</integer>
   <key>StandardOutPath</key><string>$WATCH_LOG</string>
   <key>StandardErrorPath</key><string>$WATCH_LOG</string>
@@ -1968,7 +1969,21 @@ PLIST
       # short settle so a burst of resolv.conf writes = one reload. Skip entirely
       # when neither the physical interface nor the active-service proxy actually
       # moved, so a Wi-Fi flap doesn't needlessly bounce the tunnel.
-      host_running || exit 0
+      # rowt is a user tool with no auto-start, so after a reboot/login it won't be
+      # running — but the macOS system proxy it set PERSISTS across reboots. If the
+      # router is down yet the proxy still points at our (now dead) 127.0.0.1:$PORT,
+      # clear it: rowt's system-proxy effect must not outlive a reboot, and this
+      # un-strands the network. RunAtLoad fires this at login; network changes too.
+      if ! host_running; then
+        local gsvc; gsvc="$(active_service 2>/dev/null || true)"
+        if [ -n "$gsvc" ] && _proxy_pointing_ok "$gsvc"; then
+          _watch_log "rowt not running but '$gsvc' proxy still set to 127.0.0.1:$PORT — clearing (stale, no-limbo)"
+          sudo -n /usr/sbin/networksetup -setsocksfirewallproxystate "$gsvc" off 2>/dev/null || true
+          sudo -n /usr/sbin/networksetup -setwebproxystate       "$gsvc" off 2>/dev/null || true
+          sudo -n /usr/sbin/networksetup -setsecurewebproxystate "$gsvc" off 2>/dev/null || true
+        fi
+        exit 0
+      fi
       local lock="$CFG/watch.lock"
       mkdir "$lock" 2>/dev/null || exit 0        # another tick already handling it
       trap 'rmdir "$lock" 2>/dev/null || true' EXIT
@@ -2123,9 +2138,9 @@ c@lifecycle@up [host|vm] [--force]@set up & start (no arg = auto-detect the mode
 c@lifecycle@down@tear down: proxy off + stop sing-box + vm down
 o@lifecycle@restart@bounce the tunnel in place (no re-render / proxy change)
 c@lifecycle@reload@re-apply after a network switch (re-render + restart + proxy)
-o@lifecycle@watch <install|uninstall|status>@auto-reload on network change (while up)
+o@lifecycle@watch <install|uninstall|status>@auto-reload on net change; clears a stale proxy at login
 c@lifecycle@status@state + config validity + reachability
-o@lifecycle@route <domain|ip>@explain a destination's lane (escape / corp / direct)
+o@lifecycle@explain <domain|ip>@explain a destination's lane (escape / corp / direct)
 o@lifecycle@connections [lane|-w]@live view: active connections + which lane each is on
 a@lifecycle@report@full diagnostic report to a file (masked; shareable)
 o@servers & selection@server <list|add|rm|clear|import|dump>@manage the server pool
@@ -2246,6 +2261,11 @@ flap won't needlessly bounce the tunnel). A scoped passwordless-sudo rule
 without a password prompt — it grants NOPASSWD for the networksetup proxy
 toggles only, and 'uninstall' removes it.
 
+It also runs once at LOGIN (and on every network change): if rowt isn't running
+but the system proxy is still set to 127.0.0.1:$PORT, it clears it. rowt doesn't
+auto-start, so this keeps its system-proxy effect from outliving a reboot and
+un-strands the network (no proxy pointing at a dead port).
+
   install     write + load the LaunchAgent and the scoped sudoers rule (admin once)
   uninstall   unload + remove both
   status      is the agent loaded? sudoers present? recent reload log  [default]
@@ -2260,16 +2280,17 @@ system-proxy state, the routing buckets, sing-box config validity, and a live
 'via proxy' reachability check. (Absorbs the old 'doctor'.)
 EOF
 ;;
-    route) cat <<EOF
-$PROG route <domain|ip> — explain a destination's lane.
+    explain|route) cat <<EOF
+$PROG explain <domain|ip> — explain a destination's lane.  (was '$PROG route')
 
 Prints whether a destination goes through the escape proxy, into the corp VPN
 (the OS route), or direct (pass-through), and which rule matched. Mirrors the
 real rule order: corp domain -> corp CIDR (on the resolved IP) -> escape domain
 -> final route. Accepts a bare domain, an IP, or a URL; adds a live HTTP check
 when the router is running.
-  $PROG route www.google.com
-  $PROG route 30.1.2.3
+  $PROG explain www.google.com
+  $PROG explain 30.1.2.3
+('route' still works as a hidden alias.)
 EOF
 ;;
     report) cat <<EOF
@@ -2546,7 +2567,7 @@ main() {
     watch)      cmd_watch "$@" ;;
     status)     cmd_status "$@" ;;
     report)     cmd_diag "$@" ;;
-    route)      cmd_route "$@" ;;
+    explain|route) cmd_explain "$@" ;;   # 'route' kept as a hidden alias (renamed to avoid router/route confusion)
     connections|conns) cmd_connections "$@" ;;
     # servers & selection
     server)     cmd_server "$@" ;;

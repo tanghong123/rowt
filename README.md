@@ -25,7 +25,7 @@ rowt up host                  # host mode (the common one); 'rowt up' auto-detec
 
 # --- now switch networks ---
 # 4. quit Shadowrocket, connect the CORP VPN, then verify:
-rowt route www.google.com     # HTTP 200 through the tunnel
+rowt explain www.google.com   # which lane a destination takes (was 'rowt route')
 rowt status                   # mode / server / proxy / reachability
 ```
 
@@ -303,11 +303,11 @@ rowt direct errors 10m               # which domains couldn't be reached directl
 rowt escape add googlevideo.com x.com     # or 'rowt corp add <host>' for an intranet name
 #    editing a lane auto-reloads the router
 # 3. confirm the new routing:
-rowt route rr1.googlevideo.com       # -> escape (explains which rule matched)
+rowt explain rr1.googlevideo.com     # -> escape (explains which rule matched)
 rowt connections escape              # watch them actually flow through escape
 ```
 
-`rowt route <domain>` explains the lane any destination *would* take and why,
+`rowt explain <domain>` explains the lane any destination *would* take and why,
 without hitting the site — handy for sanity-checking a change. And `rowt block
 errors [period]` (default 24h) shows what the ad/telemetry sinkhole refused, so you
 can spot a chatty tracker or confirm the block lane is doing its job.
@@ -327,9 +327,9 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 | `down` | tear everything down: system proxy off, **kill sing-box** (incl. strays), VM down. |
 | `restart` | bounce the tunnel in place (host or vm, whichever is active) — no re-render, no proxy change. Use if sing-box is stuck/high-CPU. |
 | `reload` | re-detect the network interface, re-render, restart, re-apply the proxy — run after switching Wi-Fi ↔ wired ↔ hotspot. |
-| `watch <install\|uninstall\|status>` | install/remove a LaunchAgent that runs `reload` automatically on every network change — but **only while the router is up**, debounced, and a no-op when neither the interface nor the active-service proxy moved. `install` also adds a scoped passwordless-sudo rule for the `networksetup` proxy toggles (so a Wi-Fi↔Ethernet switch doesn't prompt); `uninstall` removes both. |
+| `watch <install\|uninstall\|status>` | install/remove a LaunchAgent that runs `reload` automatically on every network change — but **only while the router is up**, debounced, and a no-op when neither the interface nor the active-service proxy moved. It also runs once at **login**: if rowt isn't running but the system proxy is still set to `127.0.0.1:7890`, it clears it, so rowt's proxy effect never outlives a reboot. `install` also adds a scoped passwordless-sudo rule for the `networksetup` proxy toggles (so a Wi-Fi↔Ethernet switch doesn't prompt); `uninstall` removes both. |
 | `status` | mode, servers, proxy state, reachability **and config validity** (absorbs the old `doctor`). |
-| `route <domain\|ip>` | explain which lane a destination takes — `escape` (proxy), `corp` (into the corp VPN), or `direct` (pass-through) — and which rule matched. Mirrors the real rule order (corp domain → corp CIDR → escape domain → final); adds a live HTTP check if the router is running. |
+| `explain <domain\|ip>` | explain which lane a destination takes — `escape` (proxy), `corp` (into the corp VPN), or `direct` (pass-through) — and which rule matched. Mirrors the real rule order (corp domain → corp CIDR → escape domain → final); adds a live HTTP check if the router is running. (`route` still works as a hidden alias.) |
 | `report` | full offline diagnostic (deps, configs, per-server reachability, DNS, through-proxy tests, log tail) → `~/.config/rowt/diag-*.txt`, **secrets masked**, for sharing. |
 
 **Servers & selection**
