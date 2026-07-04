@@ -294,6 +294,8 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 | `… import <file>` | batch-add one domain per line from a file (merges; never replaces). |
 | `… clear` | remove every entry (keeps the file's comment header). Reloads if running. |
 | `… dump [file]` | export the lane (stdout, or to a file for backup/versioning). |
+| `block stats [1h\|24h\|7d\|all]` | what got blocked and how often in that window (default 24h). The router diverts each blocked connection out of `host.log` into a compact `block.log` (`timestamp⇥domain`); this summarizes it. |
+| `block log` | live-tail the block log (timestamp + domain). |
 
 The **block** lane is an ad/telemetry sinkhole: matching domains are refused
 instantly — no DNS lookup, no dial — which stops the direct-lane retry storm
