@@ -45,7 +45,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="1.3.2"
+ROWT_VERSION="1.3.3"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -1587,8 +1587,23 @@ WATCH_LABEL="club.annaslife.rowt.watch"
 WATCH_PLIST="$HOME/Library/LaunchAgents/$WATCH_LABEL.plist"
 WATCH_SUDOERS="/etc/sudoers.d/rowt"          # no dot in the name, else sudo ignores it
 WATCH_LOG="$LOGDIR/watch.log"
+WATCH_NET="$CFG/watch.net"                   # last-seen network identity (for the log)
 
 _watch_log() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$WATCH_LOG"; }
+
+# A short, human-readable identity of the active network path — for the watch log
+# so a "skip" says WHICH network you're on. Uses permission-free signals (IP +
+# gateway) that reliably tell home Wi-Fi from a hotspot even when they share the
+# interface; the SSID is added only when macOS hands it over (it's gated behind
+# Location permission, which a LaunchAgent usually lacks, so it's best-effort).
+net_id() { # $1=iface
+  local ifc="${1:-}" ip gw ssid
+  [ -n "$ifc" ] || { printf 'down'; return 0; }
+  ip="$(ipconfig getifaddr "$ifc" 2>/dev/null || true)"
+  gw="$(ipconfig getoption "$ifc" router 2>/dev/null || true)"
+  ssid="$(networksetup -getairportnetwork "$ifc" 2>/dev/null | sed -n 's/^Current Wi-Fi Network: //p')"
+  printf '%s%s/%s' "${ssid:+$ssid }" "${ip:-none}" "${gw:-none}"
+}
 # Absolute path to THIS rowt — prefer the PATH symlink (stable across upgrades).
 _watch_self() { command -v "$PROG" 2>/dev/null || echo "$HERE/bin/$PROG"; }
 # Only the networksetup proxy toggles get NOPASSWD — nothing else.
@@ -1700,14 +1715,26 @@ PLIST
       trap 'rmdir "$lock" 2>/dev/null || true' EXIT
       sleep 2                                     # let the network settle
       host_running || exit 0                      # may have gone down while we waited
-      local ifc cur svc need=0
+      local ifc cur svc need=0 nid last
       ifc="$(detect_iface 2>/dev/null || true)"
       cur="$(jq -r '.outbounds[]?|select(.tag=="direct")|.bind_interface // empty' "$HOST_CFG" 2>/dev/null || true)"
       svc="$(active_service 2>/dev/null || true)"
+      nid="$(net_id "$ifc")"                       # e.g. "MyWifi 192.168.1.42/192.168.1.1"
+      last="$(cat "$WATCH_NET" 2>/dev/null || true)"
+      printf '%s\n' "$nid" > "$WATCH_NET" 2>/dev/null || true
       [ -n "$ifc" ] && [ "$ifc" != "$cur" ] && need=1
       [ -n "$svc" ] && { _proxy_pointing_ok "$svc" && _proxy_bypass_ok "$svc" || need=1; }
-      if [ "$need" -eq 0 ]; then _watch_log "resolver changed but iface=$ifc / proxy on '$svc' unchanged — skip"; exit 0; fi
-      _watch_log "network change (iface '$cur' -> '$ifc', service '$svc') — reloading"
+      if [ "$need" -eq 0 ]; then
+        # bind iface + proxy unchanged, so no reload needed. Say which network we're
+        # on — and whether it actually moved (same iface, new IP = home->hotspot).
+        if [ -n "$last" ] && [ "$last" != "$nid" ]; then
+          _watch_log "moved network [$last -> $nid] but iface=$ifc + proxy '$svc' unchanged — no reload needed, skip"
+        else
+          _watch_log "resolver flap — still on [$nid] (iface=$ifc, proxy '$svc') — skip"
+        fi
+        exit 0
+      fi
+      _watch_log "network change (iface '$cur' -> '$ifc', [$nid], service '$svc') — reloading"
       cmd_reload >>"$WATCH_LOG" 2>&1 && _watch_log "reload ok" || _watch_log "reload FAILED"
       ;;
     *) die "usage: $PROG watch [install | uninstall | status]" ;;
