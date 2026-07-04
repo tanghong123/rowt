@@ -45,7 +45,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="1.3.4"
+ROWT_VERSION="1.3.5"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -58,6 +58,8 @@ CFG="${XDG_CONFIG_HOME:-$HOME/.config}/rowt"
 BIN="$CFG/bin"
 STATE="$CFG/state"
 LOGDIR="$CFG/log"
+LOG_MAX_BYTES="${ROWT_LOG_MAX_BYTES:-5242880}"   # rotate a log once it passes 5 MiB
+LOG_KEEP="${ROWT_LOG_KEEP:-2}"                    # keep this many rotated generations (.1 … .N)
 CACHE="$CFG/cache"                   # pre-fetched artifacts (vm image, guest sing-box)
 OUTBOUND="$CFG/outbound.json"        # legacy single-server file (auto-migrated)
 SERVERS="$CFG/servers.json"          # array of VLESS outbounds (secret)
@@ -942,7 +944,8 @@ cmd_router() {
       [ -f "$HOST_CFG" ] || cmd_render
       ensure_singbox_host
       info "starting rule-router on 127.0.0.1:$PORT"
-      "$SB" run -c "$HOST_CFG" >"$LOGDIR/host.log" 2>&1 &
+      mkdir -p "$LOGDIR"; rotate_log "$LOGDIR/host.log"   # keep the log bounded; append (>>) so rotation is copytruncate-safe
+      "$SB" run -c "$HOST_CFG" >>"$LOGDIR/host.log" 2>&1 &
       echo $! > "$(host_pidfile)"
       sleep 1
       host_running || { err "router failed to start — see $LOGDIR/host.log"; tail -5 "$LOGDIR/host.log" >&2; return 1; }
@@ -2195,8 +2198,31 @@ show_help() {
   err "unknown command: $c"; echo; usage; return 1
 }
 
+# Copytruncate log rotation, so a chatty router log can't slowly fill the disk.
+# Rotates only once a file crosses LOG_MAX_BYTES, keeping LOG_KEEP old copies
+# (.1 … .N). Safe to run WHILE sing-box is writing because we open its log in
+# append mode (>> in cmd_router up): truncating in place makes the next write
+# land at offset 0 with no sparse hole. A couple of lines can be lost in the
+# copy→truncate window — fine for a debug log. Runs on every rowt invocation
+# (incl. each 'watch tick'), so an oversize log is trimmed the next time rowt runs.
+rotate_log() { # $1=logfile
+  local f="${1:-}" sz i
+  [ -n "$f" ] && [ -f "$f" ] || return 0
+  sz="$(stat -f%z "$f" 2>/dev/null || echo 0)"
+  [ "$sz" -ge "$LOG_MAX_BYTES" ] || return 0
+  i="$LOG_KEEP"
+  while [ "$i" -gt 1 ]; do
+    [ -f "$f.$((i-1))" ] && mv -f "$f.$((i-1))" "$f.$i" 2>/dev/null || true
+    i=$((i-1))
+  done
+  [ "$LOG_KEEP" -ge 1 ] && cp -f "$f" "$f.1" 2>/dev/null || true
+  : > "$f"
+}
+
 main() {
   migrate
+  rotate_log "$LOGDIR/host.log"
+  rotate_log "$LOGDIR/watch.log"
   # no args: greet with the onboarding checklist, then the full command list
   if [ "$#" -eq 0 ]; then cmd_onboard; echo; usage; return 0; fi
   local cmd="$1"; shift
