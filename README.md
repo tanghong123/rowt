@@ -247,6 +247,71 @@ one app, mode `vm` is the middle path (point that app/device at the VM).
 See **[DESIGN.md](DESIGN.md)** for the full packet- and DNS-level walkthrough of
 how routing works with the corp VPN on, and a Shadowrocket→escape mapping table.
 
+## Diagnosing what a site needs
+
+The default policy is **direct**, but web apps quietly reach out to domains that
+may be blocked or need the tunnel — and it's rarely obvious which. Two read-only
+tools tell you exactly what's happening, so you can move *just those* domains into
+`escape` (or `corp`) instead of tunnelling everything. (Both read live state; the
+per-lane error capture needs the router running, i.e. after `rowt up`.)
+
+**What's flowing right now — `rowt connections`.** A live snapshot of active
+connections, aggregated by host, showing which lane each is on, bytes up/down, and
+the rule that matched. This is the only view that shows **successful** traffic:
+
+```
+$ rowt connections
+13 active connections:  escape=7  direct=6
+  escape  api.anthropic.com:443     2× ↑35.7M  ↓160K   domain_suffix
+  escape  claude.ai:443             1× ↑31K    ↓13K    domain_suffix
+  direct  gateway.icloud.com:443    1× ↑5K     ↓5K     final
+  …
+```
+
+`rowt connections escape` filters to one lane; `rowt connections -w` refreshes
+every 2s (Ctrl-C to stop).
+
+**What's failing — `rowt <lane> errors [period]`.** sing-box runs quietly (warn
+level), so it only logs *failed/refused* connections. The router sorts those per
+lane into `~/.config/rowt/log/lane-<lane>.log` (`timestamp⇥domain⇥reason`), and
+`errors` summarizes them by domain, categorizing the reason:
+
+```
+$ rowt direct errors 10m
+direct lane — 12 failed connection(s) in the last 10m, across 3 domain(s):
+        8  timeout  rr1.googlevideo.com
+        3  reset    x.com
+        1  dns      gateway.icloud.com
+  → tunnel the real ones: rowt escape add <domain>  (timeout/reset/refused ⇒ likely blocked; dns ⇒ often transient)
+```
+
+- `timeout` / `reset` / `refused` ⇒ the site is almost certainly **blocked** — a prime escape candidate.
+- `dns` ⇒ usually a transient resolver blip, not a routing problem.
+
+Because only failures are logged, an **empty** `escape errors` means that lane had
+*no errors* — **not** that it carried no traffic (for that, use `connections`).
+Periods take minute granularity — `5m 10m 1h 24h 7d all` (default 10m; `block
+errors` defaults to 24h). `rowt <lane> log` live-tails the raw log. All these logs
+rotate automatically (bounded disk, 9 generations kept).
+
+**The workflow — find and fix a misbehaving app** (keeping the default DIRECT):
+
+```sh
+# 1. reproduce the problem with the app on the default policy, then:
+rowt direct errors 10m               # which domains couldn't be reached directly
+# 2. tunnel the blocked ones (timeout/reset/refused):
+rowt escape add googlevideo.com x.com     # or 'rowt corp add <host>' for an intranet name
+#    editing a lane auto-reloads the router
+# 3. confirm the new routing:
+rowt route rr1.googlevideo.com       # -> escape (explains which rule matched)
+rowt connections escape              # watch them actually flow through escape
+```
+
+`rowt route <domain>` explains the lane any destination *would* take and why,
+without hitting the site — handy for sanity-checking a change. And `rowt block
+errors [period]` (default 24h) shows what the ad/telemetry sinkhole refused, so you
+can spot a chatty tracker or confirm the block lane is doing its job.
+
 ## Commands
 
 Commands are grouped by noun. `rowt help` prints the full list, annotated by how
