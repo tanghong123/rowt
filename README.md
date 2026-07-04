@@ -291,7 +291,8 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 | --- | --- |
 | `escape` / `corp` / `block` (no verb) | list the lane. |
 | `… add <d>…` / `… rm <d>…` | add / remove domains (corp also takes CIDRs). Reloads if running. |
-| `… import <file>` | batch-add one domain per line from a file. |
+| `… import <file>` | batch-add one domain per line from a file (merges; never replaces). |
+| `… clear` | remove every entry (keeps the file's comment header). Reloads if running. |
 | `… dump [file]` | export the lane (stdout, or to a file for backup/versioning). |
 
 The **block** lane is an ad/telemetry sinkhole: matching domains are refused
@@ -307,7 +308,8 @@ corp/escape/direct.
 | command | what it does |
 | --- | --- |
 | `proxy status\|check\|on\|off\|env [--off]` | show / verify / set / unset the macOS system proxy; `env` prints CLI env exports. `on`/`off` are **idempotent** — they read the current state first (no sudo) and only invoke admin for what's actually wrong, so re-running never prompts if already correct. `on` is a **no-op unless the router is running** (else it would just point the system proxy at a dead port and break traffic) — run `rowt up` first, or `proxy on --force` to override. `check` exits 0 iff fully configured (used to re-apply after the OS config drifts). |
-| `shell-init` | shell integration to `eval` in your rc — defines `rowt-proxy-on`/`-off` (idempotent). Add `eval "$(rowt shell-init)"` to `~/.zshrc`. |
+| `shell-init` | shell integration to `eval` in your rc — defines `rowt-proxy-on`/`-off` **and** loads tab-completion for subcommands (zsh/bash), idempotent. Add `eval "$(rowt shell-init)"` to `~/.zshrc`. |
+| `completion <zsh\|bash>` | print a tab-completion script (normally auto-loaded by `shell-init`; defers to the live command set so it never drifts). |
 | `render` | regenerate the sing-box configs from current state. |
 | `fetch [host\|vm\|both]` | pre-download while a VPN is on so `up` works offline. `host` = the macOS sing-box binary; `vm` = the ubuntu image + linux sing-box tarball into `~/.config/rowt/cache/` (then `up vm` boots from the local image and installs sing-box into the guest from that cache — **the VM never reaches GitHub itself**). Default `both`. |
 | `router up\|down\|restart\|status\|log` | the local rule-router process — the always-on proxy on `127.0.0.1:7890` (the front door your system proxy points at), which runs in **both** modes. (`router` is a process, not a mode — switch modes with `up host`/`up vm`.) |

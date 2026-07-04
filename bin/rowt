@@ -33,7 +33,7 @@
 #   lifecycle : up [host|vm] · down · restart · reload · status · route <dest> · report
 #   servers   : server {list|add|rm|clear|import} · sub {list|add|rm|update|clear|import|dump}
 #               use <tag>|auto · ping [tag] · probe
-#   lanes     : escape / corp  {list|add|rm|import <file>|dump [file]}
+#   lanes     : escape / corp  {list|add|rm|import <file>|clear|dump [file]}
 #   proxy     : proxy {status|on|off|env}
 #   internals : render · fetch · router {up|down|restart|status|log} · vm {…} · version
 #
@@ -45,7 +45,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="1.2.0"
+ROWT_VERSION="1.3.0"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -357,7 +357,7 @@ _list_add_file() { # $1=list-file $2=source-file $3=label
   echo "  $3 += $added new, $already already present (from $2)"
 }
 
-# rowt escape / corp  [list | add <e>… | rm <e>… | import <file> | dump [file]]
+# rowt escape / corp  [list | add <e>… | rm <e>… | import <file> | clear | dump [file]]
 edit_list() {
   local file="$1" label="$2" action="${3:-list}"; shift 3 2>/dev/null || true
   # snapshot so we only reload the router if the list ACTUALLY changed (adding an
@@ -369,7 +369,7 @@ edit_list() {
       if grep -qvE '^[[:space:]]*(#|$)' "$file" 2>/dev/null; then
         grep -vE '^[[:space:]]*(#|$)' "$file" | sed 's/^/  /'
       else echo "  (empty)"; fi
-      echo "  $PROG $label add <e>… | rm <e>… | import <file> | dump [file]"
+      echo "  $PROG $label add <e>… | rm <e>… | import <file> | clear | dump [file]"
       return 0 ;;
     add)
       [ "$#" -ge 1 ] || die "usage: $PROG $label add <entry>..."
@@ -382,6 +382,11 @@ edit_list() {
     import)   # batch-add one domain per line from a file
       [ -n "${1:-}" ] || die "usage: $PROG $label import <file>   (one domain per line)"
       touch "$file"; _list_add_file "$file" "$1" "$label" ;;
+    clear)    # drop every active entry; keep comment/blank lines (the header)
+      [ -f "$file" ] || die "$label list is already empty"
+      local kept; kept="$(grep -E '^[[:space:]]*(#|$)' "$file" 2>/dev/null || true)"
+      printf '%s\n' "$kept" > "$file"
+      echo "  $label list cleared (comments kept)" ;;
     rm|remove)
       [ -f "$file" ] || die "$label list is empty"
       [ "$#" -ge 1 ] || die "usage: $PROG $label rm <entry>..."
@@ -398,7 +403,7 @@ edit_list() {
       if [ -n "${1:-}" ]; then printf '%s\n' "$entries" > "$1"; echo "  dumped $label list -> $1" >&2
       else printf '%s\n' "$entries"; fi
       return 0 ;;
-    *) die "usage: $PROG $label [list | add <e>… | rm <e>… | import <file> | dump [file]]" ;;
+    *) die "usage: $PROG $label [list | add <e>… | rm <e>… | import <file> | clear | dump [file]]" ;;
   esac
   # only re-render/restart if the list changed
   local _after=""; [ -f "$file" ] && _after="$(cat "$file")"
@@ -1262,9 +1267,80 @@ if [ -z "${_ROWT_SHELL_INIT:-}" ]; then
   _ROWT_SHELL_INIT=1
   alias rowt-proxy-on='eval "$(rowt proxy env)"'
   alias rowt-proxy-off='eval "$(rowt proxy env --off)"'
+  # tab-completion for subcommands (zsh/bash); defers to 'rowt _complete' at
+  # tab-time so it never drifts from the actual command set.
+  if [ -n "${ZSH_VERSION:-}" ]; then
+    eval "$(rowt completion zsh 2>/dev/null)"
+  elif [ -n "${BASH_VERSION:-}" ]; then
+    eval "$(rowt completion bash 2>/dev/null)"
+  fi
 fi
 # <<< rowt shell integration <<<
 SH
+}
+
+# Hidden helper the shell completion functions call at tab-time. Given the
+# already-typed context words (everything after 'rowt', excluding the partial
+# word under the cursor), it prints one candidate per line as "value<TAB>desc".
+# Driven by _reg so top-level commands + their <a|b|c> subcommand hints stay in
+# sync automatically; a few commands get live candidates (server tags, etc.).
+cmd__complete() {
+  if [ "$#" -eq 0 ]; then                       # first word: top-level commands
+    _reg | awk -F@ '{ split($3,a," "); printf "%s\t%s\n", a[1], $4 }'
+    return 0
+  fi
+  [ "$#" -eq 1 ] || return 0                     # only complete one level deep
+  local cmd="$1" tags
+  case "$cmd" in
+    use)   [ -s "$SERVERS" ] && jq -r '.[].tag' "$SERVERS" 2>/dev/null | sed 's/$/\tserver/'
+           printf 'auto\tpick fastest live\n'; return 0 ;;
+    ping)  [ -s "$SERVERS" ] && jq -r '.[].tag' "$SERVERS" 2>/dev/null | sed 's/$/\tserver/'; return 0 ;;
+    help)  _reg | awk -F@ '{ split($3,a," "); printf "%s\t\n", a[1] }'; return 0 ;;
+  esac
+  # generic: pull literal choices out of the usage field — only groups that hold
+  # a '|' are real choice-sets (<tag>, <domain> etc. are placeholders, skipped).
+  local usage; usage="$(_reg | awk -F@ -v c="$cmd" '{ split($3,a," "); if (a[1]==c) print $3 }')"
+  [ -n "$usage" ] || return 0
+  printf '%s\n' "$usage" | grep -oE '[<[][^]>]*\|[^]>]*[]>]' | tr -d '<>[]' | tr '|' '\n' \
+    | while IFS= read -r tok; do
+        tok="$(printf '%s' "$tok" | tr -d '[:space:]')"
+        case "$tok" in ''|--*) continue ;; esac
+        printf '%s\t\n' "$tok"
+      done
+}
+
+# Emit a shell completion script that defers to 'rowt _complete'.
+cmd_completion() {
+  case "${1:-}" in
+    zsh)  cat <<'ZSH'
+(( $+functions[compdef] )) || { autoload -Uz compinit && compinit -C 2>/dev/null; }
+_rowt() {
+  local -a _c; local _l
+  for _l in "${(@f)$(command rowt _complete "${(@)words[2,CURRENT-1]}" 2>/dev/null)}"; do
+    [[ -z $_l ]] && continue
+    _c+=("${_l%%$'\t'*}:${_l#*$'\t'}")
+  done
+  _describe -t rowt 'rowt' _c && return
+  _default
+}
+compdef _rowt rowt
+ZSH
+      ;;
+    bash) cat <<'BASH'
+_rowt() {
+  local cur ctx cands
+  cur="${COMP_WORDS[COMP_CWORD]}"
+  ctx=("${COMP_WORDS[@]:1:COMP_CWORD-1}")
+  cands="$(command rowt _complete "${ctx[@]}" 2>/dev/null | cut -f1)"
+  if [ -z "$cands" ]; then COMPREPLY=( $(compgen -f -- "$cur") )
+  else COMPREPLY=( $(compgen -W "$cands" -- "$cur") ); fi
+}
+complete -F _rowt rowt
+BASH
+      ;;
+    ""|-h|--help) die "usage: $PROG completion <zsh|bash>   (auto-loaded by 'shell-init')" ;;
+    *) die "unsupported shell: $1  (supported: zsh, bash)" ;;
+  esac
 }
 
 # ---------- orchestration ----------------------------------------------------
@@ -1766,15 +1842,16 @@ o@servers & selection@sub <list|add|rm|update|clear|import|dump>@manage subscrip
 c@servers & selection@use <tag>|auto@pin a server (manual) or auto-pick fastest live
 c@servers & selection@ping [tag]@parallel latency test through the tunnel (fastest first)
 a@servers & selection@probe@detect which mode works (host vs vm) with corp VPN up
-c@routing lanes@escape <list|add|rm|import|dump>@edit the escape lane (VPN tunnel)
-o@routing lanes@corp <list|add|rm|import|dump>@edit the corp lane (into the corp VPN)
-o@routing lanes@block <list|add|rm|import|dump>@edit the block lane (ad/telemetry sinkhole)
+c@routing lanes@escape <list|add|rm|import|clear|dump>@edit the escape lane (VPN tunnel)
+o@routing lanes@corp <list|add|rm|import|clear|dump>@edit the corp lane (into the corp VPN)
+o@routing lanes@block <list|add|rm|import|clear|dump>@edit the block lane (ad/telemetry sinkhole)
 o@proxy@proxy <status|check|on|off|env>@macOS system proxy + CLI env exports
 a@internals@render@regenerate the sing-box configs from current state
 o@internals@fetch [host|vm]@pre-download artifacts so 'up' works offline
 a@internals@router <up|down|restart|status|log>@the local rule-router process
 a@internals@vm <up|down|restart|status|log|delete>@the bridged Lima VM
-a@internals@shell-init@shell integration to eval in your rc (proxy aliases)
+a@internals@shell-init@shell integration to eval in your rc (aliases + completion)
+a@internals@completion <zsh|bash>@print a tab-completion script (auto-loaded by shell-init)
 a@internals@version@print the version
 REG
 }
@@ -1971,6 +2048,7 @@ $PROG $1 <subcommand> — edit the $1 lane$([ "$1" = escape ] && echo " (domains
   add <entry> [more]   add domain(s)$([ "$1" = corp ] && echo "; corp also accepts CIDRs, e.g. 10.0.0.0/8")
   rm <entry> [more]    remove entries
   import <file>        batch-add one entry per line from a file (# comments ok)
+  clear                remove every entry (keeps the file's comment header)
   dump [file]          print the lane (or write it to a file) for backup/versioning
 Edits auto-reload the router if it is running.
 EOF
@@ -1989,6 +2067,7 @@ hand list still works without it). Block runs BEFORE corp/escape/direct.
   add <entry> [more]   add domain(s) to block
   rm <entry> [more]    remove entries
   import <file>        batch-add one entry per line from a file (# comments ok)
+  clear                remove every entry (keeps the file's comment header)
   dump [file]          print the lane (or write it to a file) for backup/versioning
 Edits auto-reload the router if it is running.
 EOF
@@ -2049,9 +2128,21 @@ $PROG shell-init — shell integration to eval from your rc file.
 Add ONE line to your ~/.zshrc (or ~/.bashrc), after 'brew shellenv':
   eval "\$($PROG shell-init)"
 It defines rowt-proxy-on / rowt-proxy-off (point this shell's CLI proxy env at
-rowt / clear it). Idempotent: guarded so re-sourcing your rc is a no-op, and each
-new shell re-applies it. This is how a Homebrew install enables the aliases
-(Homebrew doesn't edit your rc).
+rowt / clear it), and loads tab-completion for subcommands (zsh/bash). Idempotent:
+guarded so re-sourcing your rc is a no-op, and each new shell re-applies it. This
+is how a Homebrew install enables the aliases (Homebrew doesn't edit your rc).
+EOF
+;;
+    completion) cat <<EOF
+$PROG completion <zsh|bash> — print a tab-completion script for that shell.
+
+You normally don't run this directly: 'shell-init' auto-loads the right one, so
+  eval "\$($PROG shell-init)"
+in your rc gives you completion for commands and their subcommands. To install it
+standalone (e.g. into a completion dir) you can redirect the output, e.g.
+  $PROG completion zsh > ~/.zfunc/_rowt
+Completion defers to a hidden '$PROG _complete' at tab-time, so it never drifts
+from the actual command set.
 EOF
 ;;
     version) cat <<EOF
@@ -2112,6 +2203,8 @@ main() {
     router)     cmd_router "$@" ;;
     vm)         cmd_vm "$@" ;;
     shell-init) cmd_shell_init "$@" ;;
+    completion) cmd_completion "$@" ;;
+    _complete)  cmd__complete "$@" ;;
     version)    echo "$PROG $ROWT_VERSION" ;;
     *) err "unknown command: $cmd"; echo; usage; exit 1 ;;
   esac
