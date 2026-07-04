@@ -3,9 +3,10 @@
 # install.sh — install (or update) the rowt tool.
 #
 # Copies the tool to a prefix and symlinks `rowt` into a bin dir on your PATH,
-# and adds `rowt-proxy-on` / `rowt-proxy-off` shell aliases to ~/.zshrc.
+# and wires rowt's shell integration into ~/.zshrc via `eval "$(rowt shell-init)"`
+# — the `rowt-proxy-on` / `rowt-proxy-off` aliases plus subcommand tab-completion.
 # Idempotent: re-running does nothing if the installed copy is same-or-newer and
-# the aliases are already present. Version-guarded (pass --force to override).
+# the integration is already present. Version-guarded (pass --force to override).
 #
 #   ./install.sh                 install/update into the defaults below
 #   ./install.sh --force         reinstall even if installed >= source
@@ -26,23 +27,25 @@ UNINSTALL=0
 err() { echo "error: $*" >&2; }
 die() { err "$*"; exit 1; }
 
-# Idempotently add the shell aliases (marker block, added at most once). If a
-# stale block from an older version is present, refresh it in place.
+# Idempotently wire rowt's shell integration into the rc (marker block, added at
+# most once). We source the blessed 'rowt shell-init' rather than hard-coding the
+# aliases, so a single line stays current across versions and also loads the
+# subcommand tab-completion (rowt 1.3.0+). If an older static-alias block is
+# present, migrate it in place.
 add_shell_aliases() {
   [ -f "$ZSHRC" ] || touch "$ZSHRC"
   if grep -qF "$ALIAS_BEGIN" "$ZSHRC"; then
-    grep -qF 'rowt proxy env' "$ZSHRC" && return 0   # current block already present
-    remove_shell_aliases                             # stale block -> drop, re-add below
+    grep -qF 'rowt shell-init' "$ZSHRC" && return 0  # current block already present
+    remove_shell_aliases                             # stale static block -> migrate below
   fi
   cat >> "$ZSHRC" <<'ROWTALIASES'
 
 # >>> rowt aliases >>>
-# point/unpoint this shell's CLI proxy env (http_proxy/https_proxy/all_proxy) at rowt
-alias rowt-proxy-on='eval "$(rowt proxy env)"'
-alias rowt-proxy-off='eval "$(rowt proxy env --off)"'
+# rowt shell integration: rowt-proxy-on/-off aliases + subcommand tab-completion
+command -v rowt >/dev/null 2>&1 && eval "$(rowt shell-init)"
 # <<< rowt aliases <<<
 ROWTALIASES
-  echo "added rowt-proxy-on / rowt-proxy-off to $ZSHRC (run 'source $ZSHRC' or open a new shell)"
+  echo "wired 'rowt shell-init' (proxy aliases + tab-completion) into $ZSHRC (run 'source $ZSHRC' or open a new shell)"
 }
 
 remove_shell_aliases() {
