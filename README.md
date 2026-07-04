@@ -294,8 +294,13 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 | `… import <file>` | batch-add one domain per line from a file (merges; never replaces). |
 | `… clear` | remove every entry (keeps the file's comment header). Reloads if running. |
 | `… dump [file]` | export the lane (stdout, or to a file for backup/versioning). |
-| `block stats [1h\|24h\|7d\|all]` | what got blocked and how often in that window (default 24h). The router diverts each blocked connection out of `host.log` into a compact `block.log` (`timestamp⇥domain`); this summarizes it. |
-| `block log` | live-tail the block log (timestamp + domain). |
+| `direct stats [5m\|10m\|1h\|…\|all]` | **which domains failed on the default DIRECT lane** in that window (default 10m) — your escape candidates. Reason is categorized (timeout/reset/refused ⇒ likely blocked; dns ⇒ transient). Reproduce a misbehaving app, then `direct stats 10m` and `escape add` the real ones. |
+| `<lane> stats [5m\|…\|all]` | same for any lane: `block stats` (default 24h) = what got sinkholed; `escape stats` / `corp stats` = failures on those lanes. |
+| `<lane> log` | live-tail that lane's connection log. |
+
+The router captures each failed/refused connection per lane (`timestamp⇥domain⇥reason`)
+into `~/.config/rowt/log/lane-<lane>.log` — the block flood is diverted out of
+`host.log`; direct/corp/escape failures are kept in `host.log` too. All rotate.
 
 The **block** lane is an ad/telemetry sinkhole: matching domains are refused
 instantly — no DNS lookup, no dial — which stops the direct-lane retry storm

@@ -45,7 +45,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="1.3.6"
+ROWT_VERSION="1.3.7"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -60,8 +60,9 @@ STATE="$CFG/state"
 LOGDIR="$CFG/log"
 LOG_MAX_BYTES="${ROWT_LOG_MAX_BYTES:-5242880}"   # rotate a log once it passes 5 MiB
 LOG_KEEP="${ROWT_LOG_KEEP:-9}"                    # keep this many rotated generations (.1 … .N)
-HOST_LOG="$CFG/log/host.log"         # rule-router log (block noise diverted out, see below)
-BLOCK_LOG="$CFG/log/block.log"       # one 'timestamp<TAB>domain' line per blocked connection
+HOST_LOG="$CFG/log/host.log"         # rule-router log (per-lane connection noise diverted out)
+LANE_NAMES="block direct corp escape"  # per-lane connection logs: $LOGDIR/lane-<name>.log
+lane_log() { printf '%s/lane-%s.log' "$LOGDIR" "$1"; }  # 'timestamp<TAB>domain<TAB>reason' per event
 CACHE="$CFG/cache"                   # pre-fetched artifacts (vm image, guest sing-box)
 OUTBOUND="$CFG/outbound.json"        # legacy single-server file (auto-migrated)
 SERVERS="$CFG/servers.json"          # array of VLESS outbounds (secret)
@@ -416,41 +417,93 @@ edit_list() {
   [ "$_before" != "$_after" ] && reload_if_running || true
 }
 
-cmd_escape() { local a="${1:-list}"; [ "$#" -gt 0 ] && shift; edit_list "$DOMAINS" escape "$a" "$@"; }
-cmd_corp()   { local a="${1:-list}"; [ "$#" -gt 0 ] && shift; edit_list "$CORP_DOMAINS" corp "$a" "$@"; }
-# Summarize block.log (+ rotated copies): per-domain hit counts for a time window.
-# period: Nh | Nd | all   (default 24h). Timestamps are ISO-ish, so a lexical
-# string compare against the cutoff is a correct time filter.
-block_stats() {
-  local period="${1:-24h}" cutoff="" n f files="" out tot doms
-  case "$period" in
-    all) cutoff="" ;;
-    *h)  n="${period%h}"; case "$n" in ''|*[!0-9]*) die "usage: $PROG block stats [1h|24h|7d|all]";; esac
-         cutoff="$(date -v-"${n}"H '+%Y-%m-%d %H:%M:%S')" ;;
-    *d)  n="${period%d}"; case "$n" in ''|*[!0-9]*) die "usage: $PROG block stats [1h|24h|7d|all]";; esac
-         cutoff="$(date -v-"${n}"d '+%Y-%m-%d %H:%M:%S')" ;;
-    *)   die "usage: $PROG block stats [1h|24h|7d|all]" ;;
+cmd_escape() {
+  local a="${1:-list}"; [ "$#" -gt 0 ] && shift
+  case "$a" in
+    stats) lane_stats escape "${1:-10m}" ;;
+    log)   _lane_log_tail escape ;;
+    *)     edit_list "$DOMAINS" escape "$a" "$@" ;;
   esac
-  for f in "$BLOCK_LOG" "$BLOCK_LOG".*; do [ -f "$f" ] && files="$files $f"; done
-  [ -n "$files" ] || { echo "no block activity logged yet — start the router ($PROG up) and browse a bit."; return 0; }
-  out="$(cat $files 2>/dev/null | awk -F'\t' -v cut="$cutoff" \
-        'NF>=2 && (cut=="" || $1>=cut){ c[$2]++ } END{ for (d in c) printf "%d\t%s\n", c[d], d }')"
-  tot="$(printf '%s\n' "$out" | awk -F'\t' '{s+=$1} END{print s+0}')"
-  doms="$(printf '%s' "$out" | grep -c . || true)"
-  echo "blocked domains — ${period}${cutoff:+ (since $cutoff)}: $tot blocks across $doms domains"
-  if [ "$tot" -eq 0 ]; then echo "  (none in this period)"; return 0; fi
-  printf '%s\n' "$out" | sort -rn | head -40 | awk -F'\t' '{printf "  %8d  %s\n", $1, $2}'
-  [ "$doms" -gt 40 ] && echo "  … $((doms - 40)) more (widen with '$PROG block stats all')"
-  return 0
 }
-
+cmd_corp() {
+  local a="${1:-list}"; [ "$#" -gt 0 ] && shift
+  case "$a" in
+    stats) lane_stats corp "${1:-10m}" ;;
+    log)   _lane_log_tail corp ;;
+    *)     edit_list "$CORP_DOMAINS" corp "$a" "$@" ;;
+  esac
+}
 cmd_block() {
   local a="${1:-list}"; [ "$#" -gt 0 ] && shift
   case "$a" in
-    stats) block_stats "$@" ;;
-    log)   [ -f "$BLOCK_LOG" ] || die "no block log yet — start the router first: $PROG up"; tail -f "$BLOCK_LOG" ;;
+    stats) lane_stats block "${1:-24h}" ;;
+    log)   _lane_log_tail block ;;
     *)     edit_list "$BLOCK_DOMAINS" block "$a" "$@" ;;
   esac
+}
+# 'direct' isn't an editable lane (it's the pass-through default) — only diagnostics.
+# 'direct stats' surfaces the domains that FAILED going out directly: the ones a
+# web app needs but that are blocked/unreachable → your escape (or corp) candidates.
+cmd_direct() {
+  local a="${1:-stats}"; [ "$#" -gt 0 ] && shift
+  case "$a" in
+    stats) lane_stats direct "${1:-10m}" ;;
+    log)   _lane_log_tail direct ;;
+    *)     die "usage: $PROG direct [stats [5m|10m|1h|…|all] | log]" ;;
+  esac
+}
+_lane_log_tail() { local f; f="$(lane_log "$1")"; [ -f "$f" ] || die "no $1 log yet — start the router first: $PROG up"; tail -f "$f"; }
+
+# Turn a period token (5m|30m|2h|24h|7d|all) into a cutoff timestamp ('' = all).
+_period_cutoff() {
+  local p="$1" n u
+  [ "$p" = all ] && { printf ''; return 0; }
+  n="${p%[mhd]}"; u="${p#$n}"
+  case "$n" in ''|*[!0-9]*) return 1 ;; esac
+  case "$u" in
+    m) date -v-"${n}"M '+%Y-%m-%d %H:%M:%S' ;;
+    h) date -v-"${n}"H '+%Y-%m-%d %H:%M:%S' ;;
+    d) date -v-"${n}"d '+%Y-%m-%d %H:%M:%S' ;;
+    *) return 1 ;;
+  esac
+}
+
+# Per-lane connection summary: domains × counts for a time window, with the
+# dominant failure category (timeout/reset/refused ⇒ likely blocked; dns ⇒ often
+# transient). block = refusals (the sinkhole); direct/corp/escape = failures.
+lane_stats() {
+  local lane="$1" period="${2:-10m}" cutoff base f files="" out tot doms noun
+  cutoff="$(_period_cutoff "$period")" || die "usage: $PROG $lane stats [5m|10m|1h|24h|7d|all]"
+  base="$(lane_log "$lane")"
+  for f in "$base" "$base".*; do [ -f "$f" ] && files="$files $f"; done
+  [ -n "$files" ] || { echo "no $lane-lane activity logged yet — start the router ($PROG up) and use the app."; return 0; }
+  out="$(cat $files 2>/dev/null | awk -F'\t' -v cut="$cutoff" '
+    function cat(r){
+      if (r ~ /timeout/) return "timeout"
+      if (r ~ /reset/) return "reset"
+      if (r ~ /refused/) return "refused"
+      if (r ~ /unreachable|no route|network is|no such host/) return "netfail"
+      if (r ~ /lookup|exchange|dns/) return "dns"
+      if (r ~ /not permitted/) return "blocked"
+      return "err"
+    }
+    NF>=2 && (cut=="" || $1>=cut){ c[$2]++; cc[$2 SUBSEP cat($3)]++ }
+    END{
+      for (d in c){ best=""; bn=-1
+        for (k in cc){ split(k,a,SUBSEP); if(a[1]==d && cc[k]>bn){bn=cc[k]; best=a[2]} }
+        printf "%d\t%s\t%s\n", c[d], best, d }
+    }')"
+  tot="$(printf '%s\n' "$out" | awk -F'\t' '{s+=$1} END{print s+0}')"
+  doms="$(printf '%s' "$out" | grep -c . || true)"
+  [ "$lane" = block ] && noun="blocked" || noun="failed"
+  echo "$lane lane — $noun connections, ${period}${cutoff:+ since $cutoff}: $tot across $doms domains"
+  if [ "$tot" -eq 0 ]; then echo "  (none in this period)"; return 0; fi
+  printf '%s\n' "$out" | sort -rn | head -40 | awk -F'\t' '{printf "  %7d  %-8s %s\n", $1, $2, $3}'
+  [ "$doms" -gt 40 ] && echo "  … $((doms - 40)) more (widen with 'all', or narrow with '5m')"
+  case "$lane" in
+    direct|corp) echo "  → tunnel the real ones: $PROG escape add <domain>  (timeout/reset/refused ⇒ likely blocked; dns ⇒ often transient)" ;;
+  esac
+  return 0
 }
 
 # Detect the physical (non-tunnel) interface: an enX with an IPv4 and a router.
@@ -971,23 +1024,39 @@ cmd_probe() {
 host_pidfile() { echo "$CFG/host.pid"; }
 host_running() { local p; p="$(cat "$(host_pidfile)" 2>/dev/null || true)"; [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }
 
-# The block lane logs one ERROR per refused ad/telemetry connection — useful data
-# but it would drown host.log. This splitter reads sing-box's output and DIVERTS
-# those lines into block.log as a compact "timestamp<TAB>domain" record, passing
-# everything else through to host.log. Opened append (buffering=1) so copytruncate
-# rotation stays safe. Fail-safe: any parse error falls back to writing the raw
-# line to host.log, and it only exits on EOF (sing-box gone).
+# sing-box logs a line per failed/refused connection naming its outbound TAG:
+#   "... open connection to <domain>:<port> using outbound/<type>[<tag>]: <reason>"
+# This splitter classifies each by tag into a per-lane log ($LOGDIR/lane-<lane>.log,
+# 'timestamp<TAB>domain<TAB>reason') so 'rowt <lane> stats' can summarize them.
+# The block lane is the flood (an ERROR per refused ad/telemetry host) so it's
+# DIVERTED out of host.log; direct/corp/escape failures are lower-volume and are
+# TEED (captured AND kept in host.log for debugging). Opened append (buffering=1)
+# so copytruncate rotation stays safe. Fail-safe: any parse error just writes the
+# raw line to host.log, and it only exits on EOF (sing-box gone).
 read -r -d '' SPLITTER_PY <<'PY' || true
-import sys, re
-hl, bl = sys.argv[1], sys.argv[2]
-dom = re.compile(r"open connection to (.+?):\d+ using outbound/block")
-ts  = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
-h = open(hl, "a", buffering=1); b = open(bl, "a", buffering=1)
+import sys, re, os
+hl, ld = sys.argv[1], sys.argv[2]
+line_re = re.compile(r"open connection to (.+?):\d+ using outbound/\w+\[([^\]]+)\]: (.*)")
+ts_re   = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+ansi    = re.compile(r"\x1b\[[0-9;]*m")
+h = open(hl, "a", buffering=1)
+fhs = {}
+def lane_fh(name):
+    fh = fhs.get(name)
+    if fh is None:
+        fh = open(os.path.join(ld, "lane-%s.log" % name), "a", buffering=1); fhs[name] = fh
+    return fh
 for line in sys.stdin:
     try:
-        m = dom.search(line)
+        clean = ansi.sub("", line)
+        m = line_re.search(clean)
         if m:
-            t = ts.search(line); b.write("%s\t%s\n" % (t.group(1) if t else "", m.group(1)))
+            dom, tag, reason = m.group(1), m.group(2), m.group(3).rstrip("\n")
+            lane = tag if tag in ("block", "direct", "corp") else "escape"
+            t = ts_re.search(clean)
+            lane_fh(lane).write("%s\t%s\t%s\n" % (t.group(1) if t else "", dom, reason))
+            if lane != "block":
+                h.write(line)          # tee non-flood failures back to host.log
         else:
             h.write(line)
     except Exception:
@@ -999,10 +1068,11 @@ PY
 #   $1=1 -> divert block noise via the python splitter (if python3 is available)
 #   $1=0 -> plain append to host.log (fallback: no python, or a retry)
 _start_host_router() {
-  mkdir -p "$LOGDIR"; rotate_log "$HOST_LOG"; rotate_log "$BLOCK_LOG"
+  mkdir -p "$LOGDIR"; rotate_log "$HOST_LOG"
+  local _l; for _l in $LANE_NAMES; do rotate_log "$(lane_log "$_l")"; done
   if [ "${1:-1}" = 1 ] && command -v python3 >/dev/null 2>&1; then
     # process substitution keeps $! = sing-box; append (>>) inside the splitter
-    "$SB" run -c "$HOST_CFG" > >(exec python3 -c "$SPLITTER_PY" "$HOST_LOG" "$BLOCK_LOG") 2>&1 &
+    "$SB" run -c "$HOST_CFG" > >(exec python3 -c "$SPLITTER_PY" "$HOST_LOG" "$LOGDIR") 2>&1 &
   else
     "$SB" run -c "$HOST_CFG" >>"$HOST_LOG" 2>&1 &
   fi
@@ -1966,9 +2036,10 @@ o@servers & selection@sub <list|add|rm|update|clear|import|dump>@manage subscrip
 c@servers & selection@use <tag>|auto@pin a server (manual) or auto-pick fastest live
 c@servers & selection@ping [tag]@parallel latency test through the tunnel (fastest first)
 a@servers & selection@probe@detect which mode works (host vs vm) with corp VPN up
-c@routing lanes@escape <list|add|rm|import|clear|dump>@edit the escape lane (VPN tunnel)
-o@routing lanes@corp <list|add|rm|import|clear|dump>@edit the corp lane (into the corp VPN)
+c@routing lanes@escape <list|add|rm|import|clear|dump|stats>@edit the escape lane (VPN tunnel)
+o@routing lanes@corp <list|add|rm|import|clear|dump|stats>@edit the corp lane (into the corp VPN)
 o@routing lanes@block <list|add|rm|import|clear|dump|stats>@block lane (ad/telemetry sinkhole); 'stats' = what got blocked
+o@routing lanes@direct <stats|log>@diagnose the pass-through lane; 'stats' = what failed direct (escape candidates)
 o@proxy@proxy <status|check|on|off|env>@macOS system proxy + CLI env exports
 a@internals@render@regenerate the sing-box configs from current state
 o@internals@fetch [host|vm]@pre-download artifacts so 'up' works offline
@@ -2174,7 +2245,27 @@ $PROG $1 <subcommand> — edit the $1 lane$([ "$1" = escape ] && echo " (domains
   import <file>        batch-add one entry per line from a file (# comments ok)
   clear                remove every entry (keeps the file's comment header)
   dump [file]          print the lane (or write it to a file) for backup/versioning
-Edits auto-reload the router if it is running.
+  stats [5m|10m|1h|…|all]  domains that FAILED on this lane in the window (default 10m)
+  log                  live-tail this lane's connection-failure log
+Edits auto-reload the router if it is running. 'stats' reads the per-lane failure
+log the router keeps (timestamp + domain + reason), summarized by domain.
+EOF
+;;
+    direct) cat <<EOF
+$PROG direct <stats|log> — diagnose the pass-through (direct) lane.
+
+'direct' is the default for unlisted traffic — you can't edit it, but you CAN see
+what it's failing on. sing-box logs a line per failed/refused connection with the
+outbound it used; the router captures those per lane. So after a web app misbehaves
+on the default DIRECT policy, this tells you exactly which domains it couldn't reach
+directly — your escape (or corp) candidates — without switching the default.
+
+  stats [5m|10m|1h|…|all]  domains that FAILED going direct in the window (default 10m)
+  log                      live-tail the direct-lane failure log
+
+Categories: timeout/reset/refused ⇒ likely blocked (add to escape); dns ⇒ often a
+transient resolver blip. Typical use: reproduce the app, then '$PROG direct stats 10m'
+and '$PROG escape add <domain>' the real ones.
 EOF
 ;;
     block) cat <<EOF
@@ -2193,14 +2284,14 @@ hand list still works without it). Block runs BEFORE corp/escape/direct.
   import <file>        batch-add one entry per line from a file (# comments ok)
   clear                remove every entry (keeps the file's comment header)
   dump [file]          print the lane (or write it to a file) for backup/versioning
-  stats [1h|24h|7d|all]  what got blocked + how often in that window   (default 24h)
+  stats [5m|…|24h|all]  what got blocked + how often in that window   (default 24h)
   log                  live-tail the block log (timestamp + domain)
 Edits auto-reload the router if it is running.
 
-Every blocked connection is recorded (timestamp + domain) in $BLOCK_LOG — the
-router diverts that noise out of host.log and into this compact log, which
-'stats' summarizes and which rotates like the others. Geosite-matched blocks are
-counted too; only the hand-listed suffixes are shown under '$PROG block list'.
+Every blocked connection is recorded (timestamp + domain + reason) in
+$(lane_log block) — the router diverts that flood out of host.log into this compact
+log, which 'stats' summarizes and which rotates like the others. Geosite-matched
+blocks are counted too; only the hand-listed suffixes show under '$PROG block list'.
 EOF
 ;;
     proxy) cat <<EOF
@@ -2316,8 +2407,8 @@ rotate_log() { # $1=logfile
 main() {
   migrate
   rotate_log "$HOST_LOG"
-  rotate_log "$BLOCK_LOG"
   rotate_log "$LOGDIR/watch.log"
+  local _l; for _l in $LANE_NAMES; do rotate_log "$(lane_log "$_l")"; done
   # no args: greet with the onboarding checklist, then the full command list
   if [ "$#" -eq 0 ]; then cmd_onboard; echo; usage; return 0; fi
   local cmd="$1"; shift
@@ -2350,6 +2441,7 @@ main() {
     escape)     cmd_escape "$@" ;;
     corp)       cmd_corp "$@" ;;
     block)      cmd_block "$@" ;;
+    direct)     cmd_direct "$@" ;;
     # proxy
     proxy)      cmd_proxy "$@" ;;
     # internals / power-user
