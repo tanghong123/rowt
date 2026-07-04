@@ -45,7 +45,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="1.3.3"
+ROWT_VERSION="1.3.4"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -1117,8 +1117,14 @@ cmd_vm() {
       echo "  ✓ VM tunnel active"
       ;;
     down)
-      limactl list -q 2>/dev/null | grep -qx "$VM_NAME" && limactl stop "$VM_NAME" || true
-      echo "  VM stopped"
+      # only stop a RUNNING vm — 'limactl stop' on an already-stopped (or absent)
+      # vm prints a scary FATA to stderr, even though nothing's wrong.
+      if vm_running; then
+        limactl stop "$VM_NAME" >/dev/null 2>&1 || limactl stop -f "$VM_NAME" >/dev/null 2>&1 || true
+        echo "  VM stopped"
+      else
+        echo "  VM already stopped"
+      fi
       ;;
     restart)
       vm_running && limactl shell "$VM_NAME" sudo systemctl restart rowt-singbox 2>/dev/null \
