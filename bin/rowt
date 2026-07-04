@@ -45,7 +45,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="1.3.9"
+ROWT_VERSION="1.3.10"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -1149,6 +1149,19 @@ _router_survives() {
   return 0
 }
 
+# Stop the host router process only — NO proxy change. For callers that manage
+# the proxy themselves (restart, the up-retry).
+_router_stop() {
+  local p; p="$(cat "$(host_pidfile)" 2>/dev/null || true)"
+  [ -n "$p" ] && kill "$p" 2>/dev/null || true
+  rm -f "$(host_pidfile)"
+  pkill -f "$SB run -c $HOST_CFG" 2>/dev/null || true
+}
+# Invariant guard: if the router isn't up, the system proxy must NOT be left
+# pointing at the (now dead) 127.0.0.1:$PORT. Safe to call anywhere — it only acts
+# when the router is down, so it's a no-op mid-setup while the router is running.
+_ensure_no_limbo() { host_running && return 0; ( cmd_proxy off ) || true; }
+
 cmd_router() {
   local action="${1:-up}"
   case "$action" in
@@ -1163,21 +1176,20 @@ cmd_router() {
       # plain logging (rules out both a startup-network blip and the splitter).
       err "router exited within 3s of starting — see $HOST_LOG"; tail -8 "$HOST_LOG" >&2
       info "retrying once (plain log, after a short settle)…"
-      cmd_router down >/dev/null 2>&1 || true
+      _router_stop   # clean up the failed process before retrying (proxy untouched)
       sleep 2
       _start_host_router 0
       if _router_survives 3; then echo "  ✓ running (pid $(cat "$(host_pidfile)"))  [plain log]"; return 0; fi
-      err "router failed to stay up — see $HOST_LOG"; tail -8 "$HOST_LOG" >&2; return 1
+      err "router failed to stay up — see $HOST_LOG"; tail -8 "$HOST_LOG" >&2
+      _ensure_no_limbo   # never leave the proxy pointing at a router that won't start
+      return 1
       ;;
     down)
-      local p; p="$(cat "$(host_pidfile)" 2>/dev/null || true)"
-      [ -n "$p" ] && kill "$p" 2>/dev/null || true
-      rm -f "$(host_pidfile)"
-      # reap any orphaned sing-box started from our config (crash / port conflict / ping auto-start)
-      pkill -f "$SB run -c $HOST_CFG" 2>/dev/null || true
+      _router_stop
+      _ensure_no_limbo   # router down => system proxy must not stay set (no limbo)
       echo "  router stopped"
       ;;
-    restart) cmd_router down; cmd_router up ;;
+    restart) _router_stop; cmd_router up ;;   # neutral: proxy managed by caller; up enforces no-limbo on failure
     status)
       if host_running; then echo "  router: running (pid $(cat "$(host_pidfile)")) on 127.0.0.1:$PORT"
       else echo "  router: stopped"; fi ;;
@@ -1346,6 +1358,7 @@ cmd_vm() {
       else
         echo "  VM already stopped"
       fi
+      _ensure_no_limbo   # if the router is also down, don't leave the proxy stranded
       ;;
     restart)
       vm_running && limactl shell "$VM_NAME" sudo systemctl restart rowt-singbox 2>/dev/null \
@@ -1398,9 +1411,14 @@ cmd_proxy() {
     on|off|status|check) ;;
     *) die "usage: $PROG proxy [status | check | on [--force] | off | env [--off]]" ;;
   esac
-  local svc; svc="$(active_service)" || die "no active network service"
+  # Non-fatal: with no active network service (e.g. Wi-Fi off on a plane) there's
+  # nothing to point at OR turn off — only 'on' truly needs a service. Dying here
+  # would abort 'rowt down' (via cmd_revert -> cmd_proxy off) before it kills the
+  # router, which is exactly when you most need the teardown to finish.
+  local svc; svc="$(active_service 2>/dev/null || true)"
   case "$action" in
     status)
+      [ -n "$svc" ] || { echo "system proxy: no active network service (nothing configured)"; return 0; }
       echo "system proxy (service '$svc'):"
       echo "  socks:  $(networksetup -getsocksfirewallproxy "$svc" 2>/dev/null | awk '/Enabled/{print $2} /Server/{s=$2} /Port/{print "         "s":"$2}' | tr '\n' ' ')"
       echo "  https:  $(networksetup -getsecurewebproxy "$svc" 2>/dev/null | awk '/Enabled/{print $2} /Server/{s=$2} /Port/{print "         "s":"$2}' | tr '\n' ' ')"
@@ -1408,6 +1426,7 @@ cmd_proxy() {
       echo "  CLI env: eval \"\$($PROG proxy env)\"   (off: $PROG proxy env --off)"
       ;;
     check)   # exit 0 iff fully configured (proxy pointing + local bypass). No sudo.
+      [ -n "$svc" ] || { echo "  ✗ no active network service"; return 1; }
       if _proxy_pointing_ok "$svc" && _proxy_bypass_ok "$svc"; then
         echo "  ✓ system proxy fully configured for '$svc' (127.0.0.1:$PORT + local bypass)"; return 0
       else
@@ -1427,6 +1446,7 @@ cmd_proxy() {
         echo "  override anyway: $PROG proxy on --force"
         return 0
       fi
+      [ -n "$svc" ] || die "no active network service — connect a network first, then '$PROG proxy on'"
       local set_proxy=1 set_bypass=1
       _proxy_pointing_ok "$svc" && set_proxy=0
       _proxy_bypass_ok "$svc"   && set_bypass=0
@@ -1459,6 +1479,7 @@ cmd_proxy() {
       fi
       ;;
     off)
+      [ -n "$svc" ] || { echo "  no active network service — proxy already effectively off"; return 0; }
       if _proxy_any_on "$svc"; then
         sudo networksetup -setsocksfirewallproxystate "$svc" off || true
         sudo networksetup -setwebproxystate "$svc" off || true
@@ -1787,7 +1808,18 @@ cmd_status() {
 # no proxy change. Use when sing-box is stuck; use 'reload' after a network change.
 cmd_restart() {
   [ -s "$SERVERS" ] || die "nothing to restart — run '$PROG up' first"
-  if [ "$(sget mode)" = "vm" ]; then cmd_vm restart; else cmd_router restart; fi
+  # Strict order so a mid-way failure never leaves an inconsistent state: system
+  # proxy OFF first, bounce the components, then proxy back ON only once the router
+  # is confirmed up. If the bounce fails, the proxy stays OFF (safe, not limbo).
+  info "restart: turning the system proxy off first…"
+  ( cmd_proxy off ) || true
+  if [ "$(sget mode)" = "vm" ]; then cmd_vm restart; else _router_stop; cmd_router up; fi
+  if host_running; then
+    cmd_proxy on
+  else
+    err "components did not come back up — leaving the system proxy OFF (no limbo). Check '$PROG status' / '$PROG router log'."
+    return 1
+  fi
 }
 
 # Re-detect the network interface, re-render, restart, re-apply the proxy.
@@ -1969,9 +2001,12 @@ PLIST
 }
 
 cmd_revert() {
-  cmd_proxy off || true
-  cmd_router down || true
-  cmd_vm down || true
+  # Each step in a subshell so a die/exit inside one (e.g. no active network
+  # service on a plane) can't abort teardown before sing-box is killed. The
+  # sing-box kill is the important part — it must ALWAYS run.
+  ( cmd_proxy off ) || true
+  ( cmd_router down ) || true
+  ( cmd_vm down ) || true
   # last-resort: kill ANY sing-box started from our pinned binary (stray/high-CPU)
   pkill -f "$SB run" 2>/dev/null || true
   rm -f "$(host_pidfile)"
@@ -2182,9 +2217,12 @@ EOF
     restart) cat <<EOF
 $PROG restart — bounce the tunnel in place.
 
-Restarts whichever mode is active (host or vm) WITHOUT re-rendering configs or
-touching the system proxy. Use when sing-box is stuck. After a *network* change
-use 'reload' instead (it also re-renders and re-applies the proxy).
+Restarts whichever mode is active (host or vm) WITHOUT re-rendering configs. To
+avoid ever leaving an inconsistent state, it goes in strict order: system proxy
+OFF → stop components → start components → proxy back ON (only once the router is
+confirmed up). If the bounce fails, the proxy is left OFF rather than pointing at
+a dead port. Use when sing-box is stuck. After a *network* change use 'reload'
+instead (it also re-renders).
 EOF
 ;;
     reload) cat <<EOF
