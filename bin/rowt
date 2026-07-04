@@ -45,7 +45,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="1.3.7"
+ROWT_VERSION="1.3.8"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -420,36 +420,36 @@ edit_list() {
 cmd_escape() {
   local a="${1:-list}"; [ "$#" -gt 0 ] && shift
   case "$a" in
-    stats) lane_stats escape "${1:-10m}" ;;
-    log)   _lane_log_tail escape ;;
-    *)     edit_list "$DOMAINS" escape "$a" "$@" ;;
+    errors|stats) lane_errors escape "${1:-10m}" ;;
+    log)          _lane_log_tail escape ;;
+    *)            edit_list "$DOMAINS" escape "$a" "$@" ;;
   esac
 }
 cmd_corp() {
   local a="${1:-list}"; [ "$#" -gt 0 ] && shift
   case "$a" in
-    stats) lane_stats corp "${1:-10m}" ;;
-    log)   _lane_log_tail corp ;;
-    *)     edit_list "$CORP_DOMAINS" corp "$a" "$@" ;;
+    errors|stats) lane_errors corp "${1:-10m}" ;;
+    log)          _lane_log_tail corp ;;
+    *)            edit_list "$CORP_DOMAINS" corp "$a" "$@" ;;
   esac
 }
 cmd_block() {
   local a="${1:-list}"; [ "$#" -gt 0 ] && shift
   case "$a" in
-    stats) lane_stats block "${1:-24h}" ;;
-    log)   _lane_log_tail block ;;
-    *)     edit_list "$BLOCK_DOMAINS" block "$a" "$@" ;;
+    errors|stats) lane_errors block "${1:-24h}" ;;
+    log)          _lane_log_tail block ;;
+    *)            edit_list "$BLOCK_DOMAINS" block "$a" "$@" ;;
   esac
 }
 # 'direct' isn't an editable lane (it's the pass-through default) — only diagnostics.
-# 'direct stats' surfaces the domains that FAILED going out directly: the ones a
+# 'direct errors' surfaces the domains that FAILED going out directly: the ones a
 # web app needs but that are blocked/unreachable → your escape (or corp) candidates.
 cmd_direct() {
-  local a="${1:-stats}"; [ "$#" -gt 0 ] && shift
+  local a="${1:-errors}"; [ "$#" -gt 0 ] && shift
   case "$a" in
-    stats) lane_stats direct "${1:-10m}" ;;
-    log)   _lane_log_tail direct ;;
-    *)     die "usage: $PROG direct [stats [5m|10m|1h|…|all] | log]" ;;
+    errors|stats) lane_errors direct "${1:-10m}" ;;
+    log)          _lane_log_tail direct ;;
+    *)            die "usage: $PROG direct [errors [5m|10m|1h|…|all] | log]" ;;
   esac
 }
 _lane_log_tail() { local f; f="$(lane_log "$1")"; [ -f "$f" ] || die "no $1 log yet — start the router first: $PROG up"; tail -f "$f"; }
@@ -471,12 +471,20 @@ _period_cutoff() {
 # Per-lane connection summary: domains × counts for a time window, with the
 # dominant failure category (timeout/reset/refused ⇒ likely blocked; dns ⇒ often
 # transient). block = refusals (the sinkhole); direct/corp/escape = failures.
-lane_stats() {
-  local lane="$1" period="${2:-10m}" cutoff base f files="" out tot doms noun
-  cutoff="$(_period_cutoff "$period")" || die "usage: $PROG $lane stats [5m|10m|1h|24h|7d|all]"
+lane_errors() {
+  local lane="$1" period="${2:-10m}" cutoff base f files="" out tot doms noun empty
+  cutoff="$(_period_cutoff "$period")" || die "usage: $PROG $lane errors [5m|10m|1h|24h|7d|all]"
+  [ "$lane" = block ] && { noun="blocked"; empty="nothing blocked"; } \
+                      || { noun="failed"; empty="no $lane errors"; }
   base="$(lane_log "$lane")"
   for f in "$base" "$base".*; do [ -f "$f" ] && files="$files $f"; done
-  [ -n "$files" ] || { echo "no $lane-lane activity logged yet — start the router ($PROG up) and use the app."; return 0; }
+  # NOTE: only FAILED/refused connections are logged (sing-box runs at 'warn'),
+  # never successful traffic — so an empty list means no errors, not no traffic.
+  if [ -z "$files" ]; then
+    echo "$empty recorded — only failed/refused connections are logged, not successful traffic (so an empty list means no errors, not no traffic)."
+    host_running || echo "  (the router isn't running — '$PROG up' first, then reproduce the app)"
+    return 0
+  fi
   out="$(cat $files 2>/dev/null | awk -F'\t' -v cut="$cutoff" '
     function cat(r){
       if (r ~ /timeout/) return "timeout"
@@ -495,15 +503,68 @@ lane_stats() {
     }')"
   tot="$(printf '%s\n' "$out" | awk -F'\t' '{s+=$1} END{print s+0}')"
   doms="$(printf '%s' "$out" | grep -c . || true)"
-  [ "$lane" = block ] && noun="blocked" || noun="failed"
-  echo "$lane lane — $noun connections, ${period}${cutoff:+ since $cutoff}: $tot across $doms domains"
-  if [ "$tot" -eq 0 ]; then echo "  (none in this period)"; return 0; fi
+  echo "$lane lane — $tot $noun connection(s)${cutoff:+ in the last $period}, across $doms domain(s):"
+  if [ "$tot" -eq 0 ]; then
+    echo "  ($empty${cutoff:+ in the last $period} — remember only errors are logged, not successful traffic)"
+    return 0
+  fi
   printf '%s\n' "$out" | sort -rn | head -40 | awk -F'\t' '{printf "  %7d  %-8s %s\n", $1, $2, $3}'
   [ "$doms" -gt 40 ] && echo "  … $((doms - 40)) more (widen with 'all', or narrow with '5m')"
   case "$lane" in
     direct|corp) echo "  → tunnel the real ones: $PROG escape add <domain>  (timeout/reset/refused ⇒ likely blocked; dns ⇒ often transient)" ;;
   esac
   return 0
+}
+
+# Live view of the router's ACTIVE connections (via the clash API) and which lane
+# each is on right now — unlike '<lane> errors', this shows successful traffic too.
+#   $PROG connections            snapshot
+#   $PROG connections escape     only that lane
+#   $PROG connections -w         refresh every 2s
+cmd_connections() {
+  local a="${1:-}"
+  case "$a" in
+    -w|--watch) shift
+      while :; do
+        printf '\033[H\033[2J' 2>/dev/null || true
+        printf 'rowt connections — %s   (Ctrl-C to stop)\n' "$(date '+%H:%M:%S')"
+        _connections_show "${1:-}"; sleep 2
+      done ;;
+    *) _connections_show "$a" ;;
+  esac
+}
+_connections_show() {
+  local filt="${1:-}" json rows
+  host_running || { echo "router isn't running — '$PROG up' first."; return 0; }
+  json="$(clash_curl GET /connections 2>/dev/null || true)"
+  [ -n "$json" ] || { echo "couldn't reach the clash API ($(controller)) — is the router up?"; return 0; }
+  rows="$(printf '%s' "$json" | jq -r '
+    def nz: if (. // "") == "" then null else . end;
+    def lane($c): if   ($c|index("block"))  then "block"
+                  elif ($c|index("direct")) then "direct"
+                  elif ($c|index("corp"))   then "corp"  else "escape" end;
+    (.connections // [])[]
+    | [ lane(.chains // []),
+        ((.metadata.host | nz) // (.metadata.destinationIP | nz) // "?"),
+        (.metadata.destinationPort // "?"),
+        (.upload // 0), (.download // 0), (.rule // "") ] | @tsv' 2>/dev/null)"
+  [ -n "$filt" ] && rows="$(printf '%s\n' "$rows" | awk -F'\t' -v L="$filt" 'NF && $1==L')"
+  rows="$(printf '%s\n' "$rows" | awk 'NF')"
+  if [ -z "$rows" ]; then echo "no active connections${filt:+ on the $filt lane} right now."; return 0; fi
+  local TAB; TAB="$(printf '\t')"
+  # summary line
+  printf '%s\n' "$rows" | awk -F'\t' '
+    { n[$1]++; t++ } END{ split("escape direct corp block",o," "); s=sprintf("%d active connections:", t)
+      for(i=1;i<=4;i++) if(n[o[i]]) s=s sprintf("  %s=%d", o[i], n[o[i]]); print s }'
+  # aggregate by lane+host:port (collapses the many api.anthropic.com dials), sort by lane then bytes
+  printf '%s\n' "$rows" | awk -F'\t' '
+    { k=$1 SUBSEP $2 SUBSEP $3; L[k]=$1; HP[k]=$2":"$3; C[k]++; U[k]+=$4; D[k]+=$5
+      r=$6; if (match(r, /^[A-Za-z_]+/)) r=substr(r,1,RLENGTH); R[k]=r }
+    END{ for(k in C) printf "%s\t%d\t%d\t%d\t%s\t%s\n", L[k], C[k], U[k], D[k], HP[k], R[k] }' \
+    | sort -t"$TAB" -k1,1 -k4,4nr | awk -F'\t' '
+    function hb(b){ if(b<1024)return b"B"; if(b<1048576)return sprintf("%.0fK",b/1024);
+                    if(b<1073741824)return sprintf("%.1fM",b/1048576); return sprintf("%.1fG",b/1073741824) }
+    { printf "  %-7s %-40s %2d\303\227 \342\206\221%-7s \342\206\223%-8s %s\n", $1, $5, $2, hb($3), hb($4), $6 }'
 }
 
 # Detect the physical (non-tunnel) interface: an enX with an IPv4 and a router.
@@ -2030,16 +2091,17 @@ c@lifecycle@reload@re-apply after a network switch (re-render + restart + proxy)
 o@lifecycle@watch <install|uninstall|status>@auto-reload on network change (while up)
 c@lifecycle@status@state + config validity + reachability
 o@lifecycle@route <domain|ip>@explain a destination's lane (escape / corp / direct)
+o@lifecycle@connections [lane|-w]@live view: active connections + which lane each is on
 a@lifecycle@report@full diagnostic report to a file (masked; shareable)
 o@servers & selection@server <list|add|rm|clear|import|dump>@manage the server pool
 o@servers & selection@sub <list|add|rm|update|clear|import|dump>@manage subscriptions
 c@servers & selection@use <tag>|auto@pin a server (manual) or auto-pick fastest live
 c@servers & selection@ping [tag]@parallel latency test through the tunnel (fastest first)
 a@servers & selection@probe@detect which mode works (host vs vm) with corp VPN up
-c@routing lanes@escape <list|add|rm|import|clear|dump|stats>@edit the escape lane (VPN tunnel)
-o@routing lanes@corp <list|add|rm|import|clear|dump|stats>@edit the corp lane (into the corp VPN)
-o@routing lanes@block <list|add|rm|import|clear|dump|stats>@block lane (ad/telemetry sinkhole); 'stats' = what got blocked
-o@routing lanes@direct <stats|log>@diagnose the pass-through lane; 'stats' = what failed direct (escape candidates)
+c@routing lanes@escape <list|add|rm|import|clear|dump|errors>@edit the escape lane (VPN tunnel)
+o@routing lanes@corp <list|add|rm|import|clear|dump|errors>@edit the corp lane (into the corp VPN)
+o@routing lanes@block <list|add|rm|import|clear|dump|errors>@block lane (ad/telemetry sinkhole); 'errors' = what got blocked
+o@routing lanes@direct <errors|log>@diagnose the pass-through lane; 'errors' = what failed direct (escape candidates)
 o@proxy@proxy <status|check|on|off|env>@macOS system proxy + CLI env exports
 a@internals@render@regenerate the sing-box configs from current state
 o@internals@fetch [host|vm]@pre-download artifacts so 'up' works offline
@@ -2245,14 +2307,16 @@ $PROG $1 <subcommand> — edit the $1 lane$([ "$1" = escape ] && echo " (domains
   import <file>        batch-add one entry per line from a file (# comments ok)
   clear                remove every entry (keeps the file's comment header)
   dump [file]          print the lane (or write it to a file) for backup/versioning
-  stats [5m|10m|1h|…|all]  domains that FAILED on this lane in the window (default 10m)
-  log                  live-tail this lane's connection-failure log
-Edits auto-reload the router if it is running. 'stats' reads the per-lane failure
-log the router keeps (timestamp + domain + reason), summarized by domain.
+  errors [5m|10m|1h|…|all]  domains that FAILED on this lane in the window (default 10m)
+  log                  live-tail this lane's connection-error log
+Edits auto-reload the router if it is running. 'errors' reads the per-lane error
+log the router keeps (timestamp + domain + reason). NOTE: only failed/refused
+connections are logged (not successful traffic), so an empty list means no errors,
+not no traffic — for what's flowing right now, use '$PROG connections'.
 EOF
 ;;
     direct) cat <<EOF
-$PROG direct <stats|log> — diagnose the pass-through (direct) lane.
+$PROG direct <errors|log> — diagnose the pass-through (direct) lane.
 
 'direct' is the default for unlisted traffic — you can't edit it, but you CAN see
 what it's failing on. sing-box logs a line per failed/refused connection with the
@@ -2260,12 +2324,26 @@ outbound it used; the router captures those per lane. So after a web app misbeha
 on the default DIRECT policy, this tells you exactly which domains it couldn't reach
 directly — your escape (or corp) candidates — without switching the default.
 
-  stats [5m|10m|1h|…|all]  domains that FAILED going direct in the window (default 10m)
-  log                      live-tail the direct-lane failure log
+  errors [5m|10m|1h|…|all]  domains that FAILED going direct in the window (default 10m)
+  log                       live-tail the direct-lane error log
 
 Categories: timeout/reset/refused ⇒ likely blocked (add to escape); dns ⇒ often a
-transient resolver blip. Typical use: reproduce the app, then '$PROG direct stats 10m'
-and '$PROG escape add <domain>' the real ones.
+transient resolver blip. Typical use: reproduce the app, then '$PROG direct errors 10m'
+and '$PROG escape add <domain>' the real ones. (For what's succeeding right now, see
+'$PROG connections'.)
+EOF
+;;
+    connections|conns) cat <<EOF
+$PROG connections [lane|-w] — live view of ACTIVE connections and their lane.
+
+Reads sing-box's clash API and shows each in-flight connection, aggregated by
+host, with which lane it's on (escape/direct/corp/block), bytes up/down, and the
+rule that matched. Unlike '<lane> errors' (which only shows FAILURES), this shows
+successful traffic too — so it answers "what's actually going through escape right now?".
+
+  $PROG connections            snapshot of all lanes
+  $PROG connections escape     only that lane
+  $PROG connections -w         refresh every 2s (Ctrl-C to stop)
 EOF
 ;;
     block) cat <<EOF
@@ -2284,7 +2362,7 @@ hand list still works without it). Block runs BEFORE corp/escape/direct.
   import <file>        batch-add one entry per line from a file (# comments ok)
   clear                remove every entry (keeps the file's comment header)
   dump [file]          print the lane (or write it to a file) for backup/versioning
-  stats [5m|…|24h|all]  what got blocked + how often in that window   (default 24h)
+  errors [5m|…|24h|all]  what got blocked + how often in that window   (default 24h)
   log                  live-tail the block log (timestamp + domain)
 Edits auto-reload the router if it is running.
 
@@ -2431,6 +2509,7 @@ main() {
     status)     cmd_status "$@" ;;
     report)     cmd_diag "$@" ;;
     route)      cmd_route "$@" ;;
+    connections|conns) cmd_connections "$@" ;;
     # servers & selection
     server)     cmd_server "$@" ;;
     sub)        cmd_sub "$@" ;;
