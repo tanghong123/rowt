@@ -203,3 +203,17 @@ as the only VPN, "direct" just meant "off my tunnel". escape splits that
   TUI or Python `textual`/`rich` — rowt currently only needs `jq`/`python3`);
   keyboard actions (switch server, toggle proxy, pause a lane); and whether it's
   a subcommand vs. a separate small binary the CLI launches.
+
+- **Desktop app / menu-bar widget.** A native-feeling GUI (menu-bar item or small
+  window) to see status at a glance and drive the common operations without the
+  terminal: current mode (host/vm) + selected server + latency, router/proxy
+  on-off with a toggle, per-lane connection counts + throughput, and quick actions
+  (proxy on/off, switch server, restart, add a domain to a lane). Same data
+  sources as the TUI idea above (clash API, `lane-*.log`, `rowt status`). Design
+  questions: framework + dependency footprint (SwiftUI menu-bar app vs. a
+  cross-toolkit like Tauri/Electron vs. something lightweight like `xbar`/SwiftBar
+  plugins that just shell out to `rowt`); how it talks to rowt (shell out to the
+  CLI vs. read the clash API directly vs. a small local rowt daemon/socket); how
+  it handles the sudo-gated `networksetup` calls (helper tool vs. reuse the
+  existing scoped sudoers); packaging/signing/notarization and auto-start; and
+  whether it replaces or complements the TUI view.
