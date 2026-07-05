@@ -6,11 +6,11 @@
     vless-parse.py --sub '<subscription-url>'              # fetch+decode -> array
     vless-parse.py --combine < array.json                  # dedupe + uniquify tags
 
-Emits sing-box outbound(s) on stdout. Supported protocols: VLESS (incl. Reality)
-and AnyTLS. In --multi/--sub each outbound gets a unique tag from the link's
-#name (sanitized), falling back to "server-N". Stdlib only — no dependencies.
-Credentials never touch the repo; the caller stores output under
-~/.config/rowt/.
+Emits sing-box outbound(s) on stdout. Supported protocols: VLESS (incl. Reality),
+AnyTLS, and hysteria2 (incl. Salamander obfs). In --multi/--sub each outbound
+gets a unique tag from the link's #name (sanitized), falling back to "server-N".
+Stdlib only — no dependencies. Credentials never touch the repo; the caller
+stores output under ~/.config/rowt/.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import re
 import sys
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -124,12 +125,58 @@ def parse_anytls(link: str, tag: str = "escape") -> dict:
     }
 
 
+def parse_hysteria2(link: str, tag: str = "escape") -> dict:
+    """Turn a hysteria2:// (or hy2://) URI into a sing-box hysteria2 outbound.
+
+    hysteria2 is QUIC-based, so TLS is always on. The auth string lives in the
+    URI userinfo. Port-hopping (mport) is intentionally not handled.
+    """
+    u = urlsplit(link)
+    password = unquote(u.username or "")
+    server = u.hostname or ""
+    port = u.port or 443
+    if not password or not server:
+        raise ValueError("hysteria2 link missing password or host")
+
+    qs = parse_qs(u.query)
+    sni = _first(qs, "sni") or _first(qs, "peer") or server
+    insecure = _first(qs, "insecure", "0") in ("1", "true", "True")
+    alpn = _first(qs, "alpn")
+
+    tls: dict = {"enabled": True, "server_name": sni, "insecure": insecure}
+    if alpn:
+        tls["alpn"] = [a for a in alpn.split(",") if a]
+
+    out: dict = {
+        "type": "hysteria2",
+        "tag": tag,
+        "server": server,
+        "server_port": int(port),
+        "password": password,
+        "tls": tls,
+    }
+
+    up = _first(qs, "upmbps")
+    down = _first(qs, "downmbps")
+    if up.isdigit():
+        out["up_mbps"] = int(up)
+    if down.isdigit():
+        out["down_mbps"] = int(down)
+
+    if _first(qs, "obfs"):
+        out["obfs"] = {"type": "salamander", "password": _first(qs, "obfs-password")}
+
+    return out
+
+
 def parse_link(link: str, tag: str = "escape") -> dict:
     """Dispatch a share link to the right protocol parser."""
     if link.startswith("vless://"):
         return parse_vless(link, tag)
     if link.startswith("anytls://"):
         return parse_anytls(link, tag)
+    if link.startswith(("hysteria2://", "hy2://")):
+        return parse_hysteria2(link, tag)
     raise ValueError("unsupported protocol")
 
 
@@ -155,8 +202,10 @@ def parse_many(links: list[str]) -> list[dict]:
         link = raw.strip()
         if not link or link.startswith("#"):
             continue
-        if not (link.startswith("vless://") or link.startswith("anytls://")):
-            proto = link.split("://", 1)[0] if "://" in link else "?"
+        if "://" not in link:
+            continue  # subscription header lines (e.g. "REMARKS=...") — skip quietly
+        if not link.startswith(("vless://", "anytls://", "hysteria2://", "hy2://")):
+            proto = link.split("://", 1)[0]
             print(f"warning: skipping unsupported link ({proto}://)", file=sys.stderr)
             continue
         try:
@@ -164,7 +213,7 @@ def parse_many(links: list[str]) -> list[dict]:
         except ValueError as e:
             print(f"warning: skipping a link ({e})", file=sys.stderr)
     if not out:
-        raise ValueError("no usable vless:// / anytls:// links found")
+        raise ValueError("no usable vless:// / anytls:// / hysteria2:// links found")
     return out
 
 
@@ -197,8 +246,13 @@ def fetch_subscription(url: str) -> list[str]:
 
     Handles the common v2ray format (base64-encoded, newline-separated links)
     as well as a plain-text list of links.
+
+    Sends a Shadowrocket-style User-Agent by default: many airports gate on it,
+    returning raw share links for it but Clash YAML (which we can't parse) for a
+    generic UA. Override with ROWT_SUB_UA if a provider needs a different signal.
     """
-    req = Request(url, headers={"User-Agent": "rowt/1.0"})
+    ua = os.environ.get("ROWT_SUB_UA") or "Shadowrocket/2.2.28 (iPhone; iOS 17.5.1; Scale/3.00)"
+    req = Request(url, headers={"User-Agent": ua})
     with urlopen(req, timeout=20) as r:  # noqa: S310 (user-supplied sub URL)
         body = r.read().decode("utf-8", "replace").strip()
     if "://" not in body:

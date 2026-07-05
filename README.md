@@ -1,6 +1,6 @@
 # rowt — personal VLESS/AnyTLS VPN alongside a corporate VPN
 
-Run a personal **VLESS / AnyTLS** VPN for selected sites **while the corporate
+Run a personal **VLESS / AnyTLS / hysteria2** VPN for selected sites **while the corporate
 VPN keeps the default route**, without the two clients fighting over the tunnel.
 
 ## TL;DR — the common path
@@ -134,9 +134,10 @@ just run it in place from the repo as `./bin/rowt` without installing.
 ## Quick start
 
 ```sh
-# one or more servers (vless:// or anytls://)…
+# one or more servers (vless:// , anytls:// , or hysteria2:// / hy2://)…
 ./bin/rowt server add 'vless://<uuid>@host:port?security=reality&sni=...&pbk=...&sid=...#JP' \
-                       'anytls://<pass>@host2:port?sni=...#US'
+                       'anytls://<pass>@host2:port?sni=...#US' \
+                       'hysteria2://<pass>@host3:443?sni=...&insecure=0#SG'
 # …a subscription link (add several with --add)…
 ./bin/rowt sub add 'https://example.com/sub/xxxxx'
 # …or migrate straight from Shadowrocket (see below):
@@ -183,7 +184,7 @@ $EDITOR config/escape-domains.txt
 
 ## Multiple servers & switching
 
-Every configured server (VLESS or AnyTLS, from manual imports and/or
+Every configured server (VLESS, AnyTLS, or hysteria2, from manual imports and/or
 subscriptions) is a member of a sing-box **selector** group named `escape`.
 
 ```sh
@@ -337,7 +338,7 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 | command | what it does |
 | --- | --- |
 | `server list` | list servers (`*` = active). |
-| `server add '<vless://\|anytls://…>' [more…]` | add manual server(s) from link(s), deduped. |
+| `server add '<vless://\|anytls://\|hysteria2://…>' [more…]` | add manual server(s) from link(s), deduped. |
 | `server rm <tag>` / `server clear` | remove a manual server / clear all manual. |
 | `server import [--apply]` | import from Shadowrocket (servers **and** subs) via an editable review file. |
 | `server import <file.json>` | restore manual servers from a `server dump` (round-trips). |

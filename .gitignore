@@ -4,3 +4,7 @@ diag-*.txt
 __pycache__/
 *.pyc
 bin/sing-box
+
+# macOS junk
+.DS_Store
+._*
