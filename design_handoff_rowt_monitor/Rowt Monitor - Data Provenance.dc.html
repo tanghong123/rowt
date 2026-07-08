@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    doc-page:not(:defined){ visibility:hidden; }
+    body{ margin:0; }
+    .prov table{ width:100%; border-collapse:collapse; margin:0 0 24px; }
+    .prov thead tr{ border-bottom:1.5px solid #14161c; }
+    .prov th{ text-align:left; font-family:'JetBrains Mono',monospace; font-size:10px; letter-spacing:.06em; text-transform:uppercase; color:#6b7080; font-weight:600; padding:6px 12px 6px 0; }
+    .prov tbody tr{ border-bottom:1px solid #eceef1; }
+    .prov td{ padding:8px 12px 8px 0; vertical-align:top; line-height:1.5; font-family:'Newsreader',serif; font-size:13.5px; color:#2b2f38; }
+    .prov td.el{ font-family:'JetBrains Mono',monospace; font-size:12px; color:#14161c; white-space:nowrap; }
+    .prov td.src{ font-family:'JetBrains Mono',monospace; font-size:11.5px; white-space:nowrap; }
+    .prov code{ font-family:'JetBrains Mono',monospace; font-size:11.5px; background:#f3f3f5; padding:1px 4px; border-radius:3px; }
+    .prov h2{ font-family:'Newsreader',serif; font-size:18px; font-weight:600; color:#14161c; margin:26px 0 11px; padding-bottom:5px; border-bottom:2px solid #14161c; }
+    .prov h2 .sub{ font-family:'JetBrains Mono',monospace; font-size:10.5px; font-weight:500; letter-spacing:.02em; color:#8a8f9c; text-transform:none; float:right; padding-top:5px; }
+    .prov p{ font-family:'Newsreader',serif; font-size:14.5px; line-height:1.62; color:#2b2f38; margin:0 0 12px; }
+    .s-api{ color:#8a4d2b; } .s-cfg{ color:#2f6d5f; } .s-state{ color:#3a5a8a; } .s-log{ color:#8a3550; } .s-sys{ color:#5a5f6b; } .s-ui{ color:#7a5aa0; }
+    col.c-el{ width:23%; } col.c-src{ width:17%; }
+  </style>
+</helmet>
+
+<x-import component-from-global-scope="doc-page" from="./doc-page.js" size="letter" margin="0.8in" hint-size="850px,1100px">
+<div class="prov">
+
+  <h1 style="font-family:'Newsreader',serif; font-size:29px; font-weight:600; letter-spacing:-0.01em; color:#14161c; margin:0 0 4px; line-height:1.15;">Rowt Monitor — Data Provenance</h1>
+  <p style="font-family:'JetBrains Mono',monospace; font-size:11px; letter-spacing:.05em; text-transform:uppercase; color:#8a8f9c; margin:0 0 20px;">Where every dynamic element gets its information</p>
+
+  <p>This document maps each moving part of the <em>rowt monitor</em> terminal interface to the upstream source it reads. The monitor is strictly an <strong>observer</strong> — it never mutates routing, servers, or the proxy. Every on-screen value is derived, on a fixed cadence, from one of the sources below.</p>
+
+  <div style="border:1px solid #e2e3e7; border-radius:8px; padding:13px 18px; margin:0 0 8px; background:#fafafb;">
+    <div style="font-family:'JetBrains Mono',monospace; font-size:10px; letter-spacing:.06em; text-transform:uppercase; color:#8a8f9c; margin-bottom:9px;">Upstream sources</div>
+    <div style="display:grid; grid-template-columns:auto 1fr; row-gap:7px; column-gap:16px; font-family:'Newsreader',serif; font-size:14px; line-height:1.42; color:#2b2f38;">
+      <span class="s-api" style="font-family:'JetBrains Mono',monospace; font-size:12px;">clash API</span><span>Local control plane on <code>127.0.0.1:9090</code> — the <code>/traffic</code>, <code>/connections</code> and <code>/proxies</code> (delay) endpoints.</span>
+      <span class="s-cfg" style="font-family:'JetBrains Mono',monospace; font-size:12px;">config</span><span><code>~/.config/rowt/host.json</code> — run mode, bind interface, rule set.</span>
+      <span class="s-state" style="font-family:'JetBrains Mono',monospace; font-size:12px;">state</span><span><code>state/servers.json</code> — the outbound server pool and last probe results.</span>
+      <span class="s-log" style="font-family:'JetBrains Mono',monospace; font-size:12px;">logs</span><span><code>log/lane-*.log</code> — per-lane connection-failure events.</span>
+      <span class="s-sys" style="font-family:'JetBrains Mono',monospace; font-size:12px;">system</span><span>Host OS — process uptime, system-proxy toggle, active interface.</span>
+      <span class="s-ui" style="font-family:'JetBrains Mono',monospace; font-size:12px;">ui state</span><span>Operator-local view state — never sent upstream.</span>
+    </div>
+  </div>
+
+  <h2>Refresh model</h2>
+  <p>The interface repaints on a <strong>2-second tick</strong>. Instantaneous values (rates, latency) are sampled each tick; historical shapes are computed over rolling buffers — a 26-sample ring for throughput and per-lane history, and a selectable time window for errors. Pausing (<code>p</code>) freezes sampling so figures can be read.</p>
+
+  <h2>Identity band <span class="sub">logo · state banners</span></h2>
+  <table>
+    <colgroup><col class="c-el"><col class="c-src"><col></colgroup>
+    <thead><tr><th>Element</th><th>Source</th><th>Derivation</th></tr></thead>
+    <tbody>
+      <tr><td class="el">rowt banner</td><td class="src s-sys">static</td><td>ASCII wordmark — fixed art, not data-driven.</td></tr>
+      <tr><td class="el">LIVE / PAUSED</td><td class="src s-ui">ui state</td><td>Whether sampling is running; toggled by the operator.</td></tr>
+      <tr><td class="el">filter: &lt;lane&gt;</td><td class="src s-ui">ui state</td><td>Shown only when a lane filter is active (set via Tab or a lane click); hidden otherwise. Scopes the connections table only.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Session panel <span class="sub">context strip</span></h2>
+  <table>
+    <colgroup><col class="c-el"><col class="c-src"><col></colgroup>
+    <thead><tr><th>Element</th><th>Source</th><th>Derivation</th></tr></thead>
+    <tbody>
+      <tr><td class="el">mode · bind</td><td class="src s-cfg">config</td><td>Run mode and bound interface declared in <code>host.json</code>.</td></tr>
+      <tr><td class="el">server + latency</td><td class="src s-state">state / <span class="s-api">api</span></td><td>Currently-selected outbound node (state) and its most recent measured round-trip delay (<code>/proxies</code> probe).</td></tr>
+      <tr><td class="el">router</td><td class="src s-api">clash API</td><td>Proxy-process liveness and its listen port.</td></tr>
+      <tr><td class="el">proxy</td><td class="src s-sys">system</td><td>OS system-proxy toggle and the active network interface.</td></tr>
+      <tr><td class="el">config</td><td class="src s-cfg">config</td><td>Result of parsing / validating <code>host.json</code> — <code>OK</code> or an error state.</td></tr>
+      <tr><td class="el">uptime</td><td class="src s-sys">system</td><td>Elapsed time since the monitored process started.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Throughput panel <span class="sub">clash /traffic + /connections</span></h2>
+  <table>
+    <colgroup><col class="c-el"><col class="c-src"><col></colgroup>
+    <thead><tr><th>Element</th><th>Source</th><th>Derivation</th></tr></thead>
+    <tbody>
+      <tr><td class="el">↑ / ↓ bar + rate</td><td class="src s-api">clash API</td><td>Aggregate up / down transfer rate — the sum of every active connection's byte rate from <code>/traffic</code>. Bar length = rate ÷ the recent rolling peak, so the bar auto-scales.</td></tr>
+      <tr><td class="el">conns</td><td class="src s-api">clash API</td><td>Total active connections — the sum of per-host connection counts from <code>/connections</code>.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Lanes panel <span class="sub">routing outcome</span></h2>
+  <p>A <em>lane</em> is a routing outcome — which rule class a connection matched. The three rate lanes share one bar scale so they are directly comparable; the block cell reports a count rather than a rate.</p>
+  <table>
+    <colgroup><col class="c-el"><col class="c-src"><col></colgroup>
+    <thead><tr><th>Element</th><th>Source</th><th>Derivation</th></tr></thead>
+    <tbody>
+      <tr><td class="el">lane rate + bar</td><td class="src s-api">clash API</td><td>Sum of download rate across connections routed through that lane; bar = rate ÷ shared peak of the three rate lanes.</td></tr>
+      <tr><td class="el">lane conn count</td><td class="src s-api">clash API</td><td>Number of active connections whose matched rule falls in that lane.</td></tr>
+      <tr><td class="el">block count</td><td class="src s-api">clash API</td><td>Connections matched to the block rule (sinkholed or refused) — carries no throughput by definition.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Active connections table <span class="sub">clash /connections</span></h2>
+  <table>
+    <colgroup><col class="c-el"><col class="c-src"><col></colgroup>
+    <thead><tr><th>Column</th><th>Source</th><th>Derivation</th></tr></thead>
+    <tbody>
+      <tr><td class="el">lane</td><td class="src s-api">clash API</td><td>The lane the rule engine assigned this connection.</td></tr>
+      <tr><td class="el">host:port</td><td class="src s-api">clash API</td><td>Destination host (SNI / requested host) and port from connection metadata.</td></tr>
+      <tr><td class="el">#conn</td><td class="src s-api">clash API</td><td>Concurrent connections / streams open to that host:port.</td></tr>
+      <tr><td class="el">↑ / ↓</td><td class="src s-api">clash API</td><td>Per-connection up / down byte rate, sampled each tick.</td></tr>
+      <tr><td class="el">row order</td><td class="src s-ui">ui state</td><td>Sorted by activity; the lane filter (if set) restricts which rows appear.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Errors panel <span class="sub">log/lane-*.log</span></h2>
+  <p>Failure events are read from the per-lane logs and aggregated by domain over a rolling window (<code>5m · 10m · 1h · 24h</code>, cycled with <code>w</code>). Each row is one destination that failed within the window.</p>
+  <table>
+    <colgroup><col class="c-el"><col class="c-src"><col></colgroup>
+    <thead><tr><th>Element</th><th>Source</th><th>Derivation</th></tr></thead>
+    <tbody>
+      <tr><td class="el">N failed · M domains</td><td class="src s-log">logs</td><td>Count of failure events, and distinct destination domains, within the window.</td></tr>
+      <tr><td class="el">window tabs</td><td class="src s-ui">ui state</td><td>Selected rolling window — filters which log events are counted.</td></tr>
+      <tr><td class="el">count</td><td class="src s-log">logs</td><td>Failures for that domain in the window.</td></tr>
+      <tr><td class="el">reason</td><td class="src s-log">logs</td><td>Failure class from the log line — <code>timeout</code>, <code>reset</code>, <code>refused</code>, <code>dns</code>; colored by severity.</td></tr>
+      <tr><td class="el">lane dot + domain</td><td class="src s-log">logs</td><td>The lane the failed connection belonged to (dot color) and its destination domain.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Server health panel <span class="sub">state/servers.json + /proxies delay</span></h2>
+  <table>
+    <colgroup><col class="c-el"><col class="c-src"><col></colgroup>
+    <thead><tr><th>Element</th><th>Source</th><th>Derivation</th></tr></thead>
+    <tbody>
+      <tr><td class="el">summary line</td><td class="src s-state">state</td><td>Count of servers in the pool and how many are reachable.</td></tr>
+      <tr><td class="el">▶ / · / ✕ mark</td><td class="src s-state">state</td><td>Active (currently selected), idle-but-up, or down — from the pool + last probe result.</td></tr>
+      <tr><td class="el">server tag</td><td class="src s-state">state</td><td>Node label from <code>servers.json</code>.</td></tr>
+      <tr><td class="el">latency bar + ms</td><td class="src s-api">clash API</td><td>Most recent probe round-trip (<code>/proxies</code> delay); bar = ms ÷ slowest reachable node. Down nodes show <code>DOWN</code>.</td></tr>
+      <tr><td class="el">probed</td><td class="src s-state">state</td><td>Age of the last probe for that node (round-robin schedule).</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Not data-driven</h2>
+  <p style="margin-bottom:0;">The <code>rowt</code> ASCII banner, panel captions (<code>┤ … ├</code>), the keyboard-shortcut overlay (<code>?</code>), and all layout chrome are static presentation. Bold weight and color are terminal cell <em>attributes</em> used for emphasis and severity — they encode the same underlying values described above, not additional data.</p>
+
+</div>
+</x-import>
+</x-dc>
+</body>
+</html>

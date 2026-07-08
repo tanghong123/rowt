@@ -1,0 +1,92 @@
+//! Map raw crossterm events to `Action`s (README "Interactions & keymap").
+
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+use crate::app::{Action, App};
+use crate::model::Lane;
+use crate::ui::Hit;
+
+pub fn key(k: KeyEvent, app: &App) -> Option<Action> {
+    if k.kind == KeyEventKind::Release {
+        return None;
+    }
+    // Help overlay swallows everything except its own toggle and quit.
+    if app.help {
+        return match k.code {
+            KeyCode::Char('?') | KeyCode::Esc => Some(Action::ToggleHelp),
+            KeyCode::Char('q') => Some(Action::Quit),
+            _ => None,
+        };
+    }
+    Some(match k.code {
+        KeyCode::Char('q') => Action::Quit,
+        KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => Action::Quit,
+        KeyCode::Up | KeyCode::Char('k') => Action::Up,
+        KeyCode::Down | KeyCode::Char('j') => Action::Down,
+        KeyCode::Left | KeyCode::Char('h') => Action::FocusLeft,
+        KeyCode::Right | KeyCode::Char('l') => Action::FocusRight,
+        KeyCode::Tab => Action::CycleFocus,
+        KeyCode::BackTab => Action::CycleFocusBack,
+        KeyCode::Char('f') => Action::LaneCycle,
+        KeyCode::Char('1') => Action::LaneSet(Some(Lane::Escape)),
+        KeyCode::Char('2') => Action::LaneSet(Some(Lane::Corp)),
+        KeyCode::Char('3') => Action::LaneSet(Some(Lane::Direct)),
+        KeyCode::Char('0') | KeyCode::Esc => Action::LaneSet(None),
+        KeyCode::Char('w') => Action::WindowCycle,
+        KeyCode::Char(']') => Action::WindowStep(1),
+        KeyCode::Char('[') => Action::WindowStep(-1),
+        KeyCode::Char('y') => Action::Yank,
+        KeyCode::Char('p') => Action::TogglePause,
+        KeyCode::Char('?') => Action::ToggleHelp,
+        _ => return None,
+    })
+}
+
+pub fn mouse(m: MouseEvent, hit: &Hit) -> Option<Action> {
+    let (col, row) = (m.column, m.row);
+    let over_err = hit_prefers_err(hit, col, row);
+    match m.kind {
+        // Wheel scrolls (and focuses) the list under the pointer.
+        MouseEventKind::ScrollDown => {
+            Some(if over_err { Action::ScrollErr(1) } else { Action::ScrollConn(1) })
+        }
+        MouseEventKind::ScrollUp => {
+            Some(if over_err { Action::ScrollErr(-1) } else { Action::ScrollConn(-1) })
+        }
+        MouseEventKind::Down(MouseButton::Left) => {
+            for (r, win) in &hit.windows {
+                if in_rect(*r, col, row) {
+                    return Some(Action::WindowSet(*win));
+                }
+            }
+            for (r, lane) in &hit.lanes {
+                if in_rect(*r, col, row) {
+                    return Some(Action::LaneSet(*lane));
+                }
+            }
+            if in_rect(hit.conn_list, col, row) {
+                return Some(Action::SelectConn((row - hit.conn_list.top()) as usize));
+            }
+            if in_rect(hit.err_list, col, row) {
+                return Some(Action::SelectErr((row - hit.err_list.top()) as usize));
+            }
+            // click anywhere else in a pane just focuses it
+            if in_rect(hit.err_pane, col, row) {
+                return Some(Action::FocusErr);
+            }
+            if in_rect(hit.conn_pane, col, row) {
+                return Some(Action::FocusConn);
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn hit_prefers_err(hit: &Hit, col: u16, row: u16) -> bool {
+    in_rect(hit.err_pane, col, row) || in_rect(hit.err_list, col, row)
+}
+
+fn in_rect(r: ratatui::layout::Rect, col: u16, row: u16) -> bool {
+    r.width > 0 && r.height > 0 && col >= r.left() && col < r.right() && row >= r.top() && row < r.bottom()
+}

@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    @keyframes rowtPulse { 0%,100%{opacity:1} 50%{opacity:.25} }
+    @keyframes rowtFade { from{opacity:0; transform:translateY(6px)} to{opacity:1; transform:none} }
+    @keyframes rowtMarquee { from{transform:translateX(0)} to{transform:translateX(-50%)} }
+    body{ margin:0; background:#0c0d11; }
+    *{ box-sizing:border-box; }
+    ::-webkit-scrollbar{ width:8px; height:8px; }
+    ::-webkit-scrollbar-thumb{ background:#2b2e3c; border-radius:6px; }
+    ::-webkit-scrollbar-track{ background:transparent; }
+  </style>
+</helmet>
+
+<div data-screen-label="Rowt Monitor" style="width:1400px; height:1000px; display:flex; align-items:center; justify-content:center; padding:30px; background:radial-gradient(120% 120% at 50% 0%, #16181f 0%, #0b0c10 60%, #08090c 100%); font-family:'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;">
+
+  <!-- ===== macOS terminal window ===== -->
+  <div style="position:relative; width:1340px; height:940px; border-radius:12px; overflow:hidden; background:#16171e; box-shadow:0 40px 90px -20px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.04); display:flex; flex-direction:column;">
+
+    <!-- title bar -->
+    <div style="height:40px; flex:none; display:grid; grid-template-columns:1fr auto 1fr; align-items:center; padding:0 16px; background:#242631; border-bottom:1px solid #2b2e3c;">
+      <div style="display:flex; align-items:center; gap:9px;">
+        <span style="width:12px; height:12px; border-radius:50%; background:#ff5f57;"></span>
+        <span style="width:12px; height:12px; border-radius:50%; background:#febc2e;"></span>
+        <span style="width:12px; height:12px; border-radius:50%; background:#28c840;"></span>
+      </div>
+      <div style="font-size:13px; color:#8b90a4; letter-spacing:.02em;">rowt monitor</div>
+      <div></div>
+    </div>
+
+    <!-- terminal body -->
+    <div style="flex:1; min-height:0; display:flex; flex-direction:column; gap:12px; padding:14px 18px 14px; font-size:13px; line-height:1.5; color:#b7bdcc; background:#16171e;">
+
+      <!-- top bar: logo · monitor · session facts (neofetch-style) · clock -->
+      <div style="flex:none; display:flex; align-items:center; justify-content:space-between; gap:20px;">
+        <div style="display:flex; align-items:center; gap:20px; min-width:0;">
+          <pre style="{{ bannerStyle }}">  _ __ _____      __| |_ 
+ | '__/ _ \ \ /\ / /| __|
+ | | | (_) \ V  V / | |_ 
+ |_|  \___/ \_/\_/   \__|</pre>
+          <div style="display:flex; flex-direction:column; gap:6px;">
+            <span style="color:#656a82; font-size:13px; letter-spacing:.22em; text-transform:uppercase;">monitor</span>
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span onClick="{{ togglePause }}" title="pause / resume" style="display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border:1px solid #2b2e3c; border-radius:20px; font-size:13px; letter-spacing:.14em; color:#8b90a4; cursor:pointer;">
+                <span style="{{ liveDotStyle }}">●</span>{{ liveLabel }}
+              </span>
+              <span style="{{ filterChipStyle }}">{{ filterChipLabel }}</span>
+            </div>
+          </div>
+          <div style="height:56px; width:1px; background:#2b2e3c; flex:none;"></div>
+          <div style="display:grid; grid-template-columns:auto minmax(110px,auto) auto minmax(120px,auto); row-gap:5px; column-gap:16px; align-items:baseline; font-size:13px;">
+            <span style="color:#656a82;">mode</span>
+            <span style="color:#e9ecf3; font-weight:600;">{{ ctx.mode }}<span style="color:#656a82; font-weight:400;"> · en0</span></span>
+            <span style="color:#656a82;">uptime</span>
+            <span style="color:#e9ecf3;">{{ ctx.uptime }}</span>
+
+            <span style="color:#656a82;">server</span>
+            <span><span style="{{ serverStyle }}">{{ ctx.server }}</span> <span style="{{ latStyle }}">{{ ctx.latency }}</span></span>
+            <span style="color:#656a82;">router</span>
+            <span style="color:#c3c8d6;">{{ ctx.router }}</span>
+
+            <span style="color:#656a82;">proxy</span>
+            <span style="color:#c3c8d6;">{{ ctx.proxy }}</span>
+            <span style="color:#656a82;">config</span>
+            <span style="color:#c3c8d6;">{{ ctx.cfg }}</span>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- main: two panes — live connections (left) · errors & blocked (right) -->
+      <div style="flex:1; min-height:0; display:grid; grid-template-columns:minmax(0,1.5fr) minmax(340px,1fr); gap:12px;">
+
+        <!-- LEFT: live connections -->
+        <div style="position:relative; border:1px solid #2b2e3c; background:#101116; display:flex; flex-direction:column; min-height:0;">
+          <span style="position:absolute; top:-8px; left:14px; padding:0 8px; background:#16171e; font-size:13px; letter-spacing:.16em; text-transform:uppercase; color:#656a82;">┤ live · connections <span style="{{ connFilterTagStyle }}">{{ connFilterTag }}</span> ├</span>
+          <div style="{{ connRing }}"></div>
+
+          <!-- header stats: total + per-lane — columns aligned (all rows share the ↑/↓/#conn grid) -->
+          <div style="flex:none; padding:15px 18px 13px; border-bottom:1px solid #23262f;">
+            <div style="display:flex; flex-direction:column; gap:8px; font-size:13px;">
+              <sc-for list="{{ rateRows }}" as="l" hint-placeholder-count="4">
+                <div onClick="{{ l.onClick }}" style="{{ l.cellStyle }}">
+                  <span style="{{ l.nameStyle }}">{{ l.name }}</span>
+                  <span style="{{ l.upStyle }}"><span style="color:#e0a35e; font-weight:700;">↑</span> {{ l.up }}</span>
+                  <span style="{{ l.downStyle }}"><span style="color:#56c7be; font-weight:700;">↓</span> {{ l.down }}</span>
+                  <span style="{{ l.countStyle }}">{{ l.count }}</span>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+
+          <div style="display:grid; grid-template-columns:76px 1fr 48px 96px 100px 128px; align-items:center; gap:16px; padding:9px 16px 7px; font-size:13px; letter-spacing:.1em; text-transform:uppercase; color:#565b71; border-bottom:1px solid #23262f;">
+            <span>lane</span><span>host:port</span>
+            <span style="text-align:right;">#conn</span>
+            <span style="text-align:right;">up</span>
+            <span style="text-align:right;">down</span>
+            <span style="padding-left:4px;">rule</span>
+          </div>
+          <div onWheel="{{ focusConns }}" data-list="conns" style="flex:1; min-height:0; overflow:auto; padding:6px 4px 8px;">
+            <sc-for list="{{ conns }}" as="c" hint-placeholder-count="12">
+              <div onClick="{{ c.onClick }}" data-row="c" style="{{ c.rowStyle }}">
+                <span style="{{ c.badgeStyle }}">{{ c.laneName }}</span>
+                <span data-sel-field="{{ c.sel }}" style="{{ c.hostStyle }}">{{ c.hostport }}</span>
+                <span style="color:#656a82; text-align:right;">{{ c.count }}</span>
+                <span style="color:#c9a06e; text-align:right;">{{ c.up }}</span>
+                <span style="color:#6fb8b0; text-align:right;">{{ c.down }}</span>
+                <span style="color:#656a82; padding-left:4px;">{{ c.rule }}</span>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+
+        <!-- RIGHT: errors & blocked (rolling window) -->
+        <div style="position:relative; border:1px solid #2b2e3c; background:#101116; display:flex; flex-direction:column; min-height:0;">
+          <span style="position:absolute; top:-8px; left:14px; padding:0 8px; background:#16171e; font-size:13px; letter-spacing:.16em; text-transform:uppercase; color:#656a82;">┤ errors &amp; blocked ├</span>
+          <div style="{{ errRing }}"></div>
+
+          <!-- header: window selector + aggregate stats -->
+          <div style="flex:none; padding:14px 14px 11px; border-bottom:1px solid #23262f;">
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:11px;">
+              <span style="color:#8b90a4; font-size:13px;">aggregated over</span>
+              <div style="display:flex; gap:2px; background:#14151b; border:1px solid #23262f; border-radius:7px; padding:2px;">
+                <sc-for list="{{ windows }}" as="w" hint-placeholder-count="4">
+                  <span onClick="{{ w.onClick }}" style="{{ w.style }}">{{ w.label }}</span>
+                </sc-for>
+              </div>
+            </div>
+            <div style="display:flex; flex-direction:column; gap:6px; font-size:13px;">
+              <div style="display:flex; align-items:baseline; gap:9px;">
+                <span style="color:#e0a35e; font-weight:700; width:78px;">transient</span>
+                <span style="color:#e9ecf3; font-weight:700; width:34px; text-align:right;">{{ errHdr.transient }}</span>
+                <span style="color:#565b71;">· {{ errHdr.transientDomains }} dom</span>
+              </div>
+              <div style="display:flex; align-items:baseline; gap:9px;">
+                <span style="color:#e0655e; font-weight:700; width:78px;">persistent</span>
+                <span style="color:#e9ecf3; font-weight:700; width:34px; text-align:right;">{{ errHdr.persistent }}</span>
+                <span style="color:#565b71;">· {{ errHdr.persistentDomains }} dom</span>
+              </div>
+              <div style="display:flex; align-items:baseline; gap:9px;">
+                <span style="color:#a98ad6; font-weight:700; width:78px;">blocked</span>
+                <span style="color:#e9ecf3; font-weight:700; width:34px; text-align:right;">{{ errHdr.blocked }}</span>
+                <span style="color:#565b71;">· {{ errHdr.blockedDomains }} dom</span>
+              </div>
+            </div>
+          </div>
+
+          <div onWheel="{{ focusErrors }}" data-list="errors" style="flex:1; min-height:0; overflow:auto; padding:9px 12px 6px;">
+            <div style="display:grid; grid-template-columns:40px 84px 1fr; align-items:baseline; gap:20px; font-size:13px; letter-spacing:.1em; text-transform:uppercase; color:#565b71; margin-bottom:6px;">
+              <span style="text-align:right;">count</span>
+              <span>type</span>
+              <span style="display:flex; justify-content:space-between; gap:8px;"><span>domain</span><span style="color:#4c5064; text-transform:none; letter-spacing:0;">{{ allMore }}</span></span>
+            </div>
+            <sc-if value="{{ allEmpty }}" hint-placeholder-val="{{ false }}">
+              <div style="padding:5px 2px 10px; color:#565b71; font-size:13px;">nothing in this window — <span style="color:#86c07a;">lanes healthy</span></div>
+            </sc-if>
+            <sc-for list="{{ allRows }}" as="e" hint-placeholder-count="10">
+              <div onClick="{{ e.onClick }}" data-row="e" style="{{ e.rowStyle }}">
+                <span style="{{ e.countStyle }}">{{ e.count }}</span>
+                <span style="{{ e.reasonStyle }}">{{ e.reason }}</span>
+                <span data-sel-field="{{ e.sel }}" style="{{ e.domStyle }}">{{ e.domain }}</span>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </div>
+
+      <!-- server health (full-width, bottom) — compact auto-scroll strip -->
+      <div style="flex:none; position:relative; border:1px solid #2b2e3c; background:#101116; padding:13px 16px 12px;">
+        <span style="position:absolute; top:-8px; left:14px; padding:0 8px; background:#16171e; font-size:13px; letter-spacing:.16em; text-transform:uppercase; color:#656a82;">┤ server health ├</span>
+        <!-- top row: stats -->
+        <div style="display:flex; align-items:center; justify-content:space-between; font-size:13px; margin-bottom:9px;">
+          <span style="color:#8b90a4;">{{ servers.summary }}</span>
+        </div>
+        <!-- bottom row: individual server states (auto-scroll) -->
+        <div style="position:relative; overflow:hidden; mask-image:linear-gradient(90deg, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%); -webkit-mask-image:linear-gradient(90deg, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%);">
+          <div style="display:flex; gap:8px; width:max-content; animation:rowtMarquee 46s linear infinite;">
+            <sc-for list="{{ srvChips }}" as="s" hint-placeholder-count="10">
+              <span style="{{ s.chipStyle }}">
+                <span style="{{ s.tagStyle }}">{{ s.tag }}</span>
+                <span style="{{ s.valStyle }}">{{ s.val }}</span>
+              </span>
+            </sc-for>
+            <sc-for list="{{ srvChips }}" as="s" hint-placeholder-count="10">
+              <span style="{{ s.chipStyle }}">
+                <span style="{{ s.tagStyle }}">{{ s.tag }}</span>
+                <span style="{{ s.valStyle }}">{{ s.val }}</span>
+              </span>
+            </sc-for>
+          </div>
+        </div>
+      </div>
+
+      <!-- footer hint bar (htop/less-style contextual keymap) -->
+      <div style="flex:none; display:flex; align-items:center; gap:15px; padding:7px 16px; border-top:1px solid #23262f; font-size:12.5px; color:#565b71; letter-spacing:.02em; white-space:nowrap; overflow:hidden;">
+        <span>focus <span style="{{ hintPaneStyle }}">{{ hintPane }}</span></span>
+        <span style="color:#2f3242;">│</span>
+        <span><b style="color:#8b90a4; font-weight:700;">↑↓</b> move</span>
+        <span><b style="color:#8b90a4; font-weight:700;">←→</b> pane</span>
+        <span><b style="color:#8b90a4; font-weight:700;">f</b> lane</span>
+        <span><b style="color:#8b90a4; font-weight:700;">w</b> window</span>
+        <span><b style="color:#8b90a4; font-weight:700;">y</b> copy</span>
+        <span><b style="color:#8b90a4; font-weight:700;">p</b> pause</span>
+        <span><b style="color:#8b90a4; font-weight:700;">?</b> help</span>
+        <span style="margin-left:auto; color:#4c5064; overflow:hidden; text-overflow:ellipsis;">{{ selInfo }}</span>
+      </div>
+
+    </div>
+
+    <!-- yank toast -->
+    <sc-if value="{{ toast }}" hint-placeholder-val="{{ false }}">
+      <div style="position:absolute; bottom:70px; left:50%; transform:translateX(-50%); z-index:25; display:flex; align-items:center; gap:9px; padding:9px 17px; border-radius:8px; background:#20232d; border:1px solid #33374a; box-shadow:0 18px 40px -14px rgba(0,0,0,.7); font-size:13px; color:#e9ecf3; animation:rowtFade .14s ease;">
+        <span style="color:#86c07a;">✓</span><span>{{ toast }}</span>
+      </div>
+    </sc-if>
+
+    <!-- ===== help overlay ===== -->
+    <sc-if value="{{ help }}" hint-placeholder-val="{{ false }}">
+      <div onClick="{{ toggleHelp }}" style="position:absolute; inset:0; background:rgba(8,9,12,0.72); backdrop-filter:blur(2px); display:flex; align-items:center; justify-content:center; z-index:20;">
+        <div style="width:500px; border:1px solid #33374a; border-radius:12px; background:#1b1d25; box-shadow:0 30px 70px -20px rgba(0,0,0,0.8); padding:22px 24px; animation:rowtFade .16s ease;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:16px;">
+            <span style="font-size:13px; font-weight:700; color:#e9ecf3; letter-spacing:.04em;">keyboard</span>
+            <span style="font-size:13px; color:#565b71;">esc or click to close</span>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:11px; font-size:13px;">
+            <div style="display:grid; grid-template-columns:120px 1fr; align-items:center; gap:12px;">
+              <span><kbd style="padding:2px 8px; border:1px solid #33374a; border-radius:5px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:13px;">↑ ↓ / j k</kbd></span>
+              <span style="color:#b7bdcc;">move the selection within the focused list (scrolls when it overflows)</span>
+            </div>
+            <div style="display:grid; grid-template-columns:120px 1fr; align-items:center; gap:12px;">
+              <span><kbd style="padding:2px 8px; border:1px solid #33374a; border-radius:5px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:13px;">← → / h l</kbd></span>
+              <span style="color:#b7bdcc;">move focus between the two lists — <kbd style="padding:1px 6px; border:1px solid #33374a; border-radius:4px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:12px;">Tab</kbd> toggles</span>
+            </div>
+            <div style="display:grid; grid-template-columns:120px 1fr; align-items:center; gap:12px;">
+              <span><kbd style="padding:2px 8px; border:1px solid #33374a; border-radius:5px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:13px;">f</kbd></span>
+              <span style="color:#b7bdcc;">cycle the lane filter — <span style="color:#7c9df0;">escape</span> · <span style="color:#56c7be;">corp</span> · <span style="color:#86c07a;">direct</span> · all. <kbd style="padding:1px 6px; border:1px solid #33374a; border-radius:4px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:12px;">1</kbd><kbd style="padding:1px 6px; border:1px solid #33374a; border-radius:4px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:12px;">2</kbd><kbd style="padding:1px 6px; border:1px solid #33374a; border-radius:4px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:12px;">3</kbd> jump · <kbd style="padding:1px 6px; border:1px solid #33374a; border-radius:4px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:12px;">0</kbd> clear</span>
+            </div>
+            <div style="display:grid; grid-template-columns:120px 1fr; align-items:center; gap:12px;">
+              <span><kbd style="padding:2px 8px; border:1px solid #33374a; border-radius:5px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:13px;">w &nbsp;·&nbsp; [ ]</kbd></span>
+              <span style="color:#b7bdcc;">errors rolling window — 5m · 10m · 1h · 24h (<kbd style="padding:1px 6px; border:1px solid #33374a; border-radius:4px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:12px;">w</kbd> cycles, <kbd style="padding:1px 6px; border:1px solid #33374a; border-radius:4px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:12px;">[</kbd><kbd style="padding:1px 6px; border:1px solid #33374a; border-radius:4px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:12px;">]</kbd> step)</span>
+            </div>
+            <div style="display:grid; grid-template-columns:120px 1fr; align-items:center; gap:12px;">
+              <span><kbd style="padding:2px 8px; border:1px solid #33374a; border-radius:5px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:13px;">y</kbd></span>
+              <span style="color:#b7bdcc;">copy (yank) the selected row's <span style="color:#c3c8d6;">domain</span> / <span style="color:#c3c8d6;">host:port</span> to the clipboard</span>
+            </div>
+            <div style="display:grid; grid-template-columns:120px 1fr; align-items:center; gap:12px;">
+              <span style="color:#565b71; font-size:13px;">click · wheel</span>
+              <span style="color:#b7bdcc;">click a row to select + focus it · wheel scrolls the list under the pointer</span>
+            </div>
+            <div style="display:grid; grid-template-columns:120px 1fr; align-items:center; gap:12px;">
+              <span><kbd style="padding:2px 8px; border:1px solid #33374a; border-radius:5px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:13px;">p</kbd></span>
+              <span style="color:#b7bdcc;">pause / resume the live feed (freezes numbers to read them)</span>
+            </div>
+            <div style="display:grid; grid-template-columns:120px 1fr; align-items:center; gap:12px;">
+              <span><kbd style="padding:2px 8px; border:1px solid #33374a; border-radius:5px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:13px;">Esc &nbsp;·&nbsp; ?</kbd></span>
+              <span style="color:#b7bdcc;"><kbd style="padding:1px 6px; border:1px solid #33374a; border-radius:4px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:12px;">Esc</kbd> clear the lane filter · close help &nbsp;·&nbsp; <kbd style="padding:1px 6px; border:1px solid #33374a; border-radius:4px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:12px;">?</kbd> toggle help</span>
+            </div>
+            <div style="display:grid; grid-template-columns:120px 1fr; align-items:center; gap:12px;">
+              <span><kbd style="padding:2px 8px; border:1px solid #33374a; border-radius:5px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:13px;">q</kbd></span>
+              <span style="color:#b7bdcc;">quit the monitor</span>
+            </div>
+          </div>
+          <div style="margin-top:18px; padding-top:14px; border-top:1px solid #2b2e3c; font-size:13px; color:#565b71; line-height:1.5;">
+            <span style="color:#e0a35e;">observation only</span> — reads live state directly (clash API on <span style="color:#8b90a4;">127.0.0.1:9090</span> · <span style="color:#8b90a4;">~/.config/rowt/</span> logs + state); never changes routing, servers, or the proxy, and doesn't depend on the <span style="color:#8b90a4;">rowt</span> tool.
+          </div>
+        </div>
+      </div>
+    </sc-if>
+
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1400,&quot;height&quot;:1000},&quot;speed&quot;:{&quot;editor&quot;:&quot;range&quot;,&quot;default&quot;:1,&quot;min&quot;:0.25,&quot;max&quot;:3,&quot;step&quot;:0.25,&quot;unit&quot;:&quot;×&quot;,&quot;tsType&quot;:&quot;number&quot;,&quot;section&quot;:&quot;Motion&quot;},&quot;accent&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:&quot;#7c9df0&quot;,&quot;options&quot;:[&quot;#7c9df0&quot;,&quot;#56c7be&quot;,&quot;#c58fe0&quot;,&quot;#e0a35e&quot;],&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Theme&quot;},&quot;laneFilter&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;default&quot;:&quot;All&quot;,&quot;options&quot;:[&quot;All&quot;,&quot;escape&quot;,&quot;corp&quot;,&quot;direct&quot;,&quot;block&quot;],&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;View&quot;}}">
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    const r = (a, b) => a + Math.random() * (b - a);
+    const mk = (lane, hp, count, rup, rdown, rule) => ({
+      lane, hp, count, rup, rdown, baseUp: rup, baseDown: rdown,
+      up: rup * r(4, 9) + r(1e4, 4e5), down: rdown * r(4, 9) + r(1e4, 4e5), rule
+    });
+    const blk = (hp, count) => ({ lane: 'block', hp, count, rup: 0, rdown: 0, baseUp: 0, baseDown: 0, up: 0, down: 0, rule: 'block' });
+    const conns = [
+      mk('escape', 'api.anthropic.com:443', 2, 3.1e6, 1.3e5, 'domain_suffix'),
+      mk('escape', 'i.ytimg.com:443', 3, 5.2e4, 5.4e6, 'domain_suffix'),
+      mk('escape', 'raw.githubusercontent.com:443', 1, 9.2e3, 2.1e6, 'domain_suffix'),
+      mk('escape', 'claude.ai:443', 1, 3.2e4, 1.4e4, 'domain_suffix'),
+      mk('escape', 'www.googleapis.com:443', 1, 8.4e4, 1.2e5, 'domain_suffix'),
+      mk('corp', 'git.corp.example.com:443', 2, 1.6e5, 1.25e6, 'domain_suffix'),
+      mk('corp', 'jira.corp.example.com:443', 1, 6.4e4, 1.9e5, 'domain_suffix'),
+      mk('corp', '10.20.3.14:22', 1, 8.4e3, 9.1e3, 'ip_cidr'),
+      mk('direct', 'mirrors.aliyun.com:443', 2, 1.4e4, 8.3e6, 'final'),
+      mk('direct', 'gateway.icloud.com:443', 1, 5.1e3, 5.3e3, 'final'),
+      mk('direct', 'dl.google.com:443', 1, 3.2e3, 6.4e5, 'final'),
+      blk('doubleclick.net:443', 5),
+      blk('googlesyndication.com:443', 2),
+    ];
+    const laneDown = { escape: [], corp: [], direct: [], block: [] };
+    const tu = [], td = [];
+    const lr0 = this._laneRates(conns);
+    for (let i = 0; i < 26; i++) {
+      let su = 0, sd = 0;
+      ['escape', 'corp', 'direct', 'block'].forEach(l => {
+        const v = lr0[l][1] * r(0.5, 1.4);
+        laneDown[l].push(v); sd += v; su += lr0[l][0] * r(0.5, 1.4);
+      });
+      tu.push(su); td.push(sd);
+    }
+    const f = (props.laneFilter && props.laneFilter !== 'All') ? props.laneFilter : null;
+    const errSeedPool = [
+      ['direct', 'rr3.googlevideo.com', 'timeout'], ['direct', 'rr5.googlevideo.com', 'timeout'],
+      ['direct', 'x.com', 'reset'], ['direct', 'dl.google.com', 'timeout'],
+      ['block', 'doubleclick.net', 'refused'], ['block', 'googlesyndication.com', 'refused'],
+      ['block', 'google-analytics.com', 'refused'], ['block', 'adnxs.com', 'refused'],
+      ['block', 'criteo.com', 'refused'], ['corp', 'vpn.corp.example.com', 'timeout'],
+      ['direct', 'gateway.icloud.com', 'dns'],
+    ];
+    const nowT = Date.now(), errEvents = [];
+    for (let i = 0; i < 240; i++) {
+      const d = errSeedPool[Math.floor(Math.random() * errSeedPool.length)];
+      errEvents.push({ t: nowT - Math.pow(Math.random(), 2.3) * 864e5, lane: d[0], domain: d[1], reason: d[2] });
+    }
+    this.state = {
+      clock: this._now(), uptime: 3 * 3600 + 14 * 60, latency: 42,
+      conns, laneDown, tu, td, paused: false, help: false, focusLane: f,
+      errWindow: '10m', errEvents, pane: 'conns', selConn: 0, selErr: 0, toast: null,
+      servers: [
+        { tag: 'JP-Tokyo', ms: 42, up: true, probed: 3, active: true, src: 'user' },
+        { tag: 'HK-1', ms: 71, up: true, probed: 9, src: 'sub' },
+        { tag: 'JP-Osaka', ms: 58, up: true, probed: 5, src: 'user' },
+        { tag: 'TW-Taipei', ms: 78, up: true, probed: 11, src: 'sub' },
+        { tag: 'KR-Seoul', ms: 63, up: true, probed: 2, src: 'user' },
+        { tag: 'SG-1', ms: 96, up: true, probed: 7, src: 'sub' },
+        { tag: 'US-LA', ms: 151, up: true, probed: 4, src: 'sub' },
+        { tag: 'US-NYC', ms: 0, up: false, probed: 8, src: 'sub' },
+        { tag: 'DE-Frankfurt', ms: 243, up: true, probed: 6, src: 'sub' },
+        { tag: 'UK-London', ms: 0, up: false, probed: 10, src: 'sub' },
+      ],
+    };
+    this._pool = {
+      escape: ['fonts.gstatic.com:443', 'api.github.com:443', 'en.wikipedia.org:443', 'www.youtube.com:443'],
+      corp: ['wiki.corp.example.com:443', 'confluence.corp.example.com:443', '10.20.4.7:443'],
+      direct: ['registry.npmmirror.com:443', 'swscan.apple.com:443', 'www.baidu.com:443'],
+      block: ['adnxs.com:443', 'criteo.com:443', 'scorecardresearch.com:443', 'taboola.com:443', 'pubmatic.com:443', '360yield.com:443'],
+    };
+    this._errPool = [
+      ['direct', 'rr3.googlevideo.com', 'timeout'], ['direct', 'rr5.googlevideo.com', 'timeout'],
+      ['direct', 'x.com', 'reset'], ['direct', 'dl.google.com', 'timeout'],
+      ['block', 'doubleclick.net', 'refused'], ['block', 'googlesyndication.com', 'refused'],
+      ['block', 'google-analytics.com', 'refused'], ['block', 'adnxs.com', 'refused'],
+      ['block', 'criteo.com', 'refused'], ['corp', 'vpn.corp.example.com', 'timeout'],
+      ['direct', 'gateway.icloud.com', 'dns'],
+    ];
+    this._laneCol = { escape: '#7c9df0', corp: '#56c7be', direct: '#86c07a', block: '#d3788c' };
+  }
+
+  _laneRates(conns) {
+    const m = { escape: [0, 0], corp: [0, 0], direct: [0, 0], block: [0, 0] };
+    conns.forEach(c => { m[c.lane][0] += c.rup; m[c.lane][1] += c.rdown; });
+    return m;
+  }
+  _pad(n) { return String(n).padStart(2, '0'); }
+  _now() { const d = new Date(); return this._pad(d.getHours()) + ':' + this._pad(d.getMinutes()) + ':' + this._pad(d.getSeconds()); }
+
+  hb(b) {
+    b = Math.round(b);
+    if (b < 1024) return b + 'B';
+    if (b < 1048576) return Math.round(b / 1024) + 'K';
+    if (b < 1073741824) return (b / 1048576).toFixed(1) + 'M';
+    return (b / 1073741824).toFixed(1) + 'G';
+  }
+  rate(b) {
+    if (b < 1) return '0 B/s';
+    if (b < 1024) return Math.round(b) + ' B/s';
+    if (b < 1048576) return Math.round(b / 1024) + ' KB/s';
+    if (b < 1073741824) return (b / 1048576).toFixed(1) + ' MB/s';
+    return (b / 1073741824).toFixed(2) + ' GB/s';
+  }
+  spark(arr) {
+    const B = ' ▁▂▃▄▅▆▇█';
+    if (!arr || !arr.length) return '';
+    const max = Math.max(...arr, 1);
+    return arr.map(v => B[Math.max(0, Math.min(8, Math.round(v / max * 8)))]).join('');
+  }
+  dur(s) { const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return h + 'h ' + this._pad(m) + 'm'; }
+  probedTxt(p) { return p <= 1 ? 'now' : (p < 60 ? p + 's' : Math.floor(p / 60) + 'm ' + this._pad(p % 60) + 's'); }
+  // horizontal block bar with 1/8-cell precision (htop/btop idiom)
+  bar(frac, width) {
+    frac = Math.max(0, Math.min(1, frac || 0));
+    const total = frac * width;
+    const full = Math.floor(total);
+    const rem = total - full;
+    const parts = ['', '▏', '▎', '▍', '▌', '▋', '▊', '▉'];
+    let out = '█'.repeat(full);
+    if (full < width) out += parts[Math.round(rem * 8)] || '';
+    return out.padEnd(width, ' ');
+  }
+  padTag(t, n) { return (t.length > n ? t.slice(0, n - 1) + '…' : t).padEnd(n, ' '); }
+
+  setFocus(lane) { this.setState(s => ({ focusLane: s.focusLane === lane ? null : lane })); }
+  setWindow(w) { this.setState({ errWindow: w }); }
+  togglePause() { this.setState(s => ({ paused: !s.paused })); }
+  toggleHelp() { this.setState(s => ({ help: !s.help })); }
+
+  move(d) {
+    this.setState(s => {
+      if (s.pane === 'conns') return { selConn: Math.max(0, Math.min((this._connLen || 1) - 1, s.selConn + d)) };
+      return { selErr: Math.max(0, Math.min((this._errLen || 1) - 1, s.selErr + d)) };
+    });
+  }
+  yank() {
+    const s = this.state;
+    const val = s.pane === 'conns'
+      ? (this._connKeys || [])[Math.min(s.selConn, (this._connLen || 1) - 1)]
+      : (this._errKeys || [])[Math.min(s.selErr, (this._errLen || 1) - 1)];
+    if (!val) return;
+    try { if (navigator.clipboard) navigator.clipboard.writeText(val); } catch (e) {}
+    this._toast('copied  ' + val);
+  }
+  _toast(msg) { this.setState({ toast: msg }); clearTimeout(this._tt); this._tt = setTimeout(() => this.setState({ toast: null }), 1500); }
+  _ensureVisible() {
+    const s = this.state;
+    const cont = document.querySelector(s.pane === 'conns' ? '[data-list="conns"]' : '[data-list="errors"]');
+    if (!cont) return;
+    const idx = s.pane === 'conns' ? Math.min(s.selConn, (this._connLen || 1) - 1) : Math.min(s.selErr, (this._errLen || 1) - 1);
+    const row = cont.querySelectorAll('[data-row]')[idx];
+    if (!row) return;
+    const top = row.offsetTop, bot = top + row.offsetHeight;
+    if (top < cont.scrollTop) cont.scrollTop = top - 4;
+    else if (bot > cont.scrollTop + cont.clientHeight) cont.scrollTop = bot - cont.clientHeight + 4;
+  }
+  _applyMarquee() {
+    (this._mq || []).forEach(a => { try { a.cancel(); } catch (e) {} });
+    this._mq = [];
+    requestAnimationFrame(() => {
+      document.querySelectorAll('[data-sel-field="1"]').forEach(el => {
+        const over = el.scrollWidth - el.clientWidth;
+        if (over > 3) {
+          const dur = Math.max(2600, over * 55) + 1400;
+          const a = el.animate(
+            [{ textIndent: '0px', offset: 0 }, { textIndent: '0px', offset: 0.14 }, { textIndent: (-over - 6) + 'px', offset: 0.5 }, { textIndent: (-over - 6) + 'px', offset: 0.64 }, { textIndent: '0px', offset: 1 }],
+            { duration: dur, iterations: Infinity, easing: 'ease-in-out' }
+          );
+          this._mq.push(a);
+        }
+      });
+    });
+  }
+  componentDidUpdate() {
+    const s = this.state;
+    const sig = s.pane + '|' + s.selConn + '|' + s.selErr + '|' + s.focusLane + '|' + s.errWindow;
+    if (sig !== this._sig) { this._sig = sig; this._ensureVisible(); this._applyMarquee(); }
+  }
+
+  componentDidMount() {
+    this.iv = setInterval(() => this.tick(), 1000);
+    this._onKey = (e) => {
+      const k = e.key;
+      const lanes = [null, 'escape', 'corp', 'direct'];
+      const wins = ['5m', '10m', '1h', '24h'];
+      if (k === 'ArrowUp' || k === 'k') { e.preventDefault(); this.move(-1); }
+      else if (k === 'ArrowDown' || k === 'j') { e.preventDefault(); this.move(1); }
+      else if (k === 'ArrowLeft' || k === 'h') { e.preventDefault(); this.setState({ pane: 'conns' }); }
+      else if (k === 'ArrowRight' || k === 'l') { e.preventDefault(); this.setState({ pane: 'errors' }); }
+      else if (k === 'Tab') { e.preventDefault(); this.setState(s => ({ pane: s.pane === 'conns' ? 'errors' : 'conns' })); }
+      else if (k === 'f' || k === 'F') { this.setState(s => ({ focusLane: lanes[(lanes.indexOf(s.focusLane) + 1) % lanes.length] })); }
+      else if (k === '1') { this.setState({ focusLane: 'escape' }); }
+      else if (k === '2') { this.setState({ focusLane: 'corp' }); }
+      else if (k === '3') { this.setState({ focusLane: 'direct' }); }
+      else if (k === '0') { this.setState({ focusLane: null }); }
+      else if (k === 'w' || k === 'W') { this.setState(s => ({ errWindow: wins[(wins.indexOf(s.errWindow) + 1) % wins.length] })); }
+      else if (k === '[') { this.setState(s => ({ errWindow: wins[(wins.indexOf(s.errWindow) + wins.length - 1) % wins.length] })); }
+      else if (k === ']') { this.setState(s => ({ errWindow: wins[(wins.indexOf(s.errWindow) + 1) % wins.length] })); }
+      else if (k === 'y' || k === 'Y') { this.yank(); }
+      else if (k === 'p' || k === 'P') { this.togglePause(); }
+      else if (k === '?') { this.toggleHelp(); }
+      else if (k === 'q' || k === 'Q') { this._toast('q — quit (disabled in prototype)'); }
+      else if (k === 'Escape') { this.setState(s => (s.help ? { help: false } : { focusLane: null })); }
+    };
+    window.addEventListener('keydown', this._onKey);
+    this._sig = ''; setTimeout(() => this._applyMarquee(), 0);
+  }
+  componentWillUnmount() { clearInterval(this.iv); window.removeEventListener('keydown', this._onKey); }
+
+  tick() {
+    const speed = this.props.speed ?? 1;
+    this.setState(s => {
+      if (s.paused) return { clock: this._now() };
+      const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+      const walk = (n, lo, hi) => { if (Math.random() < 0.2) n += (Math.random() < 0.5 ? -1 : 1); return clamp(n, lo, hi); };
+      let conns = s.conns.map(c => {
+        if (c.lane === 'block') return { ...c, up: 0, down: 0, count: walk(c.count, 1, 6) };
+        const rup = clamp(c.rup * (0.75 + Math.random() * 0.5), c.baseUp * 0.2, c.baseUp * 2.3);
+        const rdown = clamp(c.rdown * (0.75 + Math.random() * 0.5), c.baseDown * 0.2, c.baseDown * 2.3);
+        return { ...c, rup, rdown, up: c.up + rup * speed, down: c.down + rdown * speed, count: walk(c.count, 1, 8) };
+      });
+      if (conns.length < 14 && Math.random() < 0.16) {
+        const lanes = ['escape', 'escape', 'corp', 'direct', 'block'];
+        const lane = lanes[Math.floor(Math.random() * lanes.length)];
+        const shown = conns.map(c => c.hp);
+        const avail = this._pool[lane].filter(h => !shown.includes(h));
+        if (avail.length) {
+          const hp = avail[Math.floor(Math.random() * avail.length)];
+          if (lane === 'block') conns.push({ lane, hp, count: 1, rup: 0, rdown: 0, baseUp: 0, baseDown: 0, up: 0, down: 0, rule: 'block' });
+          else {
+            const rup = (lane === 'escape' ? 2e5 : 4e4) * (0.5 + Math.random());
+            const rdown = (lane === 'direct' ? 3e6 : 8e5) * (0.5 + Math.random());
+            conns.push({ lane, hp, count: 1, rup, rdown, baseUp: rup, baseDown: rdown, up: rup, down: rdown, rule: lane === 'corp' ? 'domain_suffix' : (lane === 'direct' ? 'final' : 'domain_suffix') });
+          }
+        }
+      }
+      if (conns.length > 10 && Math.random() < 0.12) {
+        conns.splice(4 + Math.floor(Math.random() * (conns.length - 4)), 1);
+      }
+      const lr = this._laneRates(conns);
+      const push = (a, v) => a.concat(v).slice(-26);
+      const laneDown = {
+        escape: push(s.laneDown.escape, lr.escape[1]),
+        corp: push(s.laneDown.corp, lr.corp[1]),
+        direct: push(s.laneDown.direct, lr.direct[1]),
+        block: push(s.laneDown.block, s.conns.filter(c => c.lane === 'block').length),
+      };
+      let tU = 0, tD = 0; conns.forEach(c => { tU += c.rup; tD += c.rdown; });
+      const tu = push(s.tu, tU), td = push(s.td, tD);
+      // errors: append fresh failure events (rolling window filters them in renderVals)
+      let errEvents = s.errEvents;
+      if (Math.random() < 0.6 * speed) {
+        const add = [];
+        const n = 1 + (Math.random() < 0.4 ? 1 : 0);
+        for (let k = 0; k < n; k++) { const e = this._errPool[Math.floor(Math.random() * this._errPool.length)]; add.push({ t: Date.now(), lane: e[0], domain: e[1], reason: e[2] }); }
+        errEvents = errEvents.concat(add);
+        if (errEvents.length > 800) { const cut = Date.now() - 864e5; errEvents = errEvents.filter(e => e.t >= cut).slice(-800); }
+      }
+      let latency = clamp(s.latency + (Math.random() - 0.5) * 8, 34, 96);
+      if (Math.random() < 0.04) latency = clamp(latency + 40, 34, 140);
+      // server health: round-robin re-probe the stalest server on a steady cadence
+      let servers = s.servers.map(sv => ({ ...sv, probed: sv.probed + 1 }));
+      const stale = servers.reduce((a, b) => (b.probed > a.probed ? b : a), servers[0]);
+      if (stale.probed >= 12) {
+        const i = servers.indexOf(stale);
+        const sv = { ...servers[i], probed: 0 };
+        if (sv.up) { sv.ms = clamp(Math.round(sv.ms * (0.85 + Math.random() * 0.3)) || 60, 30, 320); if (Math.random() < 0.05) { sv.up = false; sv.ms = 0; } }
+        else if (Math.random() < 0.4) { sv.up = true; sv.ms = Math.round(60 + Math.random() * 160); }
+        if (sv.active && !sv.up) { sv.up = true; sv.ms = Math.round(38 + Math.random() * 12); }
+        servers[i] = sv;
+      }
+      return { conns, laneDown, tu, td, errEvents, servers, uptime: s.uptime + 1, clock: this._now(), latency };
+    });
+  }
+
+  renderVals() {
+    const s = this.state;
+    const accent = this.props.accent ?? '#7c9df0';
+    const focus = s.focusLane;
+    const lc = this._laneCol;
+
+    const laneObj = lane => {
+      const cs = s.conns.filter(c => c.lane === lane);
+      let up = 0, down = 0, count = 0;
+      cs.forEach(c => { up += c.rup; down += c.rdown; count += c.count; });
+      const focused = focus === lane;
+      const dim = focus && !focused;
+      const col = lc[lane];
+      return {
+        count, up: this.rate(up), down: this.rate(down), spark: this.spark(s.laneDown[lane]),
+        onClick: () => this.setFocus(lane),
+        cardStyle: {
+          border: '1px solid ' + (focused ? col : '#2b2e3c'), borderRadius: '9px',
+          background: '#191b22', padding: '11px 14px', cursor: 'pointer',
+          opacity: dim ? 0.42 : 1, transition: 'opacity .15s, border-color .15s, box-shadow .15s',
+          boxShadow: focused ? ('inset 3px 0 0 ' + col + ', 0 0 0 1px ' + col + ', 0 0 22px -8px ' + col) : ('inset 3px 0 0 ' + col),
+        },
+      };
+    };
+    const escape = laneObj('escape'), corp = laneObj('corp'), direct = laneObj('direct'), block = laneObj('block');
+
+    let tU = 0, tD = 0, tc = 0;
+    s.conns.forEach(c => { if (c.lane === 'block') return; tU += c.rup; tD += c.rdown; tc += c.count; });
+    const totals = { up: this.rate(tU), down: this.rate(tD), conns: tc, upSpark: this.spark(s.tu), downSpark: this.spark(s.td) };
+
+    const order = { escape: 0, corp: 1, direct: 2 };
+    let list = s.conns.filter(c => c.lane !== 'block');
+    if (focus) list = list.filter(c => c.lane === focus);
+    list.sort((a, b) => (order[a.lane] - order[b.lane]) || (b.down - a.down));
+    const selC = Math.max(0, Math.min(s.selConn, list.length - 1));
+    this._connLen = list.length;
+    this._connKeys = list.map(c => c.hp);
+    const pConns = s.pane === 'conns';
+    const conns = list.map((c, i) => {
+      const isSel = i === selC;
+      return {
+        laneName: c.lane,
+        badgeStyle: { color: lc[c.lane], fontWeight: 700, letterSpacing: '.02em' },
+        onClick: () => this.setState({ pane: 'conns', selConn: i }),
+        sel: isSel ? '1' : '0',
+        rowStyle: {
+          display: 'grid', gridTemplateColumns: '76px 1fr 48px 96px 100px 128px', alignItems: 'center',
+          gap: '16px', padding: '4px 12px', borderRadius: '5px', cursor: 'pointer',
+          background: isSel ? (pConns ? (accent + '22') : 'rgba(255,255,255,0.05)') : 'transparent',
+          boxShadow: isSel && pConns ? ('inset 2px 0 0 ' + accent) : 'none',
+        },
+        hostStyle: { color: '#e9ecf3', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: isSel ? 'clip' : 'ellipsis' },
+        hostport: c.hp, count: c.count, up: '↑' + this.hb(c.up), down: '↓' + this.hb(c.down), rule: c.rule,
+      };
+    });
+
+    // errors — aggregate the rolling window by domain (mirrors `rowt <lane> errors`)
+    // categories: transient (dns) = orange · persistent (timeout/reset/refused) = red · blocked = purple
+    const CAT_TRANSIENT = '#e0a35e', CAT_PERSISTENT = '#e0655e', CAT_BLOCKED = '#a98ad6';
+    const catOf = e => e.lane === 'block' ? 'blocked' : (e.reason === 'dns' ? 'transient' : 'persistent');
+    const catColor = { transient: CAT_TRANSIENT, persistent: CAT_PERSISTENT, blocked: CAT_BLOCKED };
+    const win = s.errWindow;
+    const winMs = { '5m': 3e5, '10m': 6e5, '1h': 36e5, '24h': 864e5 }[win] || 6e5;
+    const now = Date.now();
+    const recent = s.errEvents.filter(e => now - e.t <= winMs);
+    const aggm = {};
+    recent.forEach(e => { if (!aggm[e.domain]) aggm[e.domain] = { domain: e.domain, lane: e.lane, reason: e.reason, count: 0 }; aggm[e.domain].count++; });
+    const arr = Object.keys(aggm).map(k => aggm[k]).sort((a, b) => b.count - a.count);
+    const cnt = { transient: 0, persistent: 0, blocked: 0 };
+    recent.forEach(e => { cnt[catOf(e)]++; });
+    const domainsIn = c => arr.filter(a => catOf(a) === c).length;
+    const errHdr = {
+      window: win,
+      transient: cnt.transient, transientDomains: domainsIn('transient'),
+      persistent: cnt.persistent, persistentDomains: domainsIn('persistent'),
+      blocked: cnt.blocked, blockedDomains: domainsIn('blocked'),
+    };
+    const pErr = s.pane === 'errors';
+    const rawRows = arr.slice(0, 12);
+    const selE = Math.max(0, Math.min(s.selErr, rawRows.length - 1));
+    this._errLen = rawRows.length;
+    this._errKeys = rawRows.map(e => e.domain);
+    const allRows = rawRows.map((e, i) => {
+      const cat = catOf(e);
+      const isSel = i === selE;
+      return {
+        count: e.count, domain: e.domain, laneName: e.lane,
+        reason: e.lane === 'block' ? 'blocked' : e.reason,
+        reasonStyle: { color: catColor[cat], fontSize: '13px' },
+        sel: isSel ? '1' : '0',
+        onClick: () => this.setState({ pane: 'errors', selErr: i }),
+        countStyle: { color: '#e9ecf3', fontWeight: 700, textAlign: 'right' },
+        rowStyle: {
+          display: 'grid', gridTemplateColumns: '40px 84px 1fr', alignItems: 'center', gap: '20px',
+          padding: '4px 8px', borderRadius: '5px', cursor: 'pointer',
+          background: isSel ? (pErr ? (accent + '22') : 'rgba(255,255,255,0.05)') : 'transparent',
+          boxShadow: isSel && pErr ? ('inset 2px 0 0 ' + accent) : 'none',
+        },
+        domStyle: { color: '#c3c8d6', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: isSel ? 'clip' : 'ellipsis', fontSize: '13px' },
+      };
+    });
+    const allEmpty = recent.length === 0;
+    const allMore = arr.length > 12 ? ('+' + (arr.length - 12) + ' more') : '';
+    const windows = ['5m', '10m', '1h', '24h'].map(w => ({
+      label: w, onClick: () => this.setWindow(w),
+      style: { padding: '2px 9px', borderRadius: '5px', fontSize:'13px', cursor: 'pointer', color: w === win ? '#e9ecf3' : '#656a82', background: w === win ? '#2b2e3c' : 'transparent', fontWeight: w === win ? 600 : 400 },
+    }));
+
+    // server health — up / down rows, each horizontally scrollable
+    const latCol = ms => ms < 70 ? '#86c07a' : ms < 140 ? '#e0a35e' : '#d3788c';
+    const chipBase = active => ({
+      display: 'inline-flex', alignItems: 'center', gap: '7px', flexShrink: 0,
+      padding: '4px 11px', borderRadius: '7px', fontSize:'13px',
+      border: '1px solid ' + (active ? accent : '#2b2e3c'),
+      background: active ? (accent + '14') : '#1c1e26',
+    });
+    const upServers = s.servers.filter(x => x.up).sort((a, b) => (a.active !== b.active ? (a.active ? -1 : 1) : (a.ms - b.ms)));
+    const downServers = s.servers.filter(x => !x.up).sort((a, b) => a.tag.localeCompare(b.tag));
+    const freshest = Math.min.apply(null, s.servers.map(x => x.probed));
+    const servers = {
+      upCount: upServers.length,
+      downCount: downServers.length,
+      allUp: downServers.length === 0,
+      summary: s.servers.length + ' servers · ' + upServers.length + ' up · ' + downServers.length + ' down · last probe ~' + this.probedTxt(freshest) + ' ago · active ' + (s.servers.find(x => x.active) || {}).tag,
+      upList: upServers.map(sv => ({
+        mark: sv.active ? '▍' : '●',
+        markStyle: { color: sv.active ? accent : '#86c07a', fontWeight: 700, fontSize:'13px' },
+        tag: sv.tag,
+        tagStyle: { color: sv.active ? accent : '#e9ecf3', fontWeight: sv.active ? 700 : 500 },
+        lat: sv.ms + ' ms',
+        latStyle: { color: latCol(sv.ms), fontWeight: 600 },
+        probed: sv.probed <= 1 ? 'now' : this.probedTxt(sv.probed),
+        chipStyle: chipBase(sv.active),
+      })),
+      downList: downServers.map(sv => ({
+        tag: sv.tag,
+        tagStyle: { color: '#a3707d', fontWeight: 500 },
+        dotStyle: { color: '#d3788c', fontSize:'13px' },
+        probed: sv.probed <= 1 ? 'now' : this.probedTxt(sv.probed),
+        chipStyle: chipBase(false),
+      })),
+    };
+    const srvChips = s.servers.filter(x => x.up && !x.active)
+      .sort((a, b) => (a.src !== b.src ? (a.src === 'user' ? -1 : 1) : a.tag.localeCompare(b.tag)))
+      .map(sv => ({
+        tag: sv.tag,
+        tagStyle: { color: '#c3c8d6' },
+        val: sv.ms + ' ms',
+        valStyle: { color: latCol(sv.ms), display: 'inline-block', width: '52px', textAlign: 'right' },
+        probed: sv.probed <= 1 ? 'now' : this.probedTxt(sv.probed),
+        chipStyle: {
+          display: 'inline-flex', alignItems: 'baseline', gap: '8px', flexShrink: 0,
+          padding: '4px 13px', borderRadius: '7px', fontSize: '13px',
+          border: '1px solid #2b2e3c', background: '#1c1e26',
+        },
+      }));
+
+    const lat = Math.round(s.latency);
+    const latColor = lat < 60 ? '#86c07a' : lat < 120 ? '#e0a35e' : '#d3788c';
+    const ctx = {
+      mode: 'host', server: 'JP-Tokyo', latency: lat + ' ms',
+      router: 'running · :7890', proxy: 'on · Wi-Fi', uptime: this.dur(s.uptime), cfg: 'host.json OK',
+    };
+
+    // ---- header rate table: a shared grid so the totals row lines up with the lane rows ----
+    const laneList = ['escape', 'corp', 'direct', 'block'];
+    const laneRates = this._laneRates(s.conns);
+    const laneCount = l => { let n = 0; s.conns.filter(c => c.lane === l).forEach(c => n += c.count); return n; };
+    const rateLanesL = ['escape', 'corp', 'direct'];
+    const rowGrid = (borderCol) => ({
+      display: 'grid', gridTemplateColumns: '76px 148px 148px 1fr', alignItems: 'baseline',
+      gap: '14px', cursor: 'pointer', padding: '2px 0 2px 11px',
+      borderLeft: '2px solid ' + borderCol, transition: 'opacity .15s, border-color .15s',
+    });
+    const udStyle = dim => ({ color: dim ? '#5c6076' : '#c3c8d6', display: 'inline-block' });
+    const totalRow = {
+      name: 'all',
+      nameStyle: { color: focus ? '#8b90a4' : '#e9ecf3', fontWeight: 700, letterSpacing: '.04em' },
+      up: totals.up, down: totals.down,
+      upStyle: udStyle(false), downStyle: udStyle(false),
+      count: tc + ' conn',
+      countStyle: { color: '#e9ecf3', fontWeight: 700, textAlign: 'right' },
+      cellStyle: { ...rowGrid(focus ? 'transparent' : accent), opacity: 1 },
+      onClick: () => this.setState({ focusLane: null }),
+    };
+    const laneRateRows = rateLanesL.map(l => {
+      const focused = focus === l, dim = focus && !focused;
+      return {
+        name: l,
+        nameStyle: { color: lc[l], fontWeight: 700 },
+        up: this.rate(laneRates[l][0]), down: this.rate(laneRates[l][1]),
+        upStyle: udStyle(dim), downStyle: udStyle(dim),
+        count: laneCount(l) + ' conn',
+        countStyle: { color: dim ? '#3f4356' : '#565b71', textAlign: 'right' },
+        cellStyle: { ...rowGrid(focused ? lc[l] : 'transparent'), opacity: dim ? 0.5 : 1 },
+        onClick: () => this.setFocus(l),
+      };
+    });
+    const rateRows = [totalRow, ...laneRateRows];
+    const blockFocused = focus === 'block', blockDim = focus && !blockFocused;
+    const blockCell = {
+      count: laneCount('block'),
+      cellStyle: { cursor: 'pointer', opacity: blockDim ? 0.4 : 1, borderLeft: '2px solid ' + (blockFocused ? lc.block : 'transparent'), paddingLeft: '9px' },
+      onClick: () => this.setFocus('block'),
+    };
+    const tputPeak = Math.max(1, ...s.tu.slice(-1), ...s.td.slice(-1), tU, tD);
+    const tputBars = {
+      upBar: this.bar(tU / tputPeak, 40), downBar: this.bar(tD / tputPeak, 40),
+      up: this.rate(tU), down: this.rate(tD),
+    };
+    // server rows with latency bars
+    const latMax = Math.max(1, ...s.servers.filter(x => x.up).map(x => x.ms));
+    const srvRows = s.servers.slice().sort((a, b) => (a.up !== b.up ? (a.up ? -1 : 1) : (a.active !== b.active ? (a.active ? -1 : 1) : a.ms - b.ms))).map(sv => {
+      const col = !sv.up ? '#d3788c' : sv.ms < 70 ? '#86c07a' : sv.ms < 140 ? '#e0a35e' : '#e0a35e';
+      return {
+        mark: sv.active ? '▶' : (sv.up ? '·' : '✕'),
+        markStyle: { color: sv.active ? accent : (sv.up ? '#4c5064' : '#d3788c'), textAlign: 'center' },
+        tag: this.padTag(sv.tag, 13),
+        tagStyle: { color: sv.active ? accent : (sv.up ? '#c3c8d6' : '#a3707d'), fontWeight: sv.active ? 700 : 400 },
+        barChars: sv.up ? this.bar(sv.ms / latMax, 22) : '',
+        barStyle: { color: col, whiteSpace: 'pre', letterSpacing: '-0.5px' },
+        val: sv.up ? (String(sv.ms).padStart(3, ' ') + ' ms') : 'DOWN',
+        valStyle: { color: col, fontWeight: sv.up ? 400 : 700, textAlign: 'right' },
+        probed: (sv.probed <= 1 ? 'now' : this.probedTxt(sv.probed)).padStart(6, ' '),
+        rowStyle: { display: 'grid', gridTemplateColumns: '16px 108px 24ch 62px 60px', alignItems: 'baseline', gap: '10px', padding: '1px 0' },
+      };
+    });
+
+    const filterActive = !!focus;
+    const pane = s.pane;
+    const ringBase = on => ({ position: 'absolute', inset: 0, pointerEvents: 'none', borderRadius: '2px', transition: 'opacity .15s', opacity: on ? 1 : 0, border: '1px solid ' + accent, boxShadow: '0 0 0 1px ' + accent + ', inset 0 0 26px -12px ' + accent });
+    const connRing = ringBase(pane === 'conns');
+    const errRing = ringBase(pane === 'errors');
+    const selKey = pane === 'conns'
+      ? (this._connKeys || [])[Math.min(s.selConn, (this._connLen || 1) - 1)]
+      : (this._errKeys || [])[Math.min(s.selErr, (this._errLen || 1) - 1)];
+    const hintPane = pane === 'conns' ? 'live · connections' : 'errors & blocked';
+    const hintPaneStyle = { color: accent, fontWeight: 700 };
+    const selInfo = selKey ? ('▸ ' + selKey + '   ·   y to copy') : '';
+    return {
+      pane, connRing, errRing, hintPane, hintPaneStyle, selInfo, toast: s.toast,
+      focusConns: () => { if (this.state.pane !== 'conns') this.setState({ pane: 'conns' }); },
+      focusErrors: () => { if (this.state.pane !== 'errors') this.setState({ pane: 'errors' }); },
+      rateRows, blockCell, tputBars, srvRows,
+      clock: s.clock, help: s.help,
+      bannerStyle: { color: accent, whiteSpace: 'pre', fontSize:'13px', lineHeight: '1.05', letterSpacing: '0', margin: 0, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace" },
+      liveLabel: s.paused ? 'PAUSED' : 'LIVE',
+      liveDotStyle: { color: s.paused ? '#e0a35e' : '#86c07a', animation: s.paused ? 'none' : 'rowtPulse 1.6s ease-in-out infinite' },
+      filterChipLabel: filterActive ? ('filter: ' + focus) : '',
+      filterChipStyle: filterActive
+        ? { display: 'inline-flex', alignItems: 'center', padding: '3px 10px', borderRadius: '20px', fontSize:'13px', border: '1px solid ' + lc[focus], color: lc[focus], background: lc[focus] + '18' }
+        : { display: 'none' },
+      connFilterTag: filterActive ? ('— ' + focus + ' only') : '',
+      connFilterTagStyle: { color: filterActive ? lc[focus] : 'transparent', letterSpacing: '0', textTransform: 'none' },
+      serverStyle: { color: accent, fontWeight: 700 },
+      latStyle: { color: latColor, fontWeight: 700 },
+      togglePause: () => this.togglePause(),
+      toggleHelp: () => this.toggleHelp(),
+      ctx, totals, escape, corp, direct, block, conns, servers, srvChips,
+      errHdr, allRows, allEmpty, allMore, windows,
+    };
+  }
+}
+</script>
+</body>
+</html>

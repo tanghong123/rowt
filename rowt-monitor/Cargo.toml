@@ -1,0 +1,26 @@
+[package]
+name = "rowt-monitor"
+version = "0.1.0"
+edition = "2021"
+description = "Read-only terminal UI for observing a running rowt proxy"
+license = "MIT"
+# Keep the binary name aligned with how `rowt monitor` execs it.
+default-run = "rowt-monitor"
+
+[[bin]]
+name = "rowt-monitor"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", default-features = false }
+arboard = { version = "3", default-features = false }
+anyhow = "1"
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+strip = true
