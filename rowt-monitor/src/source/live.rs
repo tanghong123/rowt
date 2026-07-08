@@ -85,7 +85,10 @@ impl LiveSource {
         let delays = Arc::clone(&self.delays);
         let cfg = self.cfg.clone();
         let port = self.clash_port;
-        let url = std::env::var("ROWT_PING_URL").unwrap_or_else(|_| "http://cp.cloudflare.com/generate_204".to_string());
+        // Probe target: Google's generate_204 (blocked in CN when direct, so it
+        // reaches 204 only *through* a working escape) — this tests real escape
+        // reachability, matching rowt's auto-select urltest. Override via env.
+        let url = std::env::var("ROWT_PING_URL").unwrap_or_else(|_| "https://www.gstatic.com/generate_204".to_string());
         // Default: probe every 10 minutes (override with ROWT_MONITOR_PROBE_INTERVAL secs).
         let interval = Duration::from_secs(env_port("ROWT_MONITOR_PROBE_INTERVAL", 600).max(5) as u64);
         let (tx, rx) = mpsc::channel::<()>();
