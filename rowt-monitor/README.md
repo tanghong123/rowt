@@ -38,9 +38,15 @@ Everything is derived on a 2-second tick from: the clash API
 `~/.config/rowt/log/lane-*.log`, and host system facts. Respects
 `ROWT_CLASH_PORT` (default 9090) and `ROWT_PORT` (default 7890).
 
-## Design fidelity
+## Design
 
-The layout, colors, and 130-column reflow reproduce the design captures in
-`../ux-design/rowt_monitor/renders/` byte-for-byte in width. The
-`tests/golden.rs` suite renders each geometry via ratatui's `TestBackend` and
-diffs against those captures; `--render WxH` is the same path exposed on the CLI.
+- **[DESIGN.md](DESIGN.md)** — the full design doc: architecture, the data
+  pipeline (clash API, incremental log tailing, block-lane bucketing, the
+  server-health prober), rendering, interactions, resource characteristics, and
+  the testing strategy.
+- **[`../ux-design/rowt_monitor/`](../ux-design/rowt_monitor/)** — the
+  authoritative UX spec + byte-exact ground-truth renders + HTML prototype.
+
+The layout, colors, and 130-column reflow reproduce those captures byte-for-byte
+in width. `tests/golden.rs` renders each geometry via ratatui's `TestBackend` and
+diffs against them; `--render WxH` is the same path exposed on the CLI.
