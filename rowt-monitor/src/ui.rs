@@ -272,13 +272,13 @@ fn draw_caption(buf: &mut Buffer, corner: u16, y: u16, label: &str, app: &App, p
     x += 3;
     put(buf, x, y, label, cstyle);
     x += dw(label);
-    // active lane filter chip in the connections caption
-    if which == Focus::Conn {
-        if let Some(l) = app.lane_filter {
-            let chip = format!(" · {}", l.label());
-            put(buf, x, y, &chip, theme::fg(l.color()));
-            x += dw(&chip);
-        }
+    // Active lane filter chip — shown on both panes, since the filter now scopes
+    // the connections list AND the errors pane.
+    let _ = which;
+    if let Some(l) = app.lane_filter {
+        let chip = format!(" · {}", l.label());
+        put(buf, x, y, &chip, theme::fg(l.color()));
+        x += dw(&chip);
     }
     put(buf, x, y, " ├", border);
 }

@@ -91,7 +91,7 @@ pub struct App {
 impl App {
     pub fn new(mut source: Box<dyn Source>) -> Self {
         let window = Window::M10;
-        let snap = source.poll(window);
+        let snap = source.poll(window, None);
         App {
             source,
             snap,
@@ -118,9 +118,15 @@ impl App {
     /// Data tick: re-poll unless paused.
     pub fn tick(&mut self) {
         if !self.paused {
-            self.snap = self.source.poll(self.window);
+            self.snap = self.source.poll(self.window, self.lane_filter);
             self.clamp_selection();
         }
+    }
+
+    /// Re-poll now with the current window + lane filter (immediate feedback on
+    /// a window/lane change; cheap — errors re-aggregate in memory).
+    fn repoll(&mut self) {
+        self.snap = self.source.poll(self.window, self.lane_filter);
     }
 
     /// Show a transient footer message (auto-clears — see `draw_footer`).
@@ -182,13 +188,11 @@ impl App {
                     Some(Lane::Direct) => None,
                     Some(Lane::Block) => None,
                 };
-                self.conn_sel = 0;
-                self.conn_scroll = 0;
+                self.on_lane_change();
             }
             LaneSet(l) => {
                 self.lane_filter = l;
-                self.conn_sel = 0;
-                self.conn_scroll = 0;
+                self.on_lane_change();
             }
             WindowCycle => {
                 let i = (self.window.index() + 1) % Window::ALL.len();
@@ -231,9 +235,19 @@ impl App {
 
     /// Re-aggregate the errors pane for the new window immediately.
     fn tick_window(&mut self) {
-        self.snap = self.source.poll(self.window);
+        self.repoll();
         self.err_sel = self.err_sel.min(self.err_len().saturating_sub(1));
         self.ensure_visible(Focus::Err);
+    }
+
+    /// The lane filter changed: reset both panes' selection and re-poll so the
+    /// errors pane (now scoped to the filter) updates immediately.
+    fn on_lane_change(&mut self) {
+        self.conn_sel = 0;
+        self.conn_scroll = 0;
+        self.repoll();
+        self.err_sel = 0;
+        self.err_scroll = 0;
     }
 
     fn move_sel(&mut self, d: i32) {

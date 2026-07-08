@@ -33,6 +33,16 @@ rowt status                   # mode / server / proxy / reachability
 Probing for host-vs-vm is most accurate with the corp VPN on, so if you let
 `rowt up` auto-detect, re-run it once after connecting corp.)
 
+**One-time shell setup (recommended).** Add this to your `~/.zshrc` (after
+`brew shellenv`):
+
+```sh
+eval "$(rowt shell-init)"
+```
+
+It gives you **tab-completion** for every subcommand *and* the `rowt-proxy-on` /
+`rowt-proxy-off` aliases used below — idempotent, so it's safe to keep in your rc.
+
 Day to day:
 
 ```sh
@@ -42,10 +52,16 @@ rowt corp add '*.intranet.example.com' '10.0.0.0/8'   # send a domain or CIDR in
 rowt block add ads.example.com   # sinkhole an ad/telemetry domain (no DNS, no dial)
 rowt use JP                   # pick a server (rowt ping shows the fastest)
 rowt status                   # is it working? (mode / server / proxy / reachability)
+rowt monitor                  # live full-screen dashboard (connections, errors, server health)
 rowt reload                   # after switching Wi-Fi ↔ wired ↔ hotspot
 rowt watch install            # (optional) auto-reload on every network change
 rowt down                     # stop everything
 ```
+
+**`rowt monitor`** is the read-only, `htop`-style live view — press `?` for keys,
+`q` to quit. Great for watching what's going through escape vs direct, spotting
+domains that are failing (candidates for `rowt escape add`), and checking server
+latency at a glance. See [Monitor (TUI)](#monitor-tui).
 
 Tired of running `rowt reload` by hand after every network switch? **`rowt watch
 install`** sets up a LaunchAgent that does it for you — it re-applies on each

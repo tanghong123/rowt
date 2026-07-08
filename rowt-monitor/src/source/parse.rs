@@ -226,6 +226,7 @@ pub struct ErrEvent {
     pub secs: i64,
     pub domain: String,
     pub kind: ErrKind,
+    pub lane: Lane, // which lane logged it (for the lane filter)
 }
 
 /// Classify a lane-log error message into a UI category.
@@ -248,8 +249,8 @@ pub fn classify_err(is_block: bool, msg: &str) -> ErrKind {
     }
 }
 
-/// Parse one lane-log line (TSV: `timestamp\tdomain\tmessage`).
-pub fn parse_lane_line(line: &str, is_block: bool) -> Option<ErrEvent> {
+/// Parse one lane-log line (TSV: `timestamp\tdomain\tmessage`) for `lane`.
+pub fn parse_lane_line(line: &str, lane: Lane) -> Option<ErrEvent> {
     let mut it = line.splitn(3, '\t');
     let ts = it.next()?;
     let domain = it.next()?;
@@ -257,13 +258,14 @@ pub fn parse_lane_line(line: &str, is_block: bool) -> Option<ErrEvent> {
     Some(ErrEvent {
         secs: parse_ts(ts)?,
         domain: domain.to_string(),
-        kind: classify_err(is_block, msg),
+        kind: classify_err(lane == Lane::Block, msg),
+        lane,
     })
 }
 
 /// Parse a whole `lane-*.log` (TSV: `timestamp\tdomain\tmessage`).
-pub fn parse_lane_log(text: &str, is_block: bool) -> Vec<ErrEvent> {
-    text.lines().filter_map(|l| parse_lane_line(l, is_block)).collect()
+pub fn parse_lane_log(text: &str, lane: Lane) -> Vec<ErrEvent> {
+    text.lines().filter_map(|l| parse_lane_line(l, lane)).collect()
 }
 
 /// Aggregate events within the window (referenced to the newest event, so it is
@@ -332,17 +334,22 @@ pub fn aggregate_errors(events: &[ErrEvent], window_secs: i64) -> ErrAgg {
 
 /// Aggregate the errors pane from sparse non-block events (exact, per-event) plus
 /// the block-lane minute buckets. `now` is the newest timestamp across both.
-/// Block counts are bucket-accurate (~1 minute) at the window boundary.
-pub fn aggregate_split(non_block: &[ErrEvent], blocks: &BlockBuckets, window_secs: i64, now: i64) -> ErrAgg {
+/// Block counts are bucket-accurate (~1 minute) at the window boundary. When
+/// `lane_filter` is set, only that lane's failures are counted and the block
+/// category is dropped (block is its own lane, not escape/corp/direct).
+pub fn aggregate_split(non_block: &[ErrEvent], blocks: &BlockBuckets, window_secs: i64, now: i64, lane_filter: Option<Lane>) -> ErrAgg {
     let cutoff = now - window_secs;
 
-    // Non-block lanes: exact per-domain aggregation.
+    // Non-block lanes: exact per-domain aggregation, scoped to the lane filter.
     let mut tr_ev = 0u32;
     let mut pe_ev = 0u32;
     let mut tr_dom: HashSet<&str> = HashSet::new();
     let mut pe_dom: HashSet<&str> = HashSet::new();
     let mut per: HashMap<&str, (u32, HashMap<ErrKind, u32>)> = HashMap::new();
-    for e in non_block.iter().filter(|e| e.secs >= cutoff) {
+    for e in non_block
+        .iter()
+        .filter(|e| e.secs >= cutoff && lane_filter.is_none_or(|l| e.lane == l))
+    {
         match category(e.kind) {
             Cat::Transient => {
                 tr_ev += 1;
@@ -360,12 +367,15 @@ pub fn aggregate_split(non_block: &[ErrEvent], blocks: &BlockBuckets, window_sec
     }
 
     // Block lane: sum minute buckets from the window's start minute onward.
+    // Skipped entirely when a specific lane is filtered (block is not that lane).
     let mut bl_ev = 0u32;
     let mut bl_dom: HashMap<&str, u32> = HashMap::new();
-    for (_min, counts) in blocks.range(minute_of(cutoff)..) {
-        for (dom, cnt) in counts {
-            bl_ev = bl_ev.saturating_add(*cnt);
-            *bl_dom.entry(dom.as_str()).or_default() += cnt;
+    if lane_filter.is_none() {
+        for (_min, counts) in blocks.range(minute_of(cutoff)..) {
+            for (dom, cnt) in counts {
+                bl_ev = bl_ev.saturating_add(*cnt);
+                *bl_dom.entry(dom.as_str()).or_default() += cnt;
+            }
         }
     }
 
@@ -528,10 +538,10 @@ mod tests {
 
     #[test]
     fn split_aggregation_buckets_block_lane() {
-        // Non-block: one timeout (persistent), one dns (transient) at t=600s.
+        // Non-block: one direct timeout (persistent), one direct dns (transient).
         let non_block = vec![
-            ErrEvent { secs: 600, domain: "dl.google.com".into(), kind: ErrKind::Timeout },
-            ErrEvent { secs: 590, domain: "gateway.icloud.com".into(), kind: ErrKind::Dns },
+            ErrEvent { secs: 600, domain: "dl.google.com".into(), kind: ErrKind::Timeout, lane: Lane::Direct },
+            ErrEvent { secs: 590, domain: "gateway.icloud.com".into(), kind: ErrKind::Dns, lane: Lane::Direct },
         ];
         // Block buckets: ads.example 5x + trk.example 2x at minute 10 (600s), and
         // ads.example 3x back at minute 0 (0s, outside a 5m window). now = 600.
@@ -540,8 +550,8 @@ mod tests {
         blocks.entry(minute_of(600)).or_default().insert("trk.example".into(), 2);
         blocks.entry(minute_of(0)).or_default().insert("ads.example".into(), 3);
 
-        // 10-minute window from now=600 -> cutoff 0 -> includes everything.
-        let (tr, pe, bl, rows) = aggregate_split(&non_block, &blocks, 10 * 60, 600);
+        // 10-minute window, no lane filter -> cutoff 0 -> includes everything.
+        let (tr, pe, bl, rows) = aggregate_split(&non_block, &blocks, 10 * 60, 600, None);
         assert_eq!(tr.count, 1); // dns
         assert_eq!(pe.count, 1); // timeout
         assert_eq!(bl.count, 5 + 2 + 3); // all block events
@@ -551,9 +561,21 @@ mod tests {
         assert_eq!(rows[0].count, 8);
         assert_eq!(rows[0].kind, ErrKind::Blocked);
 
-        // 5-minute window (cutoff 300 -> minute 5): drops the minute-9 bucket.
-        let (_, _, bl5, _) = aggregate_split(&non_block, &blocks, 5 * 60, 600);
+        // 5-minute window (cutoff 300 -> minute 5): drops the minute-0 bucket.
+        let (_, _, bl5, _) = aggregate_split(&non_block, &blocks, 5 * 60, 600, None);
         assert_eq!(bl5.count, 5 + 2); // only minute-10 buckets
+
+        // Lane filter = direct: keep the direct failures, drop the block lane.
+        let (trd, ped, bld, _) = aggregate_split(&non_block, &blocks, 10 * 60, 600, Some(Lane::Direct));
+        assert_eq!(ped.count, 1); // direct timeout
+        assert_eq!(trd.count, 1); // direct dns
+        assert_eq!(bld.count, 0); // block is not the direct lane
+
+        // Lane filter = escape: no escape events -> everything empty.
+        let (_, pee, ble, rowse) = aggregate_split(&non_block, &blocks, 10 * 60, 600, Some(Lane::Escape));
+        assert_eq!(pee.count, 0);
+        assert_eq!(ble.count, 0);
+        assert!(rowse.is_empty());
     }
 
     #[test]
@@ -563,7 +585,7 @@ mod tests {
 2026-07-04 10:00:10\tvpn.corp.example.com\tdial tcp 1.1.1.1:443: i/o timeout
 2026-07-04 10:05:00\tgateway.icloud.com\tlookup gateway.icloud.com: broken pipe
 2026-07-04 09:00:00\told.example.com\tdial tcp: i/o timeout";
-        let events = parse_lane_log(log, false);
+        let events = parse_lane_log(log, Lane::Direct);
         assert_eq!(events.len(), 4);
         // 10m window referenced to newest (10:05:00) -> excludes the 09:00 event
         let (tr, pe, bl, rows) = aggregate_errors(&events, 10 * 60);

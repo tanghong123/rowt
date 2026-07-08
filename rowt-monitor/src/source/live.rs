@@ -24,12 +24,12 @@ use crate::source::{FixtureSource, Source};
 /// or None if the last test failed, when it was measured).
 type Delays = Arc<Mutex<HashMap<String, (Option<u32>, Instant)>>>;
 
-/// Lane logs (name, is_block) aggregated into the errors pane.
-const LANE_FILES: [(&str, bool); 4] = [
-    ("lane-escape.log", false),
-    ("lane-corp.log", false),
-    ("lane-direct.log", false),
-    ("lane-block.log", true),
+/// Lane logs (name, lane) aggregated into the errors pane.
+const LANE_FILES: [(&str, Lane); 4] = [
+    ("lane-escape.log", Lane::Escape),
+    ("lane-corp.log", Lane::Corp),
+    ("lane-direct.log", Lane::Direct),
+    ("lane-block.log", Lane::Block),
 ];
 /// On first look, seed from this much of each log's tail (recent history);
 /// afterwards only newly-appended bytes are read.
@@ -44,7 +44,7 @@ const MAX_READ_BYTES: u64 = 8 * 1024 * 1024;
 /// Per-lane read cursor for incremental log tailing.
 struct LaneCursor {
     name: &'static str,
-    is_block: bool,
+    lane: Lane,
     offset: u64,
     mtime: Option<SystemTime>,
     primed: bool,
@@ -67,7 +67,7 @@ pub struct LiveSource {
     block_buckets: BlockBuckets,
     newest_secs: i64,
     lane_cursors: Vec<LaneCursor>,
-    err_agg: Option<(Window, ErrAgg)>,
+    err_agg: Option<(Window, Option<Lane>, ErrAgg)>,
     err_last_refresh: Option<Instant>,
     err_dirty: bool,
 
@@ -105,7 +105,7 @@ impl LiveSource {
             newest_secs: 0,
             lane_cursors: LANE_FILES
                 .iter()
-                .map(|(name, is_block)| LaneCursor { name, is_block: *is_block, offset: 0, mtime: None, primed: false })
+                .map(|(name, lane)| LaneCursor { name, lane: *lane, offset: 0, mtime: None, primed: false })
                 .collect(),
             err_agg: None,
             err_last_refresh: None,
@@ -245,10 +245,11 @@ impl LiveSource {
         let logdir = self.cfg.join("log");
         let mut fresh: Vec<ErrEvent> = Vec::new();
         for i in 0..self.lane_cursors.len() {
-            let (name, is_block, mut offset, primed, old_mtime) = {
+            let (name, lane, mut offset, primed, old_mtime) = {
                 let c = &self.lane_cursors[i];
-                (c.name, c.is_block, c.offset, c.primed, c.mtime)
+                (c.name, c.lane, c.offset, c.primed, c.mtime)
             };
+            let is_block = lane == Lane::Block;
             let path = logdir.join(name);
             let Ok(meta) = std::fs::metadata(&path) else { continue };
             let size = meta.len();
@@ -270,7 +271,7 @@ impl LiveSource {
             }
 
             if size > offset {
-                if let Some((evs, new_off)) = read_lane_incremental(&path, offset, skip_leading, is_block) {
+                if let Some((evs, new_off)) = read_lane_incremental(&path, offset, skip_leading, lane) {
                     for e in evs {
                         if e.secs > self.newest_secs {
                             self.newest_secs = e.secs;
@@ -319,7 +320,7 @@ impl LiveSource {
         self.block_buckets.retain(|min, _| *min >= min_cutoff);
     }
 
-    fn errors(&mut self, window: Window) -> ErrAgg {
+    fn errors(&mut self, window: Window, lane: Option<Lane>) -> ErrAgg {
         // Check for new log data at most every 6s (fresh enough to spot new
         // blocked/failing domains, cheap enough to not amplify IO).
         let due = self.err_last_refresh.is_none_or(|t| t.elapsed() >= Duration::from_secs(6));
@@ -327,15 +328,15 @@ impl LiveSource {
             self.err_last_refresh = Some(Instant::now());
             self.refresh_errors_buf();
         }
-        // Re-aggregate only when the buffer changed or the window switched;
-        // switching windows needs no IO (it re-aggregates the in-memory buffer).
-        let window_changed = self.err_agg.as_ref().is_none_or(|(w, _)| *w != window);
-        if window_changed || self.err_dirty || self.err_agg.is_none() {
-            let agg = parse::aggregate_split(&self.errors_buf, &self.block_buckets, parse::window_secs(window), self.newest_secs);
-            self.err_agg = Some((window, agg));
+        // Re-aggregate only when the buffer changed or the window/lane switched;
+        // switching either needs no IO (re-aggregates the in-memory buffer).
+        let changed = self.err_agg.as_ref().is_none_or(|(w, l, _)| *w != window || *l != lane);
+        if changed || self.err_dirty {
+            let agg = parse::aggregate_split(&self.errors_buf, &self.block_buckets, parse::window_secs(window), self.newest_secs, lane);
+            self.err_agg = Some((window, lane, agg));
             self.err_dirty = false;
         }
-        self.err_agg.as_ref().unwrap().1.clone()
+        self.err_agg.as_ref().unwrap().2.clone()
     }
 
     /// Derive the server-health strip from the background prober's results.
@@ -442,10 +443,10 @@ impl Source for LiveSource {
         }
     }
 
-    fn poll(&mut self, window: Window) -> Snapshot {
+    fn poll(&mut self, window: Window, lane: Option<Lane>) -> Snapshot {
         // No rowt config at all -> demo fixture so we always render something.
         let Some(info) = self.host_info() else {
-            return self.fallback.poll(window);
+            return self.fallback.poll(window, lane);
         };
         let config_ok = info.config_ok;
         let escape = info.escape;
@@ -478,7 +479,7 @@ impl Source for LiveSource {
             }
         }
 
-        let (transient, persistent, blocked, errors) = self.errors(window);
+        let (transient, persistent, blocked, errors) = self.errors(window, lane);
         let h = self.servers(&state, router_up);
         // Reserve header space for the longest server name so the ms column is
         // stable as the active server changes (bounded so it can't overrun).
@@ -627,7 +628,7 @@ fn host_bind_iface(host: &Value) -> Option<String> {
 /// lines. Returns the events and the new offset (advanced only past the last
 /// newline, so a partial trailing line is re-read next time). `skip_leading`
 /// drops a partial first line (used on the first, tail-seeked read).
-fn read_lane_incremental(path: &std::path::Path, start: u64, skip_leading: bool, is_block: bool) -> Option<(Vec<ErrEvent>, u64)> {
+fn read_lane_incremental(path: &std::path::Path, start: u64, skip_leading: bool, lane: Lane) -> Option<(Vec<ErrEvent>, u64)> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = std::fs::File::open(path).ok()?;
     f.seek(SeekFrom::Start(start)).ok()?;
@@ -643,7 +644,7 @@ fn read_lane_incremental(path: &std::path::Path, start: u64, skip_leading: bool,
     let mut evs = Vec::new();
     if end > begin {
         for line in text[begin..end].lines() {
-            if let Some(e) = parse::parse_lane_line(line, is_block) {
+            if let Some(e) = parse::parse_lane_line(line, lane) {
                 evs.push(e);
             }
         }

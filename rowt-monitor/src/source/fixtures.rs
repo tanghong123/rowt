@@ -70,7 +70,9 @@ impl Source for FixtureSource {
         "fixtures"
     }
 
-    fn poll(&mut self, _window: Window) -> Snapshot {
+    fn poll(&mut self, _window: Window, _lane: Option<Lane>) -> Snapshot {
+        // The demo fixture doesn't scope errors by lane (no per-lane fixture
+        // data); the live source honours the filter.
         self.tick += 1;
 
         let conns = vec![
