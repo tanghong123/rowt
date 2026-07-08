@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::Value;
 
@@ -38,6 +38,8 @@ pub struct LiveSource {
     // server-health probing (manual selector mode leaves /proxies history empty,
     // so we actively run clash delay tests off the UI thread, like `rowt ping`).
     escape_members: Vec<String>,
+    prev_members: Vec<String>, // sorted; to detect pool changes -> auto re-probe
+    host_cache: Option<(SystemTime, HostInfo)>, // re-parse host.json only on mtime change
     delays: Delays,
     prober_started: bool,
     probe_tx: Option<Sender<()>>, // signal the prober to run now
@@ -61,6 +63,8 @@ impl LiveSource {
             prev_at: None,
             err_cache: None,
             escape_members: Vec::new(),
+            prev_members: Vec::new(),
+            host_cache: None,
             delays: Arc::new(Mutex::new(HashMap::new())),
             prober_started: false,
             probe_tx: None,
@@ -69,10 +73,6 @@ impl LiveSource {
         }
     }
 
-    /// Escape selector members (the server pool), minus the `escape` tag itself.
-    fn members(&self, host: &Value) -> Vec<String> {
-        self.escape_tags(host).into_iter().filter(|t| t != "escape").collect()
-    }
 
     /// Start the background prober once the router is reachable. It runs clash
     /// delay tests (through the tunnel, like `rowt ping`) for the whole pool on
@@ -140,8 +140,29 @@ impl LiveSource {
         req.call().ok()?.into_json().ok()
     }
 
-    fn escape_tags(&self, host: &Value) -> HashSet<String> {
-        escape_tags_of(host)
+    /// Parse-once view of host.json, re-read only when the file's mtime changes
+    /// (stat is nearly free; the 19 KB JSON parse is not repeated every tick).
+    fn host_info(&mut self) -> Option<HostInfo> {
+        let path = self.cfg.join("host.json");
+        let mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+        if let (Some(mt), Some((cmt, info))) = (mtime, self.host_cache.as_ref()) {
+            if mt == *cmt {
+                return Some(info.clone());
+            }
+        }
+        let text = std::fs::read_to_string(&path).ok()?;
+        let host: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+        let escape = escape_tags_of(&host);
+        let info = HostInfo {
+            config_ok: host.is_object(),
+            members: escape.iter().filter(|t| *t != "escape").cloned().collect(),
+            escape,
+            iface: host_bind_iface(&host),
+        };
+        if let Some(mt) = mtime {
+            self.host_cache = Some((mt, info.clone()));
+        }
+        Some(info)
     }
 
     /// Compute per-connection byte rates from the delta since the last poll.
@@ -253,6 +274,15 @@ impl LiveSource {
     }
 }
 
+/// Cached, parse-once view of the fields we need from host.json.
+#[derive(Clone)]
+struct HostInfo {
+    config_ok: bool,
+    escape: HashSet<String>,
+    members: Vec<String>,
+    iface: Option<String>,
+}
+
 /// Server-health summary returned by `LiveSource::servers`.
 struct Health {
     total: u32,
@@ -284,17 +314,21 @@ impl Source for LiveSource {
 
     fn poll(&mut self, window: Window) -> Snapshot {
         // No rowt config at all -> demo fixture so we always render something.
-        let host_text = std::fs::read_to_string(self.cfg.join("host.json"));
-        let Ok(host_text) = host_text else {
+        let Some(info) = self.host_info() else {
             return self.fallback.poll(window);
         };
-        let host: Value = serde_json::from_str(&host_text).unwrap_or(Value::Null);
-        let config_ok = host.is_object();
+        let config_ok = info.config_ok;
+        let escape = info.escape;
+        self.escape_members = info.members;
         let state = std::fs::read_to_string(self.cfg.join("state"))
             .map(|t| parse::parse_state(&t))
             .unwrap_or_default();
-        let escape = self.escape_tags(&host);
-        self.escape_members = self.members(&host);
+        // Detect a pool change (server add/rm, sub update) so we can re-probe
+        // immediately instead of waiting for the next interval.
+        let mut sig = self.escape_members.clone();
+        sig.sort();
+        let pool_changed = !self.prev_members.is_empty() && sig != self.prev_members;
+        self.prev_members = sig;
 
         // Connections + throughput from clash (empty if unreachable).
         let conns_json = self.clash_get("/connections");
@@ -307,6 +341,11 @@ impl Source for LiveSource {
         let (conns, lanes, all) = parse::build_conn_rows(&raw, &rates, &escape);
         if router_up {
             self.ensure_prober();
+            // Pool changed (server add/rm, sub update) -> probe now rather than
+            // waiting up to the full interval.
+            if pool_changed {
+                self.force_probe();
+            }
         }
 
         let (transient, persistent, blocked, errors) = self.errors(window);
@@ -321,7 +360,7 @@ impl Source for LiveSource {
             .unwrap_or(8)
             .clamp(8, 13);
 
-        let iface = host_bind_iface(&host).unwrap_or_else(|| "—".to_string());
+        let iface = info.iface.unwrap_or_else(|| "—".to_string());
         let mode = format!("{} · {}", state.get("mode").map(String::as_str).unwrap_or("host"), iface);
         let uptime = self
             .uptime_base
