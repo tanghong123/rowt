@@ -45,7 +45,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="1.3.13"
+ROWT_VERSION="1.3.14"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -521,6 +521,21 @@ lane_errors() {
 #   $PROG connections            snapshot
 #   $PROG connections escape     only that lane
 #   $PROG connections -w         refresh every 2s
+# Read-only TUI. Ships as a standalone binary (rowt-monitor) packaged with rowt;
+# we just locate it (installed next to bin/rowt, or a local cargo build) and exec.
+cmd_monitor() {
+  local bin="" cand
+  for cand in \
+    "$HERE/bin/rowt-monitor" \
+    "$HERE/rowt-monitor/target/release/rowt-monitor" \
+    "$HERE/rowt-monitor/target/debug/rowt-monitor"; do
+    [ -x "$cand" ] && { bin="$cand"; break; }
+  done
+  [ -n "$bin" ] || bin="$(command -v rowt-monitor 2>/dev/null || true)"
+  [ -n "$bin" ] || die "rowt-monitor not found — build it with 'cd \"$HERE/rowt-monitor\" && cargo build --release', or reinstall the brew formula."
+  exec "$bin" "$@"
+}
+
 cmd_connections() {
   local a="${1:-}"
   case "$a" in
@@ -2142,6 +2157,7 @@ o@lifecycle@watch <install|uninstall|status>@auto-reload on net change; clears a
 c@lifecycle@status@state + config validity + reachability
 o@lifecycle@explain <domain|ip>@explain a destination's lane (escape / corp / direct)
 o@lifecycle@connections [lane|-w]@live view: active connections + which lane each is on
+o@lifecycle@monitor@read-only TUI: live connections, errors/blocked, server health
 a@lifecycle@report@full diagnostic report to a file (masked; shareable)
 o@servers & selection@server <list|add|rm|clear|import|dump>@manage the server pool
 o@servers & selection@sub <list|add|rm|update|clear|import|dump>@manage subscriptions
@@ -2569,6 +2585,7 @@ main() {
     report)     cmd_diag "$@" ;;
     explain|route) cmd_explain "$@" ;;   # 'route' kept as a hidden alias (renamed to avoid router/route confusion)
     connections|conns) cmd_connections "$@" ;;
+    monitor|mon) cmd_monitor "$@" ;;
     # servers & selection
     server)     cmd_server "$@" ;;
     sub)        cmd_sub "$@" ;;
