@@ -80,6 +80,8 @@ pub struct LiveSource {
     prober_started: bool,
     probe_interval: Duration,
     probe_tx: Option<Sender<()>>, // signal the prober to run now
+    prev_router_up: bool,         // detect router down->up (reload / net switch)
+    last_force: Option<Instant>,  // throttle self-heal re-probes
 
     started: Instant,
     uptime_base: Option<u64>, // proxy process uptime (secs) sampled once
@@ -117,6 +119,8 @@ impl LiveSource {
             prober_started: false,
             probe_interval,
             probe_tx: None,
+            prev_router_up: true,
+            last_force: None,
             started: Instant::now(),
             uptime_base,
         }
@@ -481,6 +485,23 @@ impl Source for LiveSource {
 
         let (transient, persistent, blocked, errors) = self.errors(window, lane);
         let h = self.servers(&state, router_up);
+
+        // Self-heal a stale ERROR: after a network switch the active server's
+        // last (pre-switch) probe can read failed for up to the 10-min cycle,
+        // even though it's reachable again. Re-probe when the router just came
+        // back (reload / net change) or keep re-probing ~every 60s while the
+        // active server is failing, so it clears within seconds instead.
+        if router_up {
+            let recovered = !self.prev_router_up;
+            let erroring = h.active_ok == Some(false);
+            let due = self.last_force.is_none_or(|t| t.elapsed() > Duration::from_secs(60));
+            if recovered || (erroring && due) {
+                self.force_probe();
+                self.last_force = Some(Instant::now());
+            }
+        }
+        self.prev_router_up = router_up;
+
         // Reserve header space for the longest server name so the ms column is
         // stable as the active server changes (bounded so it can't overrun).
         let name_reserve = self
