@@ -5,6 +5,7 @@
 use crate::model::{Snapshot, Window};
 
 pub mod fixtures;
+pub mod parse;
 pub mod live;
 
 pub trait Source {

@@ -873,6 +873,8 @@ dependencies = [
  "base64",
  "log",
  "once_cell",
+ "serde",
+ "serde_json",
  "url",
 ]
 

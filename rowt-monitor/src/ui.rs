@@ -170,7 +170,8 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, app: &App, present: bool) {
 
     // Row 3: server / router
     put(buf, x0 + 37, y0 + 3, "server", dimmer);
-    put(buf, x0 + 46, y0 + 3, &app.snap.identity.server_name, theme::bold(theme::ESCAPE));
+    // Cap the name so it never collides with the latency column at col 55.
+    put(buf, x0 + 46, y0 + 3, &truncate(&app.snap.identity.server_name, 8), theme::bold(theme::ESCAPE));
     let ms = format!("{} ms", app.snap.identity.server_ms);
     put(buf, x0 + 55, y0 + 3, &ms, theme::bold(theme::latency_color(app.snap.identity.server_ms)));
     put(buf, x0 + 67, y0 + 3, "router", dimmer);

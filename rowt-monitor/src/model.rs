@@ -6,7 +6,7 @@ use ratatui::style::Color;
 use crate::theme;
 
 /// Routing outcome for a connection / lane row.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Lane {
     Escape,
     Corp,
@@ -36,7 +36,7 @@ impl Lane {
 }
 
 /// Failure / block classification for an errors-pane row.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ErrKind {
     Dns,     // transient  (orange)
     Timeout, // persistent (red)
