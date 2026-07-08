@@ -150,23 +150,28 @@ pub fn build_conn_rows(
         if lane == Lane::Block {
             continue;
         }
+        // Lane/all aggregates are instantaneous RATES (header shows B/s).
         let (u, d) = rates.get(&c.id).copied().unwrap_or((0.0, 0.0));
         *lane_up.entry(lane).or_default() += u;
         *lane_down.entry(lane).or_default() += d;
         *lane_conns.entry(lane).or_default() += 1;
 
+        // Per-connection row shows cumulative bytes moved over the connection's
+        // life (never 0 for a connection that did anything) — idle keep-alives
+        // have a 0 instantaneous rate, which is unhelpful in the table.
+        let (tu, td) = (c.up as f64, c.down as f64);
         if let Some(g) = groups.iter_mut().find(|g| g.host == c.host && g.port == c.port && g.lane == lane) {
             g.conns += 1;
-            g.up += u;
-            g.down += d;
+            g.up += tu;
+            g.down += td;
         } else {
             groups.push(Agg {
                 lane,
                 host: c.host.clone(),
                 port: c.port,
                 conns: 1,
-                up: u,
-                down: d,
+                up: tu,
+                down: td,
                 rule: c.rule.clone(),
             });
         }
@@ -443,7 +448,8 @@ mod tests {
         assert_eq!(anth.conns, 2);
         assert_eq!(anth.lane, Lane::Escape);
         assert_eq!(anth.rule, "domain_suffix");
-        assert_eq!(anth.up, 1100.0);
+        // Per-connection column = cumulative bytes (upload 100 + 10), not rate.
+        assert_eq!(anth.up, 110.0);
         assert!(!conns.iter().any(|c| c.host == "ads.example"), "block excluded");
         let esc_lane = lanes.iter().find(|l| l.lane == Lane::Escape).unwrap();
         assert_eq!(esc_lane.conns, 2);
