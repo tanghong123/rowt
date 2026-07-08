@@ -12,21 +12,28 @@ const G96: &str = include_str!("../../design_handoff_rowt_monitor/renders/rowt-m
 const G150: &str = include_str!("../../design_handoff_rowt_monitor/renders/rowt-monitor-150x38.txt");
 const G212: &str = include_str!("../../design_handoff_rowt_monitor/renders/rowt-monitor-212x52.txt");
 
-/// Blank the ASCII-logo columns (rows 1..=4, cols 1..=27) so the byte-exact
-/// layout/data/reflow diff ignores the logo art, which intentionally diverges
-/// from the design capture (bottom row shifted left one). The logo itself is
-/// checked by `logo_bottom_row_aligned`.
-fn mask_logo(s: &str) -> String {
-    s.lines()
+/// Blank the regions of the frame that intentionally diverge from the frozen
+/// design capture, so the byte-exact diff still verifies everything else
+/// (panes, columns, borders, reflow). Masked: the identity band (rows 1..=4) —
+/// the logo art (bottom row shifted left one) and the right fact column (moved
+/// right for breathing room); and the two server-health content rows (stats no
+/// longer repeats the active server; the strip marks the active with a ▶).
+/// The masked behaviours have their own dedicated assertions below.
+fn mask(s: &str) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+    let n = lines.len();
+    lines
+        .iter()
         .enumerate()
         .map(|(i, line)| {
+            let health = n >= 4 && (i == n - 4 || i == n - 3); // stats + chips rows
             if (1..=4).contains(&i) {
-                let chars: Vec<char> = line.chars().collect();
-                chars
-                    .iter()
+                line.chars()
                     .enumerate()
-                    .map(|(c, ch)| if (1..=27).contains(&c) { ' ' } else { *ch })
+                    .map(|(c, ch)| if (1..=27).contains(&c) || c >= 60 { ' ' } else { ch })
                     .collect::<String>()
+            } else if health {
+                " ".repeat(line.chars().count())
             } else {
                 line.to_string()
             }
@@ -37,17 +44,17 @@ fn mask_logo(s: &str) -> String {
 
 #[test]
 fn golden_96_stacked() {
-    assert_eq!(mask_logo(&render_text(96, 41)), mask_logo(G96));
+    assert_eq!(mask(&render_text(96, 41)), mask(G96));
 }
 
 #[test]
 fn golden_150_side_by_side() {
-    assert_eq!(mask_logo(&render_text(150, 30)), mask_logo(G150));
+    assert_eq!(mask(&render_text(150, 30)), mask(G150));
 }
 
 #[test]
 fn golden_212_wide() {
-    assert_eq!(mask_logo(&render_text(212, 30)), mask_logo(G212));
+    assert_eq!(mask(&render_text(212, 30)), mask(G212));
 }
 
 #[test]

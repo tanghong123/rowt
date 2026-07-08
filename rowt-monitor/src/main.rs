@@ -23,7 +23,9 @@ use rowt_monitor::source::{FixtureSource, LiveSource, Source};
 use rowt_monitor::{input, render_text, ui};
 
 const DATA_TICK: Duration = Duration::from_secs(2);
-const ANIM_TICK: Duration = Duration::from_millis(120);
+// Redraw cadence for the pulse / marquee. ~14 fps keeps the breathing dot smooth
+// without busy-spinning; ratatui only repaints changed cells.
+const ANIM_TICK: Duration = Duration::from_millis(70);
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();

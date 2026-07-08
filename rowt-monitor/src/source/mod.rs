@@ -12,6 +12,10 @@ pub trait Source {
     /// Produce one observation. `window` scopes the errors/blocked aggregation.
     fn poll(&mut self, window: Window) -> Snapshot;
 
+    /// Force an immediate server re-probe (and reset the periodic timer). No-op
+    /// for sources without an active prober (e.g. fixtures).
+    fn force_probe(&self) {}
+
     /// Short human label for what's being observed (shown nowhere critical;
     /// useful for a future status line / --help). Fixtures say so plainly.
     fn label(&self) -> &str {

@@ -111,16 +111,18 @@ impl Source for FixtureSource {
             err(8, ErrKind::Timeout, "rr5.googlevideo.com"),
         ];
 
+        // The active server appears in the strip too, marked; the rest are the
+        // idle-up pool. (total 10 = 9 up incl. active + 1 down.)
         let chips = vec![
-            Server { name: "JP-Osaka".into(), ms: 175 },
-            Server { name: "KR-Seoul".into(), ms: 72 },
-            Server { name: "DE-Frankfurt".into(), ms: 195 },
-            Server { name: "HK-1".into(), ms: 82 },
-            Server { name: "SG-1".into(), ms: 81 },
-            Server { name: "TW-Taipei".into(), ms: 110 },
-            Server { name: "US-LA".into(), ms: 151 },
-            Server { name: "NL-Ams".into(), ms: 68 },
-            Server { name: "CA-Tor".into(), ms: 119 },
+            Server { name: "JP-Tokyo".into(), ms: 42, active: true },
+            Server { name: "JP-Osaka".into(), ms: 175, active: false },
+            Server { name: "KR-Seoul".into(), ms: 72, active: false },
+            Server { name: "DE-Frankfurt".into(), ms: 195, active: false },
+            Server { name: "HK-1".into(), ms: 82, active: false },
+            Server { name: "SG-1".into(), ms: 81, active: false },
+            Server { name: "TW-Taipei".into(), ms: 110, active: false },
+            Server { name: "US-LA".into(), ms: 151, active: false },
+            Server { name: "NL-Ams".into(), ms: 68, active: false },
         ];
 
         Snapshot {

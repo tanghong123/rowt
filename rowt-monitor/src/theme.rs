@@ -53,14 +53,27 @@ pub fn scale(c: Color, f: f32) -> Color {
     }
 }
 
-/// A gentle pulse intensity in [0.45, 1.0] from an animation phase counter —
-/// a triangle wave so the `● LIVE` dot breathes to show sampling is live.
-pub fn pulse(phase: usize) -> f32 {
-    const PERIOD: usize = 16; // ~2s at the 120ms anim tick
-    let t = (phase % PERIOD) as f32 / PERIOD as f32; // 0..1
-    let tri = 1.0 - (2.0 * t - 1.0).abs(); // 0..1..0
-    0.45 + 0.55 * tri
+/// A smooth pulse intensity in [0.5, 1.0] from wall-clock seconds — a sine so
+/// the `● LIVE` dot breathes to show sampling is live. Time-based (not tick-
+/// based) so the cadence is steady regardless of redraw timing.
+pub fn pulse(secs: f32) -> f32 {
+    const PERIOD: f32 = 2.6; // seconds per breath
+    let s = ((secs / PERIOD) * std::f32::consts::TAU).sin(); // -1..1
+    0.75 + 0.25 * s // 0.5..1.0
 }
+
+/// Lighten an RGB color toward white by fraction `f` (for the selected row).
+pub fn brighten(c: Color, f: f32) -> Color {
+    let f = f.clamp(0.0, 1.0);
+    let mix = |v: u8| (v as f32 + (255.0 - v as f32) * f).round() as u8;
+    match c {
+        Color::Rgb(r, g, b) => Color::Rgb(mix(r), mix(g), mix(b)),
+        other => other,
+    }
+}
+
+/// Subtle background for the selected row (dark slate; pairs with brightened fg).
+pub const SELECTION_BG: Color = Color::Rgb(38, 43, 62);
 
 /// Latency color by threshold: green < 70, orange < 140, red >= 140.
 pub fn latency_color(ms: u32) -> Color {

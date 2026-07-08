@@ -1,6 +1,8 @@
 //! UI-local application state and the update logic. Everything here is
 //! operator-local (README "State (ui-local)"); none of it is ever sent upstream.
 
+use std::time::Instant;
+
 use crate::model::{Conn, Lane, Snapshot, Window};
 use crate::source::Source;
 
@@ -48,6 +50,7 @@ pub enum Action {
     Yank,
     TogglePause,
     ToggleHelp,
+    ForceProbe,
     // Mouse:
     FocusConn,
     FocusErr,
@@ -73,6 +76,7 @@ pub struct App {
 
     pub help: bool,
     pub marquee: usize,
+    pub started: Instant, // wall-clock start, for the time-based dot pulse
     pub should_quit: bool,
     pub last_yank: Option<String>,
     pub drag: Option<Drag>,
@@ -101,6 +105,7 @@ impl App {
             err_scroll: 0,
             help: false,
             marquee: 0,
+            started: Instant::now(),
             should_quit: false,
             last_yank: None,
             drag: None,
@@ -147,6 +152,10 @@ impl App {
             Quit => self.should_quit = true,
             ToggleHelp => self.help = !self.help,
             TogglePause => self.paused = !self.paused,
+            ForceProbe => {
+                self.source.force_probe();
+                self.last_yank = Some("re-probing servers…".to_string());
+            }
             Up => self.move_sel(-1),
             Down => self.move_sel(1),
             FocusLeft => {

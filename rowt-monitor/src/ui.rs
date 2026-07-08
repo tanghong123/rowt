@@ -4,7 +4,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 
 use crate::app::{App, Focus};
 use crate::model::{ErrCat, Lane, Window};
@@ -168,14 +168,14 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, app: &App, present: bool) {
     let dot_c = if present || paused {
         dot_c
     } else {
-        theme::scale(dot_c, theme::pulse(app.marquee))
+        theme::scale(dot_c, theme::pulse(app.started.elapsed().as_secs_f32()))
     };
     put(buf, x0 + 29, y0 + 2, "●", theme::fg(dot_c));
     put(buf, x0 + 31, y0 + 2, label, theme::bold(theme::BRIGHT));
     put(buf, x0 + 37, y0 + 2, "mode", dimmer);
     put(buf, x0 + 46, y0 + 2, &app.snap.identity.mode, bright);
-    put(buf, x0 + 67, y0 + 2, "uptime", dimmer);
-    put(buf, x0 + 75, y0 + 2, &app.snap.identity.uptime, bright);
+    put(buf, x0 + 70, y0 + 2, "uptime", dimmer);
+    put(buf, x0 + 78, y0 + 2, &app.snap.identity.uptime, bright);
 
     // Row 3: server / router
     put(buf, x0 + 37, y0 + 3, "server", dimmer);
@@ -186,14 +186,14 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, app: &App, present: bool) {
     put(buf, x0 + 46, y0 + 3, &truncate(&app.snap.identity.server_name, reserve), theme::bold(theme::ESCAPE));
     let ms = format!("{} ms", app.snap.identity.server_ms);
     put(buf, x0 + 47 + reserve, y0 + 3, &ms, theme::bold(theme::latency_color(app.snap.identity.server_ms)));
-    put(buf, x0 + 67, y0 + 3, "router", dimmer);
-    put(buf, x0 + 75, y0 + 3, &app.snap.identity.router, bright);
+    put(buf, x0 + 70, y0 + 3, "router", dimmer);
+    put(buf, x0 + 78, y0 + 3, &app.snap.identity.router, bright);
 
     // Row 4: proxy / config
     put(buf, x0 + 37, y0 + 4, "proxy", dimmer);
     put(buf, x0 + 46, y0 + 4, &app.snap.identity.proxy, bright);
-    put(buf, x0 + 67, y0 + 4, "config", dimmer);
-    put(buf, x0 + 75, y0 + 4, &app.snap.identity.config, bright);
+    put(buf, x0 + 70, y0 + 4, "config", dimmer);
+    put(buf, x0 + 78, y0 + 4, &app.snap.identity.config, bright);
 }
 
 /// Draw box borders + captions row / rule row / bottom row for a box spanning
@@ -242,11 +242,12 @@ fn draw_box_frame(buf: &mut Buffer, xl: u16, xr: u16, top: u16, bot: u16, div: O
 /// focus-aware styling.
 #[allow(clippy::too_many_arguments)]
 fn draw_caption(buf: &mut Buffer, corner: u16, y: u16, label: &str, app: &App, present: bool, which: Focus, border: Style) {
+    // The ┤ ├ connectors always match the border; focus is shown by brightening
+    // the caption text only, so the connectors never look out of step.
     let focused = !present && app.focus == which;
-    let bstyle = if focused { theme::fg(theme::BORDER_FOCUS) } else { border };
     let cstyle = if focused { theme::bold(theme::BRIGHT) } else { theme::fg(theme::DIMMER) };
     let mut x = corner + 1;
-    put(buf, x, y, "─┤ ", bstyle);
+    put(buf, x, y, "─┤ ", border);
     x += 3;
     put(buf, x, y, label, cstyle);
     x += dw(label);
@@ -258,7 +259,7 @@ fn draw_caption(buf: &mut Buffer, corner: u16, y: u16, label: &str, app: &App, p
             x += dw(&chip);
         }
     }
-    put(buf, x, y, " ├", bstyle);
+    put(buf, x, y, " ├", border);
 }
 
 // ---------------- connections pane ----------------
@@ -351,7 +352,7 @@ fn draw_conn_pane(
         put_right(buf, x0 + w - 17, y, &format!("↓{}", format::compact(c.down)), theme::fg(theme::DOWN_TABLE));
         put(buf, x0 + w - 14, y, &c.rule, dimmer);
         if selected {
-            highlight(buf, Rect::new(x0, y, w, 1));
+            highlight_row(buf, x0, y, w, c.lane.color());
         }
     }
     if !present {
@@ -428,7 +429,7 @@ fn draw_err_pane(
         };
         put(buf, x0 + 21, y, &shown, dim);
         if selected {
-            highlight(buf, Rect::new(x0, y, w, 1));
+            highlight_row(buf, x0, y, w, e.kind.color());
         }
     }
     if !present {
@@ -469,32 +470,20 @@ fn draw_windows(buf: &mut Buffer, x0: u16, w: u16, y: u16, app: &App, hit: &mut 
 // ---------------- server health ----------------
 
 fn draw_health(buf: &mut Buffer, xl: u16, xr: u16, top: u16, app: &App, present: bool, border: Style) {
+    let _ = present;
     draw_box_frame_health(buf, xl, xr, top, border);
-    draw_caption(buf, xl, top, "server health", app, present, Focus::Conn, border);
-    // note: server health is never a focus target, so pass Conn but present-safe:
-    // re-draw caption neutral to avoid accidental focus styling.
-    let neutral_c = theme::fg(theme::DIMMER);
-    let mut x = xl + 1;
-    put(buf, x, top, "─┤ ", border);
-    x += 3;
-    put(buf, x, top, "server health", neutral_c);
+    // Caption (server health is never a focus target, so always neutral).
+    put(buf, xl + 1, top, "─┤ ", border);
+    put(buf, xl + 4, top, "server health", theme::fg(theme::DIMMER));
+    put(buf, xl + 4 + dw("server health"), top, " ├", border);
 
     let x0 = xl + 1;
     let w = (xr - 1) - x0 + 1;
     let s = &app.snap;
-    let dim = theme::fg(theme::DIM);
-    let stats = format!(
-        "{} servers · {} up · {} down · active ",
-        s.servers_total, s.servers_up, s.servers_down
-    );
-    put(buf, x0 + 1, top + 1, &stats, dim);
-    put(
-        buf,
-        x0 + 1 + dw(&stats),
-        top + 1,
-        &s.active_server,
-        theme::bold(theme::ESCAPE),
-    );
+    // Stats: the active server is named in the header identity band and marked
+    // in the strip below, so it is not repeated here.
+    let stats = format!("{} servers · {} up · {} down", s.servers_total, s.servers_up, s.servers_down);
+    put(buf, x0 + 1, top + 1, &stats, theme::fg(theme::DIM));
 
     // chips row (marquee as a whole)
     draw_chips(buf, x0 + 1, top + 2, w.saturating_sub(2), app, present);
@@ -515,44 +504,57 @@ fn draw_box_frame_health(buf: &mut Buffer, xl: u16, xr: u16, top: u16, border: S
 
 fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: bool) {
     let bright = theme::fg(theme::BRIGHT);
-    // Each chip is name + latency; separated by 3 spaces.
-    let chips: Vec<(String, String, Style)> = app
+    let escape = theme::fg(theme::ESCAPE);
+    // Each chip is a run of styled segments. The active server leads with a ▶.
+    let chips: Vec<Vec<(String, Style)>> = app
         .snap
         .chips
         .iter()
         .map(|c| {
-            (
-                format!("{} ", c.name),
-                format!("{:>3} ms", c.ms),
-                theme::fg(theme::latency_color(c.ms)),
-            )
+            let lat = theme::fg(theme::latency_color(c.ms));
+            let ms = format!("{:>3} ms", c.ms);
+            if c.active {
+                vec![
+                    ("▶ ".to_string(), escape),
+                    (c.name.clone(), theme::bold(theme::ESCAPE)),
+                    (" ".to_string(), bright),
+                    (ms, lat),
+                ]
+            } else {
+                vec![(c.name.clone(), bright), (" ".to_string(), bright), (ms, lat)]
+            }
         })
         .collect();
-    let widths: Vec<u16> = chips.iter().map(|(n, m, _)| dw(n) + dw(m)).collect();
+    let widths: Vec<u16> = chips
+        .iter()
+        .map(|segs| segs.iter().map(|(s, _)| dw(s)).sum())
+        .collect();
     let total: u16 = widths.iter().sum::<u16>() + 3 * (chips.len().saturating_sub(1) as u16);
 
     if present || total <= w {
         // Pack complete chips left-to-right; stop before one that won't fit.
         let mut col = x0;
-        for (i, (name, ms, ms_st)) in chips.iter().enumerate() {
+        for (i, segs) in chips.iter().enumerate() {
             let sep = if i > 0 { 3 } else { 0 };
             if col + sep + widths[i] > x0 + w {
                 break;
             }
             col += sep;
-            put(buf, col, y, name, bright);
-            put(buf, col + dw(name), y, ms, *ms_st);
-            col += widths[i];
+            for (s, st) in segs {
+                put(buf, col, y, s, *st);
+                col += dw(s);
+            }
         }
     } else {
         // Overflowing: marquee the whole strip (cell-level scroll).
         let mut cells: Vec<(char, Style)> = Vec::new();
-        for (i, (name, ms, ms_st)) in chips.iter().enumerate() {
+        for (i, segs) in chips.iter().enumerate() {
             if i > 0 {
                 cells.extend([(' ', Style::default()); 3]);
             }
-            cells.extend(name.chars().map(|c| (c, bright)));
-            cells.extend(ms.chars().map(|c| (c, *ms_st)));
+            for (s, st) in segs {
+                cells.extend(s.chars().map(|c| (c, *st)));
+            }
         }
         let span = cells.len() + 3;
         let off = (app.marquee / 2) % span;
@@ -570,6 +572,23 @@ fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: boo
 }
 
 // ---------------- helpers ----------------
+
+/// Selected-row style: a subtle consistent background, brightened text, and a
+/// thin accent bar at the front in the row's semantic color.
+fn highlight_row(buf: &mut Buffer, x0: u16, y: u16, w: u16, accent: Color) {
+    for x in x0..x0 + w {
+        if let Some(c) = buf.cell_mut((x, y)) {
+            c.set_bg(theme::SELECTION_BG);
+            let f = c.fg;
+            c.set_fg(theme::brighten(f, 0.30));
+        }
+    }
+    if let Some(c) = buf.cell_mut((x0, y)) {
+        c.set_symbol("▎");
+        c.set_fg(accent);
+        c.set_bg(theme::SELECTION_BG);
+    }
+}
 
 fn highlight(buf: &mut Buffer, rect: Rect) {
     for x in rect.left()..rect.right() {
@@ -618,6 +637,7 @@ fn draw_help(buf: &mut Buffer, area: Rect) {
         "  f 1 2 3 0  lane filter / jump / clear  ",
         "  w [ ]      errors window               ",
         "  y          yank domain / host:port     ",
+        "  r          re-probe servers now        ",
         "  p          pause sampling              ",
         "  ?          toggle this help            ",
         "  q          quit                        ",
@@ -647,9 +667,9 @@ pub fn draw_footer(buf: &mut Buffer, area: Rect, app: &App) {
     let dimmer = theme::fg(theme::DIMMER);
     let y = area.bottom().saturating_sub(1);
     let hint = if app.paused {
-        " ↑↓ move · ←→ pane · f lane · w window · y copy · p resume · ? help · q quit "
+        " ↑↓ move · ←→ pane · f lane · w window · y copy · r reprobe · p resume · ? help · q quit "
     } else {
-        " ↑↓ move · ←→ pane · f lane · w window · y copy · p pause · ? help · q quit "
+        " ↑↓ move · ←→ pane · f lane · w window · y copy · r reprobe · p pause · ? help · q quit "
     };
     let shown = truncate(hint, area.width);
     put(buf, area.left(), y, &shown, dimmer);

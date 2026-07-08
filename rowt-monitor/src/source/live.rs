@@ -7,8 +7,8 @@
 //! falls back to the demo fixture so `rowt-monitor` always shows *something*.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -40,6 +40,7 @@ pub struct LiveSource {
     escape_members: Vec<String>,
     delays: Delays,
     prober_started: bool,
+    probe_tx: Option<Sender<()>>, // signal the prober to run now
 
     started: Instant,
     uptime_base: Option<u64>, // proxy process uptime (secs) sampled once
@@ -62,6 +63,7 @@ impl LiveSource {
             escape_members: Vec::new(),
             delays: Arc::new(Mutex::new(HashMap::new())),
             prober_started: false,
+            probe_tx: None,
             started: Instant::now(),
             uptime_base,
         }
@@ -85,10 +87,15 @@ impl LiveSource {
         let port = self.clash_port;
         let secret = self.clash_secret();
         let url = std::env::var("ROWT_PING_URL").unwrap_or_else(|_| "http://cp.cloudflare.com/generate_204".to_string());
+        // Default: probe every 10 minutes (override with ROWT_MONITOR_PROBE_INTERVAL secs).
+        let interval = Duration::from_secs(env_port("ROWT_MONITOR_PROBE_INTERVAL", 600).max(5) as u64);
+        let (tx, rx) = mpsc::channel::<()>();
+        self.probe_tx = Some(tx);
         std::thread::Builder::new()
             .name("rowt-monitor-prober".into())
             .spawn(move || loop {
-                // Fan out one short-lived thread per server; join before sleeping.
+                // One round now (immediate first round), then wait for the
+                // interval OR a force signal (`r`), whichever comes first.
                 let handles: Vec<_> = members
                     .iter()
                     .map(|tag| {
@@ -104,7 +111,12 @@ impl LiveSource {
                 for h in handles {
                     let _ = h.join();
                 }
-                std::thread::sleep(Duration::from_secs(20));
+                // recv_timeout returns Ok on a force signal, Err(Timeout) after
+                // the interval — either way we loop and probe again (timer reset).
+                match rx.recv_timeout(interval) {
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
             })
             .ok();
     }
@@ -124,23 +136,6 @@ impl LiveSource {
             req = req.set("Authorization", &format!("Bearer {}", s));
         }
         req.call().ok()?.into_json().ok()
-    }
-
-    /// Read a single sample from the streaming `/traffic` endpoint.
-    fn clash_traffic(&self) -> Option<(f64, f64)> {
-        let url = format!("http://127.0.0.1:{}/traffic", self.clash_port);
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(Duration::from_millis(400))
-            .build();
-        let mut req = agent.get(&url);
-        if let Some(s) = self.clash_secret() {
-            req = req.set("Authorization", &format!("Bearer {}", s));
-        }
-        let resp = req.call().ok()?;
-        let mut line = String::new();
-        BufReader::new(resp.into_reader()).read_line(&mut line).ok()?;
-        let v: Value = serde_json::from_str(line.trim()).ok()?;
-        Some((v.get("up")?.as_f64()?, v.get("down")?.as_f64()?))
     }
 
     fn escape_tags(&self, host: &Value) -> HashSet<String> {
@@ -234,17 +229,19 @@ impl LiveSource {
             match fresh(tag) {
                 Some(Some(ms)) => {
                     up += 1;
-                    if *tag == selected {
+                    let active = *tag == selected;
+                    if active {
                         active_ms = Some(ms);
-                    } else {
-                        chips.push(Server { name: tag.clone(), ms });
                     }
+                    // All up servers appear in the strip; the active one is marked.
+                    chips.push(Server { name: tag.clone(), ms, active });
                 }
                 Some(None) => down += 1,
                 None => {} // pending first probe — neither up nor down yet
             }
         }
-        chips.sort_by_key(|c| c.ms);
+        // Active first, then the rest by latency.
+        chips.sort_by_key(|c| (!c.active, c.ms));
         (total, up, down, selected, chips, active_ms)
     }
 }
@@ -258,6 +255,13 @@ impl Default for LiveSource {
 impl Source for LiveSource {
     fn label(&self) -> &str {
         "live"
+    }
+
+    fn force_probe(&self) {
+        // Wake the prober; ignore if it hasn't started or the channel is gone.
+        if let Some(tx) = &self.probe_tx {
+            let _ = tx.send(());
+        }
     }
 
     fn poll(&mut self, window: Window) -> Snapshot {
@@ -279,11 +283,10 @@ impl Source for LiveSource {
         let router_up = conns_json.is_some();
         let raw = conns_json.as_ref().map(parse::parse_connections).unwrap_or_default();
         let rates = self.rates(&raw);
-        let (conns, lanes, mut all) = parse::build_conn_rows(&raw, &rates, &escape);
-        if let Some((u, d)) = self.clash_traffic() {
-            all.up = u;
-            all.down = d;
-        }
+        // Aggregate throughput is the sum of per-connection rates (deltas since
+        // the last tick). We intentionally do NOT read the streaming /traffic
+        // endpoint here — it blocks the UI thread up to ~1s per poll.
+        let (conns, lanes, all) = parse::build_conn_rows(&raw, &rates, &escape);
         if router_up {
             self.ensure_prober();
         }

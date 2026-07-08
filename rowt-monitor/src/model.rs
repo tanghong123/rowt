@@ -142,6 +142,7 @@ pub struct AllAgg {
 pub struct Server {
     pub name: String,
     pub ms: u32,
+    pub active: bool, // the currently-selected server (marked in the strip)
 }
 
 /// Session facts for the identity band.
