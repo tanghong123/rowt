@@ -40,6 +40,28 @@ pub fn bold(c: Color) -> Style {
     Style::default().fg(c).add_modifier(Modifier::BOLD)
 }
 
+/// Scale an RGB color's brightness by `f` (clamped 0..1). Non-RGB passes through.
+pub fn scale(c: Color, f: f32) -> Color {
+    let f = f.clamp(0.0, 1.0);
+    match c {
+        Color::Rgb(r, g, b) => Color::Rgb(
+            (r as f32 * f).round() as u8,
+            (g as f32 * f).round() as u8,
+            (b as f32 * f).round() as u8,
+        ),
+        other => other,
+    }
+}
+
+/// A gentle pulse intensity in [0.45, 1.0] from an animation phase counter —
+/// a triangle wave so the `● LIVE` dot breathes to show sampling is live.
+pub fn pulse(phase: usize) -> f32 {
+    const PERIOD: usize = 16; // ~2s at the 120ms anim tick
+    let t = (phase % PERIOD) as f32 / PERIOD as f32; // 0..1
+    let tri = 1.0 - (2.0 * t - 1.0).abs(); // 0..1..0
+    0.45 + 0.55 * tri
+}
+
 /// Latency color by threshold: green < 70, orange < 140, red >= 140.
 pub fn latency_color(ms: u32) -> Color {
     if ms < 70 {

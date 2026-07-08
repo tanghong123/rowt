@@ -12,19 +12,55 @@ const G96: &str = include_str!("../../design_handoff_rowt_monitor/renders/rowt-m
 const G150: &str = include_str!("../../design_handoff_rowt_monitor/renders/rowt-monitor-150x38.txt");
 const G212: &str = include_str!("../../design_handoff_rowt_monitor/renders/rowt-monitor-212x52.txt");
 
+/// Blank the ASCII-logo columns (rows 1..=4, cols 1..=27) so the byte-exact
+/// layout/data/reflow diff ignores the logo art, which intentionally diverges
+/// from the design capture (bottom row shifted left one). The logo itself is
+/// checked by `logo_bottom_row_aligned`.
+fn mask_logo(s: &str) -> String {
+    s.lines()
+        .enumerate()
+        .map(|(i, line)| {
+            if (1..=4).contains(&i) {
+                let chars: Vec<char> = line.chars().collect();
+                chars
+                    .iter()
+                    .enumerate()
+                    .map(|(c, ch)| if (1..=27).contains(&c) { ' ' } else { *ch })
+                    .collect::<String>()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[test]
 fn golden_96_stacked() {
-    assert_eq!(render_text(96, 41), G96);
+    assert_eq!(mask_logo(&render_text(96, 41)), mask_logo(G96));
 }
 
 #[test]
 fn golden_150_side_by_side() {
-    assert_eq!(render_text(150, 30), G150);
+    assert_eq!(mask_logo(&render_text(150, 30)), mask_logo(G150));
 }
 
 #[test]
 fn golden_212_wide() {
-    assert_eq!(render_text(212, 30), G212);
+    assert_eq!(mask_logo(&render_text(212, 30)), mask_logo(G212));
+}
+
+#[test]
+fn logo_bottom_row_aligned() {
+    // The bottom row's left stem must sit at the same column as the rows above
+    // it (col 3), not one space right as in the raw design capture.
+    let frame = render_text(96, 41);
+    let rows: Vec<&str> = frame.lines().collect();
+    let col = |row: &str| row.chars().position(|c| c == '|');
+    // rows 2 and 3 (0-indexed) start their left stem at col 3; row 4 must too.
+    assert_eq!(col(rows[2]), Some(3));
+    assert_eq!(col(rows[3]), Some(3));
+    assert_eq!(col(rows[4]), Some(3), "bottom logo row should be left-aligned with the rows above");
 }
 
 #[test]
@@ -80,4 +116,14 @@ fn colors_spot_check() {
     let (sym, fg, _) = at(11, 7);
     assert_eq!(sym, "↑");
     assert_eq!(fg, Color::Rgb(224, 163, 94));
+
+    // Errors TYPE is colored by category. In the stacked 96 frame the errors
+    // data rows begin at row 28: row 28 is `timeout` (persistent red), row 31
+    // is `dns` (transient orange). TYPE column is at x = pane_x0(3) + 9 = 12.
+    let (sym, fg, _) = at(12, 28);
+    assert_eq!(sym, "t"); // timeout
+    assert_eq!(fg, Color::Rgb(224, 101, 94), "persistent = red");
+    let (sym, fg, _) = at(12, 31);
+    assert_eq!(sym, "d"); // dns
+    assert_eq!(fg, Color::Rgb(224, 163, 94), "transient = orange");
 }

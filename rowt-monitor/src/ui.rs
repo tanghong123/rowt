@@ -25,11 +25,14 @@ pub struct Hit {
     pub windows: Vec<(Rect, Window)>,     // errors window tabs
 }
 
+// NOTE: the bottom row is shifted one space left of the design capture so its
+// stems line up under the rows above (per user correction); the golden test
+// masks the logo columns so this override doesn't fail the layout diff.
 const LOGO: [&str; 4] = [
     "  _ __ _____      __| |_ ",
     " | '__/ _ \\ \\ /\\ / /| __|",
     " | | | (_) \\ V  V / | |_ ",
-    "  |_|  \\___/ \\_/\\_/   \\__|",
+    " |_|  \\___/ \\_/\\_/   \\__|",
 ];
 
 /// `present` = neutral screenshot state (matches the goldens: no focus
@@ -154,12 +157,18 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, app: &App, present: bool) {
     // Row 1: MONITOR
     put(buf, x0 + 29, y0 + 1, "MONITOR", dimmer);
 
-    // Row 2: status + mode / uptime
+    // Row 2: status + mode / uptime. The live dot pulses to show sampling is
+    // running (frozen at full brightness when paused or in present/golden mode).
     let paused = app.paused && !present;
     let (dot_c, label) = if paused {
         (theme::UP, "PAUSED")
     } else {
         (theme::DIRECT, "LIVE")
+    };
+    let dot_c = if present || paused {
+        dot_c
+    } else {
+        theme::scale(dot_c, theme::pulse(app.marquee))
     };
     put(buf, x0 + 29, y0 + 2, "●", theme::fg(dot_c));
     put(buf, x0 + 31, y0 + 2, label, theme::bold(theme::BRIGHT));
@@ -170,10 +179,13 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, app: &App, present: bool) {
 
     // Row 3: server / router
     put(buf, x0 + 37, y0 + 3, "server", dimmer);
-    // Cap the name so it never collides with the latency column at col 55.
-    put(buf, x0 + 46, y0 + 3, &truncate(&app.snap.identity.server_name, 8), theme::bold(theme::ESCAPE));
+    // Reserve name width from the pool's longest name so the ms column is
+    // stable; bounded (<=13) so it never runs into the router column at 67.
+    // 8 reproduces the golden (JP-Tokyo -> ms at col 55).
+    let reserve = app.snap.identity.name_reserve.clamp(6, 13);
+    put(buf, x0 + 46, y0 + 3, &truncate(&app.snap.identity.server_name, reserve), theme::bold(theme::ESCAPE));
     let ms = format!("{} ms", app.snap.identity.server_ms);
-    put(buf, x0 + 55, y0 + 3, &ms, theme::bold(theme::latency_color(app.snap.identity.server_ms)));
+    put(buf, x0 + 47 + reserve, y0 + 3, &ms, theme::bold(theme::latency_color(app.snap.identity.server_ms)));
     put(buf, x0 + 67, y0 + 3, "router", dimmer);
     put(buf, x0 + 75, y0 + 3, &app.snap.identity.router, bright);
 
@@ -405,7 +417,9 @@ fn draw_err_pane(
         let e = &errs[idx];
         let y = list_y + row as u16;
         put_right(buf, x0 + 5, y, &e.count.to_string(), theme::bold(theme::BRIGHT));
-        put(buf, x0 + 9, y, e.kind.label(), dim);
+        // TYPE carries the category by color: dns=transient orange,
+        // timeout/reset/refused=persistent red, blocked=purple.
+        put(buf, x0 + 9, y, e.kind.label(), theme::fg(e.kind.color()));
         let selected = !present && app.focus == Focus::Err && idx == app.err_sel;
         let shown = if selected {
             marquee(&e.domain, dom_max, app.marquee)

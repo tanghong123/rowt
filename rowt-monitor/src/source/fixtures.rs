@@ -132,6 +132,7 @@ impl Source for FixtureSource {
                 router: "running · :7890".into(),
                 proxy: "on · Wi-Fi".into(),
                 config: "host.json OK".into(),
+                name_reserve: 8, // matches the golden (JP-Tokyo, ms at col 55)
             },
             all,
             lanes,

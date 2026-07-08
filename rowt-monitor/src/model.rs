@@ -154,6 +154,10 @@ pub struct Identity {
     pub router: String,      // e.g. "running · :7890"
     pub proxy: String,       // e.g. "on · Wi-Fi"
     pub config: String,      // e.g. "host.json OK"
+    /// Columns reserved for the active server name in the header, so the ms
+    /// column doesn't jump as the active server changes. Sized to the pool's
+    /// longest name (bounded). 8 reproduces the golden (`JP-Tokyo`).
+    pub name_reserve: u16,
 }
 
 /// A full observation for one tick. Instantaneous fields (rates, conns,

@@ -9,6 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -16,6 +17,10 @@ use serde_json::Value;
 use crate::model::*;
 use crate::source::parse::{self, ErrAgg, RawConn};
 use crate::source::{FixtureSource, Source};
+
+/// Server latency results shared with the background prober: tag -> (delay ms
+/// or None if the last test failed, when it was measured).
+type Delays = Arc<Mutex<HashMap<String, (Option<u32>, Instant)>>>;
 
 pub struct LiveSource {
     cfg: PathBuf,
@@ -29,6 +34,12 @@ pub struct LiveSource {
 
     // errors cache (re-aggregated on window change or every few seconds)
     err_cache: Option<(Window, Instant, ErrAgg)>,
+
+    // server-health probing (manual selector mode leaves /proxies history empty,
+    // so we actively run clash delay tests off the UI thread, like `rowt ping`).
+    escape_members: Vec<String>,
+    delays: Delays,
+    prober_started: bool,
 
     started: Instant,
     uptime_base: Option<u64>, // proxy process uptime (secs) sampled once
@@ -48,9 +59,54 @@ impl LiveSource {
             prev: HashMap::new(),
             prev_at: None,
             err_cache: None,
+            escape_members: Vec::new(),
+            delays: Arc::new(Mutex::new(HashMap::new())),
+            prober_started: false,
             started: Instant::now(),
             uptime_base,
         }
+    }
+
+    /// Escape selector members (the server pool), minus the `escape` tag itself.
+    fn members(&self, host: &Value) -> Vec<String> {
+        self.escape_tags(host).into_iter().filter(|t| t != "escape").collect()
+    }
+
+    /// Start the background prober once the router is reachable. It runs clash
+    /// delay tests (through the tunnel, like `rowt ping`) for the whole pool on
+    /// a gentle interval, writing results into `self.delays` off the UI thread.
+    fn ensure_prober(&mut self) {
+        if self.prober_started || self.escape_members.is_empty() {
+            return;
+        }
+        self.prober_started = true;
+        let delays = Arc::clone(&self.delays);
+        let members = self.escape_members.clone();
+        let port = self.clash_port;
+        let secret = self.clash_secret();
+        let url = std::env::var("ROWT_PING_URL").unwrap_or_else(|_| "http://cp.cloudflare.com/generate_204".to_string());
+        std::thread::Builder::new()
+            .name("rowt-monitor-prober".into())
+            .spawn(move || loop {
+                // Fan out one short-lived thread per server; join before sleeping.
+                let handles: Vec<_> = members
+                    .iter()
+                    .map(|tag| {
+                        let (tag, delays, secret, url) = (tag.clone(), Arc::clone(&delays), secret.clone(), url.clone());
+                        std::thread::spawn(move || {
+                            let ms = clash_delay(port, secret.as_deref(), &tag, &url, 5000);
+                            if let Ok(mut m) = delays.lock() {
+                                m.insert(tag, (ms, Instant::now()));
+                            }
+                        })
+                    })
+                    .collect();
+                for h in handles {
+                    let _ = h.join();
+                }
+                std::thread::sleep(Duration::from_secs(20));
+            })
+            .ok();
     }
 
     fn clash_secret(&self) -> Option<String> {
@@ -150,33 +206,33 @@ impl LiveSource {
         self.err_cache.as_ref().unwrap().2.clone()
     }
 
-    fn servers(&self, host: &Value, state: &HashMap<String, String>) -> (u32, u32, u32, String, Vec<Server>, Option<u32>) {
+    /// Derive the server-health strip from the background prober's results.
+    /// A server is *up* if its most recent delay test succeeded, *down* if it
+    /// failed, and simply not-yet-counted while its first probe is pending (so
+    /// we never mislabel unprobed servers as down — the original bug).
+    fn servers(&self, state: &HashMap<String, String>, router_up: bool) -> (u32, u32, u32, String, Vec<Server>, Option<u32>) {
         let selected = state.get("selected").cloned().unwrap_or_default();
-        let members: Vec<String> = self
-            .escape_tags(host)
-            .into_iter()
-            .filter(|t| t != "escape")
-            .collect();
-        // latencies from /proxies (clash): proxies[tag].history[-1].delay
-        let proxies = self.clash_get("/proxies");
-        let delay_of = |tag: &str| -> Option<u32> {
-            let p = proxies.as_ref()?.get("proxies")?.get(tag)?;
-            let h = p.get("history")?.as_array()?;
-            let last = h.last()?;
-            let d = last.get("delay")?.as_u64()? as u32;
-            if d == 0 {
-                None
+        let total = self.escape_members.len() as u32;
+        if !router_up {
+            // Can't probe through a down router; report the pool size only.
+            return (total, 0, 0, selected, Vec::new(), None);
+        }
+        let map = self.delays.lock().ok();
+        let fresh = |tag: &str| -> Option<Option<u32>> {
+            let (ms, at) = map.as_ref()?.get(tag)?;
+            if at.elapsed() < Duration::from_secs(90) {
+                Some(*ms)
             } else {
-                Some(d)
+                None // stale -> treat as pending, not down
             }
         };
         let mut up = 0u32;
         let mut down = 0u32;
         let mut chips = Vec::new();
         let mut active_ms = None;
-        for tag in &members {
-            match delay_of(tag) {
-                Some(ms) => {
+        for tag in &self.escape_members {
+            match fresh(tag) {
+                Some(Some(ms)) => {
                     up += 1;
                     if *tag == selected {
                         active_ms = Some(ms);
@@ -184,11 +240,11 @@ impl LiveSource {
                         chips.push(Server { name: tag.clone(), ms });
                     }
                 }
-                None => down += 1,
+                Some(None) => down += 1,
+                None => {} // pending first probe — neither up nor down yet
             }
         }
         chips.sort_by_key(|c| c.ms);
-        let total = members.len() as u32;
         (total, up, down, selected, chips, active_ms)
     }
 }
@@ -216,6 +272,7 @@ impl Source for LiveSource {
             .map(|t| parse::parse_state(&t))
             .unwrap_or_default();
         let escape = self.escape_tags(&host);
+        self.escape_members = self.members(&host);
 
         // Connections + throughput from clash (empty if unreachable).
         let conns_json = self.clash_get("/connections");
@@ -227,9 +284,21 @@ impl Source for LiveSource {
             all.up = u;
             all.down = d;
         }
+        if router_up {
+            self.ensure_prober();
+        }
 
         let (transient, persistent, blocked, errors) = self.errors(window);
-        let (total, up, down, active, chips, active_ms) = self.servers(&host, &state);
+        let (total, up, down, active, chips, active_ms) = self.servers(&state, router_up);
+        // Reserve header space for the longest server name so the ms column is
+        // stable as the active server changes (bounded so it can't overrun).
+        let name_reserve = self
+            .escape_members
+            .iter()
+            .map(|t| t.chars().count() as u16)
+            .max()
+            .unwrap_or(8)
+            .clamp(8, 13);
 
         let iface = host_bind_iface(&host).unwrap_or_else(|| "—".to_string());
         let mode = format!("{} · {}", state.get("mode").map(String::as_str).unwrap_or("host"), iface);
@@ -257,6 +326,7 @@ impl Source for LiveSource {
                 router,
                 proxy,
                 config: if config_ok { "host.json OK".into() } else { "host.json ERR".into() },
+                name_reserve,
             },
             all,
             lanes,
@@ -275,6 +345,36 @@ impl Source for LiveSource {
 }
 
 // ---------------- helpers ----------------
+
+/// Run one clash delay test for a server through the tunnel (like `rowt ping`):
+/// `GET /proxies/{tag}/delay`. Returns the RTT in ms, or None on failure.
+fn clash_delay(port: u16, secret: Option<&str>, tag: &str, url: &str, timeout_ms: u32) -> Option<u32> {
+    let enc = url_encode(url);
+    let path = format!("http://127.0.0.1:{}/proxies/{}/delay?timeout={}&url={}", port, tag, timeout_ms, enc);
+    // The HTTP call must outlast clash's own delay timeout.
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_millis(timeout_ms as u64 + 3000))
+        .build();
+    let mut req = agent.get(&path);
+    if let Some(s) = secret {
+        req = req.set("Authorization", &format!("Bearer {}", s));
+    }
+    let v: Value = req.call().ok()?.into_json().ok()?;
+    let d = v.get("delay")?.as_u64()? as u32;
+    (d > 0).then_some(d)
+}
+
+/// Percent-encode a URL for use as a query-string value (no extra deps).
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
 
 fn config_dir() -> PathBuf {
     if let Some(x) = std::env::var_os("XDG_CONFIG_HOME") {
