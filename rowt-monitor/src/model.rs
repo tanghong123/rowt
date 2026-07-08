@@ -150,10 +150,13 @@ pub struct Server {
 pub struct Identity {
     pub mode: String,        // e.g. "host · en0"
     pub uptime: String,      // e.g. "3h 15m"
-    pub server_name: String, // e.g. "JP-Tokyo"
-    pub server_ms: u32,      // active server RTT
+    pub server_name: String,     // e.g. "JP-Tokyo" (or "auto")
+    pub server_ms: Option<u32>,  // active server RTT; None -> shown as "—"
     pub router: String,      // e.g. "running · :7890"
     pub router_up: bool,     // proxy/router reachable — drives the LIVE/DOWN dot
+    /// Active server probe result: Some(true) = reachable, Some(false) = failing
+    /// (→ ERROR), None = not probed yet. Drives the LIVE/ERROR distinction.
+    pub active_ok: Option<bool>,
     pub proxy: String,       // e.g. "on · Wi-Fi"
     pub config: String,      // e.g. "host.json OK"
     /// Columns reserved for the active server name in the header, so the ms

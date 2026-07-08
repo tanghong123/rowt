@@ -157,15 +157,22 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, app: &App, present: bool) {
     // Row 1: MONITOR
     put(buf, x0 + 29, y0 + 1, "MONITOR", dimmer);
 
-    // Row 2: status dot. DOWN (red) when the router is unreachable takes
-    // priority; PAUSED (orange) when the user froze sampling; otherwise LIVE
-    // (green, breathing). Present/golden mode is always the neutral LIVE dot.
+    // Row 2: status dot, in priority order:
+    //   DOWN  (red)    — router/clash API unreachable
+    //   PAUSED (gray)  — sampling frozen by the user
+    //   ERROR (orange) — router up but the active server (or, in auto mode, the
+    //                    whole pool) is failing its probe
+    //   LIVE  (green)  — healthy; breathes to show sampling is live
+    // Present/golden mode is always the neutral LIVE dot.
+    let id = &app.snap.identity;
     let (dot_c, label, label_c, breathe) = if present {
         (theme::DIRECT, "LIVE", theme::BRIGHT, false)
-    } else if !app.snap.identity.router_up {
+    } else if !id.router_up {
         (theme::PERSISTENT, "DOWN", theme::PERSISTENT, false)
     } else if app.paused {
-        (theme::UP, "PAUSED", theme::UP, false)
+        (theme::DIM, "PAUSED", theme::DIM, false)
+    } else if id.active_ok == Some(false) {
+        (theme::UP, "ERROR", theme::UP, false)
     } else {
         (theme::DIRECT, "LIVE", theme::BRIGHT, true)
     };
@@ -184,12 +191,22 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, app: &App, present: bool) {
     // Row 3: server / router
     put(buf, x0 + 37, y0 + 3, "server", dimmer);
     // Reserve name width from the pool's longest name so the ms column is
-    // stable; bounded (<=13) so it never runs into the router column at 67.
+    // stable; bounded (<=13) so it never runs into the router column at 70.
     // 8 reproduces the golden (JP-Tokyo -> ms at col 55).
-    let reserve = app.snap.identity.name_reserve.clamp(6, 13);
-    put(buf, x0 + 46, y0 + 3, &truncate(&app.snap.identity.server_name, reserve), theme::bold(theme::ESCAPE));
-    let ms = format!("{} ms", app.snap.identity.server_ms);
-    put(buf, x0 + 47 + reserve, y0 + 3, &ms, theme::bold(theme::latency_color(app.snap.identity.server_ms)));
+    let reserve = id.name_reserve.clamp(6, 13);
+    // Gray out the server name unless it's confirmed reachable (present = ok).
+    let name_st = if present || id.active_ok == Some(true) {
+        theme::bold(theme::ESCAPE)
+    } else {
+        theme::fg(theme::DIM)
+    };
+    put(buf, x0 + 46, y0 + 3, &truncate(&id.server_name, reserve), name_st);
+    // Latency, or "—" when there is no reading (router down / not probed).
+    let (ms, ms_st) = match id.server_ms {
+        Some(v) => (format!("{} ms", v), theme::bold(theme::latency_color(v))),
+        None => ("—".to_string(), theme::fg(theme::DIM)),
+    };
+    put(buf, x0 + 47 + reserve, y0 + 3, &ms, ms_st);
     put(buf, x0 + 70, y0 + 3, "router", dimmer);
     put(buf, x0 + 78, y0 + 3, &app.snap.identity.router, bright);
 
@@ -308,12 +325,22 @@ fn draw_conn_pane(
         let name = lane.map_or("all", |l| l.label());
         put(buf, x0 + 1, y, name, *name_st);
         let val_st = if lane.is_none() { theme::bold(theme::BRIGHT) } else { dim };
+        // No connections in this row -> no meaningful rate; show "—".
+        let idle = *n == 0;
         put(buf, x0 + 8, y, "↑", up);
-        let (uv, uu) = format::rate_parts(*u);
-        put(buf, x0 + 10, y, &format!("{} {}", uv, uu), val_st);
+        if idle {
+            put(buf, x0 + 10, y, "—", dim);
+        } else {
+            let (uv, uu) = format::rate_parts(*u);
+            put(buf, x0 + 10, y, &format!("{} {}", uv, uu), val_st);
+        }
         put(buf, x0 + 21, y, "↓", down);
-        let (dv, du) = format::rate_parts(*d);
-        put(buf, x0 + 23, y, &format!("{} {}", dv, du), val_st);
+        if idle {
+            put(buf, x0 + 23, y, "—", dim);
+        } else {
+            let (dv, du) = format::rate_parts(*d);
+            put(buf, x0 + 23, y, &format!("{} {}", dv, du), val_st);
+        }
         let conn = format!("{} conn", n);
         let conn_st = if lane.is_none() { theme::bold(theme::BRIGHT) } else { dimmer };
         put_right(buf, x0 + w - 2, y, &conn, conn_st);

@@ -205,12 +205,12 @@ impl LiveSource {
     /// A server is *up* if its most recent delay test succeeded, *down* if it
     /// failed, and simply not-yet-counted while its first probe is pending (so
     /// we never mislabel unprobed servers as down — the original bug).
-    fn servers(&self, state: &HashMap<String, String>, router_up: bool) -> (u32, u32, u32, String, Vec<Server>, Option<u32>) {
+    fn servers(&self, state: &HashMap<String, String>, router_up: bool) -> Health {
         let selected = state.get("selected").cloned().unwrap_or_default();
         let total = self.escape_members.len() as u32;
         if !router_up {
             // Can't probe through a down router; report the pool size only.
-            return (total, 0, 0, selected, Vec::new(), None);
+            return Health { total, up: 0, down: 0, active: selected, chips: Vec::new(), active_ms: None, active_ok: None };
         }
         let map = self.delays.lock().ok();
         let fresh = |tag: &str| -> Option<Option<u32>> {
@@ -242,8 +242,35 @@ impl LiveSource {
         }
         // Active first, then the rest by latency.
         chips.sort_by_key(|c| (!c.active, c.ms));
-        (total, up, down, selected, chips, active_ms)
+
+        // Active status. In auto mode there's no pinned server: it's healthy if
+        // ANY server is reachable, ERROR if all probed ones failed. In manual
+        // mode it's the selected server's own probe result. `None` = not yet
+        // probed (don't alarm at startup).
+        let probed = |up: u32, down: u32| if up > 0 { Some(true) } else if down > 0 { Some(false) } else { None };
+        let (active_ms, active_ok) = if selected == "auto" {
+            (chips.iter().map(|c| c.ms).min(), probed(up, down))
+        } else {
+            let ok = match fresh(&selected) {
+                Some(Some(_)) => Some(true),
+                Some(None) => Some(false),
+                None => None,
+            };
+            (active_ms, ok)
+        };
+        Health { total, up, down, active: selected, chips, active_ms, active_ok }
     }
+}
+
+/// Server-health summary returned by `LiveSource::servers`.
+struct Health {
+    total: u32,
+    up: u32,
+    down: u32,
+    active: String,
+    chips: Vec<Server>,
+    active_ms: Option<u32>,
+    active_ok: Option<bool>,
 }
 
 impl Default for LiveSource {
@@ -292,7 +319,7 @@ impl Source for LiveSource {
         }
 
         let (transient, persistent, blocked, errors) = self.errors(window);
-        let (total, up, down, active, chips, active_ms) = self.servers(&state, router_up);
+        let h = self.servers(&state, router_up);
         // Reserve header space for the longest server name so the ms column is
         // stable as the active server changes (bounded so it can't overrun).
         let name_reserve = self
@@ -324,10 +351,11 @@ impl Source for LiveSource {
             identity: Identity {
                 mode,
                 uptime,
-                server_name: if active.is_empty() { "—".into() } else { active.clone() },
-                server_ms: active_ms.unwrap_or(0),
+                server_name: if h.active.is_empty() { "—".into() } else { h.active.clone() },
+                server_ms: h.active_ms,
                 router,
                 router_up,
+                active_ok: h.active_ok,
                 proxy,
                 config: if config_ok { "host.json OK".into() } else { "host.json ERR".into() },
                 name_reserve,
@@ -339,11 +367,11 @@ impl Source for LiveSource {
             persistent,
             blocked,
             errors,
-            servers_total: total,
-            servers_up: up,
-            servers_down: down,
-            active_server: active,
-            chips,
+            servers_total: h.total,
+            servers_up: h.up,
+            servers_down: h.down,
+            active_server: h.active,
+            chips: h.chips,
         }
     }
 }

@@ -130,9 +130,10 @@ impl Source for FixtureSource {
                 mode: "host · en0".into(),
                 uptime: "3h 15m".into(),
                 server_name: "JP-Tokyo".into(),
-                server_ms: 42,
+                server_ms: Some(42),
                 router: "running · :7890".into(),
                 router_up: true,
+                active_ok: Some(true),
                 proxy: "on · Wi-Fi".into(),
                 config: "host.json OK".into(),
                 name_reserve: 8, // matches the golden (JP-Tokyo, ms at col 55)
