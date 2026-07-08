@@ -42,6 +42,7 @@ pub struct LiveSource {
     host_cache: Option<(SystemTime, HostInfo)>, // re-parse host.json only on mtime change
     delays: Delays,
     prober_started: bool,
+    probe_interval: Duration,
     probe_tx: Option<Sender<()>>, // signal the prober to run now
 
     started: Instant,
@@ -54,6 +55,8 @@ impl LiveSource {
         let clash_port = env_port("ROWT_CLASH_PORT", 9090);
         let proxy_port = env_port("ROWT_PORT", 7890);
         let uptime_base = proxy_uptime_secs();
+        // Probe every 10 minutes by default (override with ROWT_MONITOR_PROBE_INTERVAL secs).
+        let probe_interval = Duration::from_secs(env_port("ROWT_MONITOR_PROBE_INTERVAL", 600).max(5) as u64);
         LiveSource {
             cfg,
             clash_port,
@@ -67,6 +70,7 @@ impl LiveSource {
             host_cache: None,
             delays: Arc::new(Mutex::new(HashMap::new())),
             prober_started: false,
+            probe_interval,
             probe_tx: None,
             started: Instant::now(),
             uptime_base,
@@ -89,8 +93,7 @@ impl LiveSource {
         // reaches 204 only *through* a working escape) — this tests real escape
         // reachability, matching rowt's auto-select urltest. Override via env.
         let url = std::env::var("ROWT_PING_URL").unwrap_or_else(|_| "https://www.gstatic.com/generate_204".to_string());
-        // Default: probe every 10 minutes (override with ROWT_MONITOR_PROBE_INTERVAL secs).
-        let interval = Duration::from_secs(env_port("ROWT_MONITOR_PROBE_INTERVAL", 600).max(5) as u64);
+        let interval = self.probe_interval;
         let (tx, rx) = mpsc::channel::<()>();
         self.probe_tx = Some(tx);
         std::thread::Builder::new()
@@ -228,9 +231,14 @@ impl LiveSource {
             return Health { total, up: 0, down: 0, active: selected, chips: Vec::new(), active_ms: None, active_ok: None };
         }
         let map = self.delays.lock().ok();
+        // Results stay valid across a full probe interval (plus margin); only
+        // treat them as stale — i.e. the prober likely died — after two missed
+        // rounds. (Was a fixed 90s, which emptied the strip between 10-min
+        // probes.)
+        let max_age = self.probe_interval.saturating_mul(2) + Duration::from_secs(30);
         let fresh = |tag: &str| -> Option<Option<u32>> {
             let (ms, at) = map.as_ref()?.get(tag)?;
-            if at.elapsed() < Duration::from_secs(90) {
+            if at.elapsed() < max_age {
                 Some(*ms)
             } else {
                 None // stale -> treat as pending, not down

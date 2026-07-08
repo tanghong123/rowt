@@ -379,8 +379,10 @@ fn draw_conn_pane(
         };
         put(buf, x0 + 8, y, &shown, theme::fg(theme::BRIGHT));
         put_right(buf, x0 + w - 38, y, &c.conns.to_string(), dimmer);
-        put_right(buf, x0 + w - 27, y, &format!("↑{}", format::compact(c.up)), theme::fg(theme::UP_TABLE));
-        put_right(buf, x0 + w - 17, y, &format!("↓{}", format::compact(c.down)), theme::fg(theme::DOWN_TABLE));
+        // No ↑/↓ here — the UP/DOWN column headers already label these; the
+        // color still distinguishes up (warm) from down (teal).
+        put_right(buf, x0 + w - 27, y, &format::compact(c.up), theme::fg(theme::UP_TABLE));
+        put_right(buf, x0 + w - 17, y, &format::compact(c.down), theme::fg(theme::DOWN_TABLE));
         // RULE is the last column — truncate hard so a long/verbose rule can
         // never spill across the divider into the errors pane.
         put(buf, x0 + w - 14, y, &truncate(&c.rule, 13), dimmer);
@@ -518,8 +520,14 @@ fn draw_health(buf: &mut Buffer, xl: u16, xr: u16, top: u16, app: &App, present:
     let stats = format!("{} servers · {} up · {} down", s.servers_total, s.servers_up, s.servers_down);
     put(buf, x0 + 1, top + 1, &stats, theme::fg(theme::DIM));
 
-    // chips row (marquee as a whole)
-    draw_chips(buf, x0 + 1, top + 2, w.saturating_sub(2), app, present);
+    // chips row — or a "probing…" hint while the first round is still running
+    // (router up, pool known, but nothing has come back yet), so an empty strip
+    // never looks broken.
+    if !present && s.identity.router_up && s.servers_total > 0 && s.servers_up == 0 && s.servers_down == 0 {
+        put(buf, x0 + 1, top + 2, "probing…", theme::fg(theme::DIM));
+    } else {
+        draw_chips(buf, x0 + 1, top + 2, w.saturating_sub(2), app, present);
+    }
 }
 
 fn draw_box_frame_health(buf: &mut Buffer, xl: u16, xr: u16, top: u16, border: Style) {
@@ -706,9 +714,11 @@ pub fn draw_footer(buf: &mut Buffer, area: Rect, app: &App) {
     };
     let shown = truncate(hint, area.width);
     put(buf, area.left(), y, &shown, dimmer);
-    if let Some(yk) = &app.last_yank {
-        let msg = format!(" copied {} ", yk);
-        let m = truncate(&msg, area.width);
-        put_right(buf, area.right().saturating_sub(1), y, &m, theme::fg(theme::DIRECT));
+    // Transient toast (yank / reprobe), auto-clears after a few seconds.
+    if let Some((msg, at)) = &app.toast {
+        if at.elapsed() < std::time::Duration::from_secs(4) {
+            let m = truncate(&format!(" {} ", msg), area.width);
+            put_right(buf, area.right().saturating_sub(1), y, &m, theme::fg(theme::DIRECT));
+        }
     }
 }

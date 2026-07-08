@@ -165,6 +165,7 @@ fn event_loop<B: Backend>(term: &mut Terminal<B>, app: &mut App) -> Result<()> {
                             let t = text.trim();
                             if !t.is_empty() {
                                 rowt_monitor::clipboard::copy(t);
+                                app.notify(format!("copied {}", t));
                                 app.last_yank = Some(t.to_string());
                             }
                         }

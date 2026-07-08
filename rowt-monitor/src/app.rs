@@ -79,6 +79,7 @@ pub struct App {
     pub started: Instant, // wall-clock start, for the time-based dot pulse
     pub should_quit: bool,
     pub last_yank: Option<String>,
+    pub toast: Option<(String, Instant)>, // transient footer message (auto-clears)
     pub drag: Option<Drag>,
 
     // Last-drawn list geometry, fed back by the renderer so movement/scroll can
@@ -108,6 +109,7 @@ impl App {
             started: Instant::now(),
             should_quit: false,
             last_yank: None,
+            toast: None,
             drag: None,
             conn_h: 1,
             err_h: 1,
@@ -126,6 +128,11 @@ impl App {
     /// Animation tick (faster than the data tick): advance marquees.
     pub fn anim(&mut self) {
         self.marquee = self.marquee.wrapping_add(1);
+    }
+
+    /// Show a transient footer message (auto-clears — see `draw_footer`).
+    pub fn notify(&mut self, msg: String) {
+        self.toast = Some((msg, Instant::now()));
     }
 
     /// Connections visible in the table: block lane is always excluded, plus the
@@ -154,7 +161,7 @@ impl App {
             TogglePause => self.paused = !self.paused,
             ForceProbe => {
                 self.source.force_probe();
-                self.last_yank = Some("re-probing servers…".to_string());
+                self.notify("re-probing servers…".to_string());
             }
             Up => self.move_sel(-1),
             Down => self.move_sel(1),
@@ -325,6 +332,7 @@ impl App {
     fn yank(&mut self) {
         if let Some(s) = self.yank_target() {
             crate::clipboard::copy(&s);
+            self.notify(format!("copied {}", s));
             self.last_yank = Some(s);
         }
     }

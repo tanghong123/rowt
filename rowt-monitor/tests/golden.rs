@@ -19,7 +19,26 @@ const G212: &str = include_str!("../../design_handoff_rowt_monitor/renders/rowt-
 /// right for breathing room); and the two server-health content rows (stats no
 /// longer repeats the active server; the strip marks the active with a ▶).
 /// The masked behaviours have their own dedicated assertions below.
+/// Neutralize the per-row ↑/↓ in the connections *table* (removed as redundant
+/// with the UP/DOWN column headers): a table arrow is one immediately followed
+/// by a digit (e.g. `↑8.0M`), unlike the header rate arrows (`↑ 2.9`, arrow +
+/// space), which are kept. Applied to both sides so alignment is still checked.
+fn strip_table_arrows(s: &str) -> String {
+    let ch: Vec<char> = s.chars().collect();
+    (0..ch.len())
+        .map(|i| {
+            let c = ch[i];
+            if (c == '↑' || c == '↓') && ch.get(i + 1).is_some_and(|n| n.is_ascii_digit()) {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 fn mask(s: &str) -> String {
+    let s = strip_table_arrows(s);
     let lines: Vec<&str> = s.lines().collect();
     let n = lines.len();
     lines
