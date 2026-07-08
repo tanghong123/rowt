@@ -180,7 +180,6 @@ fn event_loop<B: Backend>(term: &mut Terminal<B>, app: &mut App) -> Result<()> {
                 _ => {}
             }
         }
-        app.anim();
         if app.should_quit {
             return Ok(());
         }

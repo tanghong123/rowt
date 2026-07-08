@@ -75,8 +75,7 @@ pub struct App {
     pub err_scroll: usize,
 
     pub help: bool,
-    pub marquee: usize,
-    pub started: Instant, // wall-clock start, for the time-based dot pulse
+    pub started: Instant, // wall-clock start, for time-based pulse + marquees
     pub should_quit: bool,
     pub last_yank: Option<String>,
     pub toast: Option<(String, Instant)>, // transient footer message (auto-clears)
@@ -105,7 +104,6 @@ impl App {
             err_sel: 0,
             err_scroll: 0,
             help: false,
-            marquee: 0,
             started: Instant::now(),
             should_quit: false,
             last_yank: None,
@@ -123,11 +121,6 @@ impl App {
             self.snap = self.source.poll(self.window);
             self.clamp_selection();
         }
-    }
-
-    /// Animation tick (faster than the data tick): advance marquees.
-    pub fn anim(&mut self) {
-        self.marquee = self.marquee.wrapping_add(1);
     }
 
     /// Show a transient footer message (auto-clears — see `draw_footer`).

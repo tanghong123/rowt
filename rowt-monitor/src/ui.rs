@@ -373,7 +373,7 @@ fn draw_conn_pane(
         let hostport = format!("{}:{}", c.host, c.port);
         let selected = !present && app.focus == Focus::Conn && idx == app.conn_sel;
         let shown = if selected {
-            marquee(&hostport, host_max, app.marquee)
+            marquee(&hostport, host_max, app.started.elapsed().as_secs_f32())
         } else {
             truncate(&hostport, host_max)
         };
@@ -458,7 +458,7 @@ fn draw_err_pane(
         put(buf, x0 + 9, y, e.kind.label(), theme::fg(e.kind.color()));
         let selected = !present && app.focus == Focus::Err && idx == app.err_sel;
         let shown = if selected {
-            marquee(&e.domain, dom_max, app.marquee)
+            marquee(&e.domain, dom_max, app.started.elapsed().as_secs_f32())
         } else {
             truncate(&e.domain, dom_max)
         };
@@ -598,7 +598,7 @@ fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: boo
             }
         }
         let span = cells.len() + 3;
-        let off = (app.marquee / 2) % span;
+        let off = (app.started.elapsed().as_secs_f32() * MARQUEE_CPS) as usize % span;
         for k in 0..w as usize {
             let ci = off + k;
             let (ch, st) = if ci % span < cells.len() {
@@ -650,15 +650,20 @@ fn draw_scrollbar(buf: &mut Buffer, x: u16, y0: u16, h: usize, total: usize, scr
     put(buf, x, y, "▐", theme::fg(theme::DIM));
 }
 
-/// Horizontal auto-scroll of an overflowing value (selected row only).
-fn marquee(s: &str, max: u16, phase: usize) -> String {
+/// Cells-per-second for horizontal auto-scroll (time-based, so the speed is
+/// steady regardless of redraw/event cadence).
+const MARQUEE_CPS: f32 = 5.0;
+
+/// Horizontal auto-scroll of an overflowing value (selected row only). `secs` is
+/// elapsed wall-clock time so the roll speed doesn't change with event rate.
+fn marquee(s: &str, max: u16, secs: f32) -> String {
     let width = dw(s);
     if width <= max {
         return s.to_string();
     }
     let pad = 3u16;
     let span = width + pad; // s + gap
-    let off = ((phase / 2) as u16) % span;
+    let off = ((secs * MARQUEE_CPS) as u64 % span as u64) as u16;
     let chars: Vec<char> = s.chars().chain(std::iter::repeat_n(' ', pad as usize)).collect();
     let mut out = String::new();
     for k in 0..max {
