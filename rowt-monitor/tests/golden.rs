@@ -8,9 +8,9 @@ use rowt_monitor::app::App;
 use rowt_monitor::source::FixtureSource;
 use rowt_monitor::{render_text, ui};
 
-const G96: &str = include_str!("../../design_handoff_rowt_monitor/renders/rowt-monitor-96x30.txt");
-const G150: &str = include_str!("../../design_handoff_rowt_monitor/renders/rowt-monitor-150x38.txt");
-const G212: &str = include_str!("../../design_handoff_rowt_monitor/renders/rowt-monitor-212x52.txt");
+const G96: &str = include_str!("../../design/rowt_monitor/renders/rowt-monitor-96x30.txt");
+const G150: &str = include_str!("../../design/rowt_monitor/renders/rowt-monitor-150x38.txt");
+const G212: &str = include_str!("../../design/rowt_monitor/renders/rowt-monitor-212x52.txt");
 
 /// Blank the regions of the frame that intentionally diverge from the frozen
 /// design capture, so the byte-exact diff still verifies everything else

@@ -41,6 +41,6 @@ Everything is derived on a 2-second tick from: the clash API
 ## Design fidelity
 
 The layout, colors, and 130-column reflow reproduce the design captures in
-`../design_handoff_rowt_monitor/renders/` byte-for-byte in width. The
+`../design/rowt_monitor/renders/` byte-for-byte in width. The
 `tests/golden.rs` suite renders each geometry via ratatui's `TestBackend` and
 diffs against those captures; `--render WxH` is the same path exposed on the CLI.

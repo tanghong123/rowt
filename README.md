@@ -332,6 +332,7 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 | `status` | mode, servers, proxy state, reachability **and config validity** (absorbs the old `doctor`). |
 | `explain <domain\|ip>` | explain which lane a destination takes — `escape` (proxy), `corp` (into the corp VPN), or `direct` (pass-through) — and which rule matched. Mirrors the real rule order (corp domain → corp CIDR → escape domain → final); adds a live HTTP check if the router is running. (`route` still works as a hidden alias.) |
 | `report` | full offline diagnostic (deps, configs, per-server reachability, DNS, through-proxy tests, log tail) → `~/.config/rowt/diag-*.txt`, **secrets masked**, for sharing. |
+| `monitor` | **full-screen read-only TUI** (`htop`-style) — the live view of everything at once: connections + throughput, errors/blocked over a rolling window, and server health. See [Monitor (TUI)](#monitor-tui). |
 
 **Servers & selection**
 
@@ -389,6 +390,45 @@ corp/escape/direct.
 | `router up\|down\|restart\|status\|log` | the local rule-router process — the always-on proxy on `127.0.0.1:7890` (the front door your system proxy points at), which runs in **both** modes. (`router` is a process, not a mode — switch modes with `up host`/`up vm`.) |
 | `vm up\|down\|restart\|status\|log\|delete` | the bridged Lima VM (mode `vm`). |
 | `version` | print the version (`major.minor.revision`). |
+
+## Monitor (TUI)
+
+`rowt monitor` is a full-screen, **read-only** terminal UI for watching a running
+router — the observe-everything companion to the one-shot `status` /
+`connections` / `errors` commands. It never changes routing, servers, or the
+proxy; everything is derived on a 2-second tick.
+
+```sh
+rowt monitor            # live view (falls back to a demo fixture if nothing is running)
+rowt monitor --fixtures # force the offline demo
+```
+
+**Layout** (reflows at 130 columns — side-by-side above, stacked below):
+
+- **identity band** — mode/interface, active server + latency, router, proxy,
+  config validity, uptime, and a status dot: green **LIVE** (breathing), red
+  **DOWN** (router unreachable), orange **ERROR** (active server failing its
+  probe / auto-mode with nothing reachable), grey **PAUSED**.
+- **live · connections** — per-lane throughput rates (`↑`/`↓` B/s) and a table of
+  active connections (host:port, concurrency, cumulative bytes, matched rule),
+  colored by lane. Block-lane traffic is excluded.
+- **errors & blocked** — failures and sinkholed domains over a rolling window
+  (`5m`/`10m`/`1h`/`24h`), colored by category (dns = transient, timeout/reset/
+  refused = persistent, blocked = purple).
+- **server health** — `N up / N down`, and a marquee of the reachable pool with
+  latencies (the active server marked `▶`). Servers are probed through the tunnel
+  against Google's `generate_204` every 10 min (press `r` to re-probe now).
+
+**Keys:** `↑↓`/`jk` move · `←→`/`hl` switch pane · `Tab` cycle focus · `f`
+(or `1`/`2`/`3`, `0`/`Esc`) lane filter · `w` / `[` `]` errors window · `y` copy
+the selected domain / host:port · `r` re-probe servers · `p` pause · `?` help ·
+`q` quit. Mouse: wheel scrolls the list under the pointer; click a lane / window
+tab / row to select it.
+
+**Sources:** the clash API (`127.0.0.1:9090`), `host.json`, `state`/`servers.json`,
+and `lane-*.log`. Env: `ROWT_MONITOR_PROBE_INTERVAL` (secs, default 600),
+`ROWT_PING_URL` (probe target). It's a small Rust/`ratatui` binary built and
+installed alongside `rowt` (also runnable standalone as `rowt-monitor`).
 
 ## How it decides (probe)
 
