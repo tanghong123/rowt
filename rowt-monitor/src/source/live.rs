@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime};
 use serde_json::Value;
 
 use crate::model::*;
-use crate::source::parse::{self, ErrAgg, RawConn};
+use crate::source::parse::{self, ErrAgg, ErrEvent, RawConn};
 use crate::source::{FixtureSource, Source};
 
 /// Server latency results shared with the background prober: tag -> (delay ms
@@ -29,8 +29,24 @@ const LANE_FILES: [(&str, bool); 4] = [
     ("lane-direct.log", false),
     ("lane-block.log", true),
 ];
-/// Only the tail of each log is read — bounds RAM regardless of on-disk size.
+/// On first look, seed from this much of each log's tail (recent history);
+/// afterwards only newly-appended bytes are read.
 const LANE_TAIL_BYTES: u64 = 512 * 1024;
+/// Widest selectable window — events older than this are pruned from the buffer.
+const MAX_WINDOW_SECS: i64 = 24 * 60 * 60;
+/// Hard cap on buffered events (RAM safety net; ~24h is normally well under it).
+const ERR_BUF_CAP: usize = 40_000;
+/// Cap a single incremental read (e.g. a large first-look catch-up).
+const MAX_READ_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Per-lane read cursor for incremental log tailing.
+struct LaneCursor {
+    name: &'static str,
+    is_block: bool,
+    offset: u64,
+    mtime: Option<SystemTime>,
+    primed: bool,
+}
 
 pub struct LiveSource {
     cfg: PathBuf,
@@ -42,10 +58,14 @@ pub struct LiveSource {
     prev: HashMap<String, (u64, u64)>,
     prev_at: Option<Instant>,
 
-    // errors cache (re-aggregated on window change, or when a lane log grows,
-    // throttled to 6s). lane_sig is the last-seen (size, mtime) per lane log.
-    err_cache: Option<(Window, Instant, ErrAgg)>,
-    lane_sig: Vec<(u64, Option<SystemTime>)>,
+    // Errors pane: a bounded rolling buffer of parsed events, fed by reading
+    // only the newly-appended bytes of each lane log (no re-reading the tail).
+    errors_buf: Vec<ErrEvent>,
+    newest_secs: i64,
+    lane_cursors: Vec<LaneCursor>,
+    err_agg: Option<(Window, ErrAgg)>,
+    err_last_refresh: Option<Instant>,
+    err_dirty: bool,
 
     // server-health probing (manual selector mode leaves /proxies history empty,
     // so we actively run clash delay tests off the UI thread, like `rowt ping`).
@@ -76,8 +96,15 @@ impl LiveSource {
             fallback: FixtureSource::new(),
             prev: HashMap::new(),
             prev_at: None,
-            err_cache: None,
-            lane_sig: Vec::new(),
+            errors_buf: Vec::new(),
+            newest_secs: 0,
+            lane_cursors: LANE_FILES
+                .iter()
+                .map(|(name, is_block)| LaneCursor { name, is_block: *is_block, offset: 0, mtime: None, primed: false })
+                .collect(),
+            err_agg: None,
+            err_last_refresh: None,
+            err_dirty: false,
             escape_members: Vec::new(),
             prev_members: Vec::new(),
             host_cache: None,
@@ -205,43 +232,90 @@ impl LiveSource {
         out
     }
 
-    fn read_errors(&self, window: Window) -> ErrAgg {
-        let mut events = Vec::new();
-        for (file, is_block) in LANE_FILES {
-            if let Some(text) = tail_read(&self.cfg.join("log").join(file), LANE_TAIL_BYTES) {
-                events.extend(parse::parse_lane_log(&text, is_block));
+    /// Incrementally read the newly-appended bytes of each lane log into the
+    /// rolling event buffer. Reads bytes proportional to what was *added*, not
+    /// the whole tail — so a 1 KB append costs a 1 KB read + a few lines parsed.
+    /// mtime/size-gated (idle => nothing) and only the new region is parsed.
+    fn refresh_errors_buf(&mut self) {
+        let logdir = self.cfg.join("log");
+        let mut fresh: Vec<ErrEvent> = Vec::new();
+        for i in 0..self.lane_cursors.len() {
+            let (name, is_block, mut offset, primed, old_mtime) = {
+                let c = &self.lane_cursors[i];
+                (c.name, c.is_block, c.offset, c.primed, c.mtime)
+            };
+            let path = logdir.join(name);
+            let Ok(meta) = std::fs::metadata(&path) else { continue };
+            let size = meta.len();
+            let mtime = meta.modified().ok();
+
+            let mut skip_leading = false;
+            if !primed {
+                // First look: start near the end so we get recent history
+                // without reading the whole (possibly multi-MB) file.
+                offset = size.saturating_sub(LANE_TAIL_BYTES);
+                skip_leading = offset > 0; // first line is likely partial
+            } else {
+                if size == offset && mtime == old_mtime {
+                    continue; // unchanged since last read
+                }
+                if size < offset {
+                    offset = 0; // rotated/truncated -> read the new file from start
+                }
             }
+
+            if size > offset {
+                if let Some((evs, new_off)) = read_lane_incremental(&path, offset, skip_leading, is_block) {
+                    for e in evs {
+                        if e.secs > self.newest_secs {
+                            self.newest_secs = e.secs;
+                        }
+                        fresh.push(e);
+                    }
+                    offset = new_off;
+                }
+            }
+            let c = &mut self.lane_cursors[i];
+            c.offset = offset;
+            c.mtime = mtime;
+            c.primed = true;
         }
-        parse::aggregate_errors(&events, parse::window_secs(window))
+
+        if !fresh.is_empty() {
+            self.errors_buf.append(&mut fresh);
+            self.prune_errors();
+            self.err_dirty = true;
+        }
     }
 
-    /// Cheap per-lane signature (size + mtime) to detect whether any log grew.
-    fn lane_signature(&self) -> Vec<(u64, Option<SystemTime>)> {
-        let logdir = self.cfg.join("log");
-        LANE_FILES
-            .iter()
-            .map(|(name, _)| {
-                let m = std::fs::metadata(logdir.join(name)).ok();
-                (m.as_ref().map(|x| x.len()).unwrap_or(0), m.and_then(|x| x.modified().ok()))
-            })
-            .collect()
+    /// Bound the rolling buffer: drop events older than the widest window, and
+    /// cap the total as a hard safety net.
+    fn prune_errors(&mut self) {
+        let cutoff = self.newest_secs - MAX_WINDOW_SECS;
+        self.errors_buf.retain(|e| e.secs >= cutoff);
+        if self.errors_buf.len() > ERR_BUF_CAP {
+            let drop = self.errors_buf.len() - ERR_BUF_CAP;
+            self.errors_buf.drain(0..drop); // append order ~ chronological
+        }
     }
 
     fn errors(&mut self, window: Window) -> ErrAgg {
-        // stat the lane logs (nearly free) and only re-read/parse when one has
-        // grown — and then no more than every 6s. Idle logs => no IO, no parse.
-        let sig = self.lane_signature();
-        let files_changed = sig != self.lane_sig;
-        let (window_changed, throttle_ok) = match &self.err_cache {
-            Some((w, at, _)) => (*w != window, at.elapsed() >= Duration::from_secs(6)),
-            None => (true, true),
-        };
-        if window_changed || (files_changed && throttle_ok) {
-            self.lane_sig = sig;
-            let agg = self.read_errors(window);
-            self.err_cache = Some((window, Instant::now(), agg));
+        // Check for new log data at most every 6s (fresh enough to spot new
+        // blocked/failing domains, cheap enough to not amplify IO).
+        let due = self.err_last_refresh.is_none_or(|t| t.elapsed() >= Duration::from_secs(6));
+        if due {
+            self.err_last_refresh = Some(Instant::now());
+            self.refresh_errors_buf();
         }
-        self.err_cache.as_ref().unwrap().2.clone()
+        // Re-aggregate only when the buffer changed or the window switched;
+        // switching windows needs no IO (it re-aggregates the in-memory buffer).
+        let window_changed = self.err_agg.as_ref().is_none_or(|(w, _)| *w != window);
+        if window_changed || self.err_dirty || self.err_agg.is_none() {
+            let agg = parse::aggregate_errors(&self.errors_buf, parse::window_secs(window));
+            self.err_agg = Some((window, agg));
+            self.err_dirty = false;
+        }
+        self.err_agg.as_ref().unwrap().1.clone()
     }
 
     /// Derive the server-health strip from the background prober's results.
@@ -529,24 +603,32 @@ fn host_bind_iface(host: &Value) -> Option<String> {
     None
 }
 
-/// Read at most `cap` bytes from the end of a file (logs can be large; we only
-/// need the recent tail for any window).
-fn tail_read(path: &std::path::Path, cap: u64) -> Option<String> {
+/// Read the region `[start, EOF)` (capped) of a lane log and parse its complete
+/// lines. Returns the events and the new offset (advanced only past the last
+/// newline, so a partial trailing line is re-read next time). `skip_leading`
+/// drops a partial first line (used on the first, tail-seeked read).
+fn read_lane_incremental(path: &std::path::Path, start: u64, skip_leading: bool, is_block: bool) -> Option<(Vec<ErrEvent>, u64)> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = std::fs::File::open(path).ok()?;
-    let len = f.metadata().ok()?.len();
-    let start = len.saturating_sub(cap);
     f.seek(SeekFrom::Start(start)).ok()?;
-    let mut buf = Vec::new();
-    f.read_to_end(&mut buf).ok()?;
-    // Drop a possibly-partial first line when we didn't start at the beginning.
-    let mut s = String::from_utf8_lossy(&buf).into_owned();
-    if start > 0 {
-        if let Some(nl) = s.find('\n') {
-            s = s[nl + 1..].to_string();
+    let mut data = Vec::new();
+    f.take(MAX_READ_BYTES).read_to_end(&mut data).ok()?;
+    let text = String::from_utf8_lossy(&data);
+    let begin = if skip_leading {
+        text.find('\n').map(|i| i + 1).unwrap_or_else(|| text.len())
+    } else {
+        0
+    };
+    let end = text.rfind('\n').map(|i| i + 1).unwrap_or(begin);
+    let mut evs = Vec::new();
+    if end > begin {
+        for line in text[begin..end].lines() {
+            if let Some(e) = parse::parse_lane_line(line, is_block) {
+                evs.push(e);
+            }
         }
     }
-    Some(s)
+    Some((evs, start + end as u64))
 }
 
 fn fmt_uptime(secs: u64) -> String {

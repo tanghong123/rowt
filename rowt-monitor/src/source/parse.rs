@@ -238,22 +238,22 @@ pub fn classify_err(is_block: bool, msg: &str) -> ErrKind {
     }
 }
 
-/// Parse a `lane-*.log` (TSV: `timestamp\tdomain\tmessage`).
+/// Parse one lane-log line (TSV: `timestamp\tdomain\tmessage`).
+pub fn parse_lane_line(line: &str, is_block: bool) -> Option<ErrEvent> {
+    let mut it = line.splitn(3, '\t');
+    let ts = it.next()?;
+    let domain = it.next()?;
+    let msg = it.next().unwrap_or("");
+    Some(ErrEvent {
+        secs: parse_ts(ts)?,
+        domain: domain.to_string(),
+        kind: classify_err(is_block, msg),
+    })
+}
+
+/// Parse a whole `lane-*.log` (TSV: `timestamp\tdomain\tmessage`).
 pub fn parse_lane_log(text: &str, is_block: bool) -> Vec<ErrEvent> {
-    text.lines()
-        .filter_map(|line| {
-            let mut it = line.splitn(3, '\t');
-            let ts = it.next()?;
-            let domain = it.next()?;
-            let msg = it.next().unwrap_or("");
-            let secs = parse_ts(ts)?;
-            Some(ErrEvent {
-                secs,
-                domain: domain.to_string(),
-                kind: classify_err(is_block, msg),
-            })
-        })
-        .collect()
+    text.lines().filter_map(|l| parse_lane_line(l, is_block)).collect()
 }
 
 /// Aggregate events within the window (referenced to the newest event, so it is
