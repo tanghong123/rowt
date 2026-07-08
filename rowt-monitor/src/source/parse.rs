@@ -2,11 +2,21 @@
 //! unit-tested against captured sample payloads. `live.rs` wires them to the
 //! clash API, config/state files, and lane logs.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde_json::Value;
 
 use crate::model::*;
+
+/// Block-lane counts, bucketed by minute: `minute -> {domain -> count}`.
+/// The block lane is high-volume but low-cardinality, so per-minute per-domain
+/// counters use a fraction of the RAM of raw events (at ~1-minute accuracy).
+pub type BlockBuckets = BTreeMap<i64, HashMap<String, u32>>;
+
+/// Minute index for an epoch-seconds timestamp (bucket key).
+pub fn minute_of(secs: i64) -> i64 {
+    secs.div_euclid(60)
+}
 
 // ---------------- key=value state file ----------------
 
@@ -320,6 +330,65 @@ pub fn aggregate_errors(events: &[ErrEvent], window_secs: i64) -> ErrAgg {
     )
 }
 
+/// Aggregate the errors pane from sparse non-block events (exact, per-event) plus
+/// the block-lane minute buckets. `now` is the newest timestamp across both.
+/// Block counts are bucket-accurate (~1 minute) at the window boundary.
+pub fn aggregate_split(non_block: &[ErrEvent], blocks: &BlockBuckets, window_secs: i64, now: i64) -> ErrAgg {
+    let cutoff = now - window_secs;
+
+    // Non-block lanes: exact per-domain aggregation.
+    let mut tr_ev = 0u32;
+    let mut pe_ev = 0u32;
+    let mut tr_dom: HashSet<&str> = HashSet::new();
+    let mut pe_dom: HashSet<&str> = HashSet::new();
+    let mut per: HashMap<&str, (u32, HashMap<ErrKind, u32>)> = HashMap::new();
+    for e in non_block.iter().filter(|e| e.secs >= cutoff) {
+        match category(e.kind) {
+            Cat::Transient => {
+                tr_ev += 1;
+                tr_dom.insert(&e.domain);
+            }
+            Cat::Persistent => {
+                pe_ev += 1;
+                pe_dom.insert(&e.domain);
+            }
+            Cat::Blocked => {} // block lane isn't kept as raw events
+        }
+        let entry = per.entry(&e.domain).or_insert((0, HashMap::new()));
+        entry.0 += 1;
+        *entry.1.entry(e.kind).or_default() += 1;
+    }
+
+    // Block lane: sum minute buckets from the window's start minute onward.
+    let mut bl_ev = 0u32;
+    let mut bl_dom: HashMap<&str, u32> = HashMap::new();
+    for (_min, counts) in blocks.range(minute_of(cutoff)..) {
+        for (dom, cnt) in counts {
+            bl_ev = bl_ev.saturating_add(*cnt);
+            *bl_dom.entry(dom.as_str()).or_default() += cnt;
+        }
+    }
+
+    let mut rows: Vec<ErrRow> = per
+        .into_iter()
+        .map(|(dom, (count, kinds))| {
+            let kind = kinds.into_iter().max_by_key(|(_, n)| *n).map(|(k, _)| k).unwrap_or(ErrKind::Reset);
+            ErrRow { count, kind, domain: dom.to_string() }
+        })
+        .collect();
+    for (dom, cnt) in &bl_dom {
+        rows.push(ErrRow { count: *cnt, kind: ErrKind::Blocked, domain: (*dom).to_string() });
+    }
+    rows.sort_by(|a, b| b.count.cmp(&a.count).then(a.domain.cmp(&b.domain)));
+
+    (
+        ErrCat { count: tr_ev, domains: tr_dom.len() as u32 },
+        ErrCat { count: pe_ev, domains: pe_dom.len() as u32 },
+        ErrCat { count: bl_ev, domains: bl_dom.len() as u32 },
+        rows,
+    )
+}
+
 enum Cat {
     Transient,
     Persistent,
@@ -455,6 +524,36 @@ mod tests {
         assert_eq!(esc_lane.conns, 2);
         assert_eq!(all.conns, 3); // escape 2 + direct 1, block excluded
         assert_eq!(all.down, 2205.0);
+    }
+
+    #[test]
+    fn split_aggregation_buckets_block_lane() {
+        // Non-block: one timeout (persistent), one dns (transient) at t=600s.
+        let non_block = vec![
+            ErrEvent { secs: 600, domain: "dl.google.com".into(), kind: ErrKind::Timeout },
+            ErrEvent { secs: 590, domain: "gateway.icloud.com".into(), kind: ErrKind::Dns },
+        ];
+        // Block buckets: ads.example 5x + trk.example 2x at minute 10 (600s), and
+        // ads.example 3x back at minute 0 (0s, outside a 5m window). now = 600.
+        let mut blocks: BlockBuckets = BlockBuckets::new();
+        blocks.entry(minute_of(600)).or_default().insert("ads.example".into(), 5);
+        blocks.entry(minute_of(600)).or_default().insert("trk.example".into(), 2);
+        blocks.entry(minute_of(0)).or_default().insert("ads.example".into(), 3);
+
+        // 10-minute window from now=600 -> cutoff 0 -> includes everything.
+        let (tr, pe, bl, rows) = aggregate_split(&non_block, &blocks, 10 * 60, 600);
+        assert_eq!(tr.count, 1); // dns
+        assert_eq!(pe.count, 1); // timeout
+        assert_eq!(bl.count, 5 + 2 + 3); // all block events
+        assert_eq!(bl.domains, 2); // ads.example, trk.example
+        // ads.example totals 8 across buckets -> top row, marked blocked.
+        assert_eq!(rows[0].domain, "ads.example");
+        assert_eq!(rows[0].count, 8);
+        assert_eq!(rows[0].kind, ErrKind::Blocked);
+
+        // 5-minute window (cutoff 300 -> minute 5): drops the minute-9 bucket.
+        let (_, _, bl5, _) = aggregate_split(&non_block, &blocks, 5 * 60, 600);
+        assert_eq!(bl5.count, 5 + 2); // only minute-10 buckets
     }
 
     #[test]

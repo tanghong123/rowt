@@ -7,6 +7,8 @@
 //! falls back to the demo fixture so `rowt-monitor` always shows *something*.
 
 use std::collections::{HashMap, HashSet};
+
+use crate::source::parse::BlockBuckets;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
@@ -58,9 +60,11 @@ pub struct LiveSource {
     prev: HashMap<String, (u64, u64)>,
     prev_at: Option<Instant>,
 
-    // Errors pane: a bounded rolling buffer of parsed events, fed by reading
-    // only the newly-appended bytes of each lane log (no re-reading the tail).
+    // Errors pane: a bounded rolling buffer of parsed events for the sparse
+    // non-block lanes, plus per-minute per-domain counts for the high-volume
+    // block lane (compact regardless of how chatty it is).
     errors_buf: Vec<ErrEvent>,
+    block_buckets: BlockBuckets,
     newest_secs: i64,
     lane_cursors: Vec<LaneCursor>,
     err_agg: Option<(Window, ErrAgg)>,
@@ -97,6 +101,7 @@ impl LiveSource {
             prev: HashMap::new(),
             prev_at: None,
             errors_buf: Vec::new(),
+            block_buckets: BlockBuckets::new(),
             newest_secs: 0,
             lane_cursors: LANE_FILES
                 .iter()
@@ -270,7 +275,18 @@ impl LiveSource {
                         if e.secs > self.newest_secs {
                             self.newest_secs = e.secs;
                         }
-                        fresh.push(e);
+                        if is_block {
+                            // High-volume, low-cardinality: bucket by minute+domain.
+                            *self
+                                .block_buckets
+                                .entry(parse::minute_of(e.secs))
+                                .or_default()
+                                .entry(e.domain)
+                                .or_insert(0) += 1;
+                            self.err_dirty = true;
+                        } else {
+                            fresh.push(e);
+                        }
                     }
                     offset = new_off;
                 }
@@ -283,13 +299,15 @@ impl LiveSource {
 
         if !fresh.is_empty() {
             self.errors_buf.append(&mut fresh);
-            self.prune_errors();
             self.err_dirty = true;
+        }
+        if self.err_dirty {
+            self.prune_errors();
         }
     }
 
-    /// Bound the rolling buffer: drop events older than the widest window, and
-    /// cap the total as a hard safety net.
+    /// Bound both stores to the widest window: drop old non-block events (with a
+    /// hard count cap as a safety net) and drop block buckets older than 24h.
     fn prune_errors(&mut self) {
         let cutoff = self.newest_secs - MAX_WINDOW_SECS;
         self.errors_buf.retain(|e| e.secs >= cutoff);
@@ -297,6 +315,8 @@ impl LiveSource {
             let drop = self.errors_buf.len() - ERR_BUF_CAP;
             self.errors_buf.drain(0..drop); // append order ~ chronological
         }
+        let min_cutoff = parse::minute_of(cutoff);
+        self.block_buckets.retain(|min, _| *min >= min_cutoff);
     }
 
     fn errors(&mut self, window: Window) -> ErrAgg {
@@ -311,7 +331,7 @@ impl LiveSource {
         // switching windows needs no IO (it re-aggregates the in-memory buffer).
         let window_changed = self.err_agg.as_ref().is_none_or(|(w, _)| *w != window);
         if window_changed || self.err_dirty || self.err_agg.is_none() {
-            let agg = parse::aggregate_errors(&self.errors_buf, parse::window_secs(window));
+            let agg = parse::aggregate_split(&self.errors_buf, &self.block_buckets, parse::window_secs(window), self.newest_secs);
             self.err_agg = Some((window, agg));
             self.err_dirty = false;
         }
