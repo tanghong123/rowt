@@ -79,12 +79,16 @@ fn port_of(v: &Value) -> u16 {
         .unwrap_or(0)
 }
 
-/// Clash reports rule kinds as e.g. `DomainSuffix`, `Final`; the UI shows the
-/// sing-box snake_case form (`domain_suffix`, `final`).
+/// Clash reports rule kinds in a few shapes: `DomainSuffix`, `Final`, or a
+/// verbose `domain_suffix=[a b c...] => route(escape)`. The UI wants just the
+/// short snake_case kind (`domain_suffix`, `final`).
 pub fn normalize_rule(r: &str) -> String {
     if r.is_empty() {
         return "final".to_string();
     }
+    // Verbose form: keep only the kind before the first '=', '[', ' ' or '('.
+    let head = r.split(['=', '[', ' ', '(']).next().unwrap_or(r).trim();
+    let r = if head.is_empty() { r } else { head };
     if r.chars().any(|c| c.is_uppercase()) && !r.contains('_') {
         // CamelCase -> snake_case
         let mut out = String::new();

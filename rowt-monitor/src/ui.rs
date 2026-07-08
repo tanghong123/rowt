@@ -381,7 +381,9 @@ fn draw_conn_pane(
         put_right(buf, x0 + w - 38, y, &c.conns.to_string(), dimmer);
         put_right(buf, x0 + w - 27, y, &format!("↑{}", format::compact(c.up)), theme::fg(theme::UP_TABLE));
         put_right(buf, x0 + w - 17, y, &format!("↓{}", format::compact(c.down)), theme::fg(theme::DOWN_TABLE));
-        put(buf, x0 + w - 14, y, &c.rule, dimmer);
+        // RULE is the last column — truncate hard so a long/verbose rule can
+        // never spill across the divider into the errors pane.
+        put(buf, x0 + w - 14, y, &truncate(&c.rule, 13), dimmer);
         if selected {
             highlight_row(buf, x0, y, w, c.lane.color());
         }
