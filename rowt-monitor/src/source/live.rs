@@ -83,9 +83,8 @@ impl LiveSource {
         }
         self.prober_started = true;
         let delays = Arc::clone(&self.delays);
-        let members = self.escape_members.clone();
+        let cfg = self.cfg.clone();
         let port = self.clash_port;
-        let secret = self.clash_secret();
         let url = std::env::var("ROWT_PING_URL").unwrap_or_else(|_| "http://cp.cloudflare.com/generate_204".to_string());
         // Default: probe every 10 minutes (override with ROWT_MONITOR_PROBE_INTERVAL secs).
         let interval = Duration::from_secs(env_port("ROWT_MONITOR_PROBE_INTERVAL", 600).max(5) as u64);
@@ -94,12 +93,15 @@ impl LiveSource {
         std::thread::Builder::new()
             .name("rowt-monitor-prober".into())
             .spawn(move || loop {
-                // One round now (immediate first round), then wait for the
-                // interval OR a force signal (`r`), whichever comes first.
+                // Re-read the pool and secret from config each round so added
+                // servers / subscription updates / a rotated secret are picked
+                // up automatically (immediate first round, then wait).
+                let members = read_escape_members(&cfg);
+                let secret = read_clash_secret(&cfg);
                 let handles: Vec<_> = members
-                    .iter()
+                    .into_iter()
                     .map(|tag| {
-                        let (tag, delays, secret, url) = (tag.clone(), Arc::clone(&delays), secret.clone(), url.clone());
+                        let (delays, secret, url) = (Arc::clone(&delays), secret.clone(), url.clone());
                         std::thread::spawn(move || {
                             let ms = clash_delay(port, secret.as_deref(), &tag, &url, 5000);
                             if let Ok(mut m) = delays.lock() {
@@ -139,18 +141,7 @@ impl LiveSource {
     }
 
     fn escape_tags(&self, host: &Value) -> HashSet<String> {
-        let mut tags: HashSet<String> = HashSet::new();
-        tags.insert("escape".to_string());
-        if let Some(obs) = host.get("outbounds").and_then(|o| o.as_array()) {
-            for o in obs {
-                if o.get("tag").and_then(|t| t.as_str()) == Some("escape") {
-                    if let Some(m) = o.get("outbounds").and_then(|m| m.as_array()) {
-                        tags.extend(m.iter().filter_map(|s| s.as_str().map(str::to_string)));
-                    }
-                }
-            }
-        }
-        tags
+        escape_tags_of(host)
     }
 
     /// Compute per-connection byte rates from the delta since the last poll.
@@ -406,6 +397,37 @@ fn url_encode(s: &str) -> String {
         }
     }
     out
+}
+
+/// The `escape` selector's member tags (the server pool), plus the tag itself.
+fn escape_tags_of(host: &Value) -> HashSet<String> {
+    let mut tags: HashSet<String> = HashSet::new();
+    tags.insert("escape".to_string());
+    if let Some(obs) = host.get("outbounds").and_then(|o| o.as_array()) {
+        for o in obs {
+            if o.get("tag").and_then(|t| t.as_str()) == Some("escape") {
+                if let Some(m) = o.get("outbounds").and_then(|m| m.as_array()) {
+                    tags.extend(m.iter().filter_map(|s| s.as_str().map(str::to_string)));
+                }
+            }
+        }
+    }
+    tags
+}
+
+/// Read the current server pool straight from `host.json` (used by the prober
+/// each round so it tracks config changes without a restart).
+fn read_escape_members(cfg: &std::path::Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(cfg.join("host.json")) else {
+        return Vec::new();
+    };
+    let host: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    escape_tags_of(&host).into_iter().filter(|t| t != "escape").collect()
+}
+
+fn read_clash_secret(cfg: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(cfg.join("state")).ok()?;
+    parse::parse_state(&text).get("clash_secret").cloned()
 }
 
 fn config_dir() -> PathBuf {
