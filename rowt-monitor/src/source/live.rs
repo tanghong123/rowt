@@ -22,6 +22,16 @@ use crate::source::{FixtureSource, Source};
 /// or None if the last test failed, when it was measured).
 type Delays = Arc<Mutex<HashMap<String, (Option<u32>, Instant)>>>;
 
+/// Lane logs (name, is_block) aggregated into the errors pane.
+const LANE_FILES: [(&str, bool); 4] = [
+    ("lane-escape.log", false),
+    ("lane-corp.log", false),
+    ("lane-direct.log", false),
+    ("lane-block.log", true),
+];
+/// Only the tail of each log is read — bounds RAM regardless of on-disk size.
+const LANE_TAIL_BYTES: u64 = 512 * 1024;
+
 pub struct LiveSource {
     cfg: PathBuf,
     clash_port: u16,
@@ -32,8 +42,10 @@ pub struct LiveSource {
     prev: HashMap<String, (u64, u64)>,
     prev_at: Option<Instant>,
 
-    // errors cache (re-aggregated on window change or every few seconds)
+    // errors cache (re-aggregated on window change, or when a lane log grows,
+    // throttled to 6s). lane_sig is the last-seen (size, mtime) per lane log.
     err_cache: Option<(Window, Instant, ErrAgg)>,
+    lane_sig: Vec<(u64, Option<SystemTime>)>,
 
     // server-health probing (manual selector mode leaves /proxies history empty,
     // so we actively run clash delay tests off the UI thread, like `rowt ping`).
@@ -65,6 +77,7 @@ impl LiveSource {
             prev: HashMap::new(),
             prev_at: None,
             err_cache: None,
+            lane_sig: Vec::new(),
             escape_members: Vec::new(),
             prev_members: Vec::new(),
             host_cache: None,
@@ -194,25 +207,37 @@ impl LiveSource {
 
     fn read_errors(&self, window: Window) -> ErrAgg {
         let mut events = Vec::new();
-        for (file, is_block) in [
-            ("lane-escape.log", false),
-            ("lane-corp.log", false),
-            ("lane-direct.log", false),
-            ("lane-block.log", true),
-        ] {
-            if let Some(text) = tail_read(&self.cfg.join("log").join(file), 512 * 1024) {
+        for (file, is_block) in LANE_FILES {
+            if let Some(text) = tail_read(&self.cfg.join("log").join(file), LANE_TAIL_BYTES) {
                 events.extend(parse::parse_lane_log(&text, is_block));
             }
         }
         parse::aggregate_errors(&events, parse::window_secs(window))
     }
 
+    /// Cheap per-lane signature (size + mtime) to detect whether any log grew.
+    fn lane_signature(&self) -> Vec<(u64, Option<SystemTime>)> {
+        let logdir = self.cfg.join("log");
+        LANE_FILES
+            .iter()
+            .map(|(name, _)| {
+                let m = std::fs::metadata(logdir.join(name)).ok();
+                (m.as_ref().map(|x| x.len()).unwrap_or(0), m.and_then(|x| x.modified().ok()))
+            })
+            .collect()
+    }
+
     fn errors(&mut self, window: Window) -> ErrAgg {
-        let fresh = match &self.err_cache {
-            Some((w, at, _)) => *w != window || at.elapsed() > Duration::from_secs(6),
-            None => true,
+        // stat the lane logs (nearly free) and only re-read/parse when one has
+        // grown — and then no more than every 6s. Idle logs => no IO, no parse.
+        let sig = self.lane_signature();
+        let files_changed = sig != self.lane_sig;
+        let (window_changed, throttle_ok) = match &self.err_cache {
+            Some((w, at, _)) => (*w != window, at.elapsed() >= Duration::from_secs(6)),
+            None => (true, true),
         };
-        if fresh {
+        if window_changed || (files_changed && throttle_ok) {
+            self.lane_sig = sig;
             let agg = self.read_errors(window);
             self.err_cache = Some((window, Instant::now(), agg));
         }
