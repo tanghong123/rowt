@@ -10,6 +10,26 @@ pub enum Focus {
     Err,
 }
 
+/// An in-progress app-level drag selection (single row). Rendered as a reversed
+/// highlight; the covered glyphs are copied on mouse-up. This is the secondary
+/// copy path (primary is `y` yank) — it exists because enabling mouse tracking
+/// disables the terminal's native drag-select.
+#[derive(Clone, Copy, Debug)]
+pub struct Drag {
+    pub row: u16,
+    pub c0: u16,
+    pub c1: u16,
+}
+
+impl Drag {
+    pub fn lo(&self) -> u16 {
+        self.c0.min(self.c1)
+    }
+    pub fn hi(&self) -> u16 {
+        self.c0.max(self.c1)
+    }
+}
+
 /// One interaction, decoded from a key or mouse event (see `input.rs`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Action {
@@ -55,6 +75,7 @@ pub struct App {
     pub marquee: usize,
     pub should_quit: bool,
     pub last_yank: Option<String>,
+    pub drag: Option<Drag>,
 
     // Last-drawn list geometry, fed back by the renderer so movement/scroll can
     // clamp correctly (they need the visible heights, known only at draw time).
@@ -82,6 +103,7 @@ impl App {
             marquee: 0,
             should_quit: false,
             last_yank: None,
+            drag: None,
             conn_h: 1,
             err_h: 1,
             side_by_side: true,

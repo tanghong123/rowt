@@ -5,7 +5,13 @@
 use std::io::Write;
 
 /// Copy `text` to the system clipboard. Best-effort — never panics.
+///
+/// Set `ROWT_MONITOR_NO_CLIPBOARD=1` to make this a no-op (used by tests and any
+/// environment where touching the real clipboard is undesirable).
 pub fn copy(text: &str) {
+    if std::env::var_os("ROWT_MONITOR_NO_CLIPBOARD").is_some() {
+        return;
+    }
     if osc52(text).is_ok() {
         // OSC 52 emitted; also try arboard so local pastes work even if the
         // terminal swallowed the escape. Ignore any failure.

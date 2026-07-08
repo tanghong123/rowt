@@ -11,7 +11,7 @@ use std::io::stdout;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event};
+use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, MouseButton, MouseEventKind};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::{Backend, CrosstermBackend};
@@ -105,6 +105,17 @@ fn run(mut app: App) -> Result<()> {
     res
 }
 
+/// Read the glyphs covered by a single-row drag selection out of the buffer.
+fn read_span(buf: &ratatui::buffer::Buffer, d: rowt_monitor::app::Drag) -> String {
+    let mut s = String::new();
+    for x in d.lo()..=d.hi() {
+        if let Some(c) = buf.cell((x, d.row)) {
+            s.push_str(c.symbol());
+        }
+    }
+    s
+}
+
 fn restore() -> Result<()> {
     disable_raw_mode()?;
     execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
@@ -135,11 +146,33 @@ fn event_loop<B: Backend>(term: &mut Terminal<B>, app: &mut App) -> Result<()> {
                         app.update(action);
                     }
                 }
-                Event::Mouse(m) => {
-                    if let Some(action) = input::mouse(m, &hit) {
-                        app.update(action);
+                Event::Mouse(m) => match m.kind {
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        // Extend a single-row selection (anchored on the first
+                        // drag event's row) and cancel any prior yank toast.
+                        let d = app.drag.get_or_insert(rowt_monitor::app::Drag {
+                            row: m.row,
+                            c0: m.column,
+                            c1: m.column,
+                        });
+                        d.c1 = m.column;
                     }
-                }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        if let Some(d) = app.drag.take() {
+                            let text = read_span(term.current_buffer_mut(), d);
+                            let t = text.trim();
+                            if !t.is_empty() {
+                                rowt_monitor::clipboard::copy(t);
+                                app.last_yank = Some(t.to_string());
+                            }
+                        }
+                    }
+                    _ => {
+                        if let Some(action) = input::mouse(m, &hit) {
+                            app.update(action);
+                        }
+                    }
+                },
                 Event::Resize(_, _) => {}
                 _ => {}
             }

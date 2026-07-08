@@ -122,6 +122,13 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, present: bool) -> Hit {
 
     draw_health(buf, xl, xr, health_top, app, present, border);
 
+    // App-level drag selection highlight (secondary copy path).
+    if !present {
+        if let Some(d) = app.drag {
+            highlight(buf, Rect::new(d.lo(), d.row, d.hi().saturating_sub(d.lo()) + 1, 1));
+        }
+    }
+
     if app.help {
         draw_help(buf, area);
     }
