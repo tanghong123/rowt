@@ -327,6 +327,7 @@ impl Source for LiveSource {
                 server_name: if active.is_empty() { "—".into() } else { active.clone() },
                 server_ms: active_ms.unwrap_or(0),
                 router,
+                router_up,
                 proxy,
                 config: if config_ok { "host.json OK".into() } else { "host.json ERR".into() },
                 name_reserve,

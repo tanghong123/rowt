@@ -153,6 +153,7 @@ pub struct Identity {
     pub server_name: String, // e.g. "JP-Tokyo"
     pub server_ms: u32,      // active server RTT
     pub router: String,      // e.g. "running · :7890"
+    pub router_up: bool,     // proxy/router reachable — drives the LIVE/DOWN dot
     pub proxy: String,       // e.g. "on · Wi-Fi"
     pub config: String,      // e.g. "host.json OK"
     /// Columns reserved for the active server name in the header, so the ms

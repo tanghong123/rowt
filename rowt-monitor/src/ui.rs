@@ -157,21 +157,25 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, app: &App, present: bool) {
     // Row 1: MONITOR
     put(buf, x0 + 29, y0 + 1, "MONITOR", dimmer);
 
-    // Row 2: status + mode / uptime. The live dot pulses to show sampling is
-    // running (frozen at full brightness when paused or in present/golden mode).
-    let paused = app.paused && !present;
-    let (dot_c, label) = if paused {
-        (theme::UP, "PAUSED")
+    // Row 2: status dot. DOWN (red) when the router is unreachable takes
+    // priority; PAUSED (orange) when the user froze sampling; otherwise LIVE
+    // (green, breathing). Present/golden mode is always the neutral LIVE dot.
+    let (dot_c, label, label_c, breathe) = if present {
+        (theme::DIRECT, "LIVE", theme::BRIGHT, false)
+    } else if !app.snap.identity.router_up {
+        (theme::PERSISTENT, "DOWN", theme::PERSISTENT, false)
+    } else if app.paused {
+        (theme::UP, "PAUSED", theme::UP, false)
     } else {
-        (theme::DIRECT, "LIVE")
+        (theme::DIRECT, "LIVE", theme::BRIGHT, true)
     };
-    let dot_c = if present || paused {
-        dot_c
-    } else {
+    let dot_c = if breathe {
         theme::scale(dot_c, theme::pulse(app.started.elapsed().as_secs_f32()))
+    } else {
+        dot_c
     };
     put(buf, x0 + 29, y0 + 2, "●", theme::fg(dot_c));
-    put(buf, x0 + 31, y0 + 2, label, theme::bold(theme::BRIGHT));
+    put(buf, x0 + 31, y0 + 2, label, theme::bold(label_c));
     put(buf, x0 + 37, y0 + 2, "mode", dimmer);
     put(buf, x0 + 46, y0 + 2, &app.snap.identity.mode, bright);
     put(buf, x0 + 70, y0 + 2, "uptime", dimmer);
