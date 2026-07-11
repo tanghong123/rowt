@@ -24,6 +24,7 @@ pub struct Hit {
     pub lanes: Vec<(Rect, Option<Lane>)>, // header rate rows (None = `all`)
     pub windows: Vec<(Rect, Window)>,     // errors window tabs
     pub strip_w: u16,                     // server-strip viewport width (§5.4)
+    pub strip_render_off: usize,          // marquee cell offset actually drawn (freeze to it → no jump)
     pub chips: Vec<(Rect, usize)>,        // server chips as drawn this frame (click to select)
     pub sysproxy: Rect,                   // the "sys proxy on/off" cell region (click to toggle)
 }
@@ -647,6 +648,7 @@ fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: boo
 
     // Whole pool fits (static left-to-right layout, whether or not selected).
     if present || total <= w {
+        hit.strip_render_off = 0; // static: everything starts at column 0
         let mut col = x0;
         for (i, segs) in chips.iter().enumerate() {
             let sep = if i > 0 { 3 } else { 0 };
@@ -682,6 +684,7 @@ fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: boo
         Some(_) => app.strip_off % span,
         None => (app.started.elapsed().as_secs_f32() * MARQUEE_CPS) as usize % span,
     };
+    hit.strip_render_off = off; // freezing captures exactly this, so the view can't jump
     for k in 0..w as usize {
         let ci = (off + k) % span;
         let (ch, st) = if ci < cells.len() { cells[ci] } else { (' ', Style::default()) };
@@ -773,9 +776,9 @@ fn draw_scrollbar(buf: &mut Buffer, x: u16, y0: u16, h: usize, total: usize, scr
 }
 
 /// Cells-per-second for horizontal auto-scroll (time-based, so the speed is
-/// steady regardless of redraw/event cadence). Public so `App` can compute the
-/// same offset to freeze the server strip at its exact current scroll position.
-pub const MARQUEE_CPS: f32 = 5.0;
+/// steady regardless of redraw/event cadence). The frozen offset is fed back to
+/// `App` via `Hit::strip_render_off`, so `App` never recomputes this itself.
+const MARQUEE_CPS: f32 = 5.0;
 
 /// Horizontal auto-scroll of an overflowing value (selected row only). `secs` is
 /// elapsed wall-clock time so the roll speed doesn't change with event rate.

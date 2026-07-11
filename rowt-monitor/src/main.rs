@@ -149,6 +149,7 @@ fn event_loop<B: Backend>(term: &mut Terminal<B>, app: &mut App) -> Result<()> {
         app.err_h = hit.err_h.max(1);
         app.side_by_side = hit.side_by_side;
         app.strip_w = hit.strip_w;
+        app.strip_render_off = hit.strip_render_off;
 
         if event::poll(ANIM_TICK)? {
             match event::read()? {

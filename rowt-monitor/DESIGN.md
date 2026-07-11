@@ -311,13 +311,15 @@ interface, the system-proxy state, and router liveness/port.
   inactivity** (`SELECTION_IDLE_TIMEOUT`, checked in `on_frame`; any key/click
   resets the timer, hover doesn't) so a held selection / frozen strip doesn't
   stay stuck if the operator walks away — the panes then resume live scrolling.
-- **Server strip:** focusing keeps the marquee running; the first `←/→` **freezes
-  it at the exact cell offset** it had at that instant (App computes the same
-  time-based offset the renderer uses, so nothing jumps — a partial chip may sit
-  before the selection) and selects the first fully-visible chip. Moves wrap at
-  the ends and scroll the frozen ring one cell at a time to keep the selection
-  visible; the frozen ring renders circularly (wraps past the last chip to fill
-  the row). Strip viewport width is fed back from the renderer via `Hit`.
+- **Server strip:** focusing keeps the marquee running; the first `←/→` (or a
+  click) **freezes it at the exact offset the renderer last drew** — the renderer
+  feeds its marquee offset back each frame as `Hit::strip_render_off`, and App
+  freezes to that value, so the frozen view is precisely the snapshot on screen
+  (no jump; a partial chip may sit before the selection). It then selects the
+  first fully-visible chip. Moves wrap at the ends and scroll the frozen ring one
+  cell at a time to keep the selection visible; the frozen ring renders circularly
+  (wraps past the last chip to fill the row). Strip viewport width also comes back
+  via `Hit`.
 - **Control layer** (§1): contextual keys act on the current selection —
   `e`/`c`/`b`/`d` route the locked domain to escape/corp/block/direct, `u`
   switches to the selected server, `o` toggles the system proxy. Each shells out

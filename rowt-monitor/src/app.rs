@@ -127,7 +127,8 @@ pub struct App {
     // — so the display doesn't jump; a partial chip may sit before the selection —
     // then nudged just enough to keep the selection visible as it moves.
     pub strip_off: usize,
-    pub strip_w: u16, // server-strip viewport width, fed back from the renderer
+    pub strip_w: u16,          // server-strip viewport width, fed back from the renderer
+    pub strip_render_off: usize, // the marquee offset the renderer last drew (freeze to it → no jump)
 
     // Control layer: the armed-but-uncommitted lane edit, and the batched-reload
     // deadline (7s after the last committed edit).
@@ -174,6 +175,7 @@ impl App {
             strip_sel: None,
             strip_off: 0,
             strip_w: 0,
+            strip_render_off: 0,
             armed: None,
             pending_reload: None,
             proxy_optimistic: None,
@@ -398,12 +400,11 @@ impl App {
             return;
         }
         self.set_focus(Focus::Health);
-        // Freeze the ring at its current scroll only if it wasn't already frozen,
-        // so re-clicking another visible chip keeps the display put.
+        // Freeze the ring at the exact rendered offset only if it wasn't already
+        // frozen, so re-clicking another visible chip keeps the display put.
         if self.strip_sel.is_none() {
             let (_, _, span) = self.strip_layout();
-            let overflow = self.strip_w > 0 && span.saturating_sub(3) > self.strip_w as usize;
-            self.strip_off = if overflow { self.strip_marquee_off(span) } else { 0 };
+            self.strip_off = self.strip_render_off % span.max(1);
         }
         self.strip_sel = Some(i);
     }
@@ -533,13 +534,13 @@ impl App {
             return;
         }
         match self.strip_sel {
-            // First ←/→ freezes the marquee *exactly where it is* (cell offset and
-            // all — a partial chip may remain at the left edge) and selects the
-            // first fully-visible chip, so nothing jumps.
+            // First ←/→ freezes the marquee at the EXACT offset the renderer last
+            // drew (fed back as `strip_render_off`), so the frozen view is the
+            // snapshot on screen — a partial chip may remain at the left edge, and
+            // nothing jumps. Then select the first fully-visible chip.
             None => {
                 let (starts, widths, span) = self.strip_layout();
-                let overflow = self.strip_w > 0 && span.saturating_sub(3) > self.strip_w as usize;
-                self.strip_off = if overflow { self.strip_marquee_off(span) } else { 0 };
+                self.strip_off = self.strip_render_off % span.max(1);
                 self.strip_sel = Some(self.first_fully_visible(&starts, &widths, span, self.strip_off));
             }
             // Subsequent moves wrap around the ends; scroll the frozen ring (in the
@@ -579,15 +580,6 @@ impl App {
             cells += w as usize;
         }
         (starts, widths, cells + 3)
-    }
-
-    /// The marquee's current cell offset — computed the same way `draw_chips`
-    /// does, so freezing captures precisely what's on screen.
-    fn strip_marquee_off(&self, span: usize) -> usize {
-        if span == 0 {
-            return 0;
-        }
-        (self.started.elapsed().as_secs_f32() * crate::ui::MARQUEE_CPS) as usize % span
     }
 
     /// Display column of chip `i`'s left edge within the window at offset `off`.
