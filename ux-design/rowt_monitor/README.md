@@ -314,7 +314,7 @@ implemented **in the app**:
   dependency) with a **clipboard-crate fallback** (e.g. `arboard` / `copypasta`) for
   terminals that block OSC 52. Note OSC 52 payload-size limits and that some terminals
   disable it — degrade gracefully.
-- **Paste** is **out of scope** for the read-only monitor (nowhere to paste). Revisit only
+- **Paste** is **out of scope** (nowhere to paste — the controls are keys, not text). Revisit only
   if a text-entry field — e.g. a typed filter box — is added later.
 
 ### Overflow / marquee
@@ -346,7 +346,7 @@ route selection → escape/corp/block/direct (confirm) · `u` use selected serve
 system proxy · `↵` confirm · `Esc` cancel/unlock/clear · `p` pause · `?` help · `q` quit.
 
 ### Control layer
-A small set of **confirmed, reversible overrides** layered on the read-only view. Each is a
+A small set of **confirmed, reversible overrides** layered on the observe-only view. Each is a
 front-end to an existing `rowt` command — the monitor issues exactly what the operator could
 type, no new privileged surface. Contextual: a key is only live when there's something to act
 on (a locked row for `e`/`c`/`b`/`d`, a selected non-active chip for `u`; `o` is always live).

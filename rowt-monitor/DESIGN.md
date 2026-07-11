@@ -1,8 +1,10 @@
 # rowt monitor — design
 
-A read-only terminal UI for observing a running `rowt` proxy: live connections
-and throughput, errors/blocked over a rolling window, and outbound-server health.
-The `htop`/`btop` companion to the `rowt` CLI.
+A terminal UI for observing a running `rowt` proxy: live connections and
+throughput, errors/blocked over a rolling window, and outbound-server health —
+plus a small set of **confirmed, reversible controls** (server switch, lane
+routing, system-proxy toggle) layered on top. The `htop`/`btop` companion to the
+`rowt` CLI.
 
 This document is the full design reference — the product/UX design **and** the
 engineering internals. The frozen, pixel-exact UX handoff (spec + ground-truth
@@ -14,11 +16,15 @@ it and then goes under the hood.
 
 ## 1. Goals & principles
 
-- **Observer only.** The monitor never mutates routing, servers, or the proxy.
-  The single exception is that it *actively measures* server latency (a delay
-  probe through the tunnel, exactly like `rowt ping`) — this changes nothing
-  about routing, but it is real network work, so it runs off the UI thread on a
-  gentle cadence. Everything else is pure derivation.
+- **Observe + confirmed, reversible overrides.** The data path is pure
+  derivation and never mutates anything. On top of it, a handful of keys apply
+  **reversible** changes — server switch, lane routing, the system-proxy toggle —
+  each a front-end to the exact `rowt` command the operator could type, gated by
+  an explicit confirm for the routing edits (see §6). Lifecycle and
+  server-management stay in the CLI. (The monitor also *actively measures* server
+  latency — a delay probe through the tunnel, like `rowt ping` — which changes no
+  routing but is real network work, so it runs off the UI thread on a gentle
+  cadence.)
 - **It is a terminal.** The whole thing renders into a fixed grid of
   identically-sized character cells. Emphasis is **bold + foreground color**
   only (no font sizes). Chrome is box-drawing; bars/sparklines are block glyphs.
@@ -221,11 +227,15 @@ lines — IO and CPU scale with new data, not log size.
 
 **Aggregation** (`parse::aggregate_split`) combines the sparse events (exact) and
 the block buckets (bucketed) over the selected window into the three category
-totals + a count-sorted per-domain row list. It's cached by `(window,
-lane_filter)` and only recomputed when the buffer changes or either key changes —
-so **switching window or lane filter re-aggregates in memory, no I/O**. Refresh
-is throttled to 6s (fresh enough to spot new domains, cheap enough not to
-re-read on every 2s tick).
+totals + a count-sorted per-domain row list. It runs **every 2s poll**, and the
+window is referenced to **wall-clock now** — expressed in the same local
+civil-seconds frame the lane logs use (system clock + local UTC offset from
+`date +%z`, read once) — *not* the newest event timestamp. That is deliberate: a
+newest-event reference froze the cutoff during a quiet spell, so entries older
+than the window never aged out until a new event happened to arrive. Re-running
+each poll against an advancing wall clock retires them in real time (in-memory,
+no I/O). Log **reads** stay throttled to ~6s (fresh enough for new domains, cheap
+enough not to re-read on every tick).
 
 **Lane filter.** Each event carries its lane; `aggregate_split` filters the
 sparse events to the active filter and drops the block category under a specific
@@ -276,17 +286,51 @@ interface, the system-proxy state, and router liveness/port.
 
 `input.rs` maps crossterm events to `Action`s; `App::update` is the reducer.
 
-- **Focus model:** exactly one focused list, shown by brightening its caption
-  text. The `┤ ├` connectors always match the border (focus is text-only), so
-  they never look out of step. Server health is not focusable.
+- **Focus model:** exactly one focused region — the two lists **and** the server
+  strip (`Focus::{Conn,Err,Health}`), cycled by `Tab`. Focus is shown by
+  brightening that region's caption text (the single split box can't carry a
+  per-pane border ring); the `┤ ├` connectors stay border-colored so they never
+  look out of step. All focus changes route through `set_focus`, which **forgets
+  the leaving region's selection** — re-focusing always starts fresh.
+- **Deferred, locked selection:** a focused pane starts unselected; the first
+  `↑/↓` locks a row **by its domain key** (not index) and tints the caption
+  amber. `tick()` re-resolves the key to its current index each poll and drops it
+  if the domain leaves the list — so the acted-on domain can't shift under the 2s
+  re-sort. `Esc` releases it.
+- **Server strip:** focusing keeps the marquee running; the first `←/→` **freezes
+  it at the exact cell offset** it had at that instant (App computes the same
+  time-based offset the renderer uses, so nothing jumps — a partial chip may sit
+  before the selection) and selects the first fully-visible chip. Moves wrap at
+  the ends and scroll the frozen ring one cell at a time to keep the selection
+  visible; the frozen ring renders circularly (wraps past the last chip to fill
+  the row). Strip viewport width is fed back from the renderer via `Hit`.
+- **Control layer** (§1): contextual keys act on the current selection —
+  `e`/`c`/`b`/`d` route the locked domain to escape/corp/block/direct, `u`
+  switches to the selected server, `o` toggles the system proxy. Each shells out
+  to `$ROWT_BIN` (exported by `rowt monitor`) **off the UI thread**; outcomes are
+  drained each frame into the footer toast (a failed command surfaces its
+  stderr). Lane edits **arm** on first press (an amber confirm bar; re-press or
+  `↵` commits, any other key / `Esc` cancels — so a double-tap commits with no
+  pause) and are written with `--no-reload`; a single `render`+`router restart`
+  fires ~7s after the last edit settles (a footer chip counts down). `u`/`o` skip
+  the confirm (live + trivially reversible). The proxy toggle is **optimistic**:
+  the displayed state flips immediately, then reconciles with the real polled
+  state or reverts on timeout if the command failed.
 - **Lane filter** is global (both panes) and shows as a `· <lane>` chip in both
   captions. Changing it re-polls immediately (cheap in-memory re-aggregation).
-- **Clipboard:** `y` yanks the selected key field (domain / host:port) via OSC 52
-  (works over SSH) with an `arboard` fallback; app-level single-row drag-select
-  reads the covered glyphs back out of the buffer on mouse-up. Paste is out of
-  scope. `ROWT_MONITOR_NO_CLIPBOARD=1` disables the real clipboard (tests).
-- **Toast:** a transient footer message (copied…/re-probing…) auto-clears after
-  ~4s (timestamped).
+- **Mouse:** wheel scrolls (and focuses) the list under the pointer; clicking a
+  row / lane / window-tab activates it; clicking a **server chip** focuses the
+  strip and selects it *in place* (both partial edge chips are hit-tested);
+  clicking **`sys proxy`** toggles it. Hover over `sys proxy` highlights it — this
+  needs any-motion reporting (xterm `1003`, enabled alongside SGR-1006 capture and
+  disabled on exit). Clickable regions are recorded into `Hit` each draw.
+- **Clipboard:** `y` yanks the selected row's **domain** (bare hostname, both
+  panes) via OSC 52 (works over SSH) with an `arboard` fallback; app-level
+  single-row drag-select reads the covered glyphs back out of the buffer on
+  mouse-up. Paste is out of scope. `ROWT_MONITOR_NO_CLIPBOARD=1` disables the real
+  clipboard (tests).
+- **Toast:** a transient footer message (copied… / re-probing… / control outcome)
+  auto-clears after ~4s (timestamped).
 
 ---
 
@@ -298,8 +342,10 @@ pool.
 - **IO:** idle → only `stat`s. Active → incremental reads proportional to bytes
   appended (not the 512 KB tail). clash calls are local HTTP with short timeouts;
   the blocking stream endpoint is avoided.
-- **CPU:** only newly-appended log lines are parsed each refresh (not the whole
-  tail); aggregation runs only on change/window/lane switch.
+- **CPU:** only newly-appended log lines are parsed each ~6s refresh (not the
+  whole tail); the errors aggregation re-runs each 2s poll but is a cheap
+  in-memory filter/group over the bounded event buffer (so the window can age
+  out against the wall clock).
 - **RAM:** sparse-lane events pruned to 24h + 40k cap; block lane collapsed to
   per-minute per-domain counters (sub-MB for a normal block lane); `host.json`
   parsed once per change. The rest of the snapshot is small.
