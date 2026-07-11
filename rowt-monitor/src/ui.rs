@@ -198,9 +198,9 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, app: &App, present: bool, h
     // Row 3: server / router
     put(buf, x0 + 37, y0 + 3, "server", dimmer);
     // Reserve name width from the pool's longest name so the ms column is
-    // stable; bounded (<=13) so it never runs into the router column at 70.
-    // 8 reproduces the golden (JP-Tokyo -> ms at col 55).
-    let reserve = id.name_reserve.clamp(6, 13);
+    // stable; bounded (<=15) so name + ` NNN ms` never runs into the router
+    // column at 70. 8 reproduces the golden (JP-Tokyo -> ms at col 55).
+    let reserve = id.name_reserve.clamp(6, 15);
     // Gray out the server name unless it's confirmed reachable (present = ok).
     let name_st = if present || id.active_ok == Some(true) {
         theme::bold(theme::ESCAPE)

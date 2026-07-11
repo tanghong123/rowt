@@ -715,7 +715,9 @@ impl Source for LiveSource {
             .map(|t| t.chars().count() as u16)
             .max()
             .unwrap_or(8)
-            .clamp(8, 13);
+            // Bounded so name + ` NNN ms` stays clear of the `router` column at
+            // x0+70 (name@47 + gap + 6-wide ms → reserve ≤ 15).
+            .clamp(8, 15);
 
         let iface = info.iface.unwrap_or_else(|| "—".to_string());
         let mode = format!("{} · {}", state.get("mode").map(String::as_str).unwrap_or("host"), iface);
