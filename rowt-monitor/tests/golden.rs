@@ -50,9 +50,11 @@ fn mask(s: &str) -> String {
                 // proxy/config row diverges (proxy = system-proxy on/off, no iface)
                 " ".repeat(line.chars().count())
             } else if (1..=3).contains(&i) {
+                // logo (1..27) + the left value column (moved to 47) + right
+                // column (60+) all diverge; keep the labels (28..45) checked.
                 line.chars()
                     .enumerate()
-                    .map(|(c, ch)| if (1..=27).contains(&c) || c >= 60 { ' ' } else { ch })
+                    .map(|(c, ch)| if (1..=27).contains(&c) || c >= 46 { ' ' } else { ch })
                     .collect::<String>()
             } else if health {
                 " ".repeat(line.chars().count())
@@ -123,14 +125,14 @@ fn colors_spot_check() {
     assert_eq!(sym, "●");
     assert_eq!(fg, Color::Rgb(134, 192, 122));
 
-    // Server value 'J' (JP-Tokyo) at (46,3): escape bold.
-    let (sym, fg, m) = at(46, 3);
+    // Server value 'J' (JP-Tokyo) at (47,3): escape bold (left value column = 47).
+    let (sym, fg, m) = at(47, 3);
     assert_eq!(sym, "J");
     assert_eq!(fg, Color::Rgb(124, 157, 240));
     assert!(m.contains(Modifier::BOLD));
 
-    // Latency '4' (42 ms) at (55,3): latency-ok green (<70), bold.
-    let (sym, fg, m) = at(55, 3);
+    // Latency '4' (42 ms) at (56,3): latency-ok green (<70), bold.
+    let (sym, fg, m) = at(56, 3);
     assert_eq!(sym, "4");
     assert_eq!(fg, Color::Rgb(134, 192, 122));
     assert!(m.contains(Modifier::BOLD));

@@ -184,7 +184,7 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, app: &App, present: bool) {
     put(buf, x0 + 29, y0 + 2, "●", theme::fg(dot_c));
     put(buf, x0 + 31, y0 + 2, label, theme::bold(label_c));
     put(buf, x0 + 37, y0 + 2, "mode", dimmer);
-    put(buf, x0 + 46, y0 + 2, &app.snap.identity.mode, bright);
+    put(buf, x0 + 47, y0 + 2, &app.snap.identity.mode, bright);
     put(buf, x0 + 70, y0 + 2, "uptime", dimmer);
     put(buf, x0 + 78, y0 + 2, &app.snap.identity.uptime, bright);
 
@@ -200,18 +200,19 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, app: &App, present: bool) {
     } else {
         theme::fg(theme::DIM)
     };
-    put(buf, x0 + 46, y0 + 3, &truncate(&id.server_name, reserve), name_st);
+    put(buf, x0 + 47, y0 + 3, &truncate(&id.server_name, reserve), name_st);
     // Latency, or "—" when there is no reading (router down / not probed).
     let (ms, ms_st) = match id.server_ms {
         Some(v) => (format!("{} ms", v), theme::bold(theme::latency_color(v))),
         None => ("—".to_string(), theme::fg(theme::DIM)),
     };
-    put(buf, x0 + 47 + reserve, y0 + 3, &ms, ms_st);
+    put(buf, x0 + 48 + reserve, y0 + 3, &ms, ms_st);
     put(buf, x0 + 70, y0 + 3, "router", dimmer);
     put(buf, x0 + 78, y0 + 3, &app.snap.identity.router, bright);
 
-    // Row 4: system proxy / config. "sys proxy" is 9 wide, so its value sits one
-    // cell right of the col-46 column to keep a gap after the label.
+    // Row 4: system proxy / config. The left-column value column is at 47 (one
+    // wider than the design's 46) so the 9-wide "sys proxy" label keeps a gap;
+    // mode/server values match it, so the column stays aligned.
     put(buf, x0 + 37, y0 + 4, "sys proxy", dimmer);
     put(buf, x0 + 47, y0 + 4, &app.snap.identity.proxy, bright);
     put(buf, x0 + 70, y0 + 4, "config", dimmer);
