@@ -23,7 +23,7 @@ pub struct Hit {
     pub err_h: usize,
     pub lanes: Vec<(Rect, Option<Lane>)>, // header rate rows (None = `all`)
     pub windows: Vec<(Rect, Window)>,     // errors window tabs
-    pub strip_first_visible: usize,       // first server chip visible this frame (§5.4)
+    pub strip_page: usize,                // leftmost server chip visible this frame (§5.4)
 }
 
 // NOTE: the bottom row is shifted one space left of the design capture so its
@@ -124,7 +124,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, present: bool) -> Hit {
         draw_err_pane(buf, cx0, cw, e_top + 1, e_top + 6, e_top + 7, r2 as usize, app, present, &mut hit);
     }
 
-    hit.strip_first_visible = draw_health(buf, xl, xr, health_top, app, present, border);
+    hit.strip_page = draw_health(buf, xl, xr, health_top, app, present, border);
 
     // App-level drag selection highlight (secondary copy path).
     if !present {
@@ -613,18 +613,38 @@ fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: boo
     let widths: Vec<u16> = chips.iter().map(|segs| segs.iter().map(|(s, _)| dw(s)).sum()).collect();
     let total: u16 = widths.iter().sum::<u16>() + 3 * (chips.len().saturating_sub(1) as u16);
 
-    // Paged (a chip is selected): keep the selection visible, no marquee (§5.4).
+    // Paged (a chip is selected): render from the persisted page anchor and only
+    // scroll far enough to keep the selection visible, so the viewport *follows*
+    // the selection rather than re-centering on it every move (§5.4).
     if let Some(si) = sel {
-        // Expand a window leftward from the selection while it still fits.
-        let mut lo = si;
-        let mut used = widths[si];
-        while lo > 0 && used + 3 + widths[lo - 1] <= w {
-            used += 3 + widths[lo - 1];
-            lo -= 1;
+        let mut page = app.strip_page.min(chips.len() - 1);
+        if si < page {
+            // scrolled left (incl. wrap last→first: si == 0)
+            page = si;
+        } else {
+            // advance the left edge until [page..=si] fits in the viewport
+            while page < si {
+                let mut used = 0u16;
+                let mut fits = true;
+                for (k, wd) in widths[page..=si].iter().enumerate() {
+                    if k > 0 {
+                        used += 3;
+                    }
+                    used += *wd;
+                    if used > w {
+                        fits = false;
+                        break;
+                    }
+                }
+                if fits {
+                    break;
+                }
+                page += 1;
+            }
         }
         let mut col = x0;
-        for i in lo..chips.len() {
-            let sep = if i > lo { 3 } else { 0 };
+        for i in page..chips.len() {
+            let sep = if i > page { 3 } else { 0 };
             if col + sep + widths[i] > x0 + w {
                 break;
             }
@@ -634,7 +654,7 @@ fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: boo
                 col += dw(s);
             }
         }
-        return lo;
+        return page;
     }
 
     if present || total <= w {

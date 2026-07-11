@@ -239,6 +239,28 @@ fn route_is_inert_without_a_selection() {
 }
 
 #[test]
+fn strip_selection_wraps_and_anchors() {
+    let mut a = app();
+    a.focus = Focus::Health;
+    let n = a.snap.chips.len();
+    assert!(n >= 3, "fixture has a server pool");
+    // First ←/→ selects the first visible chip and anchors the page there (no jump).
+    a.update(Action::FocusRight);
+    assert_eq!(a.strip_sel, Some(0));
+    assert_eq!(a.strip_page, 0, "page anchored on the first visible chip, not re-centered");
+    // Walk to the last chip, then one more wraps to the first.
+    for _ in 0..n - 1 {
+        a.update(Action::FocusRight);
+    }
+    assert_eq!(a.strip_sel, Some(n - 1));
+    a.update(Action::FocusRight);
+    assert_eq!(a.strip_sel, Some(0), "wraps past the end back to the first");
+    // Left from the first wraps to the last.
+    a.update(Action::FocusLeft);
+    assert_eq!(a.strip_sel, Some(n - 1), "wraps before the start to the last");
+}
+
+#[test]
 fn esc_priority_arm_then_selection_then_filter() {
     let mut a = app();
     a.update(Action::LaneSet(Some(Lane::Escape)));

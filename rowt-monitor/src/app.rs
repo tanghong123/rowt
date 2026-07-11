@@ -115,7 +115,11 @@ pub struct App {
 
     // Server strip (§5.4): `None` = marqueeing, no selection. Set on first ←/→.
     pub strip_sel: Option<usize>,
-    pub strip_first_visible: usize, // fed back by draw_chips (first visible chip)
+    // Index of the leftmost visible chip, fed back by draw_chips each frame. While
+    // marqueeing it's the first visible chip (what the first ←/→ selects); while a
+    // chip is selected it's the paged viewport's left edge (so the strip follows
+    // the selection instead of re-anchoring on it).
+    pub strip_page: usize,
 
     // Control layer: the armed-but-uncommitted lane edit, and the batched-reload
     // deadline (7s after the last committed edit).
@@ -154,7 +158,7 @@ impl App {
             conn_key: None,
             err_key: None,
             strip_sel: None,
-            strip_first_visible: 0,
+            strip_page: 0,
             armed: None,
             pending_reload: None,
             help: false,
@@ -439,15 +443,20 @@ impl App {
         if n == 0 {
             return;
         }
-        // First ←/→ stops the marquee and selects the first VISIBLE chip (§5.4).
-        let cur = match self.strip_sel {
+        match self.strip_sel {
+            // First ←/→ selects the first VISIBLE chip and anchors the page there,
+            // so the strip does not jump — the chip stays where it was on screen.
             None => {
-                self.strip_sel = Some(self.strip_first_visible.min(n - 1));
-                return;
+                let f = self.strip_page.min(n - 1);
+                self.strip_sel = Some(f);
+                self.strip_page = f;
             }
-            Some(i) => i as i32,
-        };
-        self.strip_sel = Some((cur + d).clamp(0, n as i32 - 1) as usize);
+            // Subsequent moves wrap around the ends; the viewport follows the
+            // selection in draw_chips (which re-pages from `strip_page`).
+            Some(i) => {
+                self.strip_sel = Some((i as i32 + d).rem_euclid(n as i32) as usize);
+            }
+        }
     }
 
     /// Re-aggregate the errors pane for the new window immediately.
