@@ -251,7 +251,9 @@ cycles all three. Focus **persists across a resize/reflow** at the 130-column br
 Selection is **deferred, locked, and non-sticky**:
 - A focused pane starts with **no** highlighted row. The first `↑`/`↓` locks onto a row **by
   its domain key** and tints the caption amber — the lock follows that domain even as the
-  list re-sorts each tick (so a control acts on the domain you meant), and `Esc` releases it.
+  list re-sorts each tick (so a control acts on the domain you meant). `Esc` releases it, and
+  it also **auto-clears after ~15s of input inactivity** (any key/click resets the timer;
+  hover doesn't), so a held selection or frozen strip resumes live scrolling on its own.
 - **Leaving a region forgets its selection.** Move focus away (`Tab`, `←`/`→`, a click, a
   vertical fall-through) and the pane's selection clears, so re-focusing it starts fresh
   rather than restoring a stale highlight.

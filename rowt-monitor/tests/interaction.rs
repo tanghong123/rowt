@@ -262,6 +262,29 @@ fn wheel_only_scrolls_when_over_a_pane() {
 }
 
 #[test]
+fn selection_auto_clears_after_idle_timeout() {
+    use rowt_monitor::app::SELECTION_IDLE_TIMEOUT;
+    use std::time::Instant;
+
+    let mut a = app();
+    a.update(Action::Down); // activate a selection (stamps last_input = now)
+    assert!(a.conn_active());
+    // Still within the idle window → selection survives.
+    a.expire_idle_selection(Instant::now());
+    assert!(a.conn_active());
+    // Past the idle window with no further action → selection clears, list live again.
+    a.expire_idle_selection(Instant::now() + SELECTION_IDLE_TIMEOUT + std::time::Duration::from_secs(1));
+    assert!(!a.conn_active(), "idle selection auto-cleared");
+
+    // A fresh action re-arms activity: after selecting again, a later expire that
+    // is still within the window (because the action reset the timer) keeps it.
+    a.update(Action::Down);
+    assert!(a.conn_active());
+    a.expire_idle_selection(Instant::now() + std::time::Duration::from_secs(5));
+    assert!(a.conn_active(), "recent action keeps the selection alive");
+}
+
+#[test]
 fn selection_is_forgotten_when_focus_leaves_the_pane() {
     let mut a = app();
     a.update(Action::Down); // activate the connections selection

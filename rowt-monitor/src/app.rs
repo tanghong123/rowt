@@ -14,6 +14,9 @@ pub const ARM_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long an optimistic proxy toggle is shown before deferring to the real
 /// polled state (long enough for `rowt proxy` + the ~2s state re-read to land).
 pub const PROXY_OPTIMISTIC_TTL: Duration = Duration::from_secs(6);
+/// Clear a selection (which freezes the strip / holds a row) after this much
+/// input inactivity, so the view resumes live scrolling if the operator walks away.
+pub const SELECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Focus {
@@ -138,6 +141,7 @@ pub struct App {
     pub help: bool,
     pub started: Instant, // wall-clock start, for time-based pulse + marquees
     pub hover: Option<(u16, u16)>, // last mouse position (for hover highlights)
+    pub last_input: Instant,       // last action (for the selection idle timeout)
     pub should_quit: bool,
     pub last_yank: Option<String>,
     pub toast: Option<(String, Instant)>, // transient footer message (auto-clears)
@@ -176,6 +180,7 @@ impl App {
             help: false,
             started: Instant::now(),
             hover: None,
+            last_input: Instant::now(),
             should_quit: false,
             last_yank: None,
             toast: None,
@@ -223,6 +228,19 @@ impl App {
             if self.snap.identity.proxy == *want || at.elapsed() >= PROXY_OPTIMISTIC_TTL {
                 self.proxy_optimistic = None;
             }
+        }
+        self.expire_idle_selection(Instant::now());
+    }
+
+    /// Drop any active selection (row lock / frozen strip) after
+    /// `SELECTION_IDLE_TIMEOUT` of input inactivity, so the panes resume live
+    /// scrolling/updating. `now` is a parameter for testability.
+    pub fn expire_idle_selection(&mut self, now: Instant) {
+        let has_selection = self.conn_key.is_some() || self.err_key.is_some() || self.strip_sel.is_some();
+        if has_selection && now.duration_since(self.last_input) >= SELECTION_IDLE_TIMEOUT {
+            self.conn_key = None;
+            self.err_key = None;
+            self.strip_sel = None;
         }
     }
 
@@ -280,6 +298,9 @@ impl App {
 
     pub fn update(&mut self, a: Action) {
         use Action::*;
+        // Any real action counts as activity for the selection idle timeout
+        // (mouse-move/hover doesn't go through here, so it won't keep it alive).
+        self.last_input = Instant::now();
         // Arm lifecycle: a control-key (re)arms or commits; Confirm commits; Esc
         // is handled below; ANY other key cancels a pending arm, then proceeds.
         match a {

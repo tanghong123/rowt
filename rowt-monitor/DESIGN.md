@@ -307,7 +307,10 @@ interface, the system-proxy state, and router liveness/port.
   `↑/↓` locks a row **by its domain key** (not index) and tints the caption
   amber. `tick()` re-resolves the key to its current index each poll and drops it
   if the domain leaves the list — so the acted-on domain can't shift under the 2s
-  re-sort. `Esc` releases it.
+  re-sort. `Esc` releases it, and it also **auto-clears after 15s of input
+  inactivity** (`SELECTION_IDLE_TIMEOUT`, checked in `on_frame`; any key/click
+  resets the timer, hover doesn't) so a held selection / frozen strip doesn't
+  stay stuck if the operator walks away — the panes then resume live scrolling.
 - **Server strip:** focusing keeps the marquee running; the first `←/→` **freezes
   it at the exact cell offset** it had at that instant (App computes the same
   time-based offset the renderer uses, so nothing jumps — a partial chip may sit
