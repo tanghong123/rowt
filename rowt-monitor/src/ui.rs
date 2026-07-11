@@ -214,7 +214,13 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, app: &App, present: bool) {
     // wider than the design's 46) so the 9-wide "sys proxy" label keeps a gap;
     // mode/server values match it, so the column stays aligned.
     put(buf, x0 + 37, y0 + 4, "sys proxy", dimmer);
-    put(buf, x0 + 47, y0 + 4, &app.snap.identity.proxy, bright);
+    // Colour the state: green = on (pointing at rowt), red = off, orange = other.
+    let proxy_st = match app.snap.identity.proxy.as_str() {
+        "on" => theme::fg(theme::DIRECT),
+        "off" => theme::fg(theme::PERSISTENT),
+        _ => theme::fg(theme::UP),
+    };
+    put(buf, x0 + 47, y0 + 4, &app.snap.identity.proxy, proxy_st);
     put(buf, x0 + 70, y0 + 4, "config", dimmer);
     put(buf, x0 + 78, y0 + 4, &app.snap.identity.config, bright);
 }
