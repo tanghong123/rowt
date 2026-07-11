@@ -1,15 +1,41 @@
 //! UI-local application state and the update logic. Everything here is
 //! operator-local (README "State (ui-local)"); none of it is ever sent upstream.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::model::{Conn, Lane, Snapshot, Window};
 use crate::source::Source;
+
+/// After the last committed lane edit, wait this long before issuing the single
+/// batched router reload (CONTROLS.md §4.3).
+pub const RELOAD_DEBOUNCE: Duration = Duration::from_secs(7);
+/// An armed (not-yet-committed) lane edit auto-cancels after this long (§4.2).
+pub const ARM_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Focus {
     Conn,
     Err,
+    Health,
+}
+
+/// A lane edit that's been armed by a first keypress and awaits confirmation
+/// (§4.2). `u`/`o` skip this and apply immediately.
+#[derive(Clone, Debug)]
+pub struct Armed {
+    pub domain: String,
+    /// `Some(lane)` = route into that lane (`e`/`c`/`b`); `None` = unroute (`d`).
+    pub lane: Option<Lane>,
+    pub key: char, // the key that armed it; pressing it again commits
+    pub at: Instant,
+}
+
+impl Armed {
+    /// Footer preview label, e.g. `x.com → escape` or `x.com → direct`.
+    pub fn label(&self) -> String {
+        let dest = self.lane.map(Lane::label).unwrap_or("direct");
+        format!("{} → {}", self.domain, dest)
+    }
 }
 
 /// An in-progress app-level drag selection (single row). Rendered as a reversed
@@ -51,6 +77,13 @@ pub enum Action {
     TogglePause,
     ToggleHelp,
     ForceProbe,
+    // Control layer (CONTROLS.md):
+    Route(Lane),  // e/c/b — arm routing the selected domain into a lane
+    Unroute,      // d — arm removing the selected domain (→ direct)
+    Confirm,      // Enter — commit the armed edit
+    Escape,       // Esc — cancel arm / clear selection / clear lane filter (in that order)
+    UseServer,    // u — switch to the selected server (immediate)
+    ToggleProxy,  // o — toggle the macOS system proxy (immediate)
     // Mouse:
     FocusConn,
     FocusErr,
@@ -73,6 +106,21 @@ pub struct App {
     pub conn_scroll: usize,
     pub err_sel: usize,
     pub err_scroll: usize,
+
+    // Deferred/locked selection (CONTROLS.md §5.2): a focused pane starts with NO
+    // active selection; the first ↑/↓ locks onto a row *by key* (domain), so the
+    // acted-on domain can't shift under the 2s re-sort. `None` = nothing selected.
+    pub conn_key: Option<String>,
+    pub err_key: Option<String>,
+
+    // Server strip (§5.4): `None` = marqueeing, no selection. Set on first ←/→.
+    pub strip_sel: Option<usize>,
+    pub strip_first_visible: usize, // fed back by draw_chips (first visible chip)
+
+    // Control layer: the armed-but-uncommitted lane edit, and the batched-reload
+    // deadline (7s after the last committed edit).
+    pub armed: Option<Armed>,
+    pub pending_reload: Option<Instant>,
 
     pub help: bool,
     pub started: Instant, // wall-clock start, for time-based pulse + marquees
@@ -103,6 +151,12 @@ impl App {
             conn_scroll: 0,
             err_sel: 0,
             err_scroll: 0,
+            conn_key: None,
+            err_key: None,
+            strip_sel: None,
+            strip_first_visible: 0,
+            armed: None,
+            pending_reload: None,
             help: false,
             started: Instant::now(),
             should_quit: false,
@@ -119,7 +173,55 @@ impl App {
     pub fn tick(&mut self) {
         if !self.paused {
             self.snap = self.source.poll(self.window, self.lane_filter);
+            self.resolve_keys();
             self.clamp_selection();
+        }
+    }
+
+    /// Per-frame housekeeping (called every ~70ms from the event loop, not just
+    /// on the 2s data tick): deliver control-command outcomes as toasts, fire the
+    /// debounced router reload, and auto-cancel a stale arm.
+    pub fn on_frame(&mut self) {
+        for o in self.source.drain_ctl() {
+            match o {
+                crate::source::CtlOutcome::Ok(m) => self.notify(m),
+                crate::source::CtlOutcome::Err(m) => self.notify(format!("⚠ {m}")),
+            }
+        }
+        if let Some(t) = self.pending_reload {
+            if Instant::now() >= t {
+                self.pending_reload = None;
+                self.source.reload_router();
+                self.notify("reloading router…".to_string());
+            }
+        }
+        if let Some(a) = &self.armed {
+            if a.at.elapsed() >= ARM_TIMEOUT {
+                self.armed = None;
+            }
+        }
+    }
+
+    /// Re-resolve each locked selection to its row's current index (rows re-sort
+    /// on the tick); drop the lock if the domain has left the list (§5.2).
+    fn resolve_keys(&mut self) {
+        if let Some(k) = self.conn_key.clone() {
+            match self.conns_view().iter().position(|c| c.key() == k) {
+                Some(i) => {
+                    self.conn_sel = i;
+                    self.ensure_visible(Focus::Conn);
+                }
+                None => self.conn_key = None,
+            }
+        }
+        if let Some(k) = self.err_key.clone() {
+            match self.snap.errors.iter().position(|e| e.domain == k) {
+                Some(i) => {
+                    self.err_sel = i;
+                    self.ensure_visible(Focus::Err);
+                }
+                None => self.err_key = None,
+            }
         }
     }
 
@@ -154,6 +256,12 @@ impl App {
 
     pub fn update(&mut self, a: Action) {
         use Action::*;
+        // Arm lifecycle: a control-key (re)arms or commits; Confirm commits; Esc
+        // is handled below; ANY other key cancels a pending arm, then proceeds.
+        match a {
+            Route(_) | Unroute | Confirm | Escape => {}
+            _ => self.armed = None,
+        }
         match a {
             Quit => self.should_quit = true,
             ToggleHelp => self.help = !self.help,
@@ -162,24 +270,30 @@ impl App {
                 self.source.force_probe();
                 self.notify("re-probing servers…".to_string());
             }
+            Route(lane) => self.arm(Some(lane)),
+            Unroute => self.arm(None),
+            Confirm => self.commit_armed(),
+            Escape => self.handle_escape(),
+            UseServer => self.use_selected_server(),
+            ToggleProxy => self.toggle_proxy(),
             Up => self.move_sel(-1),
             Down => self.move_sel(1),
             FocusLeft => {
-                if self.side_by_side {
+                if self.focus == Focus::Health {
+                    self.strip_move(-1);
+                } else if self.side_by_side {
                     self.focus = Focus::Conn;
                 }
             }
             FocusRight => {
-                if self.side_by_side {
+                if self.focus == Focus::Health {
+                    self.strip_move(1);
+                } else if self.side_by_side {
                     self.focus = Focus::Err;
                 }
             }
-            CycleFocus | CycleFocusBack => {
-                self.focus = match self.focus {
-                    Focus::Conn => Focus::Err,
-                    Focus::Err => Focus::Conn,
-                };
-            }
+            CycleFocus => self.cycle_focus(1),
+            CycleFocusBack => self.cycle_focus(-1),
             LaneCycle => {
                 self.lane_filter = match self.lane_filter {
                     None => Some(Lane::Escape),
@@ -222,15 +336,118 @@ impl App {
             }
             SelectConn(i) => {
                 self.focus = Focus::Conn;
-                self.conn_sel = i.min(self.conn_len().saturating_sub(1));
-                self.ensure_visible(Focus::Conn);
+                self.set_conn_index(i.min(self.conn_len().saturating_sub(1)));
             }
             SelectErr(i) => {
                 self.focus = Focus::Err;
-                self.err_sel = i.min(self.err_len().saturating_sub(1));
-                self.ensure_visible(Focus::Err);
+                self.set_err_index(i.min(self.err_len().saturating_sub(1)));
             }
         }
+    }
+
+    fn cycle_focus(&mut self, d: i8) {
+        // conns → errors → server health → conns (Tab); reverse on Shift+Tab.
+        self.focus = match (self.focus, d >= 0) {
+            (Focus::Conn, true) => Focus::Err,
+            (Focus::Err, true) => Focus::Health,
+            (Focus::Health, true) => Focus::Conn,
+            (Focus::Conn, false) => Focus::Health,
+            (Focus::Health, false) => Focus::Err,
+            (Focus::Err, false) => Focus::Conn,
+        };
+    }
+
+    /// Arm a lane edit on the focused pane's locked domain (or commit if the same
+    /// edit is already armed — the double-tap path). Inert with no selection.
+    fn arm(&mut self, lane: Option<Lane>) {
+        let Some(domain) = self.selected_domain() else { return };
+        let key = match lane {
+            Some(Lane::Escape) => 'e',
+            Some(Lane::Corp) => 'c',
+            Some(Lane::Block) => 'b',
+            Some(Lane::Direct) | None => 'd',
+        };
+        if let Some(a) = &self.armed {
+            if a.key == key && a.domain == domain && a.lane == lane {
+                self.commit_armed();
+                return;
+            }
+        }
+        self.armed = Some(Armed { domain, lane, key, at: Instant::now() });
+    }
+
+    fn commit_armed(&mut self) {
+        let Some(a) = self.armed.take() else { return };
+        match a.lane {
+            Some(l) => self.source.route_lane(&a.domain, l),
+            None => self.source.unroute(&a.domain),
+        }
+        // Batch the reload: (re)start the 7s debounce (CONTROLS.md §4.3).
+        self.pending_reload = Some(Instant::now() + RELOAD_DEBOUNCE);
+        self.notify(a.label());
+    }
+
+    /// Esc priority: cancel an arm, else clear the focused selection, else clear
+    /// the lane filter (the shipped Esc behavior).
+    fn handle_escape(&mut self) {
+        if self.armed.take().is_some() {
+            return;
+        }
+        match self.focus {
+            Focus::Conn if self.conn_key.is_some() => {
+                self.conn_key = None;
+                return;
+            }
+            Focus::Err if self.err_key.is_some() => {
+                self.err_key = None;
+                return;
+            }
+            Focus::Health if self.strip_sel.is_some() => {
+                self.strip_sel = None;
+                return;
+            }
+            _ => {}
+        }
+        if self.lane_filter.is_some() {
+            self.lane_filter = None;
+            self.on_lane_change();
+        }
+    }
+
+    fn use_selected_server(&mut self) {
+        if self.focus != Focus::Health {
+            return;
+        }
+        if let Some(s) = self.strip_sel.and_then(|i| self.snap.chips.get(i)) {
+            if s.active {
+                self.notify(format!("{} is already active", s.name));
+            } else {
+                self.source.use_server(&s.name);
+                self.notify(format!("switching → {}", s.name));
+            }
+        }
+    }
+
+    fn toggle_proxy(&mut self) {
+        let on = self.snap.identity.proxy == "on";
+        self.source.set_proxy(!on);
+        self.notify(if on { "system proxy → off".into() } else { "system proxy → on".into() });
+    }
+
+    fn strip_move(&mut self, d: i32) {
+        let n = self.snap.chips.len();
+        if n == 0 {
+            return;
+        }
+        // First ←/→ stops the marquee and selects the first VISIBLE chip (§5.4).
+        let cur = match self.strip_sel {
+            None => {
+                self.strip_sel = Some(self.strip_first_visible.min(n - 1));
+                return;
+            }
+            Some(i) => i as i32,
+        };
+        self.strip_sel = Some((cur + d).clamp(0, n as i32 - 1) as usize);
     }
 
     /// Re-aggregate the errors pane for the new window immediately.
@@ -245,60 +462,116 @@ impl App {
     fn on_lane_change(&mut self) {
         self.conn_sel = 0;
         self.conn_scroll = 0;
+        self.conn_key = None;
         self.repoll();
         self.err_sel = 0;
         self.err_scroll = 0;
+        self.err_key = None;
     }
 
     fn move_sel(&mut self, d: i32) {
         match self.focus {
+            // ↑ leaves the server strip back to the connections pane (§5.3).
+            Focus::Health => {
+                if d < 0 {
+                    self.focus = Focus::Conn;
+                    self.strip_sel = None;
+                }
+            }
             Focus::Conn => {
                 let len = self.conn_len();
                 if len == 0 {
+                    if d > 0 {
+                        self.enter_health();
+                    }
+                    return;
+                }
+                // First ↑/↓ just *activates* a selection (§5.2), locking row 0.
+                if self.conn_key.is_none() {
+                    self.set_conn_index(0);
                     return;
                 }
                 let cur = self.conn_sel as i32;
-                // Stacked fall-through: past the bottom -> focus errors' top.
-                if !self.side_by_side && d > 0 && cur + d > len as i32 - 1 {
-                    self.focus = Focus::Err;
-                    self.err_sel = 0;
-                    self.ensure_visible(Focus::Err);
+                if d > 0 && cur >= len as i32 - 1 {
+                    // Past the bottom: stacked → errors' top; else → server strip.
+                    if !self.side_by_side {
+                        self.focus = Focus::Err;
+                        self.set_err_index(0);
+                    } else {
+                        self.enter_health();
+                    }
                     return;
                 }
-                self.conn_sel = (cur + d).clamp(0, len as i32 - 1) as usize;
-                self.ensure_visible(Focus::Conn);
+                self.set_conn_index((cur + d).clamp(0, len as i32 - 1) as usize);
             }
             Focus::Err => {
                 let len = self.err_len();
                 if len == 0 {
+                    if d > 0 {
+                        self.enter_health();
+                    }
+                    return;
+                }
+                if self.err_key.is_none() {
+                    self.set_err_index(0);
                     return;
                 }
                 let cur = self.err_sel as i32;
-                if !self.side_by_side && d < 0 && cur + d < 0 {
+                if !self.side_by_side && d < 0 && cur == 0 {
                     // Fall back up into the connections list (select its bottom).
                     self.focus = Focus::Conn;
-                    self.conn_sel = self.conn_len().saturating_sub(1);
-                    self.ensure_visible(Focus::Conn);
+                    self.set_conn_index(self.conn_len().saturating_sub(1));
                     return;
                 }
-                self.err_sel = (cur + d).clamp(0, len as i32 - 1) as usize;
+                if d > 0 && cur >= len as i32 - 1 {
+                    self.enter_health();
+                    return;
+                }
+                self.set_err_index((cur + d).clamp(0, len as i32 - 1) as usize);
+            }
+        }
+    }
+
+    /// Move focus to the server strip without selecting a chip (keeps marqueeing).
+    fn enter_health(&mut self) {
+        self.focus = Focus::Health;
+        self.strip_sel = None;
+    }
+
+    /// Lock the connections selection onto row `i` (by key), or clear if absent.
+    fn set_conn_index(&mut self, i: usize) {
+        match self.conns_view().get(i).map(|c| c.key()) {
+            Some(k) => {
+                self.conn_key = Some(k);
+                self.conn_sel = i;
+                self.ensure_visible(Focus::Conn);
+            }
+            None => self.conn_key = None,
+        }
+    }
+
+    fn set_err_index(&mut self, i: usize) {
+        match self.snap.errors.get(i).map(|e| e.domain.clone()) {
+            Some(k) => {
+                self.err_key = Some(k);
+                self.err_sel = i;
                 self.ensure_visible(Focus::Err);
             }
+            None => self.err_key = None,
         }
     }
 
     fn scroll_list(&mut self, which: Focus, d: i8) {
         match which {
             Focus::Conn => {
-                let len = self.conn_len();
-                self.conn_sel = (self.conn_sel as i32 + d as i32).clamp(0, len.saturating_sub(1) as i32) as usize;
-                self.ensure_visible(Focus::Conn);
+                let i = (self.conn_sel as i32 + d as i32).clamp(0, self.conn_len().saturating_sub(1) as i32) as usize;
+                self.set_conn_index(i);
             }
             Focus::Err => {
-                let len = self.err_len();
-                self.err_sel = (self.err_sel as i32 + d as i32).clamp(0, len.saturating_sub(1) as i32) as usize;
-                self.ensure_visible(Focus::Err);
+                let i = (self.err_sel as i32 + d as i32).clamp(0, self.err_len().saturating_sub(1) as i32) as usize;
+                self.set_err_index(i);
             }
+            Focus::Health => {}
         }
     }
 
@@ -320,6 +593,7 @@ impl App {
                     self.err_scroll = sel + 1 - h;
                 }
             }
+            Focus::Health => {}
         }
     }
 
@@ -328,11 +602,29 @@ impl App {
         self.err_sel = self.err_sel.min(self.err_len().saturating_sub(1));
     }
 
-    /// The key field `y` copies for the focused list.
+    pub fn conn_active(&self) -> bool {
+        self.conn_key.is_some()
+    }
+    pub fn err_active(&self) -> bool {
+        self.err_key.is_some()
+    }
+
+    /// The focused pane's locked domain, if any (drives the contextual controls).
+    pub fn selected_domain(&self) -> Option<String> {
+        match self.focus {
+            Focus::Conn => self.conn_key.clone(),
+            Focus::Err => self.err_key.clone(),
+            Focus::Health => None,
+        }
+    }
+
+    /// The key field `y` copies for the focused list (the row under the cursor,
+    /// whether or not it's locked — copying is harmless).
     pub fn yank_target(&self) -> Option<String> {
         match self.focus {
             Focus::Conn => self.conns_view().get(self.conn_sel).map(|c| c.key()),
             Focus::Err => self.snap.errors.get(self.err_sel).map(|e| e.domain.clone()),
+            Focus::Health => self.strip_sel.and_then(|i| self.snap.chips.get(i)).map(|s| s.name.clone()),
         }
     }
 

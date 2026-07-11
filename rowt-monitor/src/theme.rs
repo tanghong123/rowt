@@ -32,6 +32,10 @@ pub const BLOCKED: Color = BLOCK; // purple
 /// Brighter border for the focused pane (its "cursor").
 pub const BORDER_FOCUS: Color = BRIGHT;
 
+/// Amber accent for the control layer: a locked/frozen selection and the
+/// press-again-to-confirm bar (CONTROLS.md §4.2, §5.2).
+pub const ARMED: Color = UP;
+
 pub fn fg(c: Color) -> Style {
     Style::default().fg(c)
 }

@@ -23,6 +23,7 @@ pub struct Hit {
     pub err_h: usize,
     pub lanes: Vec<(Rect, Option<Lane>)>, // header rate rows (None = `all`)
     pub windows: Vec<(Rect, Window)>,     // errors window tabs
+    pub strip_first_visible: usize,       // first server chip visible this frame (§5.4)
 }
 
 // NOTE: the bottom row is shifted one space left of the design capture so its
@@ -123,7 +124,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, present: bool) -> Hit {
         draw_err_pane(buf, cx0, cw, e_top + 1, e_top + 6, e_top + 7, r2 as usize, app, present, &mut hit);
     }
 
-    draw_health(buf, xl, xr, health_top, app, present, border);
+    hit.strip_first_visible = draw_health(buf, xl, xr, health_top, app, present, border);
 
     // App-level drag selection highlight (secondary copy path).
     if !present {
@@ -274,7 +275,21 @@ fn draw_caption(buf: &mut Buffer, corner: u16, y: u16, label: &str, app: &App, p
     // The ┤ ├ connectors always match the border; focus is shown by brightening
     // the caption text only, so the connectors never look out of step.
     let focused = !present && app.focus == which;
-    let cstyle = if focused { theme::bold(theme::BRIGHT) } else { theme::fg(theme::DIMMER) };
+    // A locked/frozen selection tints the caption amber (§5.2) — the single split
+    // box can't carry a per-pane border ring, so focus + lock show in the caption.
+    let locked = focused
+        && match which {
+            Focus::Conn => app.conn_active(),
+            Focus::Err => app.err_active(),
+            _ => false,
+        };
+    let cstyle = if locked {
+        theme::bold(theme::ARMED)
+    } else if focused {
+        theme::bold(theme::BRIGHT)
+    } else {
+        theme::fg(theme::DIMMER)
+    };
     let mut x = corner + 1;
     put(buf, x, y, "─┤ ", border);
     x += 3;
@@ -379,7 +394,7 @@ fn draw_conn_pane(
         let y = list_y + row as u16;
         put(buf, x0 + 1, y, c.lane.label(), theme::bold(c.lane.color()));
         let hostport = format!("{}:{}", c.host, c.port);
-        let selected = !present && app.focus == Focus::Conn && idx == app.conn_sel;
+        let selected = !present && app.focus == Focus::Conn && app.conn_active() && idx == app.conn_sel;
         let shown = if selected {
             marquee(&hostport, host_max, app.started.elapsed().as_secs_f32())
         } else {
@@ -464,7 +479,7 @@ fn draw_err_pane(
         // TYPE carries the category by color: dns=transient orange,
         // timeout/reset/refused=persistent red, blocked=purple.
         put(buf, x0 + 9, y, e.kind.label(), theme::fg(e.kind.color()));
-        let selected = !present && app.focus == Focus::Err && idx == app.err_sel;
+        let selected = !present && app.focus == Focus::Err && app.err_active() && idx == app.err_sel;
         let shown = if selected {
             marquee(&e.domain, dom_max, app.started.elapsed().as_secs_f32())
         } else {
@@ -512,12 +527,20 @@ fn draw_windows(buf: &mut Buffer, x0: u16, w: u16, y: u16, app: &App, hit: &mut 
 
 // ---------------- server health ----------------
 
-fn draw_health(buf: &mut Buffer, xl: u16, xr: u16, top: u16, app: &App, present: bool, border: Style) {
-    let _ = present;
+fn draw_health(buf: &mut Buffer, xl: u16, xr: u16, top: u16, app: &App, present: bool, border: Style) -> usize {
     draw_box_frame_health(buf, xl, xr, top, border);
-    // Caption (server health is never a focus target, so always neutral).
+    // Caption gains a focus ring like the panes (§5.1): brighten when focused,
+    // amber once a chip is selected (frozen strip).
+    let focused = !present && app.focus == Focus::Health;
+    let cap = if focused && app.strip_sel.is_some() {
+        theme::bold(theme::ARMED)
+    } else if focused {
+        theme::bold(theme::BRIGHT)
+    } else {
+        theme::fg(theme::DIMMER)
+    };
     put(buf, xl + 1, top, "─┤ ", border);
-    put(buf, xl + 4, top, "server health", theme::fg(theme::DIMMER));
+    put(buf, xl + 4, top, "server health", cap);
     put(buf, xl + 4 + dw("server health"), top, " ├", border);
 
     let x0 = xl + 1;
@@ -533,8 +556,9 @@ fn draw_health(buf: &mut Buffer, xl: u16, xr: u16, top: u16, app: &App, present:
     // never looks broken.
     if !present && s.identity.router_up && s.servers_total > 0 && s.servers_up == 0 && s.servers_down == 0 {
         put(buf, x0 + 1, top + 2, "probing…", theme::fg(theme::DIM));
+        0
     } else {
-        draw_chips(buf, x0 + 1, top + 2, w.saturating_sub(2), app, present);
+        draw_chips(buf, x0 + 1, top + 2, w.saturating_sub(2), app, present)
     }
 }
 
@@ -551,34 +575,67 @@ fn draw_box_frame_health(buf: &mut Buffer, xl: u16, xr: u16, top: u16, border: S
     put(buf, xr, top + 3, "╯", border);
 }
 
-fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: bool) {
+/// Draw the server strip; returns the index of the first chip visible this frame
+/// (fed back so the first `←/→` can select it, §5.4).
+fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: bool) -> usize {
     let bright = theme::fg(theme::BRIGHT);
     let escape = theme::fg(theme::ESCAPE);
-    // Each chip is a run of styled segments. The active server leads with a ▶.
+    let sel = if !present && app.focus == Focus::Health { app.strip_sel } else { None };
+    // Each chip is a run of styled segments. The active server leads with a ▶;
+    // the *selected* chip (frozen strip) is tinted amber + selection background.
     let chips: Vec<Vec<(String, Style)>> = app
         .snap
         .chips
         .iter()
-        .map(|c| {
-            let lat = theme::fg(theme::latency_color(c.ms));
+        .enumerate()
+        .map(|(i, c)| {
+            let picked = sel == Some(i);
+            let bg = |st: Style| if picked { st.bg(theme::SELECTION_BG) } else { st };
+            let lat = bg(theme::fg(theme::latency_color(c.ms)));
+            let name_st = if picked {
+                bg(theme::bold(theme::ARMED))
+            } else if c.active {
+                theme::bold(theme::ESCAPE)
+            } else {
+                bright
+            };
             let ms = format!("{:>3} ms", c.ms);
             if c.active {
-                vec![
-                    ("▶ ".to_string(), escape),
-                    (c.name.clone(), theme::bold(theme::ESCAPE)),
-                    (" ".to_string(), bright),
-                    (ms, lat),
-                ]
+                vec![("▶ ".to_string(), bg(escape)), (c.name.clone(), name_st), (" ".to_string(), bg(bright)), (ms, lat)]
             } else {
-                vec![(c.name.clone(), bright), (" ".to_string(), bright), (ms, lat)]
+                vec![(c.name.clone(), name_st), (" ".to_string(), bg(bright)), (ms, lat)]
             }
         })
         .collect();
-    let widths: Vec<u16> = chips
-        .iter()
-        .map(|segs| segs.iter().map(|(s, _)| dw(s)).sum())
-        .collect();
+    if chips.is_empty() {
+        return 0;
+    }
+    let widths: Vec<u16> = chips.iter().map(|segs| segs.iter().map(|(s, _)| dw(s)).sum()).collect();
     let total: u16 = widths.iter().sum::<u16>() + 3 * (chips.len().saturating_sub(1) as u16);
+
+    // Paged (a chip is selected): keep the selection visible, no marquee (§5.4).
+    if let Some(si) = sel {
+        // Expand a window leftward from the selection while it still fits.
+        let mut lo = si;
+        let mut used = widths[si];
+        while lo > 0 && used + 3 + widths[lo - 1] <= w {
+            used += 3 + widths[lo - 1];
+            lo -= 1;
+        }
+        let mut col = x0;
+        for i in lo..chips.len() {
+            let sep = if i > lo { 3 } else { 0 };
+            if col + sep + widths[i] > x0 + w {
+                break;
+            }
+            col += sep;
+            for (s, st) in &chips[i] {
+                put(buf, col, y, s, *st);
+                col += dw(s);
+            }
+        }
+        return lo;
+    }
 
     if present || total <= w {
         // Pack complete chips left-to-right; stop before one that won't fit.
@@ -594,13 +651,17 @@ fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: boo
                 col += dw(s);
             }
         }
+        0
     } else {
-        // Overflowing: marquee the whole strip (cell-level scroll).
+        // Overflowing + no selection: marquee the whole strip (cell-level scroll),
+        // recording each chip's start cell so we can report the first visible one.
         let mut cells: Vec<(char, Style)> = Vec::new();
+        let mut starts: Vec<usize> = Vec::with_capacity(chips.len());
         for (i, segs) in chips.iter().enumerate() {
             if i > 0 {
                 cells.extend([(' ', Style::default()); 3]);
             }
+            starts.push(cells.len());
             for (s, st) in segs {
                 cells.extend(s.chars().map(|c| (c, *st)));
             }
@@ -609,14 +670,19 @@ fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: boo
         let off = (app.started.elapsed().as_secs_f32() * MARQUEE_CPS) as usize % span;
         for k in 0..w as usize {
             let ci = off + k;
-            let (ch, st) = if ci % span < cells.len() {
-                cells[ci % span]
-            } else {
-                (' ', Style::default())
-            };
+            let (ch, st) = if ci % span < cells.len() { cells[ci % span] } else { (' ', Style::default()) };
             let mut b = [0u8; 4];
             put(buf, x0 + k as u16, y, ch.encode_utf8(&mut b), st);
         }
+        // First visible chip = smallest on-screen display column among chip starts.
+        starts
+            .iter()
+            .enumerate()
+            .map(|(i, &st)| (i, (st + span - off % span) % span))
+            .filter(|&(_, k)| k < w as usize)
+            .min_by_key(|&(_, k)| k)
+            .map(|(i, _)| i)
+            .unwrap_or(0)
     }
 }
 
@@ -683,18 +749,23 @@ fn marquee(s: &str, max: u16, secs: f32) -> String {
 
 fn draw_help(buf: &mut Buffer, area: Rect) {
     let lines = [
-        "  rowt monitor — keys                    ",
-        "                                         ",
-        "  ↑↓ / j k   move selection              ",
-        "  ←→ / h l   switch pane (side by side)  ",
-        "  Tab        cycle focus                 ",
-        "  f 1 2 3 0  lane filter / jump / clear  ",
-        "  w [ ]      errors window               ",
-        "  y          copy the selected domain    ",
-        "  r          re-probe servers now        ",
-        "  p          pause sampling              ",
-        "  ?          toggle this help            ",
-        "  q          quit                        ",
+        "  rowt monitor — keys                          ",
+        "                                               ",
+        "  ↑↓ / j k   move selection (locks the row)    ",
+        "  ←→ / h l   switch pane · select server chip  ",
+        "  Tab        cycle focus (conns/errors/health) ",
+        "  f 1 2 3 0  lane filter / jump / clear        ",
+        "  w [ ]      errors window                     ",
+        "  y          copy the selected domain          ",
+        "  e c b d    route selected → escape/corp/     ",
+        "             block / direct  (↵ or key×2 apply)",
+        "  u          use the selected server           ",
+        "  o          toggle the system proxy on/off    ",
+        "  r          re-probe servers now              ",
+        "  p          pause sampling   · esc  cancel    ",
+        "  ?          toggle this help · q  quit        ",
+        "                                               ",
+        "  observe + confirmed, reversible overrides.   ",
     ];
     let bw = lines[0].chars().count() as u16;
     let bh = lines.len() as u16 + 2;
@@ -716,22 +787,62 @@ fn draw_help(buf: &mut Buffer, area: Rect) {
     put(buf, bx + bw + 1, yb, "╯", border);
 }
 
-/// The bottom hint bar (interactive only; not part of the golden frame).
+/// The bottom hint bar (interactive only; not part of the golden frame). Two
+/// states (CONTROLS.md §6): the amber confirm bar when an edit is armed, else a
+/// global key group plus a contextual group for the current selection/strip.
 pub fn draw_footer(buf: &mut Buffer, area: Rect, app: &App) {
     let dimmer = theme::fg(theme::DIMMER);
+    let dim = theme::fg(theme::DIM);
     let y = area.bottom().saturating_sub(1);
-    let hint = if app.paused {
-        " ↑↓ move · ←→ pane · f lane · w window · y copy · r reprobe · p resume · ? help · q quit "
+    let left = area.left();
+
+    // Armed → confirm bar (overrides the whole left side).
+    if let Some(a) = &app.armed {
+        let bar = format!(" CONFIRM  {}  · press {} again or ↵ to apply · esc cancel ", a.label(), a.key);
+        let shown = truncate(&bar, area.width);
+        put(buf, left, y, &shown, theme::bold(theme::ARMED));
+        return;
+    }
+
+    // Normal: global group, then a contextual group when something is live.
+    let global = if app.paused {
+        " ↑↓←→ navigate · f lane · w window · o proxy · p resume · ? help · q quit "
     } else {
-        " ↑↓ move · ←→ pane · f lane · w window · y copy · r reprobe · p pause · ? help · q quit "
+        " ↑↓←→ navigate · f lane · w window · o proxy · p pause · ? help · q quit "
     };
-    let shown = truncate(hint, area.width);
-    put(buf, area.left(), y, &shown, dimmer);
-    // Transient toast (yank / reprobe), auto-clears after a few seconds.
-    if let Some((msg, at)) = &app.toast {
+    let shown = truncate(global, area.width);
+    put(buf, left, y, &shown, dimmer);
+    let mut x = left + dw(&shown);
+
+    let ctx: Option<String> = match app.focus {
+        Focus::Conn if app.conn_active() => Some("· e·c·b·d route · y copy ".to_string()),
+        Focus::Err if app.err_active() => Some("· e·c·b·d route · y copy ".to_string()),
+        Focus::Health => match app.strip_sel.and_then(|i| app.snap.chips.get(i)) {
+            None => Some("· ←→ select server ".to_string()),
+            Some(s) if !s.active => Some(format!("· u use {} ", s.name)),
+            Some(_) => Some("· active server ".to_string()),
+        },
+        _ => None,
+    };
+    if let Some(c) = ctx {
+        if x + 1 < area.right() {
+            let c = truncate(&c, area.right().saturating_sub(x));
+            put(buf, x, y, &c, dim);
+            x += dw(&c);
+        }
+    }
+    let _ = x;
+
+    // Right edge: the pending-reload countdown chip, else a transient toast.
+    if let Some(t) = app.pending_reload {
+        let secs = t.saturating_duration_since(std::time::Instant::now()).as_secs() + 1;
+        let chip = format!(" ◍ lane edits queued · reload in ~{secs}s ");
+        put_right(buf, area.right().saturating_sub(1), y, &truncate(&chip, area.width), theme::fg(theme::ARMED));
+    } else if let Some((msg, at)) = &app.toast {
         if at.elapsed() < std::time::Duration::from_secs(4) {
-            let m = truncate(&format!(" {} ", msg), area.width);
-            put_right(buf, area.right().saturating_sub(1), y, &m, theme::fg(theme::DIRECT));
+            let color = if msg.starts_with('⚠') { theme::PERSISTENT } else { theme::DIRECT };
+            let m = truncate(&format!(" {msg} "), area.width);
+            put_right(buf, area.right().saturating_sub(1), y, &m, theme::fg(color));
         }
     }
 }

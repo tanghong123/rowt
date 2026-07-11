@@ -91,6 +91,10 @@ pub struct LiveSource {
     // block it). `rowt proxy on/off` shows up within ~2s.
     sysproxy: Arc<Mutex<String>>,
     sysproxy_started: bool,
+
+    // Control layer: outcomes of `rowt` commands run off the UI thread, drained
+    // by the app each tick into a footer toast (CONTROLS.md §4, §9.2).
+    ctl_out: Arc<Mutex<Vec<crate::source::CtlOutcome>>>,
 }
 
 impl LiveSource {
@@ -132,7 +136,38 @@ impl LiveSource {
             // Seed synchronously so the first frame is correct (no "off" flash).
             sysproxy: Arc::new(Mutex::new(read_system_proxy(proxy_port).to_string())),
             sysproxy_started: false,
+            ctl_out: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Run a `rowt` command off the UI thread and queue its outcome for the
+    /// footer toast. Uses `$ROWT_BIN` (exported by `rowt monitor`) so the control
+    /// drives the exact CLI + config the monitor was launched from.
+    fn spawn_rowt(&self, args: Vec<String>, ok: String) {
+        let out = Arc::clone(&self.ctl_out);
+        std::thread::Builder::new()
+            .name("rowt-monitor-ctl".into())
+            .spawn(move || {
+                let bin = std::env::var("ROWT_BIN").unwrap_or_else(|_| "rowt".to_string());
+                let outcome = match std::process::Command::new(&bin).args(&args).output() {
+                    Ok(o) if o.status.success() => crate::source::CtlOutcome::Ok(ok),
+                    Ok(o) => {
+                        let err = String::from_utf8_lossy(&o.stderr);
+                        let msg = err
+                            .lines()
+                            .map(str::trim)
+                            .find(|l| !l.is_empty())
+                            .map(|l| l.trim_start_matches("error:").trim().to_string())
+                            .unwrap_or_else(|| format!("rowt {} failed", args.join(" ")));
+                        crate::source::CtlOutcome::Err(msg)
+                    }
+                    Err(e) => crate::source::CtlOutcome::Err(format!("{bin}: {e}")),
+                };
+                if let Ok(mut v) = out.lock() {
+                    v.push(outcome);
+                }
+            })
+            .ok();
     }
 
     /// Refresh the system-proxy state off the input loop, so `rowt proxy on/off`
@@ -480,6 +515,90 @@ impl Source for LiveSource {
         }
     }
 
+    fn use_server(&self, tag: &str) {
+        self.spawn_rowt(vec!["use".into(), tag.into()], format!("escape → {tag}"));
+    }
+
+    fn route_lane(&self, domain: &str, lane: Lane) {
+        let verb = lane.label(); // escape | corp | block | (direct never routed here)
+        self.spawn_rowt(
+            vec![verb.into(), "add".into(), domain.into(), "--no-reload".into()],
+            format!("{domain} → {verb}"),
+        );
+    }
+
+    fn unroute(&self, domain: &str) {
+        // Single-lane invariant means the domain is in at most one lane, but we
+        // don't track which from an errors row — remove from all three (a miss is
+        // a harmless "not found"), so the result is always "back to direct".
+        let out = Arc::clone(&self.ctl_out);
+        let (bin_domain, ok) = (domain.to_string(), format!("{domain} → direct"));
+        std::thread::Builder::new()
+            .name("rowt-monitor-ctl".into())
+            .spawn(move || {
+                let bin = std::env::var("ROWT_BIN").unwrap_or_else(|_| "rowt".to_string());
+                let mut err: Option<String> = None;
+                for lane in ["escape", "corp", "block"] {
+                    let r = std::process::Command::new(&bin)
+                        .args([lane, "rm", &bin_domain, "--no-reload"])
+                        .output();
+                    if let Err(e) = r {
+                        err = Some(format!("{bin}: {e}"));
+                        break;
+                    }
+                }
+                let outcome = match err {
+                    None => crate::source::CtlOutcome::Ok(ok),
+                    Some(m) => crate::source::CtlOutcome::Err(m),
+                };
+                if let Ok(mut v) = out.lock() {
+                    v.push(outcome);
+                }
+            })
+            .ok();
+    }
+
+    fn set_proxy(&self, on: bool) {
+        let sub = if on { "on" } else { "off" };
+        self.spawn_rowt(
+            vec!["proxy".into(), sub.into()],
+            format!("system proxy {sub}"),
+        );
+    }
+
+    fn reload_router(&self) {
+        // Lane edits were written with --no-reload; issue ONE reload now. We do
+        // render + router restart (the lightweight lane-reload) rather than
+        // `rowt reload`, which would also re-assert the system proxy and fight
+        // the `o` toggle / captive-portal flow (CONTROLS.md §4.3 deviation).
+        let out = Arc::clone(&self.ctl_out);
+        std::thread::Builder::new()
+            .name("rowt-monitor-ctl".into())
+            .spawn(move || {
+                let bin = std::env::var("ROWT_BIN").unwrap_or_else(|_| "rowt".to_string());
+                let render = std::process::Command::new(&bin).arg("render").output();
+                let outcome = match render {
+                    Ok(o) if o.status.success() => {
+                        match std::process::Command::new(&bin).args(["router", "restart"]).output() {
+                            Ok(o2) if o2.status.success() => crate::source::CtlOutcome::Ok("router reloaded".into()),
+                            Ok(o2) => crate::source::CtlOutcome::Err(first_err_line(&o2.stderr, "reload failed")),
+                            Err(e) => crate::source::CtlOutcome::Err(format!("{bin}: {e}")),
+                        }
+                    }
+                    Ok(o) => crate::source::CtlOutcome::Err(first_err_line(&o.stderr, "render failed")),
+                    Err(e) => crate::source::CtlOutcome::Err(format!("{bin}: {e}")),
+                };
+                if let Ok(mut v) = out.lock() {
+                    v.push(outcome);
+                }
+            })
+            .ok();
+    }
+
+    fn drain_ctl(&self) -> Vec<crate::source::CtlOutcome> {
+        self.ctl_out.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default()
+    }
+
     fn poll(&mut self, window: Window, lane: Option<Lane>) -> Snapshot {
         // No rowt config at all -> demo fixture so we always render something.
         let Some(info) = self.host_info() else {
@@ -722,6 +841,16 @@ fn default_route_iface() -> Option<String> {
     let out = std::process::Command::new("route").args(["-n", "get", "default"]).output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     text.lines().find_map(|l| l.trim().strip_prefix("interface: ").map(|s| s.trim().to_string()))
+}
+
+/// First non-empty stderr line (sans a leading `error:`), for a control toast.
+fn first_err_line(stderr: &[u8], fallback: &str) -> String {
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(|l| l.trim_start_matches("error:").trim().to_string())
+        .unwrap_or_else(|| fallback.to_string())
 }
 
 fn config_dir() -> PathBuf {

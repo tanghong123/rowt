@@ -31,7 +31,7 @@ pub fn key(k: KeyEvent, app: &App) -> Option<Action> {
         KeyCode::Char('1') => Action::LaneSet(Some(Lane::Escape)),
         KeyCode::Char('2') => Action::LaneSet(Some(Lane::Corp)),
         KeyCode::Char('3') => Action::LaneSet(Some(Lane::Direct)),
-        KeyCode::Char('0') | KeyCode::Esc => Action::LaneSet(None),
+        KeyCode::Char('0') => Action::LaneSet(None),
         KeyCode::Char('w') => Action::WindowCycle,
         KeyCode::Char(']') => Action::WindowStep(1),
         KeyCode::Char('[') => Action::WindowStep(-1),
@@ -39,6 +39,16 @@ pub fn key(k: KeyEvent, app: &App) -> Option<Action> {
         KeyCode::Char('r') => Action::ForceProbe,
         KeyCode::Char('p') => Action::TogglePause,
         KeyCode::Char('?') => Action::ToggleHelp,
+        // Control layer (CONTROLS.md): contextual routing edits (armed → commit),
+        // immediate server switch / proxy toggle, confirm + cancel.
+        KeyCode::Char('e') => Action::Route(Lane::Escape),
+        KeyCode::Char('c') => Action::Route(Lane::Corp),
+        KeyCode::Char('b') => Action::Route(Lane::Block),
+        KeyCode::Char('d') => Action::Unroute,
+        KeyCode::Char('u') => Action::UseServer,
+        KeyCode::Char('o') => Action::ToggleProxy,
+        KeyCode::Enter => Action::Confirm,
+        KeyCode::Esc => Action::Escape,
         _ => return None,
     })
 }

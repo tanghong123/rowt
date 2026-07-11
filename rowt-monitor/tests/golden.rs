@@ -4,7 +4,8 @@
 use ratatui::backend::TestBackend;
 use ratatui::style::{Color, Modifier};
 use ratatui::Terminal;
-use rowt_monitor::app::App;
+use rowt_monitor::app::{Action, App};
+use rowt_monitor::model::Lane;
 use rowt_monitor::source::FixtureSource;
 use rowt_monitor::{render_text, ui};
 
@@ -92,6 +93,63 @@ fn logo_bottom_row_aligned() {
     assert_eq!(col(rows[2]), Some(3));
     assert_eq!(col(rows[3]), Some(3));
     assert_eq!(col(rows[4]), Some(3), "bottom logo row should be left-aligned with the rows above");
+}
+
+/// Read a full buffer row as a plain string (for footer/overlay assertions).
+fn row_text(buf: &ratatui::buffer::Buffer, w: u16, y: u16) -> String {
+    (0..w).map(|x| buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" ")).collect()
+}
+
+#[test]
+fn footer_confirm_bar_when_armed() {
+    std::env::set_var("ROWT_MONITOR_NO_CLIPBOARD", "1");
+    let mut app = App::new(Box::new(FixtureSource::still()));
+    app.side_by_side = true;
+    app.conn_h = 6;
+    app.err_h = 6;
+    app.update(Action::Down); // activate the selection
+    app.update(Action::Route(Lane::Block)); // arm (does not commit)
+    assert!(app.armed.is_some());
+
+    let (w, h) = (96u16, 41u16);
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    term.draw(|f| {
+        let a = f.area();
+        ui::draw_footer(f.buffer_mut(), a, &app);
+    })
+    .unwrap();
+    let footer = row_text(term.backend().buffer(), w, h - 1);
+    assert!(footer.contains("CONFIRM"), "armed footer shows the confirm bar: {footer:?}");
+    assert!(footer.contains("→ block"), "confirm bar previews the target lane: {footer:?}");
+}
+
+#[test]
+fn footer_global_and_contextual_groups() {
+    std::env::set_var("ROWT_MONITOR_NO_CLIPBOARD", "1");
+    let mut app = App::new(Box::new(FixtureSource::still()));
+    app.side_by_side = true;
+    app.conn_h = 6;
+    app.err_h = 6;
+    let (w, h) = (150u16, 41u16);
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    // No selection yet: only the global group shows.
+    term.draw(|f| {
+        let a = f.area();
+        ui::draw_footer(f.buffer_mut(), a, &app);
+    })
+    .unwrap();
+    let bare = row_text(term.backend().buffer(), w, h - 1);
+    assert!(bare.contains("o proxy"), "global group always present: {bare:?}");
+    assert!(!bare.contains("route"), "no contextual group without a selection");
+    // Activate a row: the contextual route/copy group appears.
+    app.update(Action::Down);
+    term.draw(|f| {
+        let a = f.area();
+        ui::draw_footer(f.buffer_mut(), a, &app);
+    })
+    .unwrap();
+    let sel = row_text(term.backend().buffer(), w, h - 1);
+    assert!(sel.contains("route"), "contextual group appears once a row is locked: {sel:?}");
 }
 
 #[test]

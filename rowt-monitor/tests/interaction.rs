@@ -20,6 +20,11 @@ fn app() -> App {
 #[test]
 fn move_selection_up_down() {
     let mut a = app();
+    // Deferred selection (§5.2): a focused pane starts with NO active selection;
+    // the first ↑/↓ just activates it (locks row 0), it does not move.
+    assert!(!a.conn_active());
+    a.update(Action::Down);
+    assert!(a.conn_active(), "first Down activates the selection");
     assert_eq!(a.conn_sel, 0);
     a.update(Action::Down);
     assert_eq!(a.conn_sel, 1);
@@ -36,7 +41,8 @@ fn move_selection_up_down() {
 #[test]
 fn selection_scrolls_on_overflow() {
     let mut a = app(); // conn_h = 6, 10 rows
-    for _ in 0..7 {
+    // 1 press activates at 0, then 7 more move to index 7.
+    for _ in 0..8 {
         a.update(Action::Down);
     }
     assert_eq!(a.conn_sel, 7);
@@ -81,10 +87,16 @@ fn focus_switches_when_side_by_side() {
     assert_eq!(a.focus, Focus::Err);
     a.update(Action::FocusLeft);
     assert_eq!(a.focus, Focus::Conn);
+    // Tab now cycles conns → errors → server health → conns (§5.1).
     a.update(Action::CycleFocus);
     assert_eq!(a.focus, Focus::Err);
     a.update(Action::CycleFocus);
+    assert_eq!(a.focus, Focus::Health);
+    a.update(Action::CycleFocus);
     assert_eq!(a.focus, Focus::Conn);
+    // Shift+Tab reverses.
+    a.update(Action::CycleFocusBack);
+    assert_eq!(a.focus, Focus::Health);
 }
 
 #[test]
@@ -94,9 +106,11 @@ fn stacked_left_right_is_noop_but_falls_through_vertically() {
     a.update(Action::FocusRight);
     assert_eq!(a.focus, Focus::Conn, "left/right do nothing when stacked");
 
-    // Down off the bottom of connections falls into errors' top.
-    a.conn_sel = a.conns_view().len() - 1;
-    a.update(Action::Down);
+    // Walk the connections selection to its last row, then Down falls into errors.
+    a.update(Action::Down); // activate at 0
+    for _ in 0..a.conns_view().len() {
+        a.update(Action::Down);
+    }
     assert_eq!(a.focus, Focus::Err);
     assert_eq!(a.err_sel, 0);
 
@@ -155,12 +169,91 @@ fn pause_and_help_toggle() {
 fn focus_and_selection_persist_across_reflow() {
     let mut a = app();
     a.update(Action::FocusRight);
-    a.update(Action::Down);
-    a.update(Action::Down);
+    a.update(Action::Down); // activate at 0
+    a.update(Action::Down); // -> 1
     assert_eq!(a.focus, Focus::Err);
-    assert_eq!(a.err_sel, 2);
+    assert_eq!(a.err_sel, 1);
     // A reflow only changes `side_by_side`; selection + focus are independent.
     a.side_by_side = false;
     assert_eq!(a.focus, Focus::Err);
-    assert_eq!(a.err_sel, 2);
+    assert_eq!(a.err_sel, 1);
+}
+
+// ---- control layer (CONTROLS.md) --------------------------------------------
+
+#[test]
+fn selection_activates_and_esc_clears() {
+    let mut a = app();
+    assert!(!a.conn_active(), "no selection until the first ↑/↓");
+    assert_eq!(a.selected_domain(), None);
+    a.update(Action::Down);
+    assert!(a.conn_active());
+    assert_eq!(a.selected_domain().as_deref(), Some("i.ytimg.com"));
+    a.update(Action::Escape);
+    assert!(!a.conn_active(), "esc clears the active selection");
+    assert_eq!(a.selected_domain(), None);
+}
+
+#[test]
+fn lane_edit_arms_then_double_tap_commits() {
+    let mut a = app();
+    a.update(Action::Down); // lock i.ytimg.com
+    a.update(Action::Route(Lane::Block));
+    assert!(a.armed.is_some(), "first press arms");
+    assert!(a.pending_reload.is_none());
+    a.update(Action::Route(Lane::Block));
+    assert!(a.armed.is_none(), "second press commits + disarms");
+    assert!(a.pending_reload.is_some(), "commit schedules the debounced reload");
+}
+
+#[test]
+fn enter_confirms_armed_edit() {
+    let mut a = app();
+    a.update(Action::Down);
+    a.update(Action::Route(Lane::Escape));
+    assert!(a.armed.is_some());
+    a.update(Action::Confirm);
+    assert!(a.armed.is_none());
+    assert!(a.pending_reload.is_some());
+}
+
+#[test]
+fn any_other_key_cancels_the_arm() {
+    let mut a = app();
+    a.update(Action::Down);
+    a.update(Action::Route(Lane::Corp));
+    assert!(a.armed.is_some());
+    a.update(Action::Down); // an unrelated key cancels the pending arm
+    assert!(a.armed.is_none());
+    assert!(a.pending_reload.is_none(), "cancelled arm never committed");
+}
+
+#[test]
+fn route_is_inert_without_a_selection() {
+    let mut a = app();
+    // Focused but nothing selected → e/c/b/d do nothing.
+    a.update(Action::Route(Lane::Escape));
+    assert!(a.armed.is_none());
+    a.update(Action::Unroute);
+    assert!(a.armed.is_none());
+}
+
+#[test]
+fn esc_priority_arm_then_selection_then_filter() {
+    let mut a = app();
+    a.update(Action::LaneSet(Some(Lane::Escape)));
+    a.update(Action::Down); // activate
+    a.update(Action::Route(Lane::Block)); // arm
+    // 1) esc cancels the arm first
+    a.update(Action::Escape);
+    assert!(a.armed.is_none());
+    assert!(a.conn_active(), "selection survives the first esc");
+    assert_eq!(a.lane_filter, Some(Lane::Escape));
+    // 2) esc clears the selection next
+    a.update(Action::Escape);
+    assert!(!a.conn_active());
+    assert_eq!(a.lane_filter, Some(Lane::Escape), "filter survives");
+    // 3) esc finally clears the lane filter
+    a.update(Action::Escape);
+    assert_eq!(a.lane_filter, None);
 }
