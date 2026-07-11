@@ -58,7 +58,8 @@ rowt watch install            # (optional) auto-reload on every network change
 rowt down                     # stop everything
 ```
 
-**`rowt monitor`** is the read-only, `htop`-style live view — press `?` for keys,
+**`rowt monitor`** is the `htop`-style live view (with confirmed, reversible
+controls — server switch, lane routing, proxy toggle) — press `?` for keys,
 `q` to quit. Great for watching what's going through escape vs direct, spotting
 domains that are failing (candidates for `rowt escape add`), and checking server
 latency at a glance. See [Monitor (TUI)](#monitor-tui).
@@ -425,7 +426,7 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 | `status` | mode, servers, proxy state, reachability **and config validity** (absorbs the old `doctor`). |
 | `explain <domain\|ip>` | explain which lane a destination takes — `escape` (proxy), `corp` (into the corp VPN), `block`, or `direct` (pass-through) — and which rule matched. Mirrors the real routing: hand-list domain suffixes win by **longest match** across all three lanes, then corp CIDR (on the resolved IP), then final; adds a live HTTP check if the router is running. (`route` still works as a hidden alias.) |
 | `report` | full offline diagnostic (deps, configs, per-server reachability, DNS, through-proxy tests, log tail) → `~/.config/rowt/diag-*.txt`, **secrets masked**, for sharing. |
-| `monitor` | **full-screen read-only TUI** (`htop`-style) — the live view of everything at once: connections + throughput, errors/blocked over a rolling window, and server health. See [Monitor (TUI)](#monitor-tui). |
+| `monitor` | **full-screen TUI** (`htop`-style) — the live view of everything at once: connections + throughput, errors/blocked over a rolling window, and server health, plus confirmed, reversible controls (server switch, lane routing, proxy toggle). See [Monitor (TUI)](#monitor-tui). |
 | `run <command> [args…]` | run a command through whatever proxy path actually reaches the internet — probes, in order, the current shell proxy env → the macOS system proxy → rowt's port (if the router is up and the system proxy is off) → direct, and execs the command with the first where the target host answers (default `https://www.google.com/`; override `ROWT_RUN_TARGET`). Aborts without running if none work. Handy for CLI tools (`claude`, `git`, `npm`…) that ignore the system proxy: `rowt run claude`. |
 
 **Servers & selection**
@@ -487,10 +488,12 @@ corp/escape/direct.
 
 ## Monitor (TUI)
 
-`rowt monitor` is a full-screen, **read-only** terminal UI for watching a running
-router — the observe-everything companion to the one-shot `status` /
-`connections` / `errors` commands. It never changes routing, servers, or the
-proxy; everything is derived on a 2-second tick.
+`rowt monitor` is a full-screen terminal UI for watching a running router — the
+observe-everything companion to the one-shot `status` / `connections` / `errors`
+commands. Everything is derived on a 2-second tick, and on top of that it offers
+a small set of **confirmed, reversible overrides** — server switch, lane routing,
+and the system-proxy toggle — each just a front-end to the same `rowt` commands
+you could type. Everything else stays observe-only.
 
 ```sh
 rowt monitor            # live view (falls back to a demo fixture if nothing is running)
@@ -510,14 +513,26 @@ rowt monitor --fixtures # force the offline demo
   (`5m`/`10m`/`1h`/`24h`), colored by category (dns = transient, timeout/reset/
   refused = persistent, blocked = purple).
 - **server health** — `N up / N down`, and a marquee of the reachable pool with
-  latencies (the active server marked `▶`). Servers are probed through the tunnel
-  against Google's `generate_204` every 10 min (press `r` to re-probe now).
+  latencies (the active server marked `▶`). `Tab` into it and `←→` picks a chip.
+  Servers are probed through the tunnel against Google's `generate_204` every
+  10 min (press `r` to re-probe now).
 
-**Keys:** `↑↓`/`jk` move · `←→`/`hl` switch pane · `Tab` cycle focus · `f`
-(or `1`/`2`/`3`, `0`/`Esc`) lane filter · `w` / `[` `]` errors window · `y` copy
-the selected domain · `r` re-probe servers · `p` pause · `?` help ·
-`q` quit. Mouse: wheel scrolls the list under the pointer; click a lane / window
-tab / row to select it.
+**Navigation:** `↑↓`/`jk` move (the first press *locks* a row by domain, so a
+mid-tick re-sort can't shift what you act on; `Esc` unlocks) · `←→`/`hl` switch
+pane / pick a server chip · `Tab` cycle focus (connections → errors → health) ·
+`f` (or `1`/`2`/`3`, `0`) lane filter · `w` / `[` `]` errors window · `y` copy the
+selected domain · `p` pause · `?` help · `q` quit. Mouse: wheel scrolls the list
+under the pointer; click a lane / window tab / row.
+
+**Controls** (confirmed, reversible — each maps to a `rowt` command):
+
+- `e` / `c` / `b` / `d` — route the locked domain into **escape** / **corp** /
+  **block**, or `d` back to **direct**. Armed by the first press (an amber confirm
+  bar previews the change); a second press of the same key or `↵` commits, any
+  other key or `Esc` cancels. Edits are batched — one router reload fires ~7s
+  after the last edit settles.
+- `u` — switch the active outbound server to the selected chip (live, immediate).
+- `o` — toggle the macOS system proxy on/off (immediate).
 
 **Sources:** the clash API (`127.0.0.1:9090`), `host.json`, `state`/`servers.json`,
 and `lane-*.log`. Env: `ROWT_MONITOR_PROBE_INTERVAL` (secs, default 600),

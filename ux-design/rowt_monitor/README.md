@@ -3,8 +3,11 @@
 ## Overview
 `rowt monitor` is a **terminal UI (TUI)** for observing a running `rowt` proxy: live
 connections and their throughput, a rolling-window view of connection errors and
-blocked domains, and outbound-server health. It is the read-only companion to the
-`rowt` CLI — think `htop`/`btop`/`bandwhich`, not a settings screen.
+blocked domains, and outbound-server health. It is the live companion to the
+`rowt` CLI — think `htop`/`btop`/`bandwhich`. On top of the observe-everything view
+it adds a small set of **confirmed, reversible overrides** (server switch, lane
+routing, system-proxy toggle — see [Control layer](#control-layer)); everything
+else stays observe-only.
 
 This bundle is the design reference for that TUI.
 
@@ -159,8 +162,10 @@ Two rows:
 ---
 
 ## Data provenance — where every dynamic entity comes from
-The monitor is strictly an **observer**; it never mutates routing, servers, or the
-proxy. Everything on screen is derived, on a fixed **2-second tick**, from one of:
+Everything on screen is **observed** — derived, on a fixed **2-second tick**, from
+one of the sources below. The only writes are the explicit [control layer](#control-layer)
+overrides, and those go through the same `rowt` CLI the operator could type; the
+data path itself never mutates anything.
 
 | Source | What it is |
 |---|---|
@@ -197,8 +202,10 @@ A print-ready version of this table is in **`Rowt Monitor - Data Provenance.dc.h
 ---
 
 ## Behavior & logic decisions (from the design conversation)
-- **Observer only.** No action mutates proxy state. (An earlier "read-only" badge was
-  removed as noise — the read-only-ness is inherent, not something to advertise.)
+- **Observe + confirmed, reversible overrides.** The data path is observe-only; on top
+  of it a handful of keys apply reversible changes (server switch, lane routing, proxy
+  toggle) via the same `rowt` commands — see [Control layer](#control-layer). Lifecycle
+  and server-management stay in the CLI.
 - **2s refresh tick.** Instantaneous values (rates, latency) are sampled each tick;
   windowed values (errors/blocked) are re-aggregated from logs over the selected window.
   **`p`** pauses sampling so figures can be read.
@@ -236,10 +243,17 @@ events, terminal mouse tracking, clipboard, redraw loop). Build the mechanism in
 stack — do not try to reproduce browser DOM event handling.
 
 ### Focus model
-There is always exactly **one focused list** (`live · connections` or `errors & blocked`).
-Focus is shown by **brightening that pane's border + caption** — this is the only cursor a
-TUI has, so it must be unmistakable. Server health is not a focus target (it is a passive
-strip). Focus + selection **persist across a resize/reflow** at the 130-column breakpoint.
+There is always exactly **one focused region** — `live · connections`, `errors & blocked`,
+or the `server health` strip. Focus is shown by **brightening that region's caption** (the
+single split box can't carry a per-pane border ring, so the caption is the cursor). `Tab`
+cycles all three. Focus + selection **persist across a resize/reflow** at the 130-column
+breakpoint.
+
+Selection is **deferred and locked** (so a control acts on the domain you meant): a focused
+pane starts with **no** highlighted row; the first `↑`/`↓` locks onto a row **by its domain
+key** and tints the caption amber — the lock follows that domain even as the list re-sorts
+each tick, and `Esc` releases it. The server strip keeps marqueeing until the first `←`/`→`,
+which selects the first **visible** chip and freezes the scroll.
 
 ### Keyboard
 - **Arrows / `hjkl`** — movement.
@@ -300,15 +314,49 @@ ticker.) A calmer alternative worth supporting behind config: a one-line **detai
 that shows the full value of the selected row instead of animating it.
 
 ### Footer hint bar
-Render a **single-line contextual key hint** at the bottom (htop / less style) showing the
-keys live for the current focus — e.g. `↑↓ move · ←→ pane · f lane · w window · y copy ·
-p pause · q quit`. This is better discoverability than the hidden `?` overlay; keep the
-overlay as the full reference.
+Render a **single-line contextual key hint** at the bottom (htop / less style). Two states:
+- **Normal** — a **global** group that's always present (`↑↓←→ navigate · f lane · w window ·
+  o proxy · p pause · ? help · q quit`), then, only when a selection/strip makes them live, a
+  divider and a **contextual** group (`e·c·b·d route · y copy`, or `←→ select server` / `u use
+  <tag>` on the strip). The right edge carries the pending-reload countdown chip or a transient
+  status toast.
+- **Armed** — the whole bar becomes the amber **confirm bar** (see [Control layer](#control-layer)).
+
+This is better discoverability than the hidden `?` overlay; keep the overlay as the full
+reference.
 
 ### Consolidated keymap
-`↑↓`/`jk` move in list · `←→`/`hl` switch pane · `Tab`/`Shift+Tab` cycle focus · `f` lane
-filter (`1`/`2`/`3` direct, `0`/`Esc` clear) · `w` or `[`/`]` errors window · `y` yank
-selected domain/host · `p` pause · `?` help · `q` quit.
+`↑↓`/`jk` move (first press locks the row) · `←→`/`hl` switch pane / pick server chip ·
+`Tab`/`Shift+Tab` cycle focus (conns → errors → health) · `f` lane filter (`1`/`2`/`3`
+jump, `0` clear) · `w` or `[`/`]` errors window · `y` yank selected domain · `e`/`c`/`b`/`d`
+route selection → escape/corp/block/direct (confirm) · `u` use selected server · `o` toggle
+system proxy · `↵` confirm · `Esc` cancel/unlock/clear · `p` pause · `?` help · `q` quit.
+
+### Control layer
+A small set of **confirmed, reversible overrides** layered on the read-only view. Each is a
+front-end to an existing `rowt` command — the monitor issues exactly what the operator could
+type, no new privileged surface. Contextual: a key is only live when there's something to act
+on (a locked row for `e`/`c`/`b`/`d`, a selected non-active chip for `u`; `o` is always live).
+
+| Key | Where | Action | `rowt` command | Reverse |
+|---|---|---|---|---|
+| `e` / `c` / `b` | locked conn/err row | route domain → **escape** / **corp** / **block** | `rowt <lane> add <domain> --no-reload` | `d` |
+| `d` | locked conn/err row | remove domain → **direct** | `rowt escape/corp/block rm <domain> --no-reload` | `e`/`c`/`b` |
+| `u` | selected server chip | switch active outbound server (live) | `rowt use <tag>` | `u` on the old server |
+| `o` | global | toggle the macOS system proxy | `rowt proxy on` / `off` | `o` again |
+
+- **Confirm model.** The lane edits (`e`/`c`/`b`/`d`) **arm** on the first press — an **amber
+  confirm bar** replaces the footer previewing the change (`CONFIRM  x.com → escape · press
+  the key again or ↵ to apply · esc cancel`) and auto-cancels after ~5s. A second press of the
+  same key, or `↵`, commits; any other key or `Esc` cancels. So a quick **double-tap commits
+  with no pause**. `u` and `o` are live and trivially reversible, so they **skip the confirm**
+  and apply on a single press.
+- **Debounced reload.** Lane edits write with `--no-reload`; a single router reload fires **~7s
+  after the last edit settles** (a footer chip counts it down), so a burst of edits bounces
+  sing-box once, not per keystroke. (The reload re-renders + restarts the router **without**
+  re-asserting the system proxy, so it doesn't fight the `o` toggle / captive-portal flow.)
+- **Feedback.** A control's outcome shows as a transient footer toast; a failed command (e.g.
+  `proxy on` with the router down) surfaces its stderr rather than silently no-op'ing.
 
 > **Note:** the interactive HTML prototype now **demonstrates** most of this contract —
 > the focus model (a highlight ring on the active pane), arrow / `hjkl` + `Tab`
