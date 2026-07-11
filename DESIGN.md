@@ -113,7 +113,9 @@ dns:
   CPU, independent of traffic). DoH is connection-based (a wedged connection
   errors and re-dials instead of spinning) and encrypted; `223.5.5.5` serves DoH
   on 443 with an IP-valid cert, so no bootstrap DNS is needed. (Plain TCP:53 and
-  DoT:853 are commonly blocked; DoH on 443 gets through.)
+  DoT:853 are commonly blocked; DoH on 443 gets through.) Override the resolver
+  with `ROWT_DNS_DIRECT` (e.g. `1.1.1.1`); it also feeds `resolve_ip` and the
+  doctor DNS check, and is forwarded to the `watch` reload agent.
 
 Net effect with corp ON: intranet lookups use corp DNS over the corp tunnel;
 your personal/Chinese lookups use AliDNS over your home line; escaped sites are

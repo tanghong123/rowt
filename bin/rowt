@@ -41,11 +41,12 @@
 #      ROWT_CLASH_PORT  clash API port for live switching (default 9090)
 #      ROWT_FINAL  bucket for unlisted traffic: direct|corp (default direct)
 #      ROWT_IFACE  force the physical interface (default: auto-detect)
+#      ROWT_DNS_DIRECT  DoH resolver for direct-lane names (default 223.5.5.5)
 #      SINGBOX_VERSION  pinned sing-box release (default 1.13.14, >=1.12 AnyTLS)
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="2.3.2"
+ROWT_VERSION="2.3.3"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -97,6 +98,10 @@ SR_REVIEW="$CFG/sr-review.json"                  # editable Shadowrocket import 
 MANUAL="$CFG/manual.json"                        # manually-imported servers (secret)
 SUBS_FILE="$CFG/subs.txt"                        # subscription URLs, one per line
 FINAL_ROUTE="${ROWT_FINAL:-direct}"            # bucket for unlisted traffic
+# Resolver for DIRECT-lane names (queried over the physical NIC via DoH; escape
+# names are resolved by the VPS, corp names by the system resolver). Default
+# AliDNS. Override with an IP or host that serves DoH on 443 (e.g. 1.1.1.1).
+DNS_DIRECT="${ROWT_DNS_DIRECT:-223.5.5.5}"
 # ping liveness check: a globally-reachable URL (incl. from China exits) so a
 # node isn't marked dead just because it can't reach Google.
 PING_URL="${ROWT_PING_URL:-https://cp.cloudflare.com/generate_204}"
@@ -812,6 +817,7 @@ assemble_host() {
     --arg secret "$secret" \
     --arg lvl "$LOG_LEVEL" \
     --arg ads "$ads" \
+    --arg dns_direct "$DNS_DIRECT" \
     --argjson esc_dom "$(domains_json)" \
     --argjson corp_dom "$(corp_domains_json)" \
     --argjson corp_cidr "$(corp_cidrs_json)" \
@@ -846,7 +852,7 @@ assemble_host() {
     # wedged conn errors + re-dials instead of spinning) and encrypted; 223.5.5.5
     # serves DoH on 443 with an IP-valid cert, so no bootstrap DNS is needed.
     ([ {type:"local", tag:"local"},
-       {type:"https", tag:"dns-direct", server:"223.5.5.5", detour:"direct"} ]) as $dns_servers
+       {type:"https", tag:"dns-direct", server:$dns_direct, detour:"direct"} ]) as $dns_servers
     |
     ([ if ($corp_dom|length) > 0 then {domain_suffix:$corp_dom, server:"local"} else empty end ]) as $dns_rules
     |
@@ -1175,7 +1181,7 @@ cmd_ping() {
 # Resolve a host to an IP without trusting corp DNS (echo empty on failure).
 resolve_ip() {
   case "$1" in
-    *[a-zA-Z]*) { have dig && dig +short @223.5.5.5 "$1" A | grep -m1 -E '^[0-9.]+$'; } || true ;;
+    *[a-zA-Z]*) { have dig && dig +short @"$DNS_DIRECT" "$1" A | grep -m1 -E '^[0-9.]+$'; } || true ;;
     *) echo "$1" ;;
   esac
 }
@@ -2073,7 +2079,7 @@ cmd_watch() {
       done
       local envxml v val
       envxml="    <key>PATH</key><string>$agent_path</string>"
-      for v in XDG_CONFIG_HOME ROWT_PORT ROWT_CLASH_PORT ROWT_FINAL ROWT_IFACE SINGBOX_VERSION ROWT_LOG_LEVEL; do
+      for v in XDG_CONFIG_HOME ROWT_PORT ROWT_CLASH_PORT ROWT_FINAL ROWT_IFACE ROWT_DNS_DIRECT SINGBOX_VERSION ROWT_LOG_LEVEL; do
         val="${!v:-}"; [ -n "$val" ] && envxml="$envxml
     <key>$v</key><string>$val</string>"
       done
@@ -2280,7 +2286,7 @@ diag_body() {
   else _d "  (no servers or no interface)"; fi
   _d ""
   _d "----- DNS checks -----"
-  _run bash -c "dig +short +time=3 @223.5.5.5 www.baidu.com A | head -3"
+  _run bash -c "dig +short +time=3 @$DNS_DIRECT www.baidu.com A | head -3"
   local cd; cd="$(grep -vE '^[[:space:]]*(#|$)' "$CORP_DOMAINS" 2>/dev/null | grep -vE '/[0-9]+$' | head -1 || true)"
   [ -n "$cd" ] && { _d "  corp name '$cd' via system resolver:"; _run bash -c "dscacheutil -q host -a name $cd | grep ip_address | head -3"; }
   _d ""
@@ -2374,7 +2380,7 @@ Notes:
     CLI proxy env at rowt (they wrap 'proxy env'; see '$PROG proxy --help').
 
 Edit which domains escape:  $DOMAINS
-Env: ROWT_PORT ($PORT)  ROWT_CLASH_PORT ($CLASH_PORT)  ROWT_IFACE (auto)  SINGBOX_VERSION ($SINGBOX_VERSION)
+Env: ROWT_PORT ($PORT)  ROWT_CLASH_PORT ($CLASH_PORT)  ROWT_IFACE (auto)  ROWT_DNS_DIRECT ($DNS_DIRECT)  SINGBOX_VERSION ($SINGBOX_VERSION)
 EOF
 }
 
