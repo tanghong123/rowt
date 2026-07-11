@@ -319,7 +319,11 @@ interface, the system-proxy state, and router liveness/port.
   first fully-visible chip. Moves wrap at the ends and scroll the frozen ring one
   cell at a time to keep the selection visible; the frozen ring renders circularly
   (wraps past the last chip to fill the row). Strip viewport width also comes back
-  via `Hit`.
+  via `Hit`. The marquee runs off a **resettable baseline** (`marquee_off0` at
+  `marquee_t0`), not raw elapsed time: on **unfreeze** (Esc / focus-leave / idle
+  timeout) the baseline is set to the frozen offset and the clock restarted, so it
+  **resumes scrolling from where it stopped** rather than jumping to where a
+  free-running clock would be.
 - **Control layer** (§1): contextual keys act on the current selection —
   `e`/`c`/`b`/`d` route the locked domain to escape/corp/block/direct, `u`
   switches to the selected server, `o` toggles the system proxy. Each shells out

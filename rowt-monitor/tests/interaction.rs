@@ -310,6 +310,22 @@ fn clicking_a_server_chip_focuses_and_selects_in_place() {
 }
 
 #[test]
+fn strip_marquee_resumes_from_frozen_offset_on_unfreeze() {
+    let mut a = app();
+    a.focus = Focus::Health;
+    // Pretend the renderer last drew the marquee at cell offset 7.
+    a.strip_render_off = 7;
+    a.update(Action::FocusRight); // first ←/→ freezes to that exact offset
+    assert!(a.strip_sel.is_some());
+    assert_eq!(a.strip_off, 7);
+    // Unfreeze (Esc): the marquee baseline is set to the frozen offset so it
+    // continues scrolling from there instead of jumping.
+    a.update(Action::Escape);
+    assert!(a.strip_sel.is_none());
+    assert_eq!(a.marquee_off0, 7, "marquee resumes from the frozen offset, not a free-running clock");
+}
+
+#[test]
 fn strip_selection_wraps_and_anchors() {
     let mut a = app();
     a.focus = Focus::Health;

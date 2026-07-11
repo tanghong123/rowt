@@ -129,6 +129,11 @@ pub struct App {
     pub strip_off: usize,
     pub strip_w: u16,          // server-strip viewport width, fed back from the renderer
     pub strip_render_off: usize, // the marquee offset the renderer last drew (freeze to it → no jump)
+    // Server-strip marquee runs off a resettable baseline (offset at t0), not raw
+    // elapsed time, so unfreezing resumes from the frozen offset instead of jumping
+    // to where a free-running clock would be.
+    pub marquee_off0: usize,
+    pub marquee_t0: Instant,
 
     // Control layer: the armed-but-uncommitted lane edit, and the batched-reload
     // deadline (7s after the last committed edit).
@@ -176,6 +181,8 @@ impl App {
             strip_off: 0,
             strip_w: 0,
             strip_render_off: 0,
+            marquee_off0: 0,
+            marquee_t0: Instant::now(),
             armed: None,
             pending_reload: None,
             proxy_optimistic: None,
@@ -242,7 +249,7 @@ impl App {
         if has_selection && now.duration_since(self.last_input) >= SELECTION_IDLE_TIMEOUT {
             self.conn_key = None;
             self.err_key = None;
-            self.strip_sel = None;
+            self.clear_strip(); // resumes the marquee from the frozen offset
         }
     }
 
@@ -420,9 +427,20 @@ impl App {
         match self.focus {
             Focus::Conn => self.conn_key = None,
             Focus::Err => self.err_key = None,
-            Focus::Health => self.strip_sel = None,
+            Focus::Health => self.clear_strip(),
         }
         self.focus = f;
+    }
+
+    /// Clear the server-strip selection and **resume the marquee from the frozen
+    /// offset** — reset the marquee baseline to the current position and restart
+    /// its clock, so unfreezing continues scrolling from there instead of jumping
+    /// to where a free-running clock would be.
+    fn clear_strip(&mut self) {
+        if self.strip_sel.take().is_some() {
+            self.marquee_off0 = self.strip_off;
+            self.marquee_t0 = Instant::now();
+        }
     }
 
     fn cycle_focus(&mut self, d: i8) {
@@ -484,7 +502,7 @@ impl App {
                 return;
             }
             Focus::Health if self.strip_sel.is_some() => {
-                self.strip_sel = None;
+                self.clear_strip();
                 return;
             }
             _ => {}

@@ -682,7 +682,9 @@ fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: boo
     let span = cells.len() + 3;
     let off = match sel {
         Some(_) => app.strip_off % span,
-        None => (app.started.elapsed().as_secs_f32() * MARQUEE_CPS) as usize % span,
+        // Marquee off a resettable baseline (not raw elapsed) so it resumes from
+        // the frozen offset after unfreezing instead of jumping.
+        None => (app.marquee_off0 + (app.marquee_t0.elapsed().as_secs_f32() * MARQUEE_CPS) as usize) % span,
     };
     hit.strip_render_off = off; // freezing captures exactly this, so the view can't jump
     for k in 0..w as usize {
