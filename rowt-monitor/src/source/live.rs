@@ -85,6 +85,12 @@ pub struct LiveSource {
 
     started: Instant,
     uptime_base: Option<u64>, // proxy process uptime (secs) sampled once
+
+    // System-proxy state ("on"/"other"/"off"), refreshed on a background thread
+    // (networksetup is ~100ms; the poll runs on the input loop, so we must not
+    // block it). `rowt proxy on/off` shows up within ~2s.
+    sysproxy: Arc<Mutex<String>>,
+    sysproxy_started: bool,
 }
 
 impl LiveSource {
@@ -123,7 +129,35 @@ impl LiveSource {
             last_force: None,
             started: Instant::now(),
             uptime_base,
+            // Seed synchronously so the first frame is correct (no "off" flash).
+            sysproxy: Arc::new(Mutex::new(read_system_proxy(proxy_port).to_string())),
+            sysproxy_started: false,
         }
+    }
+
+    /// Refresh the system-proxy state off the input loop, so `rowt proxy on/off`
+    /// (a per-service networksetup toggle) is reflected within ~2s without the
+    /// ~100ms `networksetup` cost stalling keypress handling.
+    fn ensure_sysproxy_watcher(&mut self) {
+        if self.sysproxy_started {
+            return;
+        }
+        self.sysproxy_started = true;
+        let shared = Arc::clone(&self.sysproxy);
+        let port = self.proxy_port;
+        let interval = Duration::from_secs(2);
+        std::thread::Builder::new()
+            .name("rowt-monitor-sysproxy".into())
+            .spawn(move || loop {
+                std::thread::sleep(interval);
+                let state = read_system_proxy(port);
+                if let Ok(mut s) = shared.lock() {
+                    if s.as_str() != state {
+                        *s = state.to_string();
+                    }
+                }
+            })
+            .ok();
     }
 
     /// Start the background prober once the router is reachable. It runs clash
@@ -523,9 +557,10 @@ impl Source for LiveSource {
             "down".to_string()
         };
         // System-proxy state only (on/other/off) — NOT the router; the interface
-        // is already shown in `mode`, so no suffix here. Read every tick (scutil
-        // is ~instant) so a `rowt proxy on/off` shows up within ~2s.
-        let proxy = read_system_proxy(self.proxy_port).to_string();
+        // is already shown in `mode`, so no suffix here. Refreshed on a background
+        // thread so a `rowt proxy on/off` shows up within ~2s.
+        self.ensure_sysproxy_watcher();
+        let proxy = self.sysproxy.lock().map(|s| s.clone()).unwrap_or_else(|_| "off".to_string());
 
         Snapshot {
             identity: Identity {
@@ -619,27 +654,39 @@ fn read_clash_secret(cfg: &std::path::Path) -> Option<String> {
     parse::parse_state(&text).get("clash_secret").cloned()
 }
 
-/// Parse `scutil --proxies` for the system-wide proxy: "on" if HTTP/HTTPS/SOCKS
-/// is enabled and points at 127.0.0.1:port (rowt), "other" if a different proxy
-/// is enabled, else "off".
+/// System-proxy state for the identity band, mirroring exactly what
+/// `rowt proxy status` reports (so the two never disagree): "on" if a proxy on
+/// the **active network service** points at 127.0.0.1:port (rowt), "other" if
+/// some other proxy is enabled there, else "off".
+///
+/// We deliberately query `networksetup` on the active service rather than
+/// `scutil --proxy`, because `scutil` reports the *primary* service's merged
+/// view — which can show an unrelated app's proxy (e.g. Surge on :6152) instead
+/// of the per-service setting `rowt proxy on/off` actually toggles.
 fn read_system_proxy(port: u16) -> &'static str {
-    let Ok(out) = std::process::Command::new("scutil").arg("--proxies").output() else {
-        return "off";
-    };
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut kv: HashMap<String, String> = HashMap::new();
-    for line in text.lines() {
-        if let Some((k, v)) = line.split_once(" : ") {
-            kv.insert(k.trim().to_string(), v.trim().to_string());
-        }
-    }
-    let get = |k: &str| kv.get(k).map(String::as_str);
+    let Some(svc) = active_service() else { return "off" };
     let port_s = port.to_string();
     let mut any = false;
-    for t in ["HTTPS", "HTTP", "SOCKS"] {
-        if get(&format!("{t}Enable")) == Some("1") {
+    // rowt sets all three (socks/web/securewebproxy); checking securewebproxy +
+    // socks is enough to classify (and to distinguish rowt from another proxy).
+    for flag in ["-getsecurewebproxy", "-getsocksfirewallproxy"] {
+        let Ok(out) = std::process::Command::new("networksetup").arg(flag).arg(&svc).output() else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&out.stdout);
+        let (mut en, mut server, mut pt) = (false, "", "");
+        for line in text.lines() {
+            if let Some(v) = line.strip_prefix("Enabled: ") {
+                en = v.trim() == "Yes";
+            } else if let Some(v) = line.strip_prefix("Server: ") {
+                server = v.trim();
+            } else if let Some(v) = line.strip_prefix("Port: ") {
+                pt = v.trim();
+            }
+        }
+        if en {
             any = true;
-            if get(&format!("{t}Proxy")) == Some("127.0.0.1") && get(&format!("{t}Port")) == Some(port_s.as_str()) {
+            if server == "127.0.0.1" && pt == port_s {
                 return "on";
             }
         }
@@ -649,6 +696,32 @@ fn read_system_proxy(port: u16) -> &'static str {
     } else {
         "off"
     }
+}
+
+/// The network-service name (e.g. "Wi-Fi") carrying the default route, matching
+/// rowt's `active_service`. Honours ROWT_IFACE like rowt's `detect_iface`.
+fn active_service() -> Option<String> {
+    let iface = std::env::var("ROWT_IFACE").ok().or_else(default_route_iface)?;
+    let out = std::process::Command::new("networksetup").arg("-listnetworkserviceorder").output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    // Blocks look like: "(Hardware Port: Wi-Fi, Device: en0)".
+    for line in text.lines() {
+        if let Some(rest) = line.trim().strip_prefix("(Hardware Port: ") {
+            if let Some((port, dev)) = rest.split_once(", Device: ") {
+                if dev.trim_end_matches(')') == iface {
+                    return Some(port.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Interface carrying the default route (`route -n get default`).
+fn default_route_iface() -> Option<String> {
+    let out = std::process::Command::new("route").args(["-n", "get", "default"]).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines().find_map(|l| l.trim().strip_prefix("interface: ").map(|s| s.trim().to_string()))
 }
 
 fn config_dir() -> PathBuf {
