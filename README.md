@@ -100,6 +100,57 @@ a rule-router** — a mixed HTTP+SOCKS proxy on `127.0.0.1:7890` — that splits
 traffic **three ways**. Because it's a userspace proxy, there's no default-route
 war with the corp client.
 
+## Running commands with automatic environment set-up
+
+CLI tools (`claude`, `git`, `npm`, `curl`, …) don't respect the macOS system
+proxy — they only honour the `http_proxy` / `https_proxy` / `all_proxy`
+environment variables. rowt gives you `rowt-proxy-on` / `rowt-proxy-off`
+(from `eval "$(rowt shell-init)"`) to set and clear those, but if you
+**hop between networks a lot** — corp VPN, home Wi-Fi, a hotspot, a plane —
+or you have **several proxy apps** around (rowt, Shadowrocket, a corp client),
+the right value keeps changing, and it's easy to forget which one is live.
+Running a command through the wrong (or a stale) proxy env then fails in
+confusing ways, and toggling `rowt-proxy-on`/`-off` by hand before every command
+gets tedious.
+
+**`rowt run <command> [args…]`** does it for you: it figures out which proxy path
+can actually reach the internet *right now*, sets the env accordingly, and runs
+your command with it — no manual toggling.
+
+```sh
+rowt run claude            # run claude through whatever path reaches the net
+rowt run git pull          # a one-off git through the working proxy
+rowt run npm install
+```
+
+It **probes in order** and uses the first that reaches the target:
+
+1. the proxy already set in your shell (`http(s)_proxy` / `all_proxy`);
+2. the **macOS system proxy** (exported as env for this run);
+3. **rowt's own port** (`127.0.0.1:7890`) — only when the router is up *and* the
+   system proxy is off (the "rowt is on but I don't want it hijacking everything"
+   case);
+4. **no proxy at all** (direct).
+
+If none of them reach the target, `rowt run` **stops and does not run the
+command** (exit 1) — so you never silently launch something into a dead network.
+
+"Reaches the target" means the host actually answered (any `2xx`/`3xx`/`4xx` — a
+`200`, a redirect, even a `401`/`404` all prove the path works). The default
+target is **`https://www.google.com/`** — a domain that's genuinely blocked on a
+restricted network, over **HTTPS** so a captive portal or poisoned DNS can't fake
+it. (A CDN connectivity host like `gstatic.com` can stay reachable even when
+Google proper is blocked — a false positive — which is why the real domain is
+used.) Override with `ROWT_RUN_TARGET` to gate on whatever you actually need,
+e.g. an API:
+
+```sh
+ROWT_RUN_TARGET=https://api.anthropic.com/ rowt run claude
+```
+
+Everything after `run` is the command, so its own flags (`--help`, `-v`, …) pass
+straight through; use `rowt help run` for `run`'s own documentation.
+
 ## Three-way routing
 
 | bucket | list | where it goes | example |
@@ -349,6 +400,7 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 | `explain <domain\|ip>` | explain which lane a destination takes — `escape` (proxy), `corp` (into the corp VPN), or `direct` (pass-through) — and which rule matched. Mirrors the real rule order (corp domain → corp CIDR → escape domain → final); adds a live HTTP check if the router is running. (`route` still works as a hidden alias.) |
 | `report` | full offline diagnostic (deps, configs, per-server reachability, DNS, through-proxy tests, log tail) → `~/.config/rowt/diag-*.txt`, **secrets masked**, for sharing. |
 | `monitor` | **full-screen read-only TUI** (`htop`-style) — the live view of everything at once: connections + throughput, errors/blocked over a rolling window, and server health. See [Monitor (TUI)](#monitor-tui). |
+| `run <command> [args…]` | run a command through whatever proxy path actually reaches the internet — probes, in order, the current shell proxy env → the macOS system proxy → rowt's port (if the router is up and the system proxy is off) → direct, and execs the command with the first where the target host answers (default `https://www.google.com/`; override `ROWT_RUN_TARGET`). Aborts without running if none work. Handy for CLI tools (`claude`, `git`, `npm`…) that ignore the system proxy: `rowt run claude`. |
 
 **Servers & selection**
 

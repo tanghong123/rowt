@@ -45,7 +45,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="2.0.2"
+ROWT_VERSION="2.1.0"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -534,6 +534,96 @@ cmd_monitor() {
   [ -n "$bin" ] || bin="$(command -v rowt-monitor 2>/dev/null || true)"
   [ -n "$bin" ] || die "rowt-monitor not found — build it with 'cd \"$HERE/rowt-monitor\" && cargo build --release', or reinstall the brew formula."
   exec "$bin" "$@"
+}
+
+# rowt run <command> [args…] — find a proxy env that can actually reach the
+# internet (a target that only answers when you're really online), then exec the
+# command with that env. Useful for CLI tools (claude, git, npm, curl…) that
+# ignore the system proxy, when you're not sure which path works right now.
+#
+# Probe order (first that reaches the target wins):
+#   1. the proxy already in this shell's env (http(s)_proxy / all_proxy)
+#   2. the macOS system proxy (exported as env for this run)
+#   3. rowt's local proxy port — only if the router is up AND the system proxy is
+#      off (the "rowt on but not hijacking all traffic" case)
+#   4. no proxy at all (direct)
+# If none reach the target, the command is NOT run.
+#
+# Target defaults to https://www.google.com/ — a domain that's actually blocked
+# on a restricted network, over HTTPS so a captive portal / poisoned DNS can't
+# fake it (a CDN connectivity host like gstatic can stay reachable even when
+# Google proper is blocked, so it gives false positives). Override with
+# ROWT_RUN_TARGET (any URL — an API you need, etc.).
+cmd_run() {
+  [ "$#" -ge 1 ] || die "usage: $PROG run <command> [args…]"
+  local target="${ROWT_RUN_TARGET:-https://www.google.com/generate_204}"
+
+  # reachable? $1 = proxy URL, or "" for a direct (no-proxy) test. "Reached" = the
+  # target host actually answered — any 2xx/3xx/4xx (200, 204, a redirect, even a
+  # 401/404 all prove the path works). Over HTTPS the answer can't be a captive
+  # portal or a poisoned DNS reply. 000 = no connection; a 5xx via a proxy means
+  # the proxy couldn't reach upstream — both are failures.
+  _run_reach() {
+    local attempt code
+    # Two attempts, so a one-off blip (a TUN mid-reconnect, a slow first packet)
+    # doesn't wrongly reject a path that actually works.
+    for attempt in 1 2; do
+      if [ -n "$1" ]; then
+        code="$(curl -x "$1" -sS -o /dev/null -w '%{http_code}' --connect-timeout 4 -m 8 "$target" 2>/dev/null || true)"
+      else
+        code="$(curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' --connect-timeout 4 -m 8 "$target" 2>/dev/null || true)"
+      fi
+      case "$code" in 2??|3??|4??) return 0 ;; esac
+      [ "$attempt" = 1 ] && sleep 0.4
+    done
+    return 1
+  }
+  _run_export() {  # $1 = http proxy url, $2 = all_proxy (defaults to $1)
+    export http_proxy="$1" https_proxy="$1" all_proxy="${2:-$1}"
+    export HTTP_PROXY="$1" HTTPS_PROXY="$1" ALL_PROXY="${2:-$1}"
+  }
+
+  local svc; svc="$(active_service 2>/dev/null || true)"
+  local sysproxy_on=1; { [ -n "$svc" ] && _proxy_any_on "$svc"; } || sysproxy_on=0
+
+  # 1. existing proxy env
+  local envpx="${https_proxy:-${HTTPS_PROXY:-${all_proxy:-${ALL_PROXY:-${http_proxy:-${HTTP_PROXY:-}}}}}}"
+  if [ -n "$envpx" ] && _run_reach "$envpx"; then
+    info "run: reaching $target via the current shell proxy env ($envpx)"
+    exec "$@"
+  fi
+
+  # 2. macOS system proxy
+  if [ "$sysproxy_on" = 1 ]; then
+    local host port
+    host="$(networksetup -getsecurewebproxy "$svc" 2>/dev/null | awk '/^Server:/{print $2}')"
+    port="$(networksetup -getsecurewebproxy "$svc" 2>/dev/null | awk '/^Port:/{print $2}')"
+    if [ -n "$host" ] && [ -n "$port" ]; then
+      local sysurl="http://$host:$port"
+      if _run_reach "$sysurl"; then
+        info "run: reaching $target via the system proxy ($sysurl)"
+        _run_export "$sysurl"; exec "$@"
+      fi
+    fi
+  fi
+
+  # 3. rowt's proxy port (router up, system proxy off)
+  if host_running && [ "$sysproxy_on" = 0 ]; then
+    local rurl="http://127.0.0.1:$PORT"
+    if _run_reach "$rurl"; then
+      info "run: reaching $target via rowt (127.0.0.1:$PORT)"
+      _run_export "$rurl" "socks5h://127.0.0.1:$PORT"; exec "$@"
+    fi
+  fi
+
+  # 4. direct (no proxy)
+  unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
+  if _run_reach ""; then
+    info "run: $target is reachable directly — running with no proxy"
+    exec "$@"
+  fi
+
+  die "run: could not reach $target via shell env, system proxy, rowt, or direct — not running '$1'"
 }
 
 cmd_connections() {
@@ -2158,6 +2248,7 @@ c@lifecycle@status@state + config validity + reachability
 o@lifecycle@explain <domain|ip>@explain a destination's lane (escape / corp / direct)
 o@lifecycle@connections [lane|-w]@live view: active connections + which lane each is on
 o@lifecycle@monitor@read-only TUI: live connections, errors/blocked, server health
+o@lifecycle@run <command> [args…]@auto-pick a proxy env that reaches the net, then run the command
 a@lifecycle@report@full diagnostic report to a file (masked; shareable)
 o@servers & selection@server <list|add|rm|clear|import|dump>@manage the server pool
 o@servers & selection@sub <list|add|rm|update|clear|import|dump>@manage subscriptions
@@ -2243,6 +2334,36 @@ $PROG down — tear everything down.
 
 Turns the macOS system proxy off, kills the sing-box router (including strays),
 and stops the VM. Use to fully stop rowt, or if sing-box is stuck/high-CPU.
+EOF
+;;
+    run) cat <<EOF
+$PROG run <command> [args…] — run a command through whatever proxy path works.
+
+For CLI tools (claude, git, npm, curl…) that ignore the macOS system proxy: it
+finds a proxy env that can actually reach the internet, exports it, then execs
+the command with it. Everything after 'run' is the command (flags like --help
+pass through to it, not to rowt — use '$PROG help run' for this).
+
+Probe order — the first that reaches the target wins:
+  1. the proxy already set in this shell's env (http(s)_proxy / all_proxy)
+  2. the macOS system proxy (exported as env for this run)
+  3. rowt's local proxy (127.0.0.1:$PORT) — only if the router is up AND the
+     system proxy is off (the "rowt on but not hijacking everything" case)
+  4. no proxy at all (direct)
+If none reach the target, the command is NOT run (exit 1).
+
+"Reaches the target" = the host actually answers (any 2xx/3xx/4xx — a 200, a
+redirect, even a 401/404 all prove the path works). The default target is
+https://www.google.com/ over HTTPS: a domain that's genuinely blocked on a
+restricted network, and HTTPS so a captive portal or poisoned DNS can't fake it.
+(A CDN connectivity host like gstatic can stay reachable even when Google proper
+is blocked — a false positive — which is why the real domain is used.) Override
+with ROWT_RUN_TARGET to point at whatever you actually need to reach.
+
+Examples:
+  $PROG run claude            # run claude through whatever path reaches Google
+  $PROG run git pull          # one-off git through the working proxy
+  ROWT_RUN_TARGET=https://api.anthropic.com/ $PROG run claude   # gate on the API
 EOF
 ;;
     restart) cat <<EOF
@@ -2572,7 +2693,11 @@ main() {
     -h|--help)    usage; return 0 ;;
     --version|-V) echo "$PROG $ROWT_VERSION"; return 0 ;;
   esac
-  case " $* " in *" --help "*|*" -h "*) show_help "$cmd"; return $? ;; esac
+  # exec-wrappers pass all args through to the wrapped program, so don't let a
+  # '--help'/'-h' meant for it trigger rowt's own help. (Use 'rowt help <cmd>'.)
+  case "$cmd" in run|monitor|mon) ;; *)
+    case " $* " in *" --help "*|*" -h "*) show_help "$cmd"; return $? ;; esac ;;
+  esac
   case "$cmd" in
     # lifecycle
     onboard)    cmd_onboard "$@" ;;
@@ -2586,6 +2711,7 @@ main() {
     explain|route) cmd_explain "$@" ;;   # 'route' kept as a hidden alias (renamed to avoid router/route confusion)
     connections|conns) cmd_connections "$@" ;;
     monitor|mon) cmd_monitor "$@" ;;
+    run)        cmd_run "$@" ;;
     # servers & selection
     server)     cmd_server "$@" ;;
     sub)        cmd_sub "$@" ;;
