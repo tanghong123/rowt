@@ -45,7 +45,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="2.1.4"
+ROWT_VERSION="2.1.5"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -346,6 +346,32 @@ reload_if_running() {
   if host_running; then info "reloading router"; cmd_render >/dev/null; cmd_router restart >/dev/null; fi
 }
 
+# The three editable routing lanes. A domain lives in AT MOST one of them: the
+# route rules are first-match-wins (block → corp → escape), so a domain sitting
+# in two lists is silently shadowed by the earliest lane. Adding to one lane
+# therefore removes the exact entry from the other two (see _lane_dedupe).
+_lane_label() {
+  case "$1" in
+    "$DOMAINS")       echo escape ;;
+    "$CORP_DOMAINS")  echo corp ;;
+    "$BLOCK_DOMAINS") echo block ;;
+    *)                echo "$1" ;;
+  esac
+}
+# Remove exact entry $2 from every lane file except the target $1, so the entry
+# ends up in a single lane. Echoes a note per lane it was pulled out of.
+_lane_dedupe() { # $1=keep-file $2=entry
+  local keep="$1" e="$2" f tmp
+  for f in "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS"; do
+    [ "$f" = "$keep" ] && continue
+    [ -f "$f" ] || continue
+    if grep -qxF "$e" "$f" 2>/dev/null; then
+      tmp="$(mktemp)"; grep -vxF "$e" "$f" > "$tmp"; mv "$tmp" "$f"
+      echo "  moved out of $(_lane_label "$f") lane: $e"
+    fi
+  done
+}
+
 # list/add/rm entries in a routing list file, then hot-reload.
 #   $1=file  $2=label(escape|corp)  $3=action  $4..=entries
 # Read one entry per non-comment line of a file into $file, deduped. Echoes counts.
@@ -358,6 +384,7 @@ _list_add_file() { # $1=list-file $2=source-file $3=label
     case "$e" in ''|\#*) continue ;; esac
     if grep -qxF "$e" "$1" 2>/dev/null; then already=$((already + 1))
     else printf '%s\n' "$e" >> "$1"; added=$((added + 1)); fi
+    _lane_dedupe "$1" "$e"  # single-lane invariant: pull it from the other lanes
   done < "$2"
   echo "  $3 += $added new, $already already present (from $2)"
 }
@@ -365,9 +392,11 @@ _list_add_file() { # $1=list-file $2=source-file $3=label
 # rowt escape / corp  [list | add <e>… | rm <e>… | import <file> | clear | dump [file]]
 edit_list() {
   local file="$1" label="$2" action="${3:-list}"; shift 3 2>/dev/null || true
-  # snapshot so we only reload the router if the list ACTUALLY changed (adding an
+  # snapshot so we only reload the router if a lane ACTUALLY changed (adding an
   # already-present entry, or removing a missing one, is a no-op — no restart).
-  local _before=""; [ -f "$file" ] && _before="$(cat "$file")"
+  # Snapshot ALL lanes, not just the target: an `add` may also pull the entry out
+  # of a sibling lane (single-lane invariant), which likewise needs a reload.
+  local _before; _before="$(cat "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" 2>/dev/null)"
   case "$action" in
     list)
       echo "$label list:"
@@ -385,6 +414,7 @@ edit_list() {
         e="$(printf '%s' "$e" | tr -d '[:space:]')"; [ -z "$e" ] && continue
         if grep -qxF "$e" "$file" 2>/dev/null; then echo "  already present: $e"
         else printf '%s\n' "$e" >> "$file"; echo "  added: $e"; fi
+        _lane_dedupe "$file" "$e"  # single-lane invariant: pull it from the other lanes
       done ;;
     import)   # batch-add one domain per line from a file
       [ -n "${1:-}" ] || die "usage: $PROG $label import <file>   (one domain per line)"
@@ -412,8 +442,8 @@ edit_list() {
       return 0 ;;
     *) die "usage: $PROG $label [list | add <e>… | rm <e>… | import <file> | clear | dump [file]]" ;;
   esac
-  # only re-render/restart if the list changed
-  local _after=""; [ -f "$file" ] && _after="$(cat "$file")"
+  # only re-render/restart if some lane changed
+  local _after; _after="$(cat "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" 2>/dev/null)"
   [ "$_before" != "$_after" ] && reload_if_running || true
 }
 
@@ -2505,6 +2535,10 @@ $PROG $1 <subcommand> — edit the $1 lane$([ "$1" = escape ] && echo " (domains
   dump [file]          print the lane (or write it to a file) for backup/versioning
   errors [5m|10m|1h|…|all]  domains that FAILED on this lane in the window (default 10m)
   log                  live-tail this lane's connection-error log
+A domain lives in AT MOST one lane: 'add'/'import' here pulls the exact entry out
+of the other lanes (block/corp/escape), since the router matches block→corp→escape
+first-match-wins and a domain in two lists would be silently shadowed.
+
 Edits auto-reload the router if it is running. 'errors' reads the per-lane error
 log the router keeps (timestamp + domain + reason). NOTE: only failed/refused
 connections are logged (not successful traffic), so an empty list means no errors,
@@ -2560,7 +2594,8 @@ hand list still works without it). Block runs BEFORE corp/escape/direct.
   dump [file]          print the lane (or write it to a file) for backup/versioning
   errors [5m|…|24h|all]  what got blocked + how often in that window   (default 24h)
   log                  live-tail the block log (timestamp + domain)
-Edits auto-reload the router if it is running.
+Edits auto-reload the router if it is running. A domain lives in AT MOST one lane:
+'add'/'import' here pulls the exact entry out of the escape/corp lanes.
 
 Every blocked connection is recorded (timestamp + domain + reason) in
 $(lane_log block) — the router diverts that flood out of host.log into this compact
