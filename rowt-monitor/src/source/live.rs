@@ -85,6 +85,7 @@ pub struct LiveSource {
 
     started: Instant,
     uptime_base: Option<u64>, // proxy process uptime (secs) sampled once
+    sysproxy: Option<(Instant, String)>, // cached macOS system-proxy state
 }
 
 impl LiveSource {
@@ -123,7 +124,21 @@ impl LiveSource {
             last_force: None,
             started: Instant::now(),
             uptime_base,
+            sysproxy: None,
         }
+    }
+
+    /// macOS system-proxy state (cached ~8s): "on" if it points at rowt
+    /// (127.0.0.1:proxy_port), "other" if some other proxy is set, else "off".
+    /// (A standalone process can't see per-shell `http_proxy` env, so we report
+    /// only the observable system-wide setting.)
+    fn system_proxy(&mut self) -> String {
+        let fresh = self.sysproxy.as_ref().is_none_or(|(t, _)| t.elapsed() > Duration::from_secs(8));
+        if fresh {
+            let s = read_system_proxy(self.proxy_port).to_string();
+            self.sysproxy = Some((Instant::now(), s));
+        }
+        self.sysproxy.as_ref().unwrap().1.clone()
     }
 
 
@@ -523,11 +538,9 @@ impl Source for LiveSource {
         } else {
             "down".to_string()
         };
-        let proxy = if router_up {
-            format!("on · {}", iface)
-        } else {
-            "off".to_string()
-        };
+        // System-proxy state only (on/other/off) — NOT the router; the interface
+        // is already shown in `mode`, so no suffix here.
+        let proxy = self.system_proxy();
 
         Snapshot {
             identity: Identity {
@@ -619,6 +632,38 @@ fn read_escape_members(cfg: &std::path::Path) -> Vec<String> {
 fn read_clash_secret(cfg: &std::path::Path) -> Option<String> {
     let text = std::fs::read_to_string(cfg.join("state")).ok()?;
     parse::parse_state(&text).get("clash_secret").cloned()
+}
+
+/// Parse `scutil --proxies` for the system-wide proxy: "on" if HTTP/HTTPS/SOCKS
+/// is enabled and points at 127.0.0.1:port (rowt), "other" if a different proxy
+/// is enabled, else "off".
+fn read_system_proxy(port: u16) -> &'static str {
+    let Ok(out) = std::process::Command::new("scutil").arg("--proxies").output() else {
+        return "off";
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut kv: HashMap<String, String> = HashMap::new();
+    for line in text.lines() {
+        if let Some((k, v)) = line.split_once(" : ") {
+            kv.insert(k.trim().to_string(), v.trim().to_string());
+        }
+    }
+    let get = |k: &str| kv.get(k).map(String::as_str);
+    let port_s = port.to_string();
+    let mut any = false;
+    for t in ["HTTPS", "HTTP", "SOCKS"] {
+        if get(&format!("{t}Enable")) == Some("1") {
+            any = true;
+            if get(&format!("{t}Proxy")) == Some("127.0.0.1") && get(&format!("{t}Port")) == Some(port_s.as_str()) {
+                return "on";
+            }
+        }
+    }
+    if any {
+        "other"
+    } else {
+        "off"
+    }
 }
 
 fn config_dir() -> PathBuf {

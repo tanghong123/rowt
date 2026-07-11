@@ -136,7 +136,7 @@ impl Source for FixtureSource {
                 router: "running · :7890".into(),
                 router_up: true,
                 active_ok: Some(true),
-                proxy: "on · Wi-Fi".into(),
+                proxy: "on".into(),
                 config: "host.json OK".into(),
                 name_reserve: 8, // matches the golden (JP-Tokyo, ms at col 55)
             },

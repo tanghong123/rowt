@@ -46,7 +46,10 @@ fn mask(s: &str) -> String {
         .enumerate()
         .map(|(i, line)| {
             let health = n >= 4 && (i == n - 4 || i == n - 3); // stats + chips rows
-            if (1..=4).contains(&i) {
+            if i == 4 {
+                // proxy/config row diverges (proxy = system-proxy on/off, no iface)
+                " ".repeat(line.chars().count())
+            } else if (1..=3).contains(&i) {
                 line.chars()
                     .enumerate()
                     .map(|(c, ch)| if (1..=27).contains(&c) || c >= 60 { ' ' } else { ch })
