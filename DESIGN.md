@@ -89,7 +89,7 @@ keeps each bucket's *name resolution* on the same path as its *traffic*:
 dns:
   servers:
     - local        (address: "local"  → the macOS system resolver)
-    - dns-direct   (223.5.5.5, detour: "direct" → queried over en0)
+    - dns-direct   (DoH https://223.5.5.5, detour: "direct" → queried over en0)
   rules:
     - domain_suffix in corp-domains.txt → server: local
   final: dns-direct
@@ -104,10 +104,16 @@ dns:
   system resolver, which — with the corp VPN up — is corp DNS (plus any
   `/etc/resolver/<domain>` entries the `networking/` tool installs). So intranet
   names resolve to intranet IPs, and rule #1/#4 send them into the corp tunnel.
-- **Everything else → `dns-direct`** (AliDNS `223.5.5.5`), and crucially the
-  query is sent through the **`direct`** outbound, i.e. **over `en0`**. So Baidu
-  is resolved by a Chinese resolver on your home line — China-optimal IPs, and
-  the lookup itself never touches corp DNS.
+- **Everything else → `dns-direct`** (AliDNS `223.5.5.5` over **DoH**), and
+  crucially the query is sent through the **`direct`** outbound, i.e. **over
+  `en0`**. So Baidu is resolved by a Chinese resolver on your home line —
+  China-optimal IPs, and the lookup itself never touches corp DNS. DoH (not plain
+  UDP) is deliberate: a persistent UDP DNS socket wedges on a network transition
+  and the sing-box `UDPTransport.recvLoop` then busy-spins on the dead fd (~200%
+  CPU, independent of traffic). DoH is connection-based (a wedged connection
+  errors and re-dials instead of spinning) and encrypted; `223.5.5.5` serves DoH
+  on 443 with an IP-valid cert, so no bootstrap DNS is needed. (Plain TCP:53 and
+  DoT:853 are commonly blocked; DoH on 443 gets through.)
 
 Net effect with corp ON: intranet lookups use corp DNS over the corp tunnel;
 your personal/Chinese lookups use AliDNS over your home line; escaped sites are

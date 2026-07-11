@@ -45,7 +45,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="2.3.1"
+ROWT_VERSION="2.3.2"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -840,8 +840,13 @@ assemble_host() {
      + [ if ($corp_cidr|length) > 0 then {ip_cidr:$corp_cidr, outbound:"corp"} else empty end,
          if $ads != ""              then {rule_set:["geosite-ads"], outbound:"block"} else empty end ]) as $rules
     |
+    # dns-direct is DoH (not plain UDP): a persistent UDP DNS socket wedges on a
+    # network transition and the sing-box UDPTransport.recvLoop then busy-spins on
+    # the dead fd (~200% CPU, traffic-independent). DoH is connection-based (a
+    # wedged conn errors + re-dials instead of spinning) and encrypted; 223.5.5.5
+    # serves DoH on 443 with an IP-valid cert, so no bootstrap DNS is needed.
     ([ {type:"local", tag:"local"},
-       {type:"udp", tag:"dns-direct", server:"223.5.5.5", detour:"direct"} ]) as $dns_servers
+       {type:"https", tag:"dns-direct", server:"223.5.5.5", detour:"direct"} ]) as $dns_servers
     |
     ([ if ($corp_dom|length) > 0 then {domain_suffix:$corp_dom, server:"local"} else empty end ]) as $dns_rules
     |
