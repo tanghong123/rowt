@@ -85,7 +85,6 @@ pub struct LiveSource {
 
     started: Instant,
     uptime_base: Option<u64>, // proxy process uptime (secs) sampled once
-    sysproxy: Option<(Instant, String)>, // cached macOS system-proxy state
 }
 
 impl LiveSource {
@@ -124,23 +123,8 @@ impl LiveSource {
             last_force: None,
             started: Instant::now(),
             uptime_base,
-            sysproxy: None,
         }
     }
-
-    /// macOS system-proxy state (cached ~8s): "on" if it points at rowt
-    /// (127.0.0.1:proxy_port), "other" if some other proxy is set, else "off".
-    /// (A standalone process can't see per-shell `http_proxy` env, so we report
-    /// only the observable system-wide setting.)
-    fn system_proxy(&mut self) -> String {
-        let fresh = self.sysproxy.as_ref().is_none_or(|(t, _)| t.elapsed() > Duration::from_secs(8));
-        if fresh {
-            let s = read_system_proxy(self.proxy_port).to_string();
-            self.sysproxy = Some((Instant::now(), s));
-        }
-        self.sysproxy.as_ref().unwrap().1.clone()
-    }
-
 
     /// Start the background prober once the router is reachable. It runs clash
     /// delay tests (through the tunnel, like `rowt ping`) for the whole pool on
@@ -539,8 +523,9 @@ impl Source for LiveSource {
             "down".to_string()
         };
         // System-proxy state only (on/other/off) — NOT the router; the interface
-        // is already shown in `mode`, so no suffix here.
-        let proxy = self.system_proxy();
+        // is already shown in `mode`, so no suffix here. Read every tick (scutil
+        // is ~instant) so a `rowt proxy on/off` shows up within ~2s.
+        let proxy = read_system_proxy(self.proxy_port).to_string();
 
         Snapshot {
             identity: Identity {
