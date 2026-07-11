@@ -690,7 +690,7 @@ fn draw_help(buf: &mut Buffer, area: Rect) {
         "  Tab        cycle focus                 ",
         "  f 1 2 3 0  lane filter / jump / clear  ",
         "  w [ ]      errors window               ",
-        "  y          yank domain / host:port     ",
+        "  y          copy the selected domain    ",
         "  r          re-probe servers now        ",
         "  p          pause sampling              ",
         "  ?          toggle this help            ",

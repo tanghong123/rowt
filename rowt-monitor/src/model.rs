@@ -101,9 +101,10 @@ pub struct Conn {
 }
 
 impl Conn {
-    /// The key `y` yanks in the connections pane.
+    /// The text `y` yanks in the connections pane: the domain only (no `:port`),
+    /// so it drops straight into a browser / `dig` / rowt rule.
     pub fn key(&self) -> String {
-        format!("{}:{}", self.host, self.port)
+        self.host.clone()
     }
 }
 

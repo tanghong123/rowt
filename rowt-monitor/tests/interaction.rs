@@ -125,10 +125,10 @@ fn window_cycle_and_step_and_set() {
 #[test]
 fn yank_copies_the_focused_key_field() {
     let mut a = app();
-    // Connections: host:port of the selected row.
-    assert_eq!(a.yank_target().as_deref(), Some("i.ytimg.com:443"));
+    // Connections: the domain of the selected row (no :port).
+    assert_eq!(a.yank_target().as_deref(), Some("i.ytimg.com"));
     a.update(Action::Yank);
-    assert_eq!(a.last_yank.as_deref(), Some("i.ytimg.com:443"));
+    assert_eq!(a.last_yank.as_deref(), Some("i.ytimg.com"));
 
     // Errors: the domain of the selected row.
     a.update(Action::FocusRight);

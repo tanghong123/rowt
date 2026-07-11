@@ -515,7 +515,7 @@ rowt monitor --fixtures # force the offline demo
 
 **Keys:** `↑↓`/`jk` move · `←→`/`hl` switch pane · `Tab` cycle focus · `f`
 (or `1`/`2`/`3`, `0`/`Esc`) lane filter · `w` / `[` `]` errors window · `y` copy
-the selected domain / host:port · `r` re-probe servers · `p` pause · `?` help ·
+the selected domain · `r` re-probe servers · `p` pause · `?` help ·
 `q` quit. Mouse: wheel scrolls the list under the pointer; click a lane / window
 tab / row to select it.
 
