@@ -239,6 +239,31 @@ fn route_is_inert_without_a_selection() {
 }
 
 #[test]
+fn selection_is_forgotten_when_focus_leaves_the_pane() {
+    let mut a = app();
+    a.update(Action::Down); // activate the connections selection
+    assert!(a.conn_active());
+    a.update(Action::CycleFocus); // leave Conn → Err
+    assert!(!a.conn_active(), "leaving a pane forgets its selection");
+    a.update(Action::Down); // activate the errors selection
+    assert!(a.err_active());
+    a.update(Action::FocusLeft); // leave Err → Conn (side-by-side)
+    assert!(!a.err_active(), "errors selection forgotten on leave");
+    assert!(!a.conn_active(), "re-focusing Conn starts fresh, not restored");
+}
+
+#[test]
+fn clicking_a_server_chip_focuses_and_selects_in_place() {
+    let mut a = app();
+    a.focus = Focus::Conn;
+    a.update(Action::Down); // give Conn a selection first
+    a.update(Action::SelectServer(3));
+    assert_eq!(a.focus, Focus::Health, "click focuses the strip");
+    assert_eq!(a.strip_sel, Some(3), "the clicked chip is selected");
+    assert!(!a.conn_active(), "leaving Conn forgot its selection");
+}
+
+#[test]
 fn strip_selection_wraps_and_anchors() {
     let mut a = app();
     a.focus = Focus::Health;

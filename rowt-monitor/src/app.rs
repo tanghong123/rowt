@@ -91,6 +91,7 @@ pub enum Action {
     ScrollErr(i8),
     SelectConn(usize), // absolute index in the filtered view
     SelectErr(usize),
+    SelectServer(usize), // click a server chip: focus the strip + select it in place
 }
 
 pub struct App {
@@ -129,6 +130,7 @@ pub struct App {
 
     pub help: bool,
     pub started: Instant, // wall-clock start, for time-based pulse + marquees
+    pub hover: Option<(u16, u16)>, // last mouse position (for hover highlights)
     pub should_quit: bool,
     pub last_yank: Option<String>,
     pub toast: Option<(String, Instant)>, // transient footer message (auto-clears)
@@ -165,6 +167,7 @@ impl App {
             pending_reload: None,
             help: false,
             started: Instant::now(),
+            hover: None,
             should_quit: false,
             last_yank: None,
             toast: None,
@@ -288,14 +291,14 @@ impl App {
                 if self.focus == Focus::Health {
                     self.strip_move(-1);
                 } else if self.side_by_side {
-                    self.focus = Focus::Conn;
+                    self.set_focus(Focus::Conn);
                 }
             }
             FocusRight => {
                 if self.focus == Focus::Health {
                     self.strip_move(1);
                 } else if self.side_by_side {
-                    self.focus = Focus::Err;
+                    self.set_focus(Focus::Err);
                 }
             }
             CycleFocus => self.cycle_focus(1),
@@ -330,30 +333,64 @@ impl App {
                 self.tick_window();
             }
             Yank => self.yank(),
-            FocusConn => self.focus = Focus::Conn,
-            FocusErr => self.focus = Focus::Err,
+            FocusConn => self.set_focus(Focus::Conn),
+            FocusErr => self.set_focus(Focus::Err),
             ScrollConn(d) => {
-                self.focus = Focus::Conn;
+                self.set_focus(Focus::Conn);
                 self.scroll_list(Focus::Conn, d);
             }
             ScrollErr(d) => {
-                self.focus = Focus::Err;
+                self.set_focus(Focus::Err);
                 self.scroll_list(Focus::Err, d);
             }
             SelectConn(i) => {
-                self.focus = Focus::Conn;
+                self.set_focus(Focus::Conn);
                 self.set_conn_index(i.min(self.conn_len().saturating_sub(1)));
             }
             SelectErr(i) => {
-                self.focus = Focus::Err;
+                self.set_focus(Focus::Err);
                 self.set_err_index(i.min(self.err_len().saturating_sub(1)));
             }
+            SelectServer(i) => self.select_server(i),
         }
+    }
+
+    /// Click a server chip: focus the strip and select that chip *in place* — the
+    /// strip freezes exactly where it is (the clicked chip doesn't move).
+    fn select_server(&mut self, i: usize) {
+        if i >= self.snap.chips.len() {
+            return;
+        }
+        self.set_focus(Focus::Health);
+        // Freeze the ring at its current scroll only if it wasn't already frozen,
+        // so re-clicking another visible chip keeps the display put.
+        if self.strip_sel.is_none() {
+            let (_, _, span) = self.strip_layout();
+            let overflow = self.strip_w > 0 && span.saturating_sub(3) > self.strip_w as usize;
+            self.strip_off = if overflow { self.strip_marquee_off(span) } else { 0 };
+        }
+        self.strip_sel = Some(i);
+    }
+
+    /// Move focus, forgetting the selection in the pane we're leaving so that
+    /// re-focusing a pane always starts fresh (no restored highlight). A caller
+    /// that wants a selection in the destination (fall-through, click) sets it
+    /// explicitly *after* this.
+    fn set_focus(&mut self, f: Focus) {
+        if self.focus == f {
+            return;
+        }
+        match self.focus {
+            Focus::Conn => self.conn_key = None,
+            Focus::Err => self.err_key = None,
+            Focus::Health => self.strip_sel = None,
+        }
+        self.focus = f;
     }
 
     fn cycle_focus(&mut self, d: i8) {
         // conns → errors → server health → conns (Tab); reverse on Shift+Tab.
-        self.focus = match (self.focus, d >= 0) {
+        let next = match (self.focus, d >= 0) {
             (Focus::Conn, true) => Focus::Err,
             (Focus::Err, true) => Focus::Health,
             (Focus::Health, true) => Focus::Conn,
@@ -361,6 +398,7 @@ impl App {
             (Focus::Health, false) => Focus::Err,
             (Focus::Err, false) => Focus::Conn,
         };
+        self.set_focus(next);
     }
 
     /// Arm a lane edit on the focused pane's locked domain (or commit if the same
@@ -561,8 +599,7 @@ impl App {
             // ↑ leaves the server strip back to the connections pane (§5.3).
             Focus::Health => {
                 if d < 0 {
-                    self.focus = Focus::Conn;
-                    self.strip_sel = None;
+                    self.set_focus(Focus::Conn);
                 }
             }
             Focus::Conn => {
@@ -582,7 +619,7 @@ impl App {
                 if d > 0 && cur >= len as i32 - 1 {
                     // Past the bottom: stacked → errors' top; else → server strip.
                     if !self.side_by_side {
-                        self.focus = Focus::Err;
+                        self.set_focus(Focus::Err);
                         self.set_err_index(0);
                     } else {
                         self.enter_health();
@@ -606,7 +643,7 @@ impl App {
                 let cur = self.err_sel as i32;
                 if !self.side_by_side && d < 0 && cur == 0 {
                     // Fall back up into the connections list (select its bottom).
-                    self.focus = Focus::Conn;
+                    self.set_focus(Focus::Conn);
                     self.set_conn_index(self.conn_len().saturating_sub(1));
                     return;
                 }
@@ -621,7 +658,7 @@ impl App {
 
     /// Move focus to the server strip without selecting a chip (keeps marqueeing).
     fn enter_health(&mut self) {
-        self.focus = Focus::Health;
+        self.set_focus(Focus::Health);
         self.strip_sel = None;
     }
 

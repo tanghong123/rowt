@@ -23,7 +23,9 @@ pub struct Hit {
     pub err_h: usize,
     pub lanes: Vec<(Rect, Option<Lane>)>, // header rate rows (None = `all`)
     pub windows: Vec<(Rect, Window)>,     // errors window tabs
-    pub strip_w: u16, // server-strip viewport width, fed back for the frozen ring (§5.4)
+    pub strip_w: u16,                     // server-strip viewport width (§5.4)
+    pub chips: Vec<(Rect, usize)>,        // server chips as drawn this frame (click to select)
+    pub sysproxy: Rect,                   // the "sys proxy on/off" cell region (click to toggle)
 }
 
 // NOTE: the bottom row is shifted one space left of the design capture so its
@@ -60,8 +62,6 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, present: bool) -> Hit {
     hfill(buf, x0 + 1, x0 + w - 2, y0 + h - 1, '─', border);
     put(buf, x0 + w - 1, y0 + h - 1, "╯", border);
 
-    draw_identity(buf, x0, y0, app, present);
-
     // ---- vertical layout ----
     let side = w >= 130;
     let health_top = y0 + h - 5;
@@ -75,6 +75,8 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, present: bool) -> Hit {
         side_by_side: side,
         ..Default::default()
     };
+
+    draw_identity(buf, x0, y0, app, present, &mut hit);
 
     if side {
         // One split box. Divider column (see brief): connections/errors leftover
@@ -124,10 +126,10 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, present: bool) -> Hit {
         draw_err_pane(buf, cx0, cw, e_top + 1, e_top + 6, e_top + 7, r2 as usize, app, present, &mut hit);
     }
 
-    draw_health(buf, xl, xr, health_top, app, present, border);
     // Chips render at xl+2 with width (xr-xl-3) — see draw_health; feed it back so
     // App can freeze/scroll the ring to keep the selection visible.
     hit.strip_w = (xr.saturating_sub(xl)).saturating_sub(3);
+    draw_health(buf, xl, xr, health_top, app, present, border, &mut hit);
 
     // App-level drag selection highlight (secondary copy path).
     if !present {
@@ -150,7 +152,7 @@ fn split_err_width(interior: u16) -> u16 {
     affine.max(floor).min(interior.saturating_sub(20))
 }
 
-fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, app: &App, present: bool) {
+fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, app: &App, present: bool, hit: &mut Hit) {
     let logo_st = theme::bold(theme::ESCAPE);
     for (i, line) in LOGO.iter().enumerate() {
         put(buf, x0 + 2, y0 + 1 + i as u16, line, logo_st);
@@ -217,14 +219,29 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, app: &App, present: bool) {
     // Row 4: system proxy / config. The left-column value column is at 47 (one
     // wider than the design's 46) so the 9-wide "sys proxy" label keeps a gap;
     // mode/server values match it, so the column stays aligned.
-    put(buf, x0 + 37, y0 + 4, "sys proxy", dimmer);
+    // "sys proxy <state>" is clickable (toggles the proxy) — expose the whole
+    // label+value cell region and highlight it while the mouse hovers over it.
+    let proxy = &app.snap.identity.proxy;
+    let px = x0 + 37;
+    let pw = (47 - 37) + dw(proxy); // label col .. end of value
+    let proxy_rect = Rect::new(px, y0 + 4, pw, 1);
+    hit.sysproxy = proxy_rect;
+    let hovered = !present && app.hover.is_some_and(|(cx, cy)| rect_has(proxy_rect, cx, cy));
     // Colour the state: green = on (pointing at rowt), red = off, orange = other.
-    let proxy_st = match app.snap.identity.proxy.as_str() {
-        "on" => theme::fg(theme::DIRECT),
-        "off" => theme::fg(theme::PERSISTENT),
-        _ => theme::fg(theme::UP),
+    let base = match proxy.as_str() {
+        "on" => theme::DIRECT,
+        "off" => theme::PERSISTENT,
+        _ => theme::UP,
     };
-    put(buf, x0 + 47, y0 + 4, &app.snap.identity.proxy, proxy_st);
+    let (label_st, proxy_st) = if hovered {
+        // hover feedback: brighten + underline the whole clickable span
+        let u = |c: Color| Style::default().fg(theme::brighten(c, 0.25)).add_modifier(Modifier::UNDERLINED);
+        (u(theme::DIMMER), u(base))
+    } else {
+        (dimmer, theme::fg(base))
+    };
+    put(buf, x0 + 37, y0 + 4, "sys proxy", label_st);
+    put(buf, x0 + 47, y0 + 4, proxy, proxy_st);
     put(buf, x0 + 70, y0 + 4, "config", dimmer);
     put(buf, x0 + 78, y0 + 4, &app.snap.identity.config, bright);
 }
@@ -530,7 +547,8 @@ fn draw_windows(buf: &mut Buffer, x0: u16, w: u16, y: u16, app: &App, hit: &mut 
 
 // ---------------- server health ----------------
 
-fn draw_health(buf: &mut Buffer, xl: u16, xr: u16, top: u16, app: &App, present: bool, border: Style) {
+#[allow(clippy::too_many_arguments)]
+fn draw_health(buf: &mut Buffer, xl: u16, xr: u16, top: u16, app: &App, present: bool, border: Style, hit: &mut Hit) {
     draw_box_frame_health(buf, xl, xr, top, border);
     // Caption gains a focus ring like the panes (§5.1): brighten when focused,
     // amber once a chip is selected (frozen strip).
@@ -560,7 +578,7 @@ fn draw_health(buf: &mut Buffer, xl: u16, xr: u16, top: u16, app: &App, present:
     if !present && s.identity.router_up && s.servers_total > 0 && s.servers_up == 0 && s.servers_down == 0 {
         put(buf, x0 + 1, top + 2, "probing…", theme::fg(theme::DIM));
     } else {
-        draw_chips(buf, x0 + 1, top + 2, w.saturating_sub(2), app, present);
+        draw_chips(buf, x0 + 1, top + 2, w.saturating_sub(2), app, present, hit);
     }
 }
 
@@ -581,7 +599,7 @@ fn draw_box_frame_health(buf: &mut Buffer, xl: u16, xr: u16, top: u16, border: S
 /// is rendered at `app.strip_off` (the exact cell offset it had when frozen, so it
 /// doesn't jump — a partial chip may sit at the left edge) and scrolls only to
 /// keep the selection visible (`App::reveal_strip`); otherwise it marquees.
-fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: bool) {
+fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: bool, hit: &mut Hit) {
     let bright = theme::fg(theme::BRIGHT);
     let escape = theme::fg(theme::ESCAPE);
     let sel = if !present && app.focus == Focus::Health { app.strip_sel } else { None };
@@ -617,8 +635,8 @@ fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: boo
     let widths: Vec<u16> = chips.iter().map(|segs| segs.iter().map(|(s, _)| dw(s)).sum()).collect();
     let total: u16 = widths.iter().sum::<u16>() + 3 * (chips.len().saturating_sub(1) as u16);
 
-    // Whole pool fits (and not frozen mid-scroll): static left-to-right layout.
-    if (present || total <= w) && sel.is_none() {
+    // Whole pool fits (static left-to-right layout, whether or not selected).
+    if present || total <= w {
         let mut col = x0;
         for (i, segs) in chips.iter().enumerate() {
             let sep = if i > 0 { 3 } else { 0 };
@@ -626,18 +644,7 @@ fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: boo
                 break;
             }
             col += sep;
-            for (s, st) in segs {
-                put(buf, col, y, s, *st);
-                col += dw(s);
-            }
-        }
-        return;
-    }
-    if sel.is_some() && total <= w {
-        // Selected but everything fits: static, just highlight (no ring needed).
-        let mut col = x0;
-        for (i, segs) in chips.iter().enumerate() {
-            col += if i > 0 { 3 } else { 0 };
+            hit.chips.push((Rect::new(col, y, widths[i], 1), i));
             for (s, st) in segs {
                 put(buf, col, y, s, *st);
                 col += dw(s);
@@ -649,10 +656,12 @@ fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: boo
     // Ring: one cell buffer (chips + 3-cell separators), rendered at a cell offset.
     // Frozen at `app.strip_off` when a chip is selected, else the time-based marquee.
     let mut cells: Vec<(char, Style)> = Vec::new();
+    let mut starts: Vec<usize> = Vec::with_capacity(chips.len());
     for (i, segs) in chips.iter().enumerate() {
         if i > 0 {
             cells.extend([(' ', Style::default()); 3]);
         }
+        starts.push(cells.len());
         for (s, st) in segs {
             cells.extend(s.chars().map(|c| (c, *st)));
         }
@@ -668,9 +677,23 @@ fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: boo
         let mut b = [0u8; 4];
         put(buf, x0 + k as u16, y, ch.encode_utf8(&mut b), st);
     }
+    // Record each on-screen chip's rect (its left edge at display col `left`,
+    // clipped to the viewport) so a click can select it.
+    for (i, &st) in starts.iter().enumerate() {
+        let left = (st + span - off % span) % span;
+        if left < w as usize {
+            let vis = widths[i].min(w - left as u16);
+            hit.chips.push((Rect::new(x0 + left as u16, y, vis, 1), i));
+        }
+    }
 }
 
 // ---------------- helpers ----------------
+
+/// Whether cell (col,row) is inside a non-empty rect.
+fn rect_has(r: Rect, col: u16, row: u16) -> bool {
+    r.width > 0 && r.height > 0 && col >= r.left() && col < r.right() && row >= r.top() && row < r.bottom()
+}
 
 /// Selected-row style: a subtle consistent background, brightened text, and a
 /// thin accent bar at the front in the row's semantic color.
@@ -777,7 +800,6 @@ fn draw_help(buf: &mut Buffer, area: Rect) {
 /// global key group plus a contextual group for the current selection/strip.
 pub fn draw_footer(buf: &mut Buffer, area: Rect, app: &App) {
     let dimmer = theme::fg(theme::DIMMER);
-    let dim = theme::fg(theme::DIM);
     let y = area.bottom().saturating_sub(1);
     let left = area.left();
 
@@ -799,21 +821,24 @@ pub fn draw_footer(buf: &mut Buffer, area: Rect, app: &App) {
     put(buf, left, y, &shown, dimmer);
     let mut x = left + dw(&shown);
 
+    // Contextual group: same colour as the global keys, set off by a vertical bar
+    // — and the bar only appears when there actually are contextual keys.
     let ctx: Option<String> = match app.focus {
-        Focus::Conn if app.conn_active() => Some("· e·c·b·d route · y copy ".to_string()),
-        Focus::Err if app.err_active() => Some("· e·c·b·d route · y copy ".to_string()),
+        Focus::Conn if app.conn_active() => Some("e·c·b·d route · y copy ".to_string()),
+        Focus::Err if app.err_active() => Some("e·c·b·d route · y copy ".to_string()),
         Focus::Health => match app.strip_sel.and_then(|i| app.snap.chips.get(i)) {
-            None => Some("· ←→ select server ".to_string()),
-            Some(s) if !s.active => Some(format!("· u use {} ", s.name)),
-            Some(_) => Some("· active server ".to_string()),
+            None => Some("←→ select server ".to_string()),
+            Some(s) if !s.active => Some(format!("u use {} ", s.name)),
+            Some(_) => Some("active server ".to_string()),
         },
         _ => None,
     };
     if let Some(c) = ctx {
+        let group = format!("│ {c}");
         if x + 1 < area.right() {
-            let c = truncate(&c, area.right().saturating_sub(x));
-            put(buf, x, y, &c, dim);
-            x += dw(&c);
+            let group = truncate(&group, area.right().saturating_sub(x));
+            put(buf, x, y, &group, dimmer);
+            x += dw(&group);
         }
     }
     let _ = x;

@@ -7,7 +7,7 @@
 //!   rowt-monitor --fixtures     force the fixture source (offline demo)
 //!   rowt-monitor --version / --help
 
-use std::io::stdout;
+use std::io::{stdout, Write};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -92,6 +92,11 @@ fn run(mut app: App) -> Result<()> {
     enable_raw_mode()?;
     let mut out = stdout();
     execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
+    // crossterm's mouse capture only reports motion while a button is held; also
+    // request any-motion reporting (1003h) so we get hover events for the
+    // clickable identity-band regions. Disabled again in restore().
+    write!(out, "\x1b[?1003h")?;
+    out.flush()?;
     let mut term = Terminal::new(CrosstermBackend::new(out))?;
 
     // Restore the terminal even if we panic.
@@ -120,7 +125,10 @@ fn read_span(buf: &ratatui::buffer::Buffer, d: rowt_monitor::app::Drag) -> Strin
 
 fn restore() -> Result<()> {
     disable_raw_mode()?;
-    execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
+    let mut o = stdout();
+    let _ = write!(o, "\x1b[?1003l"); // stop any-motion reporting
+    let _ = o.flush();
+    execute!(o, LeaveAlternateScreen, DisableMouseCapture)?;
     Ok(())
 }
 
@@ -150,6 +158,8 @@ fn event_loop<B: Backend>(term: &mut Terminal<B>, app: &mut App) -> Result<()> {
                     }
                 }
                 Event::Mouse(m) => match m.kind {
+                    // Track the pointer for hover highlights (e.g. sys proxy).
+                    MouseEventKind::Moved => app.hover = Some((m.column, m.row)),
                     MouseEventKind::Drag(MouseButton::Left) => {
                         // Extend a single-row selection (anchored on the first
                         // drag event's row) and cancel any prior yank toast.

@@ -65,6 +65,10 @@ pub fn mouse(m: MouseEvent, hit: &Hit) -> Option<Action> {
             Some(if over_err { Action::ScrollErr(-1) } else { Action::ScrollConn(-1) })
         }
         MouseEventKind::Down(MouseButton::Left) => {
+            // "sys proxy on/off" toggles when clicked.
+            if in_rect(hit.sysproxy, col, row) {
+                return Some(Action::ToggleProxy);
+            }
             for (r, win) in &hit.windows {
                 if in_rect(*r, col, row) {
                     return Some(Action::WindowSet(*win));
@@ -73,6 +77,12 @@ pub fn mouse(m: MouseEvent, hit: &Hit) -> Option<Action> {
             for (r, lane) in &hit.lanes {
                 if in_rect(*r, col, row) {
                     return Some(Action::LaneSet(*lane));
+                }
+            }
+            // Click a server chip → focus the strip + select it in place.
+            for (r, i) in &hit.chips {
+                if in_rect(*r, col, row) {
+                    return Some(Action::SelectServer(*i));
                 }
             }
             if in_rect(hit.conn_list, col, row) {
