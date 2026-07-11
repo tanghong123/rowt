@@ -117,9 +117,10 @@ pub struct App {
     pub strip_sel: Option<usize>,
     // Index of the leftmost visible chip, fed back by draw_chips each frame. While
     // marqueeing it's the first visible chip (what the first ←/→ selects); while a
-    // chip is selected it's the paged viewport's left edge (so the strip follows
-    // the selection instead of re-anchoring on it).
+    // chip is selected it's the frozen ring window's left edge (the display wraps
+    // past the last chip back to the first, so the row is always filled).
     pub strip_page: usize,
+    pub strip_w: u16, // server-strip viewport width, fed back for circular paging
 
     // Control layer: the armed-but-uncommitted lane edit, and the batched-reload
     // deadline (7s after the last committed edit).
@@ -159,6 +160,7 @@ impl App {
             err_key: None,
             strip_sel: None,
             strip_page: 0,
+            strip_w: 0,
             armed: None,
             pending_reload: None,
             help: false,
@@ -451,11 +453,60 @@ impl App {
                 self.strip_sel = Some(f);
                 self.strip_page = f;
             }
-            // Subsequent moves wrap around the ends; the viewport follows the
-            // selection in draw_chips (which re-pages from `strip_page`).
+            // Subsequent moves wrap around the ends; scroll the frozen ring window
+            // (in the move direction) just enough to keep the selection visible.
             Some(i) => {
-                self.strip_sel = Some((i as i32 + d).rem_euclid(n as i32) as usize);
+                let ni = (i as i32 + d).rem_euclid(n as i32) as usize;
+                self.strip_sel = Some(ni);
+                self.reveal_strip(ni, d);
             }
+        }
+    }
+
+    /// Display width of server chip `i`, matching `draw_chips`'s segments exactly
+    /// (name + ` ` + `NNN ms`, plus `▶ ` for the active one).
+    fn chip_w(&self, i: usize) -> u16 {
+        use crate::paint::dw;
+        match self.snap.chips.get(i) {
+            Some(c) => dw(&c.name) + 7 + if c.active { dw("▶ ") } else { 0 },
+            None => 0,
+        }
+    }
+
+    /// The chips `draw_chips` would render (circularly) starting at `page`, in
+    /// order, until the viewport width is used up — its 3-cell separators match.
+    fn strip_visible_from(&self, page: usize) -> Vec<usize> {
+        let n = self.snap.chips.len();
+        let mut out = Vec::new();
+        if n == 0 || self.strip_w == 0 {
+            return out;
+        }
+        let mut col = 0u16;
+        let mut i = page % n;
+        for drawn in 0..n {
+            let sep = if drawn > 0 { 3 } else { 0 };
+            if col + sep + self.chip_w(i) > self.strip_w {
+                break;
+            }
+            col += sep + self.chip_w(i);
+            out.push(i);
+            i = (i + 1) % n;
+        }
+        out
+    }
+
+    /// Scroll the ring window one chip at a time in the move direction `d` until
+    /// the selected chip `si` is visible (bounded by the pool size).
+    fn reveal_strip(&mut self, si: usize, d: i32) {
+        let n = self.snap.chips.len();
+        if n == 0 || self.strip_w == 0 {
+            return;
+        }
+        for _ in 0..n {
+            if self.strip_visible_from(self.strip_page).contains(&si) {
+                return;
+            }
+            self.strip_page = if d >= 0 { (self.strip_page + 1) % n } else { (self.strip_page + n - 1) % n };
         }
     }
 

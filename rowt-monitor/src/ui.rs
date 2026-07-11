@@ -24,6 +24,7 @@ pub struct Hit {
     pub lanes: Vec<(Rect, Option<Lane>)>, // header rate rows (None = `all`)
     pub windows: Vec<(Rect, Window)>,     // errors window tabs
     pub strip_page: usize,                // leftmost server chip visible this frame (§5.4)
+    pub strip_w: u16,                     // server-strip viewport width (for circular paging)
 }
 
 // NOTE: the bottom row is shifted one space left of the design capture so its
@@ -125,6 +126,9 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, present: bool) -> Hit {
     }
 
     hit.strip_page = draw_health(buf, xl, xr, health_top, app, present, border);
+    // Chips render at xl+2 with width (xr-xl-3) — see draw_health; feed it back so
+    // App can page the frozen ring window to keep the selection visible.
+    hit.strip_w = (xr.saturating_sub(xl)).saturating_sub(3);
 
     // App-level drag selection highlight (secondary copy path).
     if !present {
@@ -613,38 +617,33 @@ fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: boo
     let widths: Vec<u16> = chips.iter().map(|segs| segs.iter().map(|(s, _)| dw(s)).sum()).collect();
     let total: u16 = widths.iter().sum::<u16>() + 3 * (chips.len().saturating_sub(1) as u16);
 
-    // Paged (a chip is selected): render from the persisted page anchor and only
-    // scroll far enough to keep the selection visible, so the viewport *follows*
-    // the selection rather than re-centering on it every move (§5.4).
-    if let Some(si) = sel {
-        let mut page = app.strip_page.min(chips.len() - 1);
-        if si < page {
-            // scrolled left (incl. wrap last→first: si == 0)
-            page = si;
-        } else {
-            // advance the left edge until [page..=si] fits in the viewport
-            while page < si {
-                let mut used = 0u16;
-                let mut fits = true;
-                for (k, wd) in widths[page..=si].iter().enumerate() {
-                    if k > 0 {
-                        used += 3;
-                    }
-                    used += *wd;
-                    if used > w {
-                        fits = false;
-                        break;
-                    }
-                }
-                if fits {
+    // A chip is selected: the marquee is frozen. If the whole pool fits, lay it
+    // out statically and just highlight; otherwise render the frozen RING window
+    // starting at the page anchor (viewport already scrolled to reveal the
+    // selection in `App::reveal_strip`), wrapping past the last chip back to the
+    // first so the row is always filled (§5.4).
+    if let Some(_si) = sel {
+        let n = chips.len();
+        if total <= w {
+            let mut col = x0;
+            for (i, segs) in chips.iter().enumerate() {
+                let sep = if i > 0 { 3 } else { 0 };
+                if col + sep + widths[i] > x0 + w {
                     break;
                 }
-                page += 1;
+                col += sep;
+                for (s, st) in segs {
+                    put(buf, col, y, s, *st);
+                    col += dw(s);
+                }
             }
+            return 0;
         }
+        let start = app.strip_page % n;
         let mut col = x0;
-        for i in page..chips.len() {
-            let sep = if i > page { 3 } else { 0 };
+        let mut i = start;
+        for drawn in 0..n {
+            let sep = if drawn > 0 { 3 } else { 0 };
             if col + sep + widths[i] > x0 + w {
                 break;
             }
@@ -653,8 +652,9 @@ fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: boo
                 put(buf, col, y, s, *st);
                 col += dw(s);
             }
+            i = (i + 1) % n;
         }
-        return page;
+        return start;
     }
 
     if present || total <= w {

@@ -4,7 +4,7 @@
 use ratatui::backend::TestBackend;
 use ratatui::style::{Color, Modifier};
 use ratatui::Terminal;
-use rowt_monitor::app::{Action, App};
+use rowt_monitor::app::{Action, App, Focus};
 use rowt_monitor::model::Lane;
 use rowt_monitor::source::FixtureSource;
 use rowt_monitor::{render_text, ui};
@@ -150,6 +150,47 @@ fn footer_global_and_contextual_groups() {
     .unwrap();
     let sel = row_text(term.backend().buffer(), w, h - 1);
     assert!(sel.contains("route"), "contextual group appears once a row is locked: {sel:?}");
+}
+
+#[test]
+fn selected_server_strip_fills_row_circularly() {
+    std::env::set_var("ROWT_MONITOR_NO_CLIPBOARD", "1");
+    let mut app = App::new(Box::new(FixtureSource::still()));
+    app.conn_h = 6;
+    app.err_h = 6;
+    let (w, h) = (96u16, 41u16);
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    // First draw feeds back the strip viewport width (needed for circular paging).
+    let mut sw = 0u16;
+    term.draw(|f| {
+        let a = f.area();
+        sw = ui::draw(f.buffer_mut(), a, &app, false).strip_w;
+    })
+    .unwrap();
+    app.strip_w = sw;
+    app.side_by_side = false;
+    // Focus the strip and select a chip partway down the (overflowing) pool.
+    app.focus = Focus::Health;
+    for _ in 0..6 {
+        app.update(Action::FocusRight);
+    }
+    assert_eq!(app.strip_sel, Some(5));
+    term.draw(|f| {
+        let a = f.area();
+        ui::draw(f.buffer_mut(), a, &app, false);
+    })
+    .unwrap();
+    let buf = term.backend().buffer();
+    // The chips row is the one just below the "N servers · …" stats line.
+    let stats = (0..h).find(|&yy| row_text(buf, w, yy).contains("servers ·")).expect("stats row");
+    let chips_y = stats + 1;
+    // The selected server is visible…
+    let name = &app.snap.chips[5].name;
+    assert!(row_text(buf, w, chips_y).contains(name.as_str()), "selected chip visible: {:?}", row_text(buf, w, chips_y));
+    // …and the frozen ring fills the right side of the row (wraps past the end),
+    // rather than leaving it blank as a stop-at-list-end pager would.
+    let filled_right = (w / 2..w - 3).filter(|&x| buf.cell((x, chips_y)).map(|c| c.symbol().trim() != "").unwrap_or(false)).count();
+    assert!(filled_right > 10, "strip wraps to fill the row's right side ({filled_right} cells)");
 }
 
 #[test]
