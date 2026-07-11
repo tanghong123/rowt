@@ -221,9 +221,9 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, app: &App, present: bool, h
     // mode/server values match it, so the column stays aligned.
     // "sys proxy <state>" is clickable (toggles the proxy) — expose the whole
     // label+value cell region and highlight it while the mouse hovers over it.
-    let proxy = &app.snap.identity.proxy;
+    let proxy = app.proxy_display();
     let px = x0 + 37;
-    let pw = (47 - 37) + dw(proxy); // label col .. end of value
+    let pw = (47 - 37) + dw(&proxy); // label col .. end of value
     let proxy_rect = Rect::new(px, y0 + 4, pw, 1);
     hit.sysproxy = proxy_rect;
     let hovered = !present && app.hover.is_some_and(|(cx, cy)| rect_has(proxy_rect, cx, cy));
@@ -241,7 +241,7 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, app: &App, present: bool, h
         (dimmer, theme::fg(base))
     };
     put(buf, x0 + 37, y0 + 4, "sys proxy", label_st);
-    put(buf, x0 + 47, y0 + 4, proxy, proxy_st);
+    put(buf, x0 + 47, y0 + 4, &proxy, proxy_st);
     put(buf, x0 + 70, y0 + 4, "config", dimmer);
     put(buf, x0 + 78, y0 + 4, &app.snap.identity.config, bright);
 }
@@ -677,13 +677,23 @@ fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: boo
         let mut b = [0u8; 4];
         put(buf, x0 + k as u16, y, ch.encode_utf8(&mut b), st);
     }
-    // Record each on-screen chip's rect (its left edge at display col `left`,
-    // clipped to the viewport) so a click can select it.
+    // Record each on-screen chip's rect so a click can select it — including the
+    // two edge chips that are only *partially* visible: the last one (clipped on
+    // the right) and the first one (clipped on the left, its left edge scrolled
+    // off, so its right portion shows from column 0).
+    let wu = w as usize;
     for (i, &st) in starts.iter().enumerate() {
-        let left = (st + span - off % span) % span;
-        if left < w as usize {
-            let vis = widths[i].min(w - left as u16);
-            hit.chips.push((Rect::new(x0 + left as u16, y, vis, 1), i));
+        let wd = widths[i] as usize;
+        let kl = (st + span - off % span) % span; // display col of the chip's left edge
+        let (cx, cw) = if kl < wu {
+            (kl, wd.min(wu - kl)) // left edge on screen (may be right-clipped)
+        } else if st < off && off < st + wd {
+            (0, (st + wd - off).min(wu)) // left-clipped: right part shows from col 0
+        } else {
+            continue;
+        };
+        if cw > 0 {
+            hit.chips.push((Rect::new(x0 + cx as u16, y, cw as u16, 1), i));
         }
     }
 }

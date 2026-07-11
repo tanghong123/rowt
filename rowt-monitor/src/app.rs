@@ -11,6 +11,9 @@ use crate::source::Source;
 pub const RELOAD_DEBOUNCE: Duration = Duration::from_secs(7);
 /// An armed (not-yet-committed) lane edit auto-cancels after this long (§4.2).
 pub const ARM_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long an optimistic proxy toggle is shown before deferring to the real
+/// polled state (long enough for `rowt proxy` + the ~2s state re-read to land).
+pub const PROXY_OPTIMISTIC_TTL: Duration = Duration::from_secs(6);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Focus {
@@ -127,6 +130,10 @@ pub struct App {
     // deadline (7s after the last committed edit).
     pub armed: Option<Armed>,
     pub pending_reload: Option<Instant>,
+    // Optimistic system-proxy state: shown immediately on a toggle so the change
+    // feels instant, then cleared once the real (polled) state confirms it — or a
+    // timeout reverts the display if the underlying `rowt proxy` command failed.
+    pub proxy_optimistic: Option<(String, Instant)>,
 
     pub help: bool,
     pub started: Instant, // wall-clock start, for time-based pulse + marquees
@@ -165,6 +172,7 @@ impl App {
             strip_w: 0,
             armed: None,
             pending_reload: None,
+            proxy_optimistic: None,
             help: false,
             started: Instant::now(),
             hover: None,
@@ -207,6 +215,13 @@ impl App {
         if let Some(a) = &self.armed {
             if a.at.elapsed() >= ARM_TIMEOUT {
                 self.armed = None;
+            }
+        }
+        // Clear the optimistic proxy state once the real state confirms it, or
+        // give up after a few seconds (a failed toggle then visibly reverts).
+        if let Some((want, at)) = &self.proxy_optimistic {
+            if self.snap.identity.proxy == *want || at.elapsed() >= PROXY_OPTIMISTIC_TTL {
+                self.proxy_optimistic = None;
             }
         }
     }
@@ -472,10 +487,23 @@ impl App {
         }
     }
 
+    /// The system-proxy state to display: the optimistic target if a toggle is
+    /// pending confirmation, otherwise the real polled state.
+    pub fn proxy_display(&self) -> String {
+        match &self.proxy_optimistic {
+            Some((v, _)) => v.clone(),
+            None => self.snap.identity.proxy.clone(),
+        }
+    }
+
     fn toggle_proxy(&mut self) {
-        let on = self.snap.identity.proxy == "on";
+        let on = self.proxy_display() == "on";
+        let target = if on { "off" } else { "on" };
         self.source.set_proxy(!on);
-        self.notify(if on { "system proxy → off".into() } else { "system proxy → on".into() });
+        // Flip the display immediately (optimistic); on_frame reconciles it with
+        // the real state once the command lands, or reverts it after a timeout.
+        self.proxy_optimistic = Some((target.to_string(), Instant::now()));
+        self.notify(format!("system proxy → {target}"));
     }
 
     fn strip_move(&mut self, d: i32) {

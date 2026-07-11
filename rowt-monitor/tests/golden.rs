@@ -194,6 +194,40 @@ fn selected_server_strip_fills_row_circularly() {
 }
 
 #[test]
+fn both_partial_edge_chips_are_clickable() {
+    std::env::set_var("ROWT_MONITOR_NO_CLIPBOARD", "1");
+    let mut app = App::new(Box::new(FixtureSource::still()));
+    app.conn_h = 6;
+    app.err_h = 6;
+    let (w, h) = (96u16, 41u16);
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    let mut sw = 0u16;
+    term.draw(|f| {
+        let a = f.area();
+        sw = ui::draw(f.buffer_mut(), a, &app, false).strip_w;
+    })
+    .unwrap();
+    app.strip_w = sw;
+    app.side_by_side = false;
+    app.focus = Focus::Health;
+    // Freeze the ring scrolled a few cells in, so the FIRST chip is clipped on its
+    // left edge and the last visible chip is clipped on its right edge.
+    app.strip_sel = Some(2);
+    app.strip_off = 4;
+    let mut chips = Vec::new();
+    term.draw(|f| {
+        let a = f.area();
+        chips = ui::draw(f.buffer_mut(), a, &app, false).chips;
+    })
+    .unwrap();
+    assert!(chips.iter().any(|(_, i)| *i == 0), "the left-clipped first chip is clickable: {chips:?}");
+    // its rect starts at the strip's left edge (right portion shown from col 0)
+    let (r0, _) = chips.iter().find(|(_, i)| *i == 0).unwrap();
+    let strip_left = w - 3 - sw; // xr-1-width ≈ strip start; just assert it's near the left
+    assert!(r0.x <= strip_left + 3, "left-clipped chip anchored at the strip's left edge");
+}
+
+#[test]
 fn colors_spot_check() {
     let app = App::new(Box::new(FixtureSource::still()));
     let mut term = Terminal::new(TestBackend::new(96, 41)).unwrap();
