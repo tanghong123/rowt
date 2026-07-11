@@ -251,7 +251,10 @@ def fetch_subscription(url: str) -> list[str]:
     returning raw share links for it but Clash YAML (which we can't parse) for a
     generic UA. Override with ROWT_SUB_UA if a provider needs a different signal.
     """
-    ua = os.environ.get("ROWT_SUB_UA") or "Shadowrocket/2.2.28 (iPhone; iOS 17.5.1; Scale/3.00)"
+    ua = (
+        os.environ.get("ROWT_SUB_UA")
+        or "Shadowrocket/2.2.28 (iPhone; iOS 17.5.1; Scale/3.00)"
+    )
     req = Request(url, headers={"User-Agent": ua})
     with urlopen(req, timeout=20) as r:  # noqa: S310 (user-supplied sub URL)
         body = r.read().decode("utf-8", "replace").strip()
