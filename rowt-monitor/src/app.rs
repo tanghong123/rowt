@@ -115,12 +115,12 @@ pub struct App {
 
     // Server strip (§5.4): `None` = marqueeing, no selection. Set on first ←/→.
     pub strip_sel: Option<usize>,
-    // Index of the leftmost visible chip, fed back by draw_chips each frame. While
-    // marqueeing it's the first visible chip (what the first ←/→ selects); while a
-    // chip is selected it's the frozen ring window's left edge (the display wraps
-    // past the last chip back to the first, so the row is always filled).
-    pub strip_page: usize,
-    pub strip_w: u16, // server-strip viewport width, fed back for circular paging
+    // Frozen scroll position of the strip's ring, in cells (matches the marquee's
+    // own offset). Captured at the exact instant the first ←/→ freezes the scroll
+    // — so the display doesn't jump; a partial chip may sit before the selection —
+    // then nudged just enough to keep the selection visible as it moves.
+    pub strip_off: usize,
+    pub strip_w: u16, // server-strip viewport width, fed back from the renderer
 
     // Control layer: the armed-but-uncommitted lane edit, and the batched-reload
     // deadline (7s after the last committed edit).
@@ -159,7 +159,7 @@ impl App {
             conn_key: None,
             err_key: None,
             strip_sel: None,
-            strip_page: 0,
+            strip_off: 0,
             strip_w: 0,
             armed: None,
             pending_reload: None,
@@ -446,15 +446,17 @@ impl App {
             return;
         }
         match self.strip_sel {
-            // First ←/→ selects the first VISIBLE chip and anchors the page there,
-            // so the strip does not jump — the chip stays where it was on screen.
+            // First ←/→ freezes the marquee *exactly where it is* (cell offset and
+            // all — a partial chip may remain at the left edge) and selects the
+            // first fully-visible chip, so nothing jumps.
             None => {
-                let f = self.strip_page.min(n - 1);
-                self.strip_sel = Some(f);
-                self.strip_page = f;
+                let (starts, widths, span) = self.strip_layout();
+                let overflow = self.strip_w > 0 && span.saturating_sub(3) > self.strip_w as usize;
+                self.strip_off = if overflow { self.strip_marquee_off(span) } else { 0 };
+                self.strip_sel = Some(self.first_fully_visible(&starts, &widths, span, self.strip_off));
             }
-            // Subsequent moves wrap around the ends; scroll the frozen ring window
-            // (in the move direction) just enough to keep the selection visible.
+            // Subsequent moves wrap around the ends; scroll the frozen ring (in the
+            // move direction) just enough to keep the selection fully visible.
             Some(i) => {
                 let ni = (i as i32 + d).rem_euclid(n as i32) as usize;
                 self.strip_sel = Some(ni);
@@ -463,50 +465,75 @@ impl App {
         }
     }
 
-    /// Display width of server chip `i`, matching `draw_chips`'s segments exactly
-    /// (name + ` ` + `NNN ms`, plus `▶ ` for the active one).
+    /// Cell width of server chip `i`, matching `draw_chips`'s cell buffer exactly
+    /// (char counts: name + ` ` + `NNN ms`, plus `▶ ` for the active one).
     fn chip_w(&self, i: usize) -> u16 {
-        use crate::paint::dw;
         match self.snap.chips.get(i) {
-            Some(c) => dw(&c.name) + 7 + if c.active { dw("▶ ") } else { 0 },
+            Some(c) => c.name.chars().count() as u16 + 7 + if c.active { 2 } else { 0 },
             None => 0,
         }
     }
 
-    /// The chips `draw_chips` would render (circularly) starting at `page`, in
-    /// order, until the viewport width is used up — its 3-cell separators match.
-    fn strip_visible_from(&self, page: usize) -> Vec<usize> {
+    /// The strip's ring layout: each chip's start cell, its width, and the total
+    /// ring span (chips + 3-cell separators + a 3-cell trailing gap), mirroring the
+    /// marquee cell buffer in `draw_chips`.
+    fn strip_layout(&self) -> (Vec<usize>, Vec<u16>, usize) {
         let n = self.snap.chips.len();
-        let mut out = Vec::new();
-        if n == 0 || self.strip_w == 0 {
-            return out;
-        }
-        let mut col = 0u16;
-        let mut i = page % n;
-        for drawn in 0..n {
-            let sep = if drawn > 0 { 3 } else { 0 };
-            if col + sep + self.chip_w(i) > self.strip_w {
-                break;
+        let mut starts = Vec::with_capacity(n);
+        let mut widths = Vec::with_capacity(n);
+        let mut cells = 0usize;
+        for i in 0..n {
+            if i > 0 {
+                cells += 3;
             }
-            col += sep + self.chip_w(i);
-            out.push(i);
-            i = (i + 1) % n;
+            starts.push(cells);
+            let w = self.chip_w(i);
+            widths.push(w);
+            cells += w as usize;
         }
-        out
+        (starts, widths, cells + 3)
     }
 
-    /// Scroll the ring window one chip at a time in the move direction `d` until
-    /// the selected chip `si` is visible (bounded by the pool size).
+    /// The marquee's current cell offset — computed the same way `draw_chips`
+    /// does, so freezing captures precisely what's on screen.
+    fn strip_marquee_off(&self, span: usize) -> usize {
+        if span == 0 {
+            return 0;
+        }
+        (self.started.elapsed().as_secs_f32() * crate::ui::MARQUEE_CPS) as usize % span
+    }
+
+    /// Display column of chip `i`'s left edge within the window at offset `off`.
+    fn chip_col(&self, starts: &[usize], span: usize, off: usize, i: usize) -> usize {
+        (starts[i] + span - off % span) % span
+    }
+
+    /// The first chip fully inside the viewport at offset `off` (what the first
+    /// ←/→ selects); falls back to chip 0 if none fits.
+    fn first_fully_visible(&self, starts: &[usize], widths: &[u16], span: usize, off: usize) -> usize {
+        let mut best: Option<(usize, usize)> = None; // (left column, index)
+        for (i, &wd) in widths.iter().enumerate() {
+            let col = self.chip_col(starts, span, off, i);
+            if col + wd as usize <= self.strip_w as usize && best.is_none_or(|(c, _)| col < c) {
+                best = Some((col, i));
+            }
+        }
+        best.map(|(_, i)| i).unwrap_or(0)
+    }
+
+    /// Scroll the frozen ring one cell at a time in the move direction `d` until
+    /// the selected chip is fully visible (bounded by the ring span).
     fn reveal_strip(&mut self, si: usize, d: i32) {
-        let n = self.snap.chips.len();
-        if n == 0 || self.strip_w == 0 {
+        let (starts, widths, span) = self.strip_layout();
+        if span == 0 || self.strip_w == 0 {
             return;
         }
-        for _ in 0..n {
-            if self.strip_visible_from(self.strip_page).contains(&si) {
+        for _ in 0..span {
+            let col = self.chip_col(&starts, span, self.strip_off, si);
+            if col + widths[si] as usize <= self.strip_w as usize {
                 return;
             }
-            self.strip_page = if d >= 0 { (self.strip_page + 1) % n } else { (self.strip_page + n - 1) % n };
+            self.strip_off = if d >= 0 { (self.strip_off + 1) % span } else { (self.strip_off + span - 1) % span };
         }
     }
 

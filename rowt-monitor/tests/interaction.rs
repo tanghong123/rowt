@@ -244,10 +244,9 @@ fn strip_selection_wraps_and_anchors() {
     a.focus = Focus::Health;
     let n = a.snap.chips.len();
     assert!(n >= 3, "fixture has a server pool");
-    // First ←/→ selects the first visible chip and anchors the page there (no jump).
+    // First ←/→ freezes the scroll and selects the first fully-visible chip.
     a.update(Action::FocusRight);
     assert_eq!(a.strip_sel, Some(0));
-    assert_eq!(a.strip_page, 0, "page anchored on the first visible chip, not re-centered");
     // Walk to the last chip, then one more wraps to the first.
     for _ in 0..n - 1 {
         a.update(Action::FocusRight);

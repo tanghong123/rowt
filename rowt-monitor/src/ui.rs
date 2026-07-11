@@ -23,8 +23,7 @@ pub struct Hit {
     pub err_h: usize,
     pub lanes: Vec<(Rect, Option<Lane>)>, // header rate rows (None = `all`)
     pub windows: Vec<(Rect, Window)>,     // errors window tabs
-    pub strip_page: usize,                // leftmost server chip visible this frame (§5.4)
-    pub strip_w: u16,                     // server-strip viewport width (for circular paging)
+    pub strip_w: u16, // server-strip viewport width, fed back for the frozen ring (§5.4)
 }
 
 // NOTE: the bottom row is shifted one space left of the design capture so its
@@ -125,9 +124,9 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, present: bool) -> Hit {
         draw_err_pane(buf, cx0, cw, e_top + 1, e_top + 6, e_top + 7, r2 as usize, app, present, &mut hit);
     }
 
-    hit.strip_page = draw_health(buf, xl, xr, health_top, app, present, border);
+    draw_health(buf, xl, xr, health_top, app, present, border);
     // Chips render at xl+2 with width (xr-xl-3) — see draw_health; feed it back so
-    // App can page the frozen ring window to keep the selection visible.
+    // App can freeze/scroll the ring to keep the selection visible.
     hit.strip_w = (xr.saturating_sub(xl)).saturating_sub(3);
 
     // App-level drag selection highlight (secondary copy path).
@@ -531,7 +530,7 @@ fn draw_windows(buf: &mut Buffer, x0: u16, w: u16, y: u16, app: &App, hit: &mut 
 
 // ---------------- server health ----------------
 
-fn draw_health(buf: &mut Buffer, xl: u16, xr: u16, top: u16, app: &App, present: bool, border: Style) -> usize {
+fn draw_health(buf: &mut Buffer, xl: u16, xr: u16, top: u16, app: &App, present: bool, border: Style) {
     draw_box_frame_health(buf, xl, xr, top, border);
     // Caption gains a focus ring like the panes (§5.1): brighten when focused,
     // amber once a chip is selected (frozen strip).
@@ -560,9 +559,8 @@ fn draw_health(buf: &mut Buffer, xl: u16, xr: u16, top: u16, app: &App, present:
     // never looks broken.
     if !present && s.identity.router_up && s.servers_total > 0 && s.servers_up == 0 && s.servers_down == 0 {
         put(buf, x0 + 1, top + 2, "probing…", theme::fg(theme::DIM));
-        0
     } else {
-        draw_chips(buf, x0 + 1, top + 2, w.saturating_sub(2), app, present)
+        draw_chips(buf, x0 + 1, top + 2, w.saturating_sub(2), app, present);
     }
 }
 
@@ -579,9 +577,11 @@ fn draw_box_frame_health(buf: &mut Buffer, xl: u16, xr: u16, top: u16, border: S
     put(buf, xr, top + 3, "╯", border);
 }
 
-/// Draw the server strip; returns the index of the first chip visible this frame
-/// (fed back so the first `←/→` can select it, §5.4).
-fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: bool) -> usize {
+/// Draw the server strip. When a chip is selected the marquee is frozen: the ring
+/// is rendered at `app.strip_off` (the exact cell offset it had when frozen, so it
+/// doesn't jump — a partial chip may sit at the left edge) and scrolls only to
+/// keep the selection visible (`App::reveal_strip`); otherwise it marquees.
+fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: bool) {
     let bright = theme::fg(theme::BRIGHT);
     let escape = theme::fg(theme::ESCAPE);
     let sel = if !present && app.focus == Focus::Health { app.strip_sel } else { None };
@@ -612,53 +612,13 @@ fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: boo
         })
         .collect();
     if chips.is_empty() {
-        return 0;
+        return;
     }
     let widths: Vec<u16> = chips.iter().map(|segs| segs.iter().map(|(s, _)| dw(s)).sum()).collect();
     let total: u16 = widths.iter().sum::<u16>() + 3 * (chips.len().saturating_sub(1) as u16);
 
-    // A chip is selected: the marquee is frozen. If the whole pool fits, lay it
-    // out statically and just highlight; otherwise render the frozen RING window
-    // starting at the page anchor (viewport already scrolled to reveal the
-    // selection in `App::reveal_strip`), wrapping past the last chip back to the
-    // first so the row is always filled (§5.4).
-    if let Some(_si) = sel {
-        let n = chips.len();
-        if total <= w {
-            let mut col = x0;
-            for (i, segs) in chips.iter().enumerate() {
-                let sep = if i > 0 { 3 } else { 0 };
-                if col + sep + widths[i] > x0 + w {
-                    break;
-                }
-                col += sep;
-                for (s, st) in segs {
-                    put(buf, col, y, s, *st);
-                    col += dw(s);
-                }
-            }
-            return 0;
-        }
-        let start = app.strip_page % n;
-        let mut col = x0;
-        let mut i = start;
-        for drawn in 0..n {
-            let sep = if drawn > 0 { 3 } else { 0 };
-            if col + sep + widths[i] > x0 + w {
-                break;
-            }
-            col += sep;
-            for (s, st) in &chips[i] {
-                put(buf, col, y, s, *st);
-                col += dw(s);
-            }
-            i = (i + 1) % n;
-        }
-        return start;
-    }
-
-    if present || total <= w {
-        // Pack complete chips left-to-right; stop before one that won't fit.
+    // Whole pool fits (and not frozen mid-scroll): static left-to-right layout.
+    if (present || total <= w) && sel.is_none() {
         let mut col = x0;
         for (i, segs) in chips.iter().enumerate() {
             let sep = if i > 0 { 3 } else { 0 };
@@ -671,38 +631,42 @@ fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: boo
                 col += dw(s);
             }
         }
-        0
-    } else {
-        // Overflowing + no selection: marquee the whole strip (cell-level scroll),
-        // recording each chip's start cell so we can report the first visible one.
-        let mut cells: Vec<(char, Style)> = Vec::new();
-        let mut starts: Vec<usize> = Vec::with_capacity(chips.len());
+        return;
+    }
+    if sel.is_some() && total <= w {
+        // Selected but everything fits: static, just highlight (no ring needed).
+        let mut col = x0;
         for (i, segs) in chips.iter().enumerate() {
-            if i > 0 {
-                cells.extend([(' ', Style::default()); 3]);
-            }
-            starts.push(cells.len());
+            col += if i > 0 { 3 } else { 0 };
             for (s, st) in segs {
-                cells.extend(s.chars().map(|c| (c, *st)));
+                put(buf, col, y, s, *st);
+                col += dw(s);
             }
         }
-        let span = cells.len() + 3;
-        let off = (app.started.elapsed().as_secs_f32() * MARQUEE_CPS) as usize % span;
-        for k in 0..w as usize {
-            let ci = off + k;
-            let (ch, st) = if ci % span < cells.len() { cells[ci % span] } else { (' ', Style::default()) };
-            let mut b = [0u8; 4];
-            put(buf, x0 + k as u16, y, ch.encode_utf8(&mut b), st);
+        return;
+    }
+
+    // Ring: one cell buffer (chips + 3-cell separators), rendered at a cell offset.
+    // Frozen at `app.strip_off` when a chip is selected, else the time-based marquee.
+    let mut cells: Vec<(char, Style)> = Vec::new();
+    for (i, segs) in chips.iter().enumerate() {
+        if i > 0 {
+            cells.extend([(' ', Style::default()); 3]);
         }
-        // First visible chip = smallest on-screen display column among chip starts.
-        starts
-            .iter()
-            .enumerate()
-            .map(|(i, &st)| (i, (st + span - off % span) % span))
-            .filter(|&(_, k)| k < w as usize)
-            .min_by_key(|&(_, k)| k)
-            .map(|(i, _)| i)
-            .unwrap_or(0)
+        for (s, st) in segs {
+            cells.extend(s.chars().map(|c| (c, *st)));
+        }
+    }
+    let span = cells.len() + 3;
+    let off = match sel {
+        Some(_) => app.strip_off % span,
+        None => (app.started.elapsed().as_secs_f32() * MARQUEE_CPS) as usize % span,
+    };
+    for k in 0..w as usize {
+        let ci = (off + k) % span;
+        let (ch, st) = if ci < cells.len() { cells[ci] } else { (' ', Style::default()) };
+        let mut b = [0u8; 4];
+        put(buf, x0 + k as u16, y, ch.encode_utf8(&mut b), st);
     }
 }
 
@@ -745,8 +709,9 @@ fn draw_scrollbar(buf: &mut Buffer, x: u16, y0: u16, h: usize, total: usize, scr
 }
 
 /// Cells-per-second for horizontal auto-scroll (time-based, so the speed is
-/// steady regardless of redraw/event cadence).
-const MARQUEE_CPS: f32 = 5.0;
+/// steady regardless of redraw/event cadence). Public so `App` can compute the
+/// same offset to freeze the server strip at its exact current scroll position.
+pub const MARQUEE_CPS: f32 = 5.0;
 
 /// Horizontal auto-scroll of an overflowing value (selected row only). `secs` is
 /// elapsed wall-clock time so the roll speed doesn't change with event rate.
