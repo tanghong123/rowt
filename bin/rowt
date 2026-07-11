@@ -45,7 +45,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="2.1.5"
+ROWT_VERSION="2.1.6"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -807,14 +807,27 @@ assemble_host() {
     --argjson block_dom "$(block_domains_json)" \
     '
     # route rules, first match wins. sniff first so domain rules see host names.
-    # block goes BEFORE corp/escape so ad/tracker domains are sunk with no DNS
-    # lookup and no dial (the fix for the direct-lane retry storm that pegs CPU).
+    #
+    # Longest-suffix-wins across the three hand lists: flatten them into (suffix,
+    # lane) pairs and emit ONE rule per suffix, ordered most-specific-first (more
+    # labels, then longer string). Because sing-box takes the first matching rule,
+    # a more-specific suffix is consulted first — so an explicit api.foo.com in
+    # escape beats a foo.com in block, instead of block always winning by lane
+    # order. A suffix lives in at most one lane (rowt enforces that), so no ties.
+    (( ($block_dom | map({s:., o:"block"}))
+     + ($corp_dom  | map({s:., o:"corp"}))
+     + ($esc_dom   | map({s:., o:"escape"})) )
+     | sort_by([(.s|split(".")|length), (.s|length)]) | reverse
+     | map({domain_suffix:[.s], outbound:.o})) as $suffix_rules
+    |
+    # The geosite ad set is opaque (thousands of suffixes we cannot interleave), so
+    # it sits AFTER the hand lists — an explicit escape/corp entry overrides the
+    # broad blocklist — but still before the default, so ad/tracker domains are
+    # still sunk to `block` with no dial (the direct-lane retry-storm CPU fix).
     ([ {action:"sniff"} ]
-     + [ if $ads != ""                  then {rule_set:["geosite-ads"], outbound:"block"} else empty end,
-         if ($block_dom|length) > 0      then {domain_suffix:$block_dom, outbound:"block"} else empty end,
-         if ($corp_dom|length)  > 0 then {domain_suffix:$corp_dom,  outbound:"corp"}   else empty end,
-         if ($corp_cidr|length) > 0 then {ip_cidr:$corp_cidr,       outbound:"corp"}   else empty end,
-         if ($esc_dom|length)   > 0 then {domain_suffix:$esc_dom,   outbound:"escape"} else empty end ]) as $rules
+     + $suffix_rules
+     + [ if ($corp_cidr|length) > 0 then {ip_cidr:$corp_cidr, outbound:"corp"} else empty end,
+         if $ads != ""              then {rule_set:["geosite-ads"], outbound:"block"} else empty end ]) as $rules
     |
     ([ {type:"local", tag:"local"},
        {type:"udp", tag:"dns-direct", server:"223.5.5.5", detour:"direct"} ]) as $dns_servers
@@ -1877,27 +1890,44 @@ _list_hit() {
   return 1
 }
 
-# Explain which lane a destination takes. Mirrors the render rule order exactly:
-# block domain_suffix -> corp domain_suffix -> corp ip_cidr (on resolved IP) ->
-# escape domain_suffix -> final. (The geosite ad rule-set also blocks, but it's a
-# binary .srs we can't cheaply inspect here — so a hit there won't show below.)
+# Longest-suffix-wins across the three hand lists (mirrors the render: rowt emits
+# one rule per suffix, most-specific-first). Echoes "<lane> <suffix>" for the
+# longest matching domain suffix, or returns nonzero if none match. Uses the same
+# plain-suffix test as _list_hit so this predictor matches the router.
+_longest_domain_hit() { # $1=domain
+  local val="$1" best_e="" best_lane="" e lane f pair
+  for pair in "escape:$DOMAINS" "corp:$CORP_DOMAINS" "block:$BLOCK_DOMAINS"; do
+    lane="${pair%%:*}"; f="${pair#*:}"
+    [ -f "$f" ] || continue
+    while IFS= read -r e; do
+      e="$(printf '%s' "$e" | sed 's/[[:space:]]//g')"; case "$e" in ''|\#*) continue ;; esac
+      case "$e" in */[0-9]*) continue ;; esac   # skip corp CIDR entries
+      case "$val" in *"$e") [ "${#e}" -gt "${#best_e}" ] && { best_e="$e"; best_lane="$lane"; } ;; esac
+    done < "$f"
+  done
+  [ -n "$best_e" ] || return 1
+  printf '%s %s\n' "$best_lane" "$best_e"
+}
+
+# Explain which lane a destination takes. Mirrors the render exactly: hand-list
+# domain suffixes win by LONGEST match across all three lanes (block/corp/escape),
+# then corp ip_cidr (on the resolved IP), then final. (The geosite ad rule-set
+# also blocks, but it's a binary .srs we can't cheaply inspect — a hit there won't
+# show below; it's consulted after the hand lists, so an explicit entry overrides.)
 cmd_explain() {
   local dest="${1:-}"; [ -n "$dest" ] || die "usage: $PROG explain <domain|ip>"
   dest="$(printf '%s' "$dest" | sed -E 's#^[a-zA-Z]+://##; s#/.*$##; s#:[0-9]+$##' | tr 'A-Z' 'a-z')"
-  local lane="" why="" ip="" m
+  local lane="" why="" ip="" m hit
   if is_ipv4 "$dest"; then
     ip="$dest"
     if m="$(_list_hit "$dest" "$CORP_DOMAINS" cidr)"; then lane=corp; why="corp CIDR '$m'"
     else lane="$FINAL_ROUTE"; why="no corp CIDR matched; final route = $FINAL_ROUTE"; fi
-  elif m="$(_list_hit "$dest" "$BLOCK_DOMAINS" domain)"; then
-    lane=block; why="block-domains suffix '$m'"
-  elif m="$(_list_hit "$dest" "$CORP_DOMAINS" domain)"; then
-    lane=corp; why="corp-domains suffix '$m'"
+  elif hit="$(_longest_domain_hit "$dest")"; then
+    lane="${hit%% *}"; m="${hit#* }"; why="longest-match ${lane}-domains suffix '$m'"
   else
     ip="$(resolve_ip "$dest")"
     if [ -n "$ip" ] && m="$(_list_hit "$ip" "$CORP_DOMAINS" cidr)"; then lane=corp; why="resolves to $ip — in corp CIDR '$m'"
-    elif m="$(_list_hit "$dest" "$DOMAINS" domain)"; then lane=escape; why="escape-domains suffix '$m'"
-    else lane="$FINAL_ROUTE"; why="no block/escape/corp rule; final route = $FINAL_ROUTE"; fi
+    else lane="$FINAL_ROUTE"; why="no block/corp/escape rule; final route = $FINAL_ROUTE"; fi
   fi
   local desc
   case "$lane" in

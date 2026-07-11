@@ -51,12 +51,24 @@ home LAN (`192.168.x`) stays on `en0` because corp excludes the local subnet.
 A connection arrives at the proxy. sing-box sniffs the destination host name and
 walks the rules **top to bottom, first match wins**:
 
-| # | rule | outbound | what physically happens (corp ON) |
-|---|------|----------|-----------------------------------|
-| 1 | `domain_suffix` in `corp-domains.txt` | **corp** | resolved to an intranet IP (see §4), sent via the **routing table** → matches the corp route → into `utunN` → corp network |
-| 2 | `ip_cidr` in `corp-domains.txt` (e.g. `10.0.0.0/8`) | **corp** | literal intranet IP → routing table → `utunN` → corp |
-| 3 | `domain_suffix` in `escape-domains.txt` | **escape** | VLESS socket **bound to en0** → home router → VPS → the VPS reaches Google |
-| — | no match → `final` (default `direct`) | **direct** | direct socket **bound to en0** → home router → the public internet, corp untouched |
+| rule | outbound | what physically happens (corp ON) |
+|------|----------|-----------------------------------|
+| `domain_suffix` in `block-domains.txt` | **block** | refused instantly — no DNS, no dial (kills the ad/tracker retry storm) |
+| `domain_suffix` in `corp-domains.txt` | **corp** | resolved to an intranet IP (see §4), sent via the **routing table** → matches the corp route → into `utunN` → corp network |
+| `ip_cidr` in `corp-domains.txt` (e.g. `10.0.0.0/8`) | **corp** | literal intranet IP → routing table → `utunN` → corp |
+| `domain_suffix` in `escape-domains.txt` | **escape** | VLESS socket **bound to en0** → home router → VPS → the VPS reaches Google |
+| `geosite-category-ads-all` rule-set | **block** | broad ad/tracker blocklist (opaque, so it runs *after* the hand lists) |
+| no match → `final` (default `direct`) | **direct** | direct socket **bound to en0** → home router → the public internet, corp untouched |
+
+**Longest suffix wins, not lane order.** rowt does *not* emit one rule per lane
+(which would make an earlier lane shadow a later one). It flattens the three hand
+lists into **one rule per suffix, ordered most-specific-first** (more labels, then
+longer). So `api.foo.com` in escape beats `foo.com` in block for `api.foo.com`,
+while `www.foo.com` still lands in block. A suffix lives in **at most one lane** —
+`rowt escape/corp/block add` pulls the entry out of the other two — so there are
+never two lanes fighting over the same suffix. The opaque geosite rule-set can't
+be interleaved by specificity, so it sits after the hand lists (explicit intent
+overrides the broad blocklist) but before `final`.
 
 Two consequences worth internalizing:
 
