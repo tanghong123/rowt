@@ -45,7 +45,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="2.1.6"
+ROWT_VERSION="2.1.7"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -392,6 +392,13 @@ _list_add_file() { # $1=list-file $2=source-file $3=label
 # rowt escape / corp  [list | add <e>… | rm <e>… | import <file> | clear | dump [file]]
 edit_list() {
   local file="$1" label="$2" action="${3:-list}"; shift 3 2>/dev/null || true
+  # --no-reload: write the lane file but skip the router bounce (used by the TUI
+  # control layer, which batches several edits and issues ONE reload on a timer).
+  local no_reload=0 __a; local args=()
+  for __a in "$@"; do
+    if [ "$__a" = "--no-reload" ]; then no_reload=1; else args+=("$__a"); fi
+  done
+  set -- ${args[@]+"${args[@]}"}
   # snapshot so we only reload the router if a lane ACTUALLY changed (adding an
   # already-present entry, or removing a missing one, is a no-op — no restart).
   # Snapshot ALL lanes, not just the target: an `add` may also pull the entry out
@@ -442,9 +449,9 @@ edit_list() {
       return 0 ;;
     *) die "usage: $PROG $label [list | add <e>… | rm <e>… | import <file> | clear | dump [file]]" ;;
   esac
-  # only re-render/restart if some lane changed
+  # only re-render/restart if some lane changed (and reload wasn't suppressed)
   local _after; _after="$(cat "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" 2>/dev/null)"
-  [ "$_before" != "$_after" ] && reload_if_running || true
+  [ "$no_reload" -eq 0 ] && [ "$_before" != "$_after" ] && reload_if_running || true
 }
 
 cmd_escape() {
@@ -563,6 +570,10 @@ cmd_monitor() {
   done
   [ -n "$bin" ] || bin="$(command -v rowt-monitor 2>/dev/null || true)"
   [ -n "$bin" ] || die "rowt-monitor not found — build it with 'cd \"$HERE/rowt-monitor\" && cargo build --release', or reinstall the brew formula."
+  # Hand the monitor the exact rowt it was launched from, so its control layer
+  # (server switch / lane edits / proxy toggle) drives the same CLI + config.
+  local self; self="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/$(basename "${BASH_SOURCE[0]}")"
+  [ -x "$self" ] && export ROWT_BIN="$self"
   exec "$bin" "$@"
 }
 
