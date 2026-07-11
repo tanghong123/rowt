@@ -412,7 +412,11 @@ fn draw_conn_pane(
         }
         let c = view[idx];
         let y = list_y + row as u16;
-        put(buf, x0 + 1, y, c.lane.label(), theme::bold(c.lane.color()));
+        // A dormant domain (no live connection — only carried-over history) is
+        // greyed and shows `#` 0; it sorts after all the live rows.
+        let dormant = c.conns == 0;
+        let lane_st = if dormant { dim } else { theme::bold(c.lane.color()) };
+        put(buf, x0 + 1, y, c.lane.label(), lane_st);
         let hostport = format!("{}:{}", c.host, c.port);
         let selected = !present && app.focus == Focus::Conn && app.conn_active() && idx == app.conn_sel;
         let shown = if selected {
@@ -420,12 +424,18 @@ fn draw_conn_pane(
         } else {
             truncate(&hostport, host_max)
         };
-        put(buf, x0 + 8, y, &shown, theme::fg(theme::BRIGHT));
+        put(buf, x0 + 8, y, &shown, if dormant { dim } else { theme::fg(theme::BRIGHT) });
         put_right(buf, x0 + w - 38, y, &c.conns.to_string(), dimmer);
         // No ↑/↓ here — the UP/DOWN column headers already label these; the
-        // color still distinguishes up (warm) from down (teal).
-        put_right(buf, x0 + w - 27, y, &format::compact(c.up), theme::fg(theme::UP_TABLE));
-        put_right(buf, x0 + w - 17, y, &format::compact(c.down), theme::fg(theme::DOWN_TABLE));
+        // color still distinguishes up (warm) from down (teal). Dormant rows are
+        // uniformly grey.
+        let (up_st, down_st) = if dormant {
+            (dim, dim)
+        } else {
+            (theme::fg(theme::UP_TABLE), theme::fg(theme::DOWN_TABLE))
+        };
+        put_right(buf, x0 + w - 27, y, &format::compact(c.up), up_st);
+        put_right(buf, x0 + w - 17, y, &format::compact(c.down), down_st);
         // RULE is the last column — truncate hard so a long/verbose rule can
         // never spill across the divider into the errors pane.
         put(buf, x0 + w - 14, y, &truncate(&c.rule, 13), dimmer);

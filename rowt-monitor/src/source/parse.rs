@@ -41,6 +41,20 @@ pub struct RawConn {
     pub rule: String,
 }
 
+/// Identity of a connections-table row: its lane, host, and port.
+pub type ConnKey = (Lane, String, u16);
+
+/// Cumulative bytes carried over from a domain's already-**closed** connections,
+/// plus its last-seen matched rule (for a dormant row's RULE column). This is
+/// what lets the table total a domain's traffic across short-lived connections
+/// instead of losing it when each connection drops out of the live set.
+#[derive(Clone, Default, Debug)]
+pub struct ConnHist {
+    pub up: u64,
+    pub down: u64,
+    pub rule: String,
+}
+
 /// Parse the clash `/connections` payload into raw per-connection records.
 pub fn parse_connections(v: &Value) -> Vec<RawConn> {
     let mut out = Vec::new();
@@ -139,6 +153,7 @@ pub fn build_conn_rows(
     raw: &[RawConn],
     rates: &HashMap<String, (f64, f64)>,
     escape_tags: &HashSet<String>,
+    history: &HashMap<ConnKey, ConnHist>,
 ) -> (Vec<Conn>, Vec<LaneAgg>, AllAgg) {
     // Group by (lane, host, port) -> concurrency + summed rates.
     struct Agg {
@@ -187,8 +202,35 @@ pub fn build_conn_rows(
         }
     }
 
-    // Sort rows by throughput (down+up) desc for a stable, useful ordering.
-    groups.sort_by(|a, b| (b.down + b.up).total_cmp(&(a.down + a.up)));
+    // Fold in each live domain's carried-over history (bytes from its connections
+    // that have since closed), so the row totals a domain across short-lived
+    // connections rather than only its currently-open ones.
+    for g in groups.iter_mut() {
+        if let Some(h) = history.get(&(g.lane, g.host.clone(), g.port)) {
+            g.up += h.up as f64;
+            g.down += h.down as f64;
+        }
+    }
+    // Domains with history but NO live connection this tick → dormant rows
+    // (concurrency 0, greyed by the renderer), shown after the live ones.
+    let live: HashSet<ConnKey> = groups.iter().map(|g| (g.lane, g.host.clone(), g.port)).collect();
+    for (key, h) in history {
+        if !live.contains(key) {
+            groups.push(Agg {
+                lane: key.0,
+                host: key.1.clone(),
+                port: key.2,
+                conns: 0,
+                up: h.up as f64,
+                down: h.down as f64,
+                rule: h.rule.clone(),
+            });
+        }
+    }
+
+    // Live rows first, then dormant rows; within each group, by throughput
+    // (down+up) desc for a stable, useful ordering.
+    groups.sort_by(|a, b| (a.conns == 0).cmp(&(b.conns == 0)).then((b.down + b.up).total_cmp(&(a.down + a.up))));
     let conns: Vec<Conn> = groups
         .into_iter()
         .map(|g| Conn {
@@ -521,7 +563,8 @@ mod tests {
         rates.insert("a".to_string(), (1000.0, 2000.0));
         rates.insert("b".to_string(), (100.0, 200.0));
         rates.insert("d".to_string(), (5.0, 5.0));
-        let (conns, lanes, all) = build_conn_rows(&raw, &rates, &esc);
+        let hist: HashMap<ConnKey, ConnHist> = HashMap::new();
+        let (conns, lanes, all) = build_conn_rows(&raw, &rates, &esc, &hist);
         // block excluded; anthropic grouped (concurrency 2)
         let anth = conns.iter().find(|c| c.host == "api.anthropic.com").unwrap();
         assert_eq!(anth.conns, 2);
@@ -534,6 +577,49 @@ mod tests {
         assert_eq!(esc_lane.conns, 2);
         assert_eq!(all.conns, 3); // escape 2 + direct 1, block excluded
         assert_eq!(all.down, 2205.0);
+    }
+
+    #[test]
+    fn conn_rows_merge_history_and_add_dormant_rows() {
+        let v = json!({
+            "connections": [
+                {"id":"a","metadata":{"host":"api.anthropic.com","destinationPort":"443"},
+                 "upload":100,"download":200,"chains":["Hong-Server","escape"],"rule":"DomainSuffix"}
+            ]
+        });
+        let raw = parse_connections(&v);
+        let esc: HashSet<String> = ["Hong-Server"].iter().map(|s| s.to_string()).collect();
+        let rates = HashMap::new();
+        let mut hist: HashMap<ConnKey, ConnHist> = HashMap::new();
+        // anthropic has carried-over history from earlier closed connections…
+        hist.insert(
+            (Lane::Escape, "api.anthropic.com".into(), 443),
+            ConnHist { up: 900, down: 800, rule: "domain_suffix".into() },
+        );
+        // …and github is dormant (history only, no live connection now).
+        hist.insert(
+            (Lane::Escape, "github.com".into(), 443),
+            ConnHist { up: 5000, down: 50, rule: "domain_suffix".into() },
+        );
+        let (conns, _lanes, _all) = build_conn_rows(&raw, &rates, &esc, &hist);
+
+        // Live domain totals live cumulative + history: 100+900 up, 200+800 down.
+        let anth = conns.iter().find(|c| c.host == "api.anthropic.com").unwrap();
+        assert_eq!(anth.conns, 1);
+        assert_eq!(anth.up, 1000.0);
+        assert_eq!(anth.down, 1000.0);
+
+        // Dormant domain present with concurrency 0 and its history bytes.
+        let gh = conns.iter().find(|c| c.host == "github.com").unwrap();
+        assert_eq!(gh.conns, 0);
+        assert_eq!(gh.up, 5000.0);
+        assert_eq!(gh.down, 50.0);
+
+        // Ordering: every live row (conns>0) precedes every dormant row (conns==0),
+        // even though github (5050) out-totals anthropic (2000).
+        let first_dormant = conns.iter().position(|c| c.conns == 0).unwrap();
+        assert!(conns[..first_dormant].iter().all(|c| c.conns > 0));
+        assert_eq!(conns[first_dormant].host, "github.com");
     }
 
     #[test]

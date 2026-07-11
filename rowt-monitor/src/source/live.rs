@@ -40,6 +40,9 @@ const MAX_WINDOW_SECS: i64 = 24 * 60 * 60;
 const ERR_BUF_CAP: usize = 40_000;
 /// Cap a single incremental read (e.g. a large first-look catch-up).
 const MAX_READ_BYTES: u64 = 8 * 1024 * 1024;
+/// Cap on the per-domain connection-byte history (bounds RAM and the number of
+/// dormant rows); the smallest-total domains are evicted past this.
+const CONN_HISTORY_CAP: usize = 200;
 
 /// Per-lane read cursor for incremental log tailing.
 struct LaneCursor {
@@ -59,6 +62,12 @@ pub struct LiveSource {
     // rate computation: previous cumulative byte counts per connection id
     prev: HashMap<String, (u64, u64)>,
     prev_at: Option<Instant>,
+
+    // Per-domain cumulative bytes carried over from CLOSED connections, so the
+    // table can total a domain across short-lived connections. `conn_last` is the
+    // last-seen state of each live connection, used to detect closes.
+    conn_history: HashMap<parse::ConnKey, parse::ConnHist>,
+    conn_last: HashMap<String, (parse::ConnKey, u64, u64, String)>,
 
     // Errors pane: a bounded rolling buffer of parsed events for the sparse
     // non-block lanes, plus per-minute per-domain counts for the high-volume
@@ -116,6 +125,8 @@ impl LiveSource {
             fallback: FixtureSource::new(),
             prev: HashMap::new(),
             prev_at: None,
+            conn_history: HashMap::new(),
+            conn_last: HashMap::new(),
             errors_buf: Vec::new(),
             block_buckets: BlockBuckets::new(),
             newest_secs: 0,
@@ -312,6 +323,39 @@ impl LiveSource {
         self.prev = cur;
         self.prev_at = Some(now);
         out
+    }
+
+    /// Fold the final byte counts of connections that closed since the last poll
+    /// into the per-domain history, so a domain's row keeps totalling its traffic
+    /// after each short-lived connection drops out of the live set. Call once per
+    /// poll *before* building rows so freshly-closed bytes appear this frame.
+    fn accumulate_history(&mut self, raw: &[RawConn], escape: &HashSet<String>) {
+        let mut current: HashMap<String, (parse::ConnKey, u64, u64, String)> = HashMap::with_capacity(raw.len());
+        for c in raw {
+            let lane = parse::classify_lane(&c.chains, escape);
+            if lane == Lane::Block {
+                continue; // block traffic is excluded from the connections view
+            }
+            current.insert(c.id.clone(), ((lane, c.host.clone(), c.port), c.up, c.down, c.rule.clone()));
+        }
+        // A connection present last tick but gone now has closed — add its
+        // last-seen cumulative bytes to that domain's history.
+        let closed: Vec<(parse::ConnKey, u64, u64, String)> =
+            self.conn_last.iter().filter(|(id, _)| !current.contains_key(*id)).map(|(_, v)| v.clone()).collect();
+        for (key, up, down, rule) in closed {
+            let e = self.conn_history.entry(key).or_default();
+            e.up += up;
+            e.down += down;
+            e.rule = rule;
+        }
+        self.conn_last = current;
+        // Bound memory/rows: keep the top-N domains by total bytes.
+        if self.conn_history.len() > CONN_HISTORY_CAP {
+            let mut v: Vec<_> = std::mem::take(&mut self.conn_history).into_iter().collect();
+            v.sort_by_key(|(_, h)| std::cmp::Reverse(h.up + h.down));
+            v.truncate(CONN_HISTORY_CAP);
+            self.conn_history = v.into_iter().collect();
+        }
     }
 
     /// Incrementally read the newly-appended bytes of each lane log into the
@@ -630,10 +674,11 @@ impl Source for LiveSource {
         let router_up = conns_json.is_some();
         let raw = conns_json.as_ref().map(parse::parse_connections).unwrap_or_default();
         let rates = self.rates(&raw);
+        self.accumulate_history(&raw, &escape);
         // Aggregate throughput is the sum of per-connection rates (deltas since
         // the last tick). We intentionally do NOT read the streaming /traffic
         // endpoint here — it blocks the UI thread up to ~1s per poll.
-        let (conns, lanes, all) = parse::build_conn_rows(&raw, &rates, &escape);
+        let (conns, lanes, all) = parse::build_conn_rows(&raw, &rates, &escape, &self.conn_history);
         if router_up {
             self.ensure_prober();
             // Pool changed (server add/rm, sub update) -> probe now rather than

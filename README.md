@@ -507,8 +507,11 @@ rowt monitor --fixtures # force the offline demo
   **DOWN** (router unreachable), orange **ERROR** (active server failing its
   probe / auto-mode with nothing reachable), grey **PAUSED**.
 - **live · connections** — per-lane throughput rates (`↑`/`↓` B/s) and a table of
-  active connections (host:port, concurrency, cumulative bytes, matched rule),
-  colored by lane. Block-lane traffic is excluded.
+  domains (host:port, concurrency, cumulative bytes, matched rule), colored by
+  lane. Byte totals **persist per domain across short-lived connections** (so
+  bursty domains still show where your traffic went); a domain with no live
+  connection stays as a greyed **dormant** row (concurrency 0), sorted after the
+  live ones. Block-lane traffic is excluded.
 - **errors & blocked** — failures and sinkholed domains over a rolling window
   (`5m`/`10m`/`1h`/`24h`), colored by category (dns = transient, timeout/reset/
   refused = persistent, blocked = purple).

@@ -179,10 +179,21 @@ from the state file), short timeouts so a dead API never hangs the tick.
   `corp` / `escape` (or any escape-selector member) / else `direct`. Block-lane
   connections are excluded from the list and from throughput.
 - **Header rows = instantaneous rates** (summed per lane, `B/s`); **the
-  per-connection table shows cumulative bytes**, not a rate. Rationale: idle
+  per-domain table row shows cumulative bytes**, not a rate. Rationale: idle
   keep-alive connections move 0 bytes between 2s samples, so an instantaneous
   per-connection rate reads 0 almost always — cumulative totals ("what actually
   moved data") are the useful view, and match the design's large numbers.
+- **Per-domain byte history** (so short-lived connections still count). clash
+  drops a connection's cumulative counters the moment it closes, so a row built
+  only from the *live* set loses the traffic of bursty domains. Instead the live
+  source keeps a per-domain (`lane, host, port`) accumulator: each poll, any
+  connection that vanished since the last one is *closed* — its last-seen
+  cumulative bytes are folded into that domain's history (`accumulate_history`,
+  before the rows are built). A row's total is then **live cumulative + history**.
+  Domains with history but **no live connection** become **dormant rows** —
+  concurrency `0`, greyed, sorted after the live rows (both groups by `up+down`
+  desc). The history is session-scoped and capped (top 200 by bytes; smallest
+  evicted) to bound RAM and the dormant-row count.
 - We deliberately **do not** read clash's streaming `/traffic` endpoint: its
   first line can take ~1s to arrive, which blocked the UI thread every tick.
   Aggregate throughput is summed from per-connection deltas instead (a 2s
