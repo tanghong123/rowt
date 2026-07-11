@@ -518,11 +518,13 @@ rowt monitor --fixtures # force the offline demo
   10 min (press `r` to re-probe now).
 
 **Navigation:** `↑↓`/`jk` move (the first press *locks* a row by domain, so a
-mid-tick re-sort can't shift what you act on; `Esc` unlocks) · `←→`/`hl` switch
-pane / pick a server chip · `Tab` cycle focus (connections → errors → health) ·
-`f` (or `1`/`2`/`3`, `0`) lane filter · `w` / `[` `]` errors window · `y` copy the
+mid-tick re-sort can't shift what you act on; `Esc` unlocks; leaving a pane forgets
+its selection) · `←→`/`hl` switch pane / pick a server chip (the strip freezes
+in place and wraps at the ends) · `Tab` cycle focus (connections → errors → health)
+· `f` (or `1`/`2`/`3`, `0`) lane filter · `w` / `[` `]` errors window · `y` copy the
 selected domain · `p` pause · `?` help · `q` quit. Mouse: wheel scrolls the list
-under the pointer; click a lane / window tab / row.
+under the pointer; click a lane / window tab / row, a server chip (selects it in
+place), or `sys proxy` to toggle it (hover-highlights).
 
 **Controls** (confirmed, reversible — each maps to a `rowt` command):
 

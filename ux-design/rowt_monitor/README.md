@@ -246,14 +246,21 @@ stack — do not try to reproduce browser DOM event handling.
 There is always exactly **one focused region** — `live · connections`, `errors & blocked`,
 or the `server health` strip. Focus is shown by **brightening that region's caption** (the
 single split box can't carry a per-pane border ring, so the caption is the cursor). `Tab`
-cycles all three. Focus + selection **persist across a resize/reflow** at the 130-column
-breakpoint.
+cycles all three. Focus **persists across a resize/reflow** at the 130-column breakpoint.
 
-Selection is **deferred and locked** (so a control acts on the domain you meant): a focused
-pane starts with **no** highlighted row; the first `↑`/`↓` locks onto a row **by its domain
-key** and tints the caption amber — the lock follows that domain even as the list re-sorts
-each tick, and `Esc` releases it. The server strip keeps marqueeing until the first `←`/`→`,
-which selects the first **visible** chip and freezes the scroll.
+Selection is **deferred, locked, and non-sticky**:
+- A focused pane starts with **no** highlighted row. The first `↑`/`↓` locks onto a row **by
+  its domain key** and tints the caption amber — the lock follows that domain even as the
+  list re-sorts each tick (so a control acts on the domain you meant), and `Esc` releases it.
+- **Leaving a region forgets its selection.** Move focus away (`Tab`, `←`/`→`, a click, a
+  vertical fall-through) and the pane's selection clears, so re-focusing it starts fresh
+  rather than restoring a stale highlight.
+- **Server strip:** it keeps marqueeing until the first `←`/`→`, which **freezes the ring at
+  its exact current scroll offset** (nothing jumps — a partially-shown chip may sit before
+  the selection) and selects the first **fully-visible** chip. Moving `←`/`→` **wraps** at
+  the ends and scrolls the frozen ring one cell at a time to keep the selection in view; the
+  frozen ring is **circular**, wrapping past the last chip back to the first so the row stays
+  filled.
 
 ### Keyboard
 - **Arrows / `hjkl`** — movement.
@@ -271,20 +278,25 @@ which selects the first **visible** chip and freezes the scroll.
   - **`0`** or **`Esc`** — clear the lane filter.
 - **`w`**, or **`[` / `]`** — change the errors rolling window (`5m · 10m · 1h · 24h`).
   `w` cycles; `[` / `]` step down / up. Re-aggregates the whole errors pane.
-- **`y`** — **yank** (copy) the selected row's key field to the system clipboard: the
-  **domain** in the errors pane, the **host:port** in the connections pane. This is the
-  primary, precise copy path (see Clipboard below).
+- **`y`** — **yank** (copy) the selected row's **domain** to the system clipboard (both
+  panes copy the bare hostname, no `:port`, so it drops straight into a browser / rule).
+  This is the primary, precise copy path (see Clipboard below).
 - **`p`** — pause / resume sampling (freezes the numbers so they can be read).
 - **`?`** — toggle the help overlay.
 - **`q`** — quit.
 
 ### Mouse
-Requires the app to opt into terminal mouse tracking (**SGR 1006**) and hit-test events
-against cell regions itself.
+Requires the app to opt into terminal mouse tracking (**SGR 1006**, plus any-motion `1003`
+for hover) and hit-test events against cell regions itself.
 - **Wheel** scrolls the list **under the pointer** — and only that list. Wheel over a pane
   also **focuses** it, so keyboard and mouse never disagree about what's active.
-- **Click** a lane row (in the connections header) or a window tab to activate it — same
-  effect as `f` / `w`.
+- **Click a row / lane / window tab** to activate it — a row click focuses that pane and
+  locks the selection (same as arrowing to it); a lane row / window tab click = `f` / `w`.
+- **Click a server chip** to focus the strip and select that chip **in place** (the ring
+  freezes exactly where it is — the clicked chip doesn't move). Both partially-shown edge
+  chips are clickable.
+- **Click `sys proxy on/off`** (identity band) to toggle the system proxy — the same action
+  as `o`, and it **hover-highlights** (brighten + underline) while the pointer is over it.
 - **Scroll indicator:** draw a thin position tick / track (`▐`, btop-style) on any list
   that overflows, so there is a visible cue that more rows exist.
 
@@ -316,10 +328,11 @@ that shows the full value of the selected row instead of animating it.
 ### Footer hint bar
 Render a **single-line contextual key hint** at the bottom (htop / less style). Two states:
 - **Normal** — a **global** group that's always present (`↑↓←→ navigate · f lane · w window ·
-  o proxy · p pause · ? help · q quit`), then, only when a selection/strip makes them live, a
-  divider and a **contextual** group (`e·c·b·d route · y copy`, or `←→ select server` / `u use
-  <tag>` on the strip). The right edge carries the pending-reload countdown chip or a transient
-  status toast.
+  o proxy · p pause · ? help · q quit`), then, **only when** a selection/strip makes them live,
+  a **vertical-bar (`│`) divider** and a **contextual** group (`e·c·b·d route · y copy`, or
+  `←→ select server` / `u use <tag>` on the strip). The contextual group is the **same colour**
+  as the global keys (the bar, not colour, sets it apart). The right edge carries the
+  pending-reload countdown chip or a transient status toast.
 - **Armed** — the whole bar becomes the amber **confirm bar** (see [Control layer](#control-layer)).
 
 This is better discoverability than the hidden `?` overlay; keep the overlay as the full
@@ -343,7 +356,7 @@ on (a locked row for `e`/`c`/`b`/`d`, a selected non-active chip for `u`; `o` is
 | `e` / `c` / `b` | locked conn/err row | route domain → **escape** / **corp** / **block** | `rowt <lane> add <domain> --no-reload` | `d` |
 | `d` | locked conn/err row | remove domain → **direct** | `rowt escape/corp/block rm <domain> --no-reload` | `e`/`c`/`b` |
 | `u` | selected server chip | switch active outbound server (live) | `rowt use <tag>` | `u` on the old server |
-| `o` | global | toggle the macOS system proxy | `rowt proxy on` / `off` | `o` again |
+| `o` | global · or click `sys proxy` | toggle the macOS system proxy | `rowt proxy on` / `off` | `o` again |
 
 - **Confirm model.** The lane edits (`e`/`c`/`b`/`d`) **arm** on the first press — an **amber
   confirm bar** replaces the footer previewing the change (`CONFIRM  x.com → escape · press
@@ -351,6 +364,10 @@ on (a locked row for `e`/`c`/`b`/`d`, a selected non-active chip for `u`; `o` is
   same key, or `↵`, commits; any other key or `Esc` cancels. So a quick **double-tap commits
   with no pause**. `u` and `o` are live and trivially reversible, so they **skip the confirm**
   and apply on a single press.
+- **Optimistic proxy toggle.** `o` (and the `sys proxy` click) flips the displayed state
+  **immediately** rather than waiting for the ~2s state re-read, so it feels instant; the real
+  polled state then confirms it, or — if the underlying `rowt proxy` command failed — the
+  display **reverts** after a short timeout with the error surfaced in the toast.
 - **Debounced reload.** Lane edits write with `--no-reload`; a single router reload fires **~7s
   after the last edit settles** (a footer chip counts it down), so a burst of edits bounces
   sing-box once, not per keystroke. (The reload re-renders + restarts the router **without**
