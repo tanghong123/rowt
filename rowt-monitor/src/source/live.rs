@@ -66,6 +66,10 @@ pub struct LiveSource {
     errors_buf: Vec<ErrEvent>,
     block_buckets: BlockBuckets,
     newest_secs: i64,
+    // Local UTC offset (secs), so the wall clock can be expressed in the same
+    // "local time as if UTC" civil-seconds frame the lane-log timestamps use —
+    // this is what lets the errors window age entries out in real time.
+    tz_offset_secs: i64,
     lane_cursors: Vec<LaneCursor>,
     err_agg: Option<(Window, Option<Lane>, ErrAgg)>,
     err_last_refresh: Option<Instant>,
@@ -115,6 +119,7 @@ impl LiveSource {
             errors_buf: Vec::new(),
             block_buckets: BlockBuckets::new(),
             newest_secs: 0,
+            tz_offset_secs: local_tz_offset_secs(),
             lane_cursors: LANE_FILES
                 .iter()
                 .map(|(name, lane)| LaneCursor { name, lane: *lane, offset: 0, mtime: None, primed: false })
@@ -400,14 +405,17 @@ impl LiveSource {
             self.err_last_refresh = Some(Instant::now());
             self.refresh_errors_buf();
         }
-        // Re-aggregate only when the buffer changed or the window/lane switched;
-        // switching either needs no IO (re-aggregates the in-memory buffer).
-        let changed = self.err_agg.as_ref().is_none_or(|(w, l, _)| *w != window || *l != lane);
-        if changed || self.err_dirty {
-            let agg = parse::aggregate_split(&self.errors_buf, &self.block_buckets, parse::window_secs(window), self.newest_secs, lane);
-            self.err_agg = Some((window, lane, agg));
-            self.err_dirty = false;
-        }
+        // Reference the rolling window to WALL-CLOCK now (in the lane logs' local
+        // civil-seconds frame), not the newest event — otherwise a quiet spell
+        // freezes the cutoff and stale entries never age out. `.max(newest)`
+        // guards against clock skew hiding a just-arrived event.
+        let now = wall_now_civil(self.tz_offset_secs).max(self.newest_secs);
+        // Re-aggregate every poll: `now` advances each tick, so the boundary must
+        // be recomputed even when no new events arrived (that's the whole fix).
+        // Cheap — an in-memory filter/group over the bounded buffer.
+        let agg = parse::aggregate_split(&self.errors_buf, &self.block_buckets, parse::window_secs(window), now, lane);
+        self.err_agg = Some((window, lane, agg));
+        self.err_dirty = false;
         self.err_agg.as_ref().unwrap().2.clone()
     }
 
@@ -841,6 +849,33 @@ fn default_route_iface() -> Option<String> {
     let out = std::process::Command::new("route").args(["-n", "get", "default"]).output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     text.lines().find_map(|l| l.trim().strip_prefix("interface: ").map(|s| s.trim().to_string()))
+}
+
+/// Local UTC offset in seconds, from `date +%z` (e.g. `+0800` → 28800). Used to
+/// express the system clock in the same local civil-seconds frame the lane-log
+/// timestamps use (they're written in local time with no offset). 0 on failure
+/// (falls back to the newest-event reference — the pre-fix behavior).
+fn local_tz_offset_secs() -> i64 {
+    let Ok(out) = std::process::Command::new("date").arg("+%z").output() else { return 0 };
+    let s = String::from_utf8_lossy(&out.stdout);
+    let s = s.trim();
+    // [+-]HHMM
+    if s.len() >= 5 && s.is_char_boundary(1) {
+        let sign = if s.starts_with('-') { -1 } else { 1 };
+        let d = &s[1..];
+        if let (Ok(hh), Ok(mm)) = (d[0..2].parse::<i64>(), d[2..4].parse::<i64>()) {
+            return sign * (hh * 3600 + mm * 60);
+        }
+    }
+    0
+}
+
+/// Wall-clock now in the lane logs' local civil-seconds frame.
+fn wall_now_civil(offset_secs: i64) -> i64 {
+    match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(d) => d.as_secs() as i64 + offset_secs,
+        Err(_) => 0,
+    }
 }
 
 /// First non-empty stderr line (sans a leading `error:`), for a control toast.

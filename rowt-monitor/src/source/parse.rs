@@ -598,4 +598,23 @@ mod tests {
         assert_eq!(rows[0].kind, ErrKind::Timeout);
         assert!(!rows.iter().any(|r| r.domain == "old.example.com"), "outside window");
     }
+
+    #[test]
+    fn window_retires_entries_as_now_advances() {
+        // The live source references the window to WALL-CLOCK now, not the newest
+        // event — so with a *fixed* event set, entries age out as `now` moves.
+        let non_block = vec![
+            ErrEvent { secs: 1000, domain: "a.example".into(), kind: ErrKind::Timeout, lane: Lane::Direct },
+            ErrEvent { secs: 1000, domain: "a.example".into(), kind: ErrKind::Timeout, lane: Lane::Direct },
+        ];
+        let blocks = BlockBuckets::new();
+        // now just after the events (5m window): still visible.
+        let (_, pe, _, rows) = aggregate_split(&non_block, &blocks, 5 * 60, 1000, None);
+        assert_eq!(pe.count, 2);
+        assert_eq!(rows.len(), 1);
+        // now advanced 6 minutes past the events (still no new events): retired.
+        let (_, pe_later, _, rows_later) = aggregate_split(&non_block, &blocks, 5 * 60, 1000 + 6 * 60, None);
+        assert_eq!(pe_later.count, 0, "events older than the window age out even with nothing new arriving");
+        assert!(rows_later.is_empty());
+    }
 }
