@@ -155,11 +155,13 @@
     runtime.markFetched(rootName);
     runtime.setRootName(rootName);
     runtime.adoptParsed(rootName, parsed);
-    fetch(location.href).then((res) => res.ok ? res.text() : "").then((t) => {
-      const raw = t ? parseDcText(t) : null;
-      if (raw?.template) runtime.updateHtml(rootName, raw.template);
-    }).catch(() => {
-    });
+    if (!window.__resources) {
+      fetch(location.href).then((res) => res.ok ? res.text() : "").then((t) => {
+        const raw = t ? parseDcText(t) : null;
+        if (raw?.template) runtime.updateHtml(rootName, raw.template);
+      }).catch(() => {
+      });
+    }
     const dc = doc.querySelector("x-dc");
     const hostEl = doc.createElement("div");
     hostEl.id = "dc-root";
@@ -327,7 +329,33 @@
     onfocus: "onFocus",
     onblur: "onBlur",
     ondoubleclick: "onDoubleClick",
-    oncontextmenu: "onContextMenu"
+    oncontextmenu: "onContextMenu",
+    onmousemove: "onMouseMove",
+    onmouseover: "onMouseOver",
+    onmouseout: "onMouseOut",
+    onpointerdown: "onPointerDown",
+    onpointerup: "onPointerUp",
+    onpointermove: "onPointerMove",
+    onpointerenter: "onPointerEnter",
+    onpointerleave: "onPointerLeave",
+    onpointercancel: "onPointerCancel",
+    onpointerover: "onPointerOver",
+    onpointerout: "onPointerOut",
+    ongotpointercapture: "onGotPointerCapture",
+    onlostpointercapture: "onLostPointerCapture",
+    ontouchstart: "onTouchStart",
+    ontouchend: "onTouchEnd",
+    ontouchmove: "onTouchMove",
+    ontouchcancel: "onTouchCancel",
+    ondragstart: "onDragStart",
+    ondragend: "onDragEnd",
+    ondragenter: "onDragEnter",
+    ondragleave: "onDragLeave",
+    ondragover: "onDragOver",
+    onanimationstart: "onAnimationStart",
+    onanimationend: "onAnimationEnd",
+    onanimationiteration: "onAnimationIteration",
+    ontransitionend: "onTransitionEnd"
   };
   var ATTRS = `(?:[^>"']|"[^"]*"|'[^']*')*`;
   var IMPORT_SELF_CLOSE_RE = new RegExp(
@@ -335,6 +363,12 @@
     "gi"
   );
   var CAMEL_ATTR_RE = /(\s)([a-z]+[A-Z][A-Za-z0-9]*)(\s*=)/g;
+  function encodeCamelAttrs(html) {
+    return html.replace(
+      CAMEL_ATTR_RE,
+      (_, sp, name, eq) => sp + CAMEL_ATTR + name.replace(/[A-Z]/g, (c) => "-" + c.toLowerCase()) + eq
+    );
+  }
   function encodeCase(html) {
     html = html.replace(
       IMPORT_SELF_CLOSE_RE,
@@ -342,10 +376,7 @@
     );
     html = html.replace(/<helmet(\s|>)/gi, "<sc-helmet$1");
     html = html.replace(/<\/helmet\s*>/gi, "</sc-helmet>");
-    html = html.replace(
-      CAMEL_ATTR_RE,
-      (_, sp, name, eq) => sp + CAMEL_ATTR + name.replace(/[A-Z]/g, (c) => "-" + c.toLowerCase()) + eq
-    );
+    html = encodeCamelAttrs(html);
     for (const [real, alias] of Object.entries(RAW_WRAP)) {
       html = html.replace(
         new RegExp("(</?)" + real + "(?=[\\s>])", "gi"),
@@ -599,7 +630,7 @@
     const exportNameGet = compileAttr(
       el.getAttribute("component") || el.getAttribute("name") || ""
     );
-    const fromRaw = el.getAttribute("from") || el.getAttribute("src") || el.getAttribute("import") || "";
+    const fromRaw = el.getAttribute("from") || (el.getAttribute("component-from-global-scope") ? "" : el.getAttribute("src") || el.getAttribute("import") || "");
     const urls = fromRaw.trim() ? fromRaw.trim().split(/\s+/) : [];
     const url = urls.length ? urls[urls.length - 1] : "";
     const kindOf = (u) => /\.(jsx|tsx)(\?|#|$)/i.test(u) ? "jsx" : "js";
@@ -1031,6 +1062,26 @@
     };
   }
 
+  // src/bundled.ts
+  function bundledBlob(url) {
+    const blobs = window.__resourceBlobs;
+    const b = blobs ? blobs[url.split("#")[0]] : void 0;
+    return b instanceof Blob ? b : null;
+  }
+
+  // src/cdn.ts
+  var REACT_URL = "https://unpkg.com/react@18.3.1/umd/react.production.min.js";
+  var REACT_SRI = "sha384-DGyLxAyjq0f9SPpVevD6IgztCFlnMF6oW/XQGmfe+IsZ8TqEiDrcHkMLKI6fiB/Z";
+  var REACT_DOM_URL = "https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js";
+  var REACT_DOM_SRI = "sha384-gTGxhz21lVGYNMcdJOyq01Edg0jhn/c22nsx0kyqP0TxaV5WVdsSH1fSDUf5YJj1";
+  var BABEL_URL = "https://unpkg.com/@babel/standalone@7.29.0/babel.min.js";
+  var BABEL_SRI = "sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y";
+  function cdnScriptFor(url, sri) {
+    const res = window.__resources;
+    const v = res ? res[url] : void 0;
+    return typeof v === "string" && v ? { src: v } : { src: url, integrity: sri };
+  }
+
   // src/external.ts
   var isCustomElementName = (n) => !n.includes(".") && n.includes("-");
   function isRenderableType(g) {
@@ -1045,8 +1096,6 @@
     }
     return cur;
   }
-  var BABEL_URL = "https://unpkg.com/@babel/standalone@7.29.0/babel.min.js";
-  var BABEL_SRI = "sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y";
   var GLOBAL_POLL_INTERVAL_MS = 50;
   var GLOBAL_POLL_TIMEOUT_MS = 3e4;
   function createExternalModules(onResolved) {
@@ -1057,11 +1106,14 @@
     function ensureBabel() {
       if (window.Babel) return Promise.resolve();
       if (babelLoading) return babelLoading;
+      const babel = cdnScriptFor(BABEL_URL, BABEL_SRI);
       babelLoading = new Promise((res, rej) => {
         const s = document.createElement("script");
-        s.src = BABEL_URL;
-        s.integrity = BABEL_SRI;
-        s.crossOrigin = "anonymous";
+        s.src = babel.src;
+        if (babel.integrity) {
+          s.integrity = babel.integrity;
+          s.crossOrigin = "anonymous";
+        }
         s.onload = () => res();
         s.onerror = rej;
         document.head.appendChild(s);
@@ -1078,9 +1130,13 @@
         kind === "jsx" ? ensureBabel() : Promise.resolve(),
         after ?? Promise.resolve()
       ]);
-      const p = ready.then(() => fetch(url)).then((r) => {
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        return r.text();
+      const p = ready.then(() => {
+        const pre = bundledBlob(url);
+        if (pre) return pre.text();
+        return fetch(url).then((r) => {
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          return r.text();
+        });
       }).then((src) => {
         const code = kind === "jsx" ? window.Babel.transform(src, {
           filename: url,
@@ -1284,7 +1340,6 @@
         const t = e.data.theme;
         if (t === "light" || t === "dark") {
           appTheme = t;
-          doc.documentElement.dataset.theme = t;
           applyCanvasBg();
         }
         return;
@@ -1324,6 +1379,28 @@
             const key = tag + "|" + (child.getAttribute("href") || child.getAttribute("src") || child.outerHTML);
             if (mounted.has(key)) continue;
             mounted.add(key);
+            if (tag === "LINK") {
+              const rel = (child.getAttribute("rel") || "").toLowerCase().split(/\s+/);
+              const href = (child.getAttribute("href") || "").trim();
+              const res = window.__resources;
+              const pre = res && rel.includes("stylesheet") && !rel.includes("alternate") ? res[href] : void 0;
+              const blob = typeof pre === "string" && pre ? bundledBlob(pre) : null;
+              if (blob) {
+                const el = doc.createElement("style");
+                if (child.hasAttribute("disabled")) {
+                  el.setAttribute("media", "not all");
+                } else if (child.getAttribute("media")) {
+                  el.setAttribute("media", child.getAttribute("media"));
+                }
+                if (child.getAttribute("title"))
+                  el.setAttribute("title", child.getAttribute("title"));
+                void blob.text().then((css) => {
+                  el.textContent = css;
+                });
+                doc.head.appendChild(el);
+                continue;
+              }
+            }
             doc.head.appendChild(child.cloneNode(true));
           } else {
             const key = name + "|" + i;
@@ -1424,24 +1501,28 @@
       if (r.fetched) return;
       r.fetched = true;
       const url = COMPONENT_DIR + "/" + encodeURIComponent(name) + ".dc.html";
-      fetch(url).then((res) => {
-        if (!res.ok) {
+      const res = window.__resources;
+      const pre = res ? res[url] : void 0;
+      const target = typeof pre === "string" && pre ? pre : url;
+      const blob = bundledBlob(target);
+      (blob ? blob.text() : fetch(target).then((res2) => {
+        if (!res2.ok) {
           console.error(
-            "[dc-runtime] sibling fetch for <" + name + "/> failed:",
+            '[dc-runtime] sibling fetch for "' + name + '" failed:',
             url,
             "returned",
-            res.status,
+            res2.status,
             "\u2014 the reference renders as an empty placeholder."
           );
           return "";
         }
-        return res.text();
-      }).then((t) => {
+        return res2.text();
+      })).then((t) => {
         if (!t) return;
         const parsed = parseDcText(t);
         if (!parsed) {
           console.error(
-            "[dc-runtime] sibling fetch for <" + name + "/>:",
+            '[dc-runtime] sibling fetch for "' + name + '":',
             url,
             "has no <x-dc> block \u2014 not a Design Component."
           );
@@ -1453,7 +1534,7 @@
         if (parsed.js && !r.Logic) updateJs(name, parsed.js);
       }).catch(
         (e) => console.error(
-          "[dc-runtime] sibling fetch for <" + name + "/> threw:",
+          '[dc-runtime] sibling fetch for "' + name + '" threw:',
           url,
           e
         )
@@ -1591,10 +1672,6 @@
   }
 
   // src/index.ts
-  var REACT_URL = "https://unpkg.com/react@18.3.1/umd/react.production.min.js";
-  var REACT_SRI = "sha384-DGyLxAyjq0f9SPpVevD6IgztCFlnMF6oW/XQGmfe+IsZ8TqEiDrcHkMLKI6fiB/Z";
-  var REACT_DOM_URL = "https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js";
-  var REACT_DOM_SRI = "sha384-gTGxhz21lVGYNMcdJOyq01Edg0jhn/c22nsx0kyqP0TxaV5WVdsSH1fSDUf5YJj1";
   function hideRawTemplate() {
     const s = document.createElement("style");
     s.textContent = "x-dc{display:none!important}";
@@ -1605,8 +1682,10 @@
       //! nosemgrep: create-script-element
       const s = document.createElement("script");
       s.src = src;
-      s.integrity = integrity;
-      s.crossOrigin = "anonymous";
+      if (integrity) {
+        s.integrity = integrity;
+        s.crossOrigin = "anonymous";
+      }
       s.async = false;
       s.onload = () => resolve2();
       s.onerror = () => reject(new Error(`failed to load ${src}`));
@@ -1616,9 +1695,11 @@
   function loadReactUmd() {
     const w = window;
     if (w.React && w.ReactDOM) return Promise.resolve();
+    const react = cdnScriptFor(REACT_URL, REACT_SRI);
+    const reactDom = cdnScriptFor(REACT_DOM_URL, REACT_DOM_SRI);
     return Promise.all([
-      loadScript(REACT_URL, REACT_SRI),
-      loadScript(REACT_DOM_URL, REACT_DOM_SRI)
+      loadScript(react.src, react.integrity),
+      loadScript(reactDom.src, reactDom.integrity)
     ]).then(() => void 0);
   }
   function init() {
@@ -1658,8 +1739,8 @@
       /** Editor bridge — the encoded, `data-dc-tpl`-annotated template source.
        *  The host editor parses this into its own template DOM so it can map a
        *  rendered node (carrying the same `data-dc-tpl`) back to the source
-       *  node that emitted it. Returns the encoded form (`<sc-comp>`,
-       *  `sc-camel-*` attrs); the editor decodes on serialize. */
+       *  node that emitted it. Returns the encoded form (`sc-camel-*` attrs,
+       *  `<sc-raw-*>`/`<sc-helmet>` tags); the editor decodes on serialize. */
       __dcAnnotatedTemplate: (name) => runtime.annotatedTemplate(name),
       /** Editor bridge — the *original* (decoded) template source. */
       __dcTemplateSource: (name) => runtime.templateSource(name),

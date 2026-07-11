@@ -6,6 +6,9 @@
 <script src="./support.js"></script>
 </head>
 <body>
+<template id="__bundler_thumbnail">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" fill="#0c0d11"/><g fill="#7c9df0" font-family="monospace" font-weight="700"><text x="50" y="46" font-size="26" text-anchor="middle">rowt</text><text x="50" y="66" font-size="9" fill="#86c07a" text-anchor="middle">● monitor</text></g></svg>
+</template>
 <x-dc>
 <helmet>
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -70,7 +73,7 @@
             <span style="color:#656a82;">router</span>
             <span style="color:#c3c8d6;">{{ ctx.router }}</span>
 
-            <span style="color:#656a82;">proxy</span>
+            <span style="color:#656a82;">sys proxy</span>
             <span style="color:#c3c8d6;">{{ ctx.proxy }}</span>
             <span style="color:#656a82;">config</span>
             <span style="color:#c3c8d6;">{{ ctx.cfg }}</span>
@@ -103,7 +106,7 @@
 
           <div style="display:grid; grid-template-columns:76px 1fr 48px 96px 100px 128px; align-items:center; gap:16px; padding:9px 16px 7px; font-size:13px; letter-spacing:.1em; text-transform:uppercase; color:#565b71; border-bottom:1px solid #23262f;">
             <span>lane</span><span>host:port</span>
-            <span style="text-align:right;">#conn</span>
+            <span style="text-align:right;">#</span>
             <span style="text-align:right;">up</span>
             <span style="text-align:right;">down</span>
             <span style="padding-left:4px;">rule</span>
@@ -179,42 +182,68 @@
       <!-- server health (full-width, bottom) — compact auto-scroll strip -->
       <div style="flex:none; position:relative; border:1px solid #2b2e3c; background:#101116; padding:13px 16px 12px;">
         <span style="position:absolute; top:-8px; left:14px; padding:0 8px; background:#16171e; font-size:13px; letter-spacing:.16em; text-transform:uppercase; color:#656a82;">┤ server health ├</span>
+        <div style="{{ healthRing }}"></div>
         <!-- top row: stats -->
         <div style="display:flex; align-items:center; justify-content:space-between; font-size:13px; margin-bottom:9px;">
           <span style="color:#8b90a4;">{{ servers.summary }}</span>
+          <span style="{{ stripHintStyle }}">{{ stripHint }}</span>
         </div>
-        <!-- bottom row: individual server states (auto-scroll) -->
-        <div style="position:relative; overflow:hidden; mask-image:linear-gradient(90deg, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%); -webkit-mask-image:linear-gradient(90deg, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%);">
-          <div style="display:flex; gap:8px; width:max-content; animation:rowtMarquee 46s linear infinite;">
-            <sc-for list="{{ srvChips }}" as="s" hint-placeholder-count="10">
-              <span style="{{ s.chipStyle }}">
-                <span style="{{ s.tagStyle }}">{{ s.tag }}</span>
-                <span style="{{ s.valStyle }}">{{ s.val }}</span>
-              </span>
-            </sc-for>
-            <sc-for list="{{ srvChips }}" as="s" hint-placeholder-count="10">
-              <span style="{{ s.chipStyle }}">
-                <span style="{{ s.tagStyle }}">{{ s.tag }}</span>
-                <span style="{{ s.valStyle }}">{{ s.val }}</span>
-              </span>
-            </sc-for>
+        <!-- bottom row: individual server states (auto-scroll · or focusable selector) -->
+        <sc-if value="{{ stripStatic }}" hint-placeholder-val="{{ false }}">
+          <div data-strip-static="1" style="position:relative; overflow:hidden; mask-image:linear-gradient(90deg, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%); -webkit-mask-image:linear-gradient(90deg, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%);">
+            <div style="display:flex; gap:8px; width:max-content;">
+              <sc-for list="{{ srvFocusChips }}" as="s" hint-placeholder-count="10">
+                <span data-strip-sel="{{ s.sel }}" onClick="{{ s.onClick }}" style="{{ s.chipStyle }}"><span style="{{ s.tagStyle }}">{{ s.tag }}</span><span style="{{ s.valStyle }}">{{ s.val }}</span></span>
+              </sc-for>
+            </div>
           </div>
-        </div>
+        </sc-if>
+        <sc-if value="{{ stripScrolling }}" hint-placeholder-val="{{ true }}">
+          <div data-strip-scroll="1" style="position:relative; overflow:hidden; mask-image:linear-gradient(90deg, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%); -webkit-mask-image:linear-gradient(90deg, transparent 0, #000 24px, #000 calc(100% - 24px), transparent 100%);">
+            <div style="display:flex; gap:8px; width:max-content; animation:rowtMarquee 46s linear infinite;">
+              <sc-for list="{{ srvChips }}" as="s" hint-placeholder-count="10">
+                <span data-srv="{{ s.rawTag }}" onClick="{{ s.onClick }}" style="{{ s.chipStyle }}"><span style="{{ s.tagStyle }}">{{ s.tag }}</span><span style="{{ s.valStyle }}">{{ s.val }}</span></span>
+              </sc-for>
+              <sc-for list="{{ srvChips }}" as="s" hint-placeholder-count="10">
+                <span data-srv="{{ s.rawTag }}" onClick="{{ s.onClick }}" style="{{ s.chipStyle }}"><span style="{{ s.tagStyle }}">{{ s.tag }}</span><span style="{{ s.valStyle }}">{{ s.val }}</span></span>
+              </sc-for>
+            </div>
+          </div>
+        </sc-if>
       </div>
 
-      <!-- footer hint bar (htop/less-style contextual keymap) -->
-      <div style="flex:none; display:flex; align-items:center; gap:15px; padding:7px 16px; border-top:1px solid #23262f; font-size:12.5px; color:#565b71; letter-spacing:.02em; white-space:nowrap; overflow:hidden;">
-        <span>focus <span style="{{ hintPaneStyle }}">{{ hintPane }}</span></span>
-        <span style="color:#2f3242;">│</span>
-        <span><b style="color:#8b90a4; font-weight:700;">↑↓</b> move</span>
-        <span><b style="color:#8b90a4; font-weight:700;">←→</b> pane</span>
-        <span><b style="color:#8b90a4; font-weight:700;">f</b> lane</span>
-        <span><b style="color:#8b90a4; font-weight:700;">w</b> window</span>
-        <span><b style="color:#8b90a4; font-weight:700;">y</b> copy</span>
-        <span><b style="color:#8b90a4; font-weight:700;">p</b> pause</span>
-        <span><b style="color:#8b90a4; font-weight:700;">?</b> help</span>
-        <span style="margin-left:auto; color:#4c5064; overflow:hidden; text-overflow:ellipsis;">{{ selInfo }}</span>
-      </div>
+      <!-- footer: confirm bar when an action is armed, else contextual keymap + status -->
+      <sc-if value="{{ armed }}" hint-placeholder-val="{{ false }}">
+        <div style="flex:none; display:flex; align-items:center; gap:12px; padding:8px 16px; border-top:1px solid #4a3a24; background:linear-gradient(90deg,#241a10,#1a1713); font-size:13px; color:#e9ecf3; white-space:nowrap; overflow:hidden;">
+          <span style="display:inline-flex; align-items:center; gap:7px; color:#e0a35e; font-weight:700; letter-spacing:.06em;">CONFIRM</span>
+          <span style="color:#e9ecf3;">{{ armLabel }}</span>
+          <span style="margin-left:auto; color:#8b90a4; text-overflow:ellipsis; overflow:hidden;">press the key again or <b style="color:#e9ecf3;">↵</b> to apply · <b style="color:#e9ecf3;">esc</b> cancel</span>
+        </div>
+      </sc-if>
+      <sc-if value="{{ notArmed }}" hint-placeholder-val="{{ true }}">
+        <div style="flex:none; display:flex; align-items:center; gap:14px; padding:7px 16px; border-top:1px solid #23262f; font-size:12.5px; color:#565b71; letter-spacing:.02em; white-space:nowrap; overflow:hidden;">
+          <sc-for list="{{ globalChips }}" as="hc" hint-placeholder-count="6">
+            <span><b style="color:#8b90a4; font-weight:700;">{{ hc.k }}</b> {{ hc.v }}</span>
+          </sc-for>
+          <sc-if value="{{ hasCtx }}" hint-placeholder-val="{{ false }}">
+            <span style="color:#2f3242;">│</span>
+          </sc-if>
+          <sc-for list="{{ ctxChips }}" as="cc" hint-placeholder-count="2">
+            <span><b style="color:#86c07a; font-weight:700;">{{ cc.k }}</b> <span style="color:#8b90a4;">{{ cc.v }}</span></span>
+          </sc-for>
+          <span style="margin-left:auto; display:inline-flex; align-items:center; gap:10px; overflow:hidden;">
+            <sc-if value="{{ pendingReload }}" hint-placeholder-val="{{ false }}">
+              <span style="{{ pendChipStyle }}">◍ lane edits queued · reload in ~7s</span>
+            </sc-if>
+            <sc-if value="{{ statusHint }}" hint-placeholder-val="{{ false }}">
+              <span style="{{ statusStyle }}">{{ statusText }}</span>
+            </sc-if>
+            <sc-if value="{{ noStatus }}" hint-placeholder-val="{{ true }}">
+              <span style="color:#4c5064; overflow:hidden; text-overflow:ellipsis;">{{ selInfo }}</span>
+            </sc-if>
+          </span>
+        </div>
+      </sc-if>
 
     </div>
 
@@ -236,11 +265,27 @@
           <div style="display:flex; flex-direction:column; gap:11px; font-size:13px;">
             <div style="display:grid; grid-template-columns:120px 1fr; align-items:center; gap:12px;">
               <span><kbd style="padding:2px 8px; border:1px solid #33374a; border-radius:5px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:13px;">↑ ↓ / j k</kbd></span>
-              <span style="color:#b7bdcc;">move the selection within the focused list (scrolls when it overflows)</span>
+              <span style="color:#b7bdcc;">select a row in the focused pane — the first press makes a selection and <span style="color:#e0a35e;">freezes that pane</span> so the domain can't shift under you. At the last row, <kbd style="padding:1px 6px; border:1px solid #33374a; border-radius:4px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:12px;">↓</kbd> jumps to server health; <kbd style="padding:1px 6px; border:1px solid #33374a; border-radius:4px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:12px;">esc</kbd> resumes.</span>
             </div>
             <div style="display:grid; grid-template-columns:120px 1fr; align-items:center; gap:12px;">
-              <span><kbd style="padding:2px 8px; border:1px solid #33374a; border-radius:5px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:13px;">← → / h l</kbd></span>
-              <span style="color:#b7bdcc;">move focus between the two lists — <kbd style="padding:1px 6px; border:1px solid #33374a; border-radius:4px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:12px;">Tab</kbd> toggles</span>
+              <span><kbd style="padding:2px 8px; border:1px solid #33374a; border-radius:5px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:13px;">← →</kbd></span>
+              <span style="color:#b7bdcc;">switch between the <span style="color:#7c9df0;">connections</span> and <span style="color:#a98ad6;">errors</span> panes (same as <kbd style="padding:1px 6px; border:1px solid #33374a; border-radius:4px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:12px;">h l</kbd>). When the <span style="color:#86c07a;">server health</span> strip is focused, ← → select servers and <kbd style="padding:1px 6px; border:1px solid #33374a; border-radius:4px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:12px;">↑</kbd> returns to connections. <kbd style="padding:1px 6px; border:1px solid #33374a; border-radius:4px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:12px;">Tab</kbd> cycles conns → errors → servers.</span>
+            </div>
+            <div style="display:grid; grid-template-columns:120px 1fr; align-items:center; gap:12px;">
+              <span><kbd style="padding:2px 8px; border:1px solid #33374a; border-radius:5px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:13px;">u</kbd></span>
+              <span style="color:#b7bdcc;">switch the active server to the selected one — <span style="color:#86c07a;">live</span>, no reload, applies immediately (no confirm). Shown only when a non-active server is selected on the strip.</span>
+            </div>
+            <div style="display:grid; grid-template-columns:120px 1fr; align-items:center; gap:12px;">
+              <span><kbd style="padding:2px 8px; border:1px solid #33374a; border-radius:5px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:13px;">e · c · b · d</kbd></span>
+              <span style="color:#b7bdcc;">route the selected domain to <span style="color:#7c9df0;">escape</span> · <span style="color:#56c7be;">corp</span> · <span style="color:#a98ad6;">block</span> · <span style="color:#86c07a;">direct</span> (<kbd style="padding:1px 6px; border:1px solid #33374a; border-radius:4px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:12px;">d</kbd> removes it from a lane). Edits batch a router reload ~7s after your last change.</span>
+            </div>
+            <div style="display:grid; grid-template-columns:120px 1fr; align-items:center; gap:12px;">
+              <span><kbd style="padding:2px 8px; border:1px solid #33374a; border-radius:5px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:13px;">o</kbd></span>
+              <span style="color:#b7bdcc;">toggle the macOS <span style="color:#c3c8d6;">system proxy</span> on / off (captive-portal &amp; stop-hijacking flow) — global, applies immediately (no confirm).</span>
+            </div>
+            <div style="display:grid; grid-template-columns:120px 1fr; align-items:center; gap:12px;">
+              <span style="color:#565b71; font-size:13px;">once · twice</span>
+              <span style="color:#b7bdcc;">for a <b style="color:#c3c8d6;">lane edit</b> (<kbd style="padding:1px 6px; border:1px solid #33374a; border-radius:4px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:12px;">e c b d</kbd>) press <b style="color:#c3c8d6;">once</b> to preview it in the confirm bar (<kbd style="padding:1px 6px; border:1px solid #33374a; border-radius:4px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:12px;">↵</kbd> apply · <kbd style="padding:1px 6px; border:1px solid #33374a; border-radius:4px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:12px;">esc</kbd> cancel), or <b style="color:#c3c8d6;">twice</b> to apply at once. <kbd style="padding:1px 6px; border:1px solid #33374a; border-radius:4px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:12px;">u</kbd> / <kbd style="padding:1px 6px; border:1px solid #33374a; border-radius:4px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:12px;">o</kbd> apply immediately.</span>
             </div>
             <div style="display:grid; grid-template-columns:120px 1fr; align-items:center; gap:12px;">
               <span><kbd style="padding:2px 8px; border:1px solid #33374a; border-radius:5px; background:#23262f; color:#e9ecf3; font-family:inherit; font-size:13px;">f</kbd></span>
@@ -272,7 +317,7 @@
             </div>
           </div>
           <div style="margin-top:18px; padding-top:14px; border-top:1px solid #2b2e3c; font-size:13px; color:#565b71; line-height:1.5;">
-            <span style="color:#e0a35e;">observation only</span> — reads live state directly (clash API on <span style="color:#8b90a4;">127.0.0.1:9090</span> · <span style="color:#8b90a4;">~/.config/rowt/</span> logs + state); never changes routing, servers, or the proxy, and doesn't depend on the <span style="color:#8b90a4;">rowt</span> tool.
+            <span style="color:#86c07a;">observe + confirmed overrides</span> — reads live state (clash API on <span style="color:#8b90a4;">127.0.0.1:9090</span> · <span style="color:#8b90a4;">~/.config/rowt/</span>) and applies <span style="color:#c3c8d6;">reversible</span> changes on your confirmation: switch server (live), route a domain to escape/corp/block/direct, toggle the sys proxy. Lane edits batch and <span style="color:#8b90a4;">reload the router ~7s after your last change</span>.
           </div>
         </div>
       </div>
@@ -335,6 +380,8 @@ class Component extends DCLogic {
       clock: this._now(), uptime: 3 * 3600 + 14 * 60, latency: 42,
       conns, laneDown, tu, td, paused: false, help: false, focusLane: f,
       errWindow: '10m', errEvents, pane: 'conns', selConn: 0, selErr: 0, toast: null,
+      stripFocus: false, stripSel: 0, armed: null, laneOverrides: {}, pendingReload: false, statusHint: null, proxyOn: true,
+      connSelActive: false, errSelActive: false, connFrozen: null, errFrozen: null, stripSelActive: false,
       servers: [
         { tag: 'JP-Tokyo', ms: 42, up: true, probed: 3, active: true, src: 'user' },
         { tag: 'HK-1', ms: 71, up: true, probed: 9, src: 'sub' },
@@ -413,14 +460,130 @@ class Component extends DCLogic {
   togglePause() { this.setState(s => ({ paused: !s.paused })); }
   toggleHelp() { this.setState(s => ({ help: !s.help })); }
 
-  move(d) {
+  // ---- focus: two lists + the server-health strip ----
+  cycleFocus() {
+    this._disarm(); this._clearSel();
     this.setState(s => {
-      if (s.pane === 'conns') return { selConn: Math.max(0, Math.min((this._connLen || 1) - 1, s.selConn + d)) };
-      return { selErr: Math.max(0, Math.min((this._errLen || 1) - 1, s.selErr + d)) };
+      if (s.stripFocus) return { stripFocus: false, stripSelActive: false, pane: 'conns' };
+      if (s.pane === 'conns') return { pane: 'errors' };
+      return { stripFocus: true, stripSelActive: false };
     });
   }
+  stripNav(d) {
+    this._disarm(); this._clearSel();
+    const s = this.state;
+    if (!s.stripFocus) { this.setState({ stripFocus: true }); return; }
+    if (!s.stripSelActive) { this.setState({ stripSelActive: true, stripSel: this._firstVisibleServerIndex() }); return; }
+    const n = this._stripLen || 1;
+    this.setState({ stripSel: (s.stripSel + d + n) % n });
+  }
+  _firstVisibleServerIndex() {
+    const cont = document.querySelector('[data-strip-scroll]');
+    if (!cont) return 0;
+    const cl = cont.getBoundingClientRect().left;
+    const chips = [...cont.querySelectorAll('[data-srv]')];
+    for (const el of chips) {
+      const r = el.getBoundingClientRect();
+      if (r.right > cl + 2) {
+        const tag = el.getAttribute('data-srv');
+        const idx = (this._stripServers || []).findIndex(sv => sv.tag === tag);
+        return idx >= 0 ? idx : 0;
+      }
+    }
+    return 0;
+  }
+  _ensureStripVisible() {
+    const cont = document.querySelector('[data-strip-static]');
+    if (!cont) return;
+    const sel = cont.querySelector('[data-strip-sel="1"]');
+    if (!sel) return;
+    const cr = cont.getBoundingClientRect();
+    const sr = sel.getBoundingClientRect();
+    if (sr.left < cr.left + 26) cont.scrollLeft -= (cr.left + 26 - sr.left);
+    else if (sr.right > cr.right - 26) cont.scrollLeft += (sr.right - (cr.right - 26));
+  }
+
+  // ---- confirm model: press once to arm (confirm bar), same key / Enter to commit ----
+  _selDomain() {
+    const s = this.state;
+    const active = s.pane === 'conns' ? s.connSelActive : s.errSelActive;
+    if (!active) return null;
+    if (s.pane === 'conns') { const hp = (this._connKeys || [])[Math.min(s.selConn, (this._connLen || 1) - 1)]; return hp ? hp.split(':')[0] : null; }
+    return (this._errKeys || [])[Math.min(s.selErr, (this._errLen || 1) - 1)] || null;
+  }
+  _arm(sig, label, exec) {
+    if (this.state.armed && this.state.armed.sig === sig) { this._commit(); return; }
+    this._exec = exec;
+    this.setState({ armed: { sig, label } });
+    clearTimeout(this._armT); this._armT = setTimeout(() => this._disarm(), 5000);
+  }
+  _commit() { const fn = this._exec; this._disarm(); if (fn) fn(); }
+  _disarm() { clearTimeout(this._armT); this._exec = null; if (this.state.armed) this.setState({ armed: null }); }
+  _setStatus(text, tone) {
+    this.setState({ statusHint: { text, tone: tone || 'info' } });
+    clearTimeout(this._statusT); this._statusT = setTimeout(() => this.setState({ statusHint: null }), 5000);
+  }
+
+  // ---- Tier-1 controls ----
+  useServer() {
+    const st = this.state;
+    if (!st.stripFocus) { this.setState({ stripFocus: true }); return; }
+    if (!st.stripSelActive) { this.setState({ stripSelActive: true, stripSel: this._firstVisibleServerIndex() }); return; }
+    const sv = (this._stripServers || [])[st.stripSel];
+    if (!sv || sv.active) return;
+    // u/o are safe + reversible — apply immediately, no confirm.
+    this._disarm();
+    this.setState(s => ({ servers: s.servers.map(x => ({ ...x, active: x.tag === sv.tag })) }));
+    this._setStatus('server \u2192 ' + sv.tag, 'ok');
+  }
+  toggleProxy() {
+    const on = this.state.proxyOn;
+    this._disarm();
+    this.setState(s => ({ proxyOn: !s.proxyOn }));
+    this._setStatus('sys proxy \u2192 ' + (on ? 'off' : 'on'), 'ok');
+  }
+  laneAction(lane) {
+    if (this.state.stripFocus) return;
+    const dom = this._selDomain();
+    if (!dom) return;
+    const label = (lane === 'direct')
+      ? ('remove ' + dom + ' from its lane \u2192 direct')
+      : ('route ' + dom + ' \u2192 ' + lane);
+    this._arm('lane:' + lane + ':' + dom, label, () => this._applyLane(dom, lane));
+  }
+  _applyLane(dom, lane) {
+    this.setState(s => {
+      const ov = { ...s.laneOverrides };
+      if (lane === 'direct') delete ov[dom]; else ov[dom] = lane;
+      return { laneOverrides: ov, pendingReload: true };
+    });
+    this._setStatus(dom + ' \u2192 ' + lane, 'ok');
+    clearTimeout(this._reloadT);
+    this._reloadT = setTimeout(() => { this.setState({ pendingReload: false }); this._setStatus('reloading router\u2026', 'reload'); }, 7000);
+  }
+
+  move(d) {
+    this._disarm();
+    const s = this.state;
+    if (s.pane === 'conns') {
+      // first arrow press makes a selection AND freezes this pane's list, so the
+      // selected domain can't shift under the cursor while you act on it.
+      if (!s.connSelActive) { this.setState({ connSelActive: true, connFrozen: this._connOrderedFresh || [], selConn: 0 }); return; }
+      const nxt = s.selConn + d;
+      if (nxt >= (this._connLen || 1)) { this.setState({ connSelActive: false, connFrozen: null, stripFocus: true, stripSelActive: false, stripSel: 0 }); return; }
+      this.setState({ selConn: Math.max(0, nxt) });
+    } else {
+      if (!s.errSelActive) { this.setState({ errSelActive: true, errFrozen: this._errOrderedFresh || [], selErr: 0 }); return; }
+      const nxt = s.selErr + d;
+      if (nxt >= (this._errLen || 1)) { this.setState({ errSelActive: false, errFrozen: null, stripFocus: true, stripSelActive: false, stripSel: 0 }); return; }
+      this.setState({ selErr: Math.max(0, nxt) });
+    }
+  }
+  _clearSel() { const s = this.state; if (s.connSelActive || s.errSelActive) this.setState({ connSelActive: false, errSelActive: false, connFrozen: null, errFrozen: null }); }
   yank() {
     const s = this.state;
+    const active = s.pane === 'conns' ? s.connSelActive : s.errSelActive;
+    if (!active) return;
     const val = s.pane === 'conns'
       ? (this._connKeys || [])[Math.min(s.selConn, (this._connLen || 1) - 1)]
       : (this._errKeys || [])[Math.min(s.selErr, (this._errLen || 1) - 1)];
@@ -459,8 +622,8 @@ class Component extends DCLogic {
   }
   componentDidUpdate() {
     const s = this.state;
-    const sig = s.pane + '|' + s.selConn + '|' + s.selErr + '|' + s.focusLane + '|' + s.errWindow;
-    if (sig !== this._sig) { this._sig = sig; this._ensureVisible(); this._applyMarquee(); }
+    const sig = s.pane + '|' + s.selConn + '|' + s.selErr + '|' + s.focusLane + '|' + s.errWindow + '|' + s.connSelActive + '|' + s.errSelActive + '|' + s.stripFocus + '|' + s.stripSelActive + '|' + s.stripSel;
+    if (sig !== this._sig) { this._sig = sig; this._ensureVisible(); this._ensureStripVisible(); this._applyMarquee(); }
   }
 
   componentDidMount() {
@@ -469,11 +632,24 @@ class Component extends DCLogic {
       const k = e.key;
       const lanes = [null, 'escape', 'corp', 'direct'];
       const wins = ['5m', '10m', '1h', '24h'];
-      if (k === 'ArrowUp' || k === 'k') { e.preventDefault(); this.move(-1); }
-      else if (k === 'ArrowDown' || k === 'j') { e.preventDefault(); this.move(1); }
-      else if (k === 'ArrowLeft' || k === 'h') { e.preventDefault(); this.setState({ pane: 'conns' }); }
-      else if (k === 'ArrowRight' || k === 'l') { e.preventDefault(); this.setState({ pane: 'errors' }); }
-      else if (k === 'Tab') { e.preventDefault(); this.setState(s => ({ pane: s.pane === 'conns' ? 'errors' : 'conns' })); }
+      if (this.state.help) { if (k === '?' || k === 'Escape') this.toggleHelp(); return; }
+      const actionKeys = ['u', 'U', 'e', 'E', 'c', 'C', 'b', 'B', 'd', 'D', 'o', 'O'];
+      // Any key that isn't a (re)press of an action or Enter cancels a pending confirm.
+      if (this.state.armed && k !== 'Enter' && !actionKeys.includes(k)) this._disarm();
+      if (k === 'ArrowUp' || k === 'k') { e.preventDefault(); if (this.state.stripFocus) { this._clearSel(); this.setState({ stripFocus: false, stripSelActive: false, pane: 'conns' }); } else this.move(-1); }
+      else if (k === 'ArrowDown' || k === 'j') { e.preventDefault(); if (!this.state.stripFocus) this.move(1); }
+      else if (k === 'h') { e.preventDefault(); this._disarm(); this._clearSel(); this.setState({ pane: 'conns', stripFocus: false, stripSelActive: false }); }
+      else if (k === 'l') { e.preventDefault(); this._disarm(); this._clearSel(); this.setState({ pane: 'errors', stripFocus: false, stripSelActive: false }); }
+      else if (k === 'ArrowLeft') { e.preventDefault(); if (this.state.stripFocus) this.stripNav(-1); else { this._disarm(); this._clearSel(); this.setState({ pane: 'conns', stripFocus: false, stripSelActive: false }); } }
+      else if (k === 'ArrowRight') { e.preventDefault(); if (this.state.stripFocus) this.stripNav(1); else { this._disarm(); this._clearSel(); this.setState({ pane: 'errors', stripFocus: false, stripSelActive: false }); } }
+      else if (k === 'Tab') { e.preventDefault(); this.cycleFocus(); }
+      else if (k === 'u' || k === 'U') { this.useServer(); }
+      else if (k === 'e' || k === 'E') { this.laneAction('escape'); }
+      else if (k === 'c' || k === 'C') { this.laneAction('corp'); }
+      else if (k === 'b' || k === 'B') { this.laneAction('block'); }
+      else if (k === 'd' || k === 'D') { this.laneAction('direct'); }
+      else if (k === 'o' || k === 'O') { this.toggleProxy(); }
+      else if (k === 'Enter') { this._commit(); }
       else if (k === 'f' || k === 'F') { this.setState(s => ({ focusLane: lanes[(lanes.indexOf(s.focusLane) + 1) % lanes.length] })); }
       else if (k === '1') { this.setState({ focusLane: 'escape' }); }
       else if (k === '2') { this.setState({ focusLane: 'corp' }); }
@@ -483,15 +659,16 @@ class Component extends DCLogic {
       else if (k === '[') { this.setState(s => ({ errWindow: wins[(wins.indexOf(s.errWindow) + wins.length - 1) % wins.length] })); }
       else if (k === ']') { this.setState(s => ({ errWindow: wins[(wins.indexOf(s.errWindow) + 1) % wins.length] })); }
       else if (k === 'y' || k === 'Y') { this.yank(); }
+      else if (k === 'r' || k === 'R') { this._setStatus('re-probing servers\u2026', 'info'); }
       else if (k === 'p' || k === 'P') { this.togglePause(); }
       else if (k === '?') { this.toggleHelp(); }
       else if (k === 'q' || k === 'Q') { this._toast('q — quit (disabled in prototype)'); }
-      else if (k === 'Escape') { this.setState(s => (s.help ? { help: false } : { focusLane: null })); }
+      else if (k === 'Escape') { if (this.state.armed) this._disarm(); else if (this.state.connSelActive || this.state.errSelActive) this._clearSel(); else if (this.state.stripSelActive) this.setState({ stripSelActive: false }); else if (this.state.stripFocus) this.setState({ stripFocus: false }); else this.setState(s => (s.help ? { help: false } : { focusLane: null })); }
     };
     window.addEventListener('keydown', this._onKey);
     this._sig = ''; setTimeout(() => this._applyMarquee(), 0);
   }
-  componentWillUnmount() { clearInterval(this.iv); window.removeEventListener('keydown', this._onKey); }
+  componentWillUnmount() { clearInterval(this.iv); window.removeEventListener('keydown', this._onKey); clearTimeout(this._armT); clearTimeout(this._statusT); clearTimeout(this._reloadT); }
 
   tick() {
     const speed = this.props.speed ?? 1;
@@ -590,19 +767,29 @@ class Component extends DCLogic {
     const totals = { up: this.rate(tU), down: this.rate(tD), conns: tc, upSpark: this.spark(s.tu), downSpark: this.spark(s.td) };
 
     const order = { escape: 0, corp: 1, direct: 2 };
-    let list = s.conns.filter(c => c.lane !== 'block');
+    // apply this session's lane overrides so a routed domain visibly moves lanes
+    const domOf = hp => hp.split(':')[0];
+    const applyOv = c => {
+      const ov = s.laneOverrides[domOf(c.hp)];
+      if (!ov) return c;
+      if (ov === 'block') return { ...c, lane: 'block', rule: 'block', up: 0, down: 0 };
+      return { ...c, lane: ov, rule: ov === 'direct' ? 'final' : 'domain_suffix' };
+    };
+    let list = s.conns.map(applyOv).filter(c => c.lane !== 'block');
     if (focus) list = list.filter(c => c.lane === focus);
     list.sort((a, b) => (order[a.lane] - order[b.lane]) || (b.down - a.down));
-    const selC = Math.max(0, Math.min(s.selConn, list.length - 1));
-    this._connLen = list.length;
-    this._connKeys = list.map(c => c.hp);
+    this._connOrderedFresh = list;
+    const dConns = (s.connSelActive && s.connFrozen) ? s.connFrozen : list;
+    const selC = Math.max(0, Math.min(s.selConn, dConns.length - 1));
+    this._connLen = dConns.length;
+    this._connKeys = dConns.map(c => c.hp);
     const pConns = s.pane === 'conns';
-    const conns = list.map((c, i) => {
-      const isSel = i === selC;
+    const conns = dConns.map((c, i) => {
+      const isSel = s.connSelActive && i === selC;
       return {
         laneName: c.lane,
         badgeStyle: { color: lc[c.lane], fontWeight: 700, letterSpacing: '.02em' },
-        onClick: () => this.setState({ pane: 'conns', selConn: i }),
+        onClick: () => { this._disarm(); this.setState({ pane: 'conns', selConn: i, connSelActive: true, connFrozen: this._connOrderedFresh }); },
         sel: isSel ? '1' : '0',
         rowStyle: {
           display: 'grid', gridTemplateColumns: '76px 1fr 48px 96px 100px 128px', alignItems: 'center',
@@ -638,18 +825,20 @@ class Component extends DCLogic {
     };
     const pErr = s.pane === 'errors';
     const rawRows = arr.slice(0, 12);
-    const selE = Math.max(0, Math.min(s.selErr, rawRows.length - 1));
-    this._errLen = rawRows.length;
-    this._errKeys = rawRows.map(e => e.domain);
-    const allRows = rawRows.map((e, i) => {
+    this._errOrderedFresh = rawRows;
+    const dErr = (s.errSelActive && s.errFrozen) ? s.errFrozen : rawRows;
+    const selE = Math.max(0, Math.min(s.selErr, dErr.length - 1));
+    this._errLen = dErr.length;
+    this._errKeys = dErr.map(e => e.domain);
+    const allRows = dErr.map((e, i) => {
       const cat = catOf(e);
-      const isSel = i === selE;
+      const isSel = s.errSelActive && i === selE;
       return {
         count: e.count, domain: e.domain, laneName: e.lane,
         reason: e.lane === 'block' ? 'blocked' : e.reason,
         reasonStyle: { color: catColor[cat], fontSize: '13px' },
         sel: isSel ? '1' : '0',
-        onClick: () => this.setState({ pane: 'errors', selErr: i }),
+        onClick: () => { this._disarm(); this.setState({ pane: 'errors', selErr: i, errSelActive: true, errFrozen: this._errOrderedFresh }); },
         countStyle: { color: '#e9ecf3', fontWeight: 700, textAlign: 'right' },
         rowStyle: {
           display: 'grid', gridTemplateColumns: '40px 84px 1fr', alignItems: 'center', gap: '20px',
@@ -682,7 +871,7 @@ class Component extends DCLogic {
       upCount: upServers.length,
       downCount: downServers.length,
       allUp: downServers.length === 0,
-      summary: s.servers.length + ' servers · ' + upServers.length + ' up · ' + downServers.length + ' down · last probe ~' + this.probedTxt(freshest) + ' ago · active ' + (s.servers.find(x => x.active) || {}).tag,
+      summary: s.servers.length + ' servers · ' + upServers.length + ' up · ' + downServers.length + ' down',
       upList: upServers.map(sv => ({
         mark: sv.active ? '▍' : '●',
         markStyle: { color: sv.active ? accent : '#86c07a', fontWeight: 700, fontSize:'13px' },
@@ -701,26 +890,56 @@ class Component extends DCLogic {
         chipStyle: chipBase(false),
       })),
     };
-    const srvChips = s.servers.filter(x => x.up && !x.active)
-      .sort((a, b) => (a.src !== b.src ? (a.src === 'user' ? -1 : 1) : a.tag.localeCompare(b.tag)))
-      .map(sv => ({
-        tag: sv.tag,
-        tagStyle: { color: '#c3c8d6' },
+    // server-health strip: all up servers, active first (marked ▶) — matches the binary.
+    const stripUp = s.servers.filter(x => x.up)
+      .sort((a, b) => (a.active !== b.active ? (a.active ? -1 : 1) : (a.ms - b.ms)));
+    this._stripServers = stripUp;
+    this._stripLen = stripUp.length;
+    const stripFocused = s.stripFocus;
+    const stripSel = Math.max(0, Math.min(s.stripSel, stripUp.length - 1));
+    const stripSelSv = stripUp[stripSel];
+    const chipBaseStrip = {
+      display: 'inline-flex', alignItems: 'baseline', gap: '8px', flexShrink: 0,
+      padding: '4px 13px', borderRadius: '7px', fontSize: '13px',
+      border: '1px solid #2b2e3c', background: '#1c1e26',
+    };
+    const srvChips = stripUp.map((sv, i) => ({
+      tag: (sv.active ? '▶ ' : '') + sv.tag,
+      rawTag: sv.tag,
+      tagStyle: { color: sv.active ? accent : '#c3c8d6', fontWeight: sv.active ? 700 : 400 },
+      val: sv.ms + ' ms',
+      valStyle: { color: latCol(sv.ms), display: 'inline-block', width: '52px', textAlign: 'right' },
+      onClick: () => { this._disarm(); this._clearSel(); this.setState({ stripFocus: true, stripSelActive: true, stripSel: i }); },
+      chipStyle: chipBaseStrip,
+    }));
+    const srvFocusChips = stripUp.map((sv, i) => {
+      const isSel = i === stripSel;
+      const armedUse = s.armed && s.armed.sig === ('use:' + sv.tag);
+      return {
+        tag: (sv.active ? '▶ ' : '') + sv.tag,
+        sel: isSel ? '1' : '0',
+        tagStyle: { color: sv.active ? accent : (isSel ? '#e9ecf3' : '#c3c8d6'), fontWeight: (sv.active || isSel) ? 700 : 400 },
         val: sv.ms + ' ms',
         valStyle: { color: latCol(sv.ms), display: 'inline-block', width: '52px', textAlign: 'right' },
-        probed: sv.probed <= 1 ? 'now' : this.probedTxt(sv.probed),
+        onClick: () => this.setState({ stripFocus: true, stripSelActive: true, stripSel: i }),
         chipStyle: {
-          display: 'inline-flex', alignItems: 'baseline', gap: '8px', flexShrink: 0,
-          padding: '4px 13px', borderRadius: '7px', fontSize: '13px',
-          border: '1px solid #2b2e3c', background: '#1c1e26',
+          ...chipBaseStrip, cursor: 'pointer',
+          border: '1px solid ' + (armedUse ? '#e0a35e' : (isSel ? accent : '#2b2e3c')),
+          background: armedUse ? 'rgba(224,163,94,0.12)' : (isSel ? (accent + '18') : '#1c1e26'),
+          boxShadow: isSel ? ('inset 2px 0 0 ' + accent) : 'none',
         },
-      }));
+      };
+    });
+    const stripHint = !s.stripFocus ? '' : (!s.stripSelActive ? '←→ select a server' : ((stripSelSv && !stripSelSv.active) ? ('u  use ' + stripSelSv.tag) : ''));
+    const stripStatic = s.stripFocus && s.stripSelActive;
+    const stripScrolling = !stripStatic;
 
-    const lat = Math.round(s.latency);
+    const act = s.servers.find(x => x.active) || s.servers[0];
+    const lat = act ? act.ms : Math.round(s.latency);
     const latColor = lat < 60 ? '#86c07a' : lat < 120 ? '#e0a35e' : '#d3788c';
     const ctx = {
-      mode: 'host', server: 'JP-Tokyo', latency: lat + ' ms',
-      router: 'running · :7890', proxy: 'on · Wi-Fi', uptime: this.dur(s.uptime), cfg: 'host.json OK',
+      mode: 'host', server: act ? act.tag : '—', latency: lat + ' ms',
+      router: 'running · :7890', proxy: s.proxyOn ? 'on · Wi-Fi' : 'off', uptime: this.dur(s.uptime), cfg: 'host.json OK',
     };
 
     // ---- header rate table: a shared grid so the totals row lines up with the lane rows ----
@@ -789,15 +1008,33 @@ class Component extends DCLogic {
 
     const filterActive = !!focus;
     const pane = s.pane;
-    const ringBase = on => ({ position: 'absolute', inset: 0, pointerEvents: 'none', borderRadius: '2px', transition: 'opacity .15s', opacity: on ? 1 : 0, border: '1px solid ' + accent, boxShadow: '0 0 0 1px ' + accent + ', inset 0 0 26px -12px ' + accent });
-    const connRing = ringBase(pane === 'conns');
-    const errRing = ringBase(pane === 'errors');
-    const selKey = pane === 'conns'
+    const ringBase = (on, col) => ({ position: 'absolute', inset: 0, pointerEvents: 'none', borderRadius: '2px', transition: 'opacity .15s', opacity: on ? 1 : 0, border: '1px solid ' + (col || accent), boxShadow: '0 0 0 1px ' + (col || accent) + ', inset 0 0 26px -12px ' + (col || accent) });
+    const connRing = ringBase(pane === 'conns' && !s.stripFocus, s.connSelActive ? '#e0a35e' : accent);
+    const errRing = ringBase(pane === 'errors' && !s.stripFocus, s.errSelActive ? '#e0a35e' : accent);
+    const healthRing = ringBase(s.stripFocus, s.stripSelActive ? '#e0a35e' : accent);
+    const selActive = pane === 'conns' ? s.connSelActive : s.errSelActive;
+    const selKey = !selActive ? null : (pane === 'conns'
       ? (this._connKeys || [])[Math.min(s.selConn, (this._connLen || 1) - 1)]
-      : (this._errKeys || [])[Math.min(s.selErr, (this._errLen || 1) - 1)];
-    const hintPane = pane === 'conns' ? 'live · connections' : 'errors & blocked';
-    const hintPaneStyle = { color: accent, fontWeight: 700 };
-    const selInfo = selKey ? ('▸ ' + selKey + '   ·   y to copy') : '';
+      : (this._errKeys || [])[Math.min(s.selErr, (this._errLen || 1) - 1)]);
+    const hintPane = s.stripFocus ? 'server health' : (pane === 'conns' ? 'live · connections' : 'errors & blocked');
+    const hintPaneStyle = { color: s.stripFocus ? '#86c07a' : accent, fontWeight: 700 };
+    const selInfo = selKey ? ('▸ ' + selKey + '   ·   y copy · esc resume') : '';
+    const proxyLbl = s.proxyOn ? 'proxy off' : 'proxy on';
+    const globalChips = [ { k: '↑↓←→', v: 'navigate' }, { k: 'f', v: 'lane' }, { k: 'w', v: 'window' }, { k: 'o', v: proxyLbl }, { k: 'p', v: 'pause' }, { k: '?', v: 'help' } ];
+    let ctxChips = [];
+    if (s.stripFocus && s.stripSelActive && stripSelSv && !stripSelSv.active) ctxChips = [ { k: 'u', v: 'use ' + stripSelSv.tag } ];
+    else if (s.stripFocus && !s.stripSelActive) ctxChips = [ { k: '←→', v: 'select server' } ];
+    else if (selActive) ctxChips = [ { k: 'e·c·b·d', v: 'route' }, { k: 'y', v: 'copy' } ];
+    const hasCtx = ctxChips.length > 0;
+    let hintChips;
+    if (stripFocused) {
+      hintChips = [ { k: '←→', v: 'select' }, { k: 'u', v: (stripSelSv && !stripSelSv.active) ? ('use ' + stripSelSv.tag) : 'use' }, { k: 'o', v: s.proxyOn ? 'proxy off' : 'proxy on' }, { k: 'esc', v: 'back' } ];
+    } else {
+      hintChips = [ { k: '↑↓', v: 'move' }, { k: 'e/c/b', v: 'route' }, { k: 'd', v: 'direct' }, { k: 'o', v: s.proxyOn ? 'proxy off' : 'proxy on' }, { k: '←→', v: 'servers' }, { k: 'y', v: 'copy' }, { k: '?', v: 'help' } ];
+    }
+    const statusStyle = { color: s.statusHint ? (s.statusHint.tone === 'reload' ? '#e0a35e' : s.statusHint.tone === 'ok' ? '#86c07a' : '#8b90a4') : '#8b90a4', fontWeight: 600 };
+    const stripHintStyle = { color: '#86c07a', fontWeight: 700 };
+    const pendChipStyle = { display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '2px 9px', borderRadius: '20px', border: '1px solid #4a3a24', color: '#e0a35e', background: 'rgba(224,163,94,0.1)' };
     return {
       pane, connRing, errRing, hintPane, hintPaneStyle, selInfo, toast: s.toast,
       focusConns: () => { if (this.state.pane !== 'conns') this.setState({ pane: 'conns' }); },
@@ -819,6 +1056,10 @@ class Component extends DCLogic {
       toggleHelp: () => this.toggleHelp(),
       ctx, totals, escape, corp, direct, block, conns, servers, srvChips,
       errHdr, allRows, allEmpty, allMore, windows,
+      armed: !!s.armed, notArmed: !s.armed, armLabel: s.armed ? s.armed.label : '',
+      statusHint: !!s.statusHint, noStatus: !s.statusHint, statusText: s.statusHint ? s.statusHint.text : '', statusStyle,
+      globalChips, ctxChips, hasCtx, stripFocused, stripStatic, stripScrolling, srvFocusChips, stripHint, stripHintStyle, healthRing,
+      pendingReload: s.pendingReload, pendChipStyle,
     };
   }
 }
