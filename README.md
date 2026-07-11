@@ -151,6 +151,32 @@ ROWT_RUN_TARGET=https://api.anthropic.com/ rowt run claude
 Everything after `run` is the command, so its own flags (`--help`, `-v`, …) pass
 straight through; use `rowt help run` for `run`'s own documentation.
 
+### Captive portals (hotel / airplane Wi-Fi)
+
+This is exactly why **"router up, system proxy *off*"** is a first-class mode —
+and `rowt run` is built for it. On hotel/airline Wi-Fi you first have to load a
+**captive-portal** page and authenticate. If the macOS **system proxy** is
+pointed at rowt, that breaks: rowt can't reach the portal, and macOS's own
+captive-portal *detection* gets confused, so the auth page never appears. Keeping
+the system proxy **off** lets the portal flow work normally.
+
+So the flow is:
+
+1. `rowt down` (or just `rowt proxy off`) so the **system proxy is off** —
+   `rowt status` shows `system proxy: No`, and `rowt monitor` shows
+   `router: running` + `sys proxy: off`. Keep the router up.
+2. Connect to the Wi-Fi and finish the captive-portal login in your browser.
+3. Now run the tools that need the tunnel with **`rowt run`** — it routes just
+   that command through rowt's port via env, without ever touching the system
+   proxy (so it can't re-break the portal). It's captive-portal-aware too: the
+   default `https://www.google.com/` target uses HTTPS, so a portal can't fake a
+   success — `rowt run` refuses to launch until you've *actually* authenticated
+   and the open internet is reachable.
+
+`rowt monitor`'s split of **`router`** (is the tunnel engine up) vs **`sys
+proxy`** (is system traffic being pointed at it) makes this mode legible at a
+glance.
+
 ## Three-way routing
 
 | bucket | list | where it goes | example |
