@@ -239,6 +239,29 @@ fn route_is_inert_without_a_selection() {
 }
 
 #[test]
+fn wheel_only_scrolls_when_over_a_pane() {
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::layout::Rect;
+    use rowt_monitor::input;
+    use rowt_monitor::ui::Hit;
+
+    let hit = Hit {
+        conn_pane: Rect::new(0, 0, 50, 20),
+        err_pane: Rect::new(50, 0, 50, 20),
+        ..Default::default()
+    };
+    let wheel = |col, row| MouseEvent { kind: MouseEventKind::ScrollDown, column: col, row, modifiers: KeyModifiers::NONE };
+
+    assert_eq!(input::mouse(wheel(10, 5), &hit), Some(Action::ScrollConn(1)), "over conns → scroll conns");
+    assert_eq!(input::mouse(wheel(60, 5), &hit), Some(Action::ScrollErr(1)), "over errors → scroll errors");
+    // Over neither pane (e.g. the identity band / server strip / footer): no-op.
+    assert_eq!(input::mouse(wheel(10, 30), &hit), None, "wheel over nothing does not scroll");
+    // Clicks elsewhere still return None (sanity that we didn't break the arm).
+    let click = MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: 10, row: 30, modifiers: KeyModifiers::NONE };
+    assert_eq!(input::mouse(click, &hit), None);
+}
+
+#[test]
 fn selection_is_forgotten_when_focus_leaves_the_pane() {
     let mut a = app();
     a.update(Action::Down); // activate the connections selection

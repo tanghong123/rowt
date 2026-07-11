@@ -650,6 +650,7 @@ fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: boo
                 col += dw(s);
             }
         }
+        hover_chip(buf, app, present, hit);
         return;
     }
 
@@ -694,6 +695,26 @@ fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: boo
         };
         if cw > 0 {
             hit.chips.push((Rect::new(x0 + cx as u16, y, cw as u16, 1), i));
+        }
+    }
+    hover_chip(buf, app, present, hit);
+}
+
+/// Hover feedback for the server strip: brighten + underline the chip under the
+/// pointer (mirrors the `sys proxy` hover). A post-pass over `hit.chips`, so it
+/// works for both the static and the frozen-ring layouts.
+fn hover_chip(buf: &mut Buffer, app: &App, present: bool, hit: &Hit) {
+    if present {
+        return;
+    }
+    let Some((hx, hy)) = app.hover else { return };
+    if let Some((r, _)) = hit.chips.iter().find(|(r, _)| rect_has(*r, hx, hy)) {
+        for x in r.left()..r.right() {
+            if let Some(c) = buf.cell_mut((x, r.top())) {
+                let f = c.fg;
+                c.set_fg(theme::brighten(f, 0.25));
+                c.modifier.insert(Modifier::UNDERLINED);
+            }
         }
     }
 }

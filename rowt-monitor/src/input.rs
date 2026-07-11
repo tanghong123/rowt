@@ -55,14 +55,18 @@ pub fn key(k: KeyEvent, app: &App) -> Option<Action> {
 
 pub fn mouse(m: MouseEvent, hit: &Hit) -> Option<Action> {
     let (col, row) = (m.column, m.row);
-    let over_err = hit_prefers_err(hit, col, row);
     match m.kind {
-        // Wheel scrolls (and focuses) the list under the pointer.
-        MouseEventKind::ScrollDown => {
-            Some(if over_err { Action::ScrollErr(1) } else { Action::ScrollConn(1) })
-        }
-        MouseEventKind::ScrollUp => {
-            Some(if over_err { Action::ScrollErr(-1) } else { Action::ScrollConn(-1) })
+        // Wheel scrolls (and focuses) the list *under the pointer* — and only if
+        // the pointer is actually over a pane; over anything else it's a no-op.
+        MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+            let d = if matches!(m.kind, MouseEventKind::ScrollDown) { 1 } else { -1 };
+            if in_rect(hit.err_pane, col, row) || in_rect(hit.err_list, col, row) {
+                Some(Action::ScrollErr(d))
+            } else if in_rect(hit.conn_pane, col, row) || in_rect(hit.conn_list, col, row) {
+                Some(Action::ScrollConn(d))
+            } else {
+                None
+            }
         }
         MouseEventKind::Down(MouseButton::Left) => {
             // "sys proxy on/off" toggles when clicked.
@@ -102,10 +106,6 @@ pub fn mouse(m: MouseEvent, hit: &Hit) -> Option<Action> {
         }
         _ => None,
     }
-}
-
-fn hit_prefers_err(hit: &Hit, col: u16, row: u16) -> bool {
-    in_rect(hit.err_pane, col, row) || in_rect(hit.err_list, col, row)
 }
 
 fn in_rect(r: ratatui::layout::Rect, col: u16, row: u16) -> bool {
