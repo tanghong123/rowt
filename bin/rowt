@@ -43,13 +43,14 @@
 #      ROWT_IFACE  force the physical interface (default: auto-detect)
 #      ROWT_DNS_DIRECT  DoH resolver for direct-lane names (default 223.5.5.5)
 #      ROWT_WATCH_INTERVAL  watchdog liveness-probe cadence, seconds (default 120)
-#      ROWT_HEALTH_FAILS/…_COOLDOWN  probe failures before auto-restart (3) / min
-#                   seconds between auto-restarts (600)
+#      ROWT_HEALTH_FAILS  consecutive probe failures before auto-recover (default 3)
+#      ROWT_HEALTH_COOLDOWN  min seconds between auto-recoveries (default 600)
+#      ROWT_HEALTH_TIMEOUT  per-probe delay-test timeout, seconds (default 8)
 #      SINGBOX_VERSION  pinned sing-box release (default 1.13.14, >=1.12 AnyTLS)
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="2.3.4"
+ROWT_VERSION="2.3.5"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -117,7 +118,8 @@ AUTO_INTERVAL="${ROWT_AUTO_INTERVAL:-20m}"       # how often 'auto' re-probes al
 WATCH_INTERVAL="${ROWT_WATCH_INTERVAL:-120}"     # seconds between liveness probes (plist StartInterval)
 HEALTH_FAILS="${ROWT_HEALTH_FAILS:-3}"           # consecutive failed probes before an auto-restart
 HEALTH_COOLDOWN="${ROWT_HEALTH_COOLDOWN:-600}"   # min seconds between auto-restarts (anti-thrash)
-HEALTH_URL="${ROWT_HEALTH_URL:-https://cp.cloudflare.com/generate_204}"  # tiny 204, fetched via the proxy
+HEALTH_TIMEOUT="${ROWT_HEALTH_TIMEOUT:-8}"       # per-probe delay-test timeout, seconds (generous: a slow-but-live tunnel must not read as wedged)
+HEALTH_URL="${ROWT_HEALTH_URL:-https://www.gstatic.com/generate_204}"    # target the liveness delay-test fetches THROUGH the escape server
 
 mkdir -p "$CFG" "$BIN" "$LOGDIR"
 
@@ -1788,6 +1790,11 @@ cmd_setup() {
     esac
   done
   [ -s "$SERVERS" ] || die "first import servers: $PROG server add '<vless://...>' or $PROG sub add <url>"
+  # Record the user's intent to be UP (with the current boot id) so the watchdog
+  # can tell a mid-session crash (recover it) from a deliberate 'down' or a fresh
+  # boot (leave it). Set before the work so a failed setup still reads as "wanted
+  # up" — the watchdog will keep trying, which is the point.
+  sset intent up; sset boot "$(_boot_id)"
   # idempotency: already fully set up in the requested mode? no-op — BUT in vm
   # mode the bridged DHCP IP can change (reboot, new lease, network switch), so
   # re-detect it first and re-wire if it moved; only then declare nothing-to-do.
@@ -2013,6 +2020,7 @@ cmd_restart() {
   if [ "$(sget mode)" = "vm" ]; then cmd_vm restart; else _router_stop; cmd_router up; fi
   if host_running; then
     cmd_proxy on
+    sset intent up; sset boot "$(_boot_id)"   # a live restart means "should be up"
   else
     err "components did not come back up — leaving the system proxy OFF (no limbo). Check '$PROG status' / '$PROG router log'."
     return 1
@@ -2031,16 +2039,19 @@ cmd_reload() {
   fi
   if host_running; then cmd_router restart; else cmd_router up; fi
   cmd_proxy on                            # proxy + bypass on the now-active service
+  sset intent up; sset boot "$(_boot_id)" # reload implies the tunnel should be up
   info "reloaded (mode=$(sget mode))."
 }
 
 # ---------- auto-recover: network-change reload + liveness watchdog ----------
 # A per-user LaunchAgent runs 'watch tick' on two triggers: a resolver change
 # (macOS rewrites it on every network/route transition -> a guarded, debounced
-# reload) and a periodic timer (a liveness probe that auto-restarts a wedged
-# tunnel the network-change path can't see). Both only act while the router is
-# up. A scoped passwordless-sudo rule lets it re-point the system proxy on a
-# Wi-Fi<->Ethernet switch without a prompt.
+# reload) and a periodic timer (a liveness probe of the escape tunnel). It
+# self-heals two failure classes the change-triggered reload can't see: a wedged
+# tunnel (router up but not carrying traffic) and a crashed router (down while
+# the user's intent is up, same boot). Both gated by a cooldown, verified by a
+# re-probe. A scoped passwordless-sudo rule lets it re-point the system proxy on
+# a Wi-Fi<->Ethernet switch without a prompt.
 WATCH_LABEL="club.annaslife.rowt.watch"
 WATCH_PLIST="$HOME/Library/LaunchAgents/$WATCH_LABEL.plist"
 WATCH_SUDOERS="/etc/sudoers.d/rowt"          # no dot in the name, else sudo ignores it
@@ -2067,39 +2078,76 @@ net_id() { # $1=iface
 # Absolute path to THIS rowt — prefer the PATH symlink (stable across upgrades).
 _watch_self() { command -v "$PROG" 2>/dev/null || echo "$HERE/bin/$PROG"; }
 
-# Liveness recovery. Called by 'watch tick' only when the network did NOT change
-# (a change already triggers a full reload). Probes a real request through the
-# proxy; if it fails $HEALTH_FAILS ticks in a row the tunnel is wedged — not a
-# one-off blip — so bounce it in place. A $HEALTH_COOLDOWN gate means a genuinely
-# dead server (nothing local can fix) causes at most one restart per window, not
-# a storm. Silent on success (no log spam); logs only failures and restarts.
-# $1 = active physical interface (may be empty when offline).
+# A token that changes across reboots. Crash-recovery fires only within the same
+# boot the router was started in, so the watchdog never resurrects the tunnel at
+# login/after a reboot (rowt has no auto-start — that would be surprising).
+# The first number in `{ sec = 1783207691, usec = ... }` is the boot epoch;
+# match the leading run so a greedy '.*' can't drift onto 'usec'.
+_boot_id() { sysctl -n kern.boottime 2>/dev/null | sed -n 's/[^0-9]*\([0-9][0-9]*\).*/\1/p'; }
+
+# True if the ESCAPE tunnel is actually carrying traffic. Tests the escape lane
+# end-to-end via the clash API delay check (local -> selected escape server ->
+# target) rather than an HTTP request through the mixed proxy. The mixed-proxy
+# probe was unreliable: its target routed by the normal rules (often DIRECT), so
+# a flaky direct-to-CDN path in a censored network produced failures that had
+# nothing to do with the tunnel. The delay test forces traffic through the escape
+# server regardless of routing. Two tries so one dropped packet isn't 'wedged'.
+_watch_probe() {
+  local ep sec sel enc out t
+  ep="$(controller 2>/dev/null || true)"; [ -n "$ep" ] || return 1   # API gone = wedged
+  sec="$(clash_secret)"
+  sel="$(sget selected)"; sel="${sel:-auto}"                          # concrete server, or 'auto' (urltest)
+  enc="$(python3 -c 'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=""))' "$HEALTH_URL" 2>/dev/null || echo "$HEALTH_URL")"
+  for t in 1 2; do
+    # curl max-time must exceed the clash delay timeout or it cuts the test early.
+    out="$(curl --noproxy '*' -sS -m "$(( HEALTH_TIMEOUT + 3 ))" -H "Authorization: Bearer $sec" \
+          "http://$ep/proxies/$sel/delay?timeout=${HEALTH_TIMEOUT}000&url=$enc" 2>/dev/null || true)"
+    printf '%s' "$out" | jq -e '.delay // empty' >/dev/null 2>&1 && return 0
+    [ "$t" = 1 ] && sleep 2
+  done
+  return 1
+}
+
+# Cooldown-gated, SELF-VERIFYING recovery. $1 = reason (logged); the rest is the
+# recovery command (cmd_reload — it re-renders, starts if down / restarts if up,
+# and re-applies the proxy). Runs at most once per $HEALTH_COOLDOWN so a
+# genuinely dead server (nothing local can fix) can't cause a restart storm.
+# Crucially it re-probes AFTER acting: a sing-box that starts then crashes would
+# otherwise log a false 'ok'. Resets the failure streak.
+_watch_recover() {
+  local reason="$1"; shift
+  local now last; now="$(date +%s)"; last="$(cat "$WATCH_RESTART" 2>/dev/null || echo 0)"
+  if [ "$(( now - last ))" -lt "$HEALTH_COOLDOWN" ]; then
+    _watch_log "$reason — last recovery $(( now - last ))s ago (< ${HEALTH_COOLDOWN}s cooldown), holding off"
+    return 1
+  fi
+  printf '%s\n' "$now" > "$WATCH_RESTART" 2>/dev/null || true
+  rm -f "$WATCH_HEALTH"
+  _watch_log "$reason — recovering ($*)"
+  "$@" >>"$WATCH_LOG" 2>&1 || true
+  sleep 2
+  if host_running && _watch_probe; then
+    _watch_log "recovery ok — escape tunnel answering"
+  else
+    _watch_log "recovery INCOMPLETE — router $(host_running && echo up || echo DOWN), tunnel still not answering (retry after ${HEALTH_COOLDOWN}s)"
+  fi
+}
+
+# Liveness check, called by 'watch tick' when the network did NOT change (a
+# change already triggers a full reload). $1 = active physical interface.
 _watch_health() {
   # Offline (no interface IP) — a restart can't help and a returning network
   # fires its own resolver-change reload, so just reset the streak and bail.
   local ip; ip="$(ipconfig getifaddr "${1:-}" 2>/dev/null || true)"
   [ -n "$ip" ] || { rm -f "$WATCH_HEALTH"; return 0; }
-  # curl exits 0 for any HTTP response (even 4xx/5xx); only a dead/wedged tunnel
-  # (connection refused, timeout) makes it non-zero — exactly our signal.
-  if curl -sS -m 8 -x "http://127.0.0.1:$PORT" -o /dev/null "$HEALTH_URL" 2>/dev/null; then
-    rm -f "$WATCH_HEALTH"                         # healthy — clear the streak
-    return 0
-  fi
+  if _watch_probe; then rm -f "$WATCH_HEALTH"; return 0; fi   # healthy — clear streak
   local fails; fails="$(( $(cat "$WATCH_HEALTH" 2>/dev/null || echo 0) + 1 ))"
   printf '%s\n' "$fails" > "$WATCH_HEALTH" 2>/dev/null || true
   if [ "$fails" -lt "$HEALTH_FAILS" ]; then
-    _watch_log "liveness probe failed ($fails/$HEALTH_FAILS) — tunnel not answering via 127.0.0.1:$PORT"
+    _watch_log "escape tunnel probe failed ($fails/$HEALTH_FAILS)"
     return 0
   fi
-  local now last; now="$(date +%s)"; last="$(cat "$WATCH_RESTART" 2>/dev/null || echo 0)"
-  if [ "$(( now - last ))" -lt "$HEALTH_COOLDOWN" ]; then
-    _watch_log "liveness probe failed ($fails) but last auto-restart was $(( now - last ))s ago (< ${HEALTH_COOLDOWN}s cooldown) — holding off"
-    return 0
-  fi
-  printf '%s\n' "$now" > "$WATCH_RESTART" 2>/dev/null || true
-  rm -f "$WATCH_HEALTH"
-  _watch_log "tunnel wedged ($fails consecutive probe failures) — auto-restarting in place"
-  cmd_restart >>"$WATCH_LOG" 2>&1 && _watch_log "auto-restart ok" || _watch_log "auto-restart FAILED"
+  _watch_recover "tunnel wedged ($fails consecutive probe failures)" cmd_reload
 }
 # Only the networksetup proxy toggles get NOPASSWD — nothing else.
 _watch_sudoers_body() {
@@ -2128,7 +2176,7 @@ cmd_watch() {
       done
       local envxml v val
       envxml="    <key>PATH</key><string>$agent_path</string>"
-      for v in XDG_CONFIG_HOME ROWT_PORT ROWT_CLASH_PORT ROWT_FINAL ROWT_IFACE ROWT_DNS_DIRECT SINGBOX_VERSION ROWT_LOG_LEVEL ROWT_WATCH_INTERVAL ROWT_HEALTH_FAILS ROWT_HEALTH_COOLDOWN ROWT_HEALTH_URL; do
+      for v in XDG_CONFIG_HOME ROWT_PORT ROWT_CLASH_PORT ROWT_FINAL ROWT_IFACE ROWT_DNS_DIRECT SINGBOX_VERSION ROWT_LOG_LEVEL ROWT_WATCH_INTERVAL ROWT_HEALTH_FAILS ROWT_HEALTH_COOLDOWN ROWT_HEALTH_TIMEOUT ROWT_HEALTH_URL; do
         val="${!v:-}"; [ -n "$val" ] && envxml="$envxml
     <key>$v</key><string>$val</string>"
       done
@@ -2177,9 +2225,9 @@ PLIST
       launchctl bootstrap "gui/$(id -u)" "$WATCH_PLIST" 2>/dev/null \
         || launchctl load -w "$WATCH_PLIST" 2>/dev/null \
         || die "could not load the LaunchAgent — try: launchctl bootstrap gui/$(id -u) $WATCH_PLIST"
-      info "watch installed — auto-reload on network changes + liveness watchdog (only while the router is up)."
+      info "watch installed — auto-reload on network changes + liveness watchdog (recovers a wedged OR crashed tunnel)."
       echo "  agent:  $WATCH_PLIST"
-      echo "  probe:  every ${WATCH_INTERVAL}s; auto-restart after $HEALTH_FAILS failures (>= ${HEALTH_COOLDOWN}s apart)"
+      echo "  probe:  escape delay-test every ${WATCH_INTERVAL}s; auto-recover after $HEALTH_FAILS failures (>= ${HEALTH_COOLDOWN}s apart)"
       echo "  log:    $WATCH_LOG"
       echo "  status: $PROG watch status   ·   remove: $PROG watch uninstall"
       ;;
@@ -2202,26 +2250,15 @@ PLIST
       [ -f "$WATCH_LOG" ] && { echo "  recent:"; tail -5 "$WATCH_LOG" | sed 's/^/    /'; }
       ;;
     tick)
-      # Fired by the LaunchAgent on a resolver change. Guard: do nothing unless the
-      # router is up ("only while the proxy is up"). Debounce via a lock dir + a
-      # short settle so a burst of resolv.conf writes = one reload. Skip entirely
-      # when neither the physical interface nor the active-service proxy actually
-      # moved, so a Wi-Fi flap doesn't needlessly bounce the tunnel.
-      # rowt is a user tool with no auto-start, so after a reboot/login it won't be
-      # running — but the macOS system proxy it set PERSISTS across reboots. If the
-      # router is down yet the proxy still points at our (now dead) 127.0.0.1:$PORT,
-      # clear it: rowt's system-proxy effect must not outlive a reboot, and this
-      # un-strands the network. RunAtLoad fires this at login; network changes too.
-      if ! host_running; then
-        local gsvc; gsvc="$(active_service 2>/dev/null || true)"
-        if [ -n "$gsvc" ] && _proxy_pointing_ok "$gsvc"; then
-          _watch_log "rowt not running but '$gsvc' proxy still set to 127.0.0.1:$PORT — clearing (stale, no-limbo)"
-          sudo -n /usr/sbin/networksetup -setsocksfirewallproxystate "$gsvc" off 2>/dev/null || true
-          sudo -n /usr/sbin/networksetup -setwebproxystate       "$gsvc" off 2>/dev/null || true
-          sudo -n /usr/sbin/networksetup -setsecurewebproxystate "$gsvc" off 2>/dev/null || true
-        fi
-        exit 0
-      fi
+      # Fired by the LaunchAgent on a resolver change OR the periodic timer.
+      # Debounce via a lock dir + a short settle so a burst of resolv.conf writes
+      # = one reload. When the router is up and nothing moved, probe the escape
+      # tunnel (liveness); when it is down, recover it only if the user's intent
+      # is up in this same boot (see below). A Wi-Fi flap that changes nothing
+      # does no work beyond the probe.
+      # Acquire the debounce lock up front so the crash-recovery, stale-proxy and
+      # reload paths can never overlap a concurrent tick (a StartInterval timer
+      # tick and a WatchPaths network tick can fire close together).
       local lock="$CFG/watch.lock"
       if ! mkdir "$lock" 2>/dev/null; then       # another tick already handling it…
         # …unless that lock is stale. A tick finishes in seconds (sleep 2 + a
@@ -2239,6 +2276,29 @@ PLIST
       # Clean the lock by its absolute path, not the local $lock, so the trap
       # still resolves if it fires at top-level scope after a fall-through path.
       trap 'rmdir "$CFG/watch.lock" 2>/dev/null || true' EXIT
+
+      local intent; intent="$(sget intent 2>/dev/null || true)"
+      # rowt is a user tool with no auto-start, so after a reboot/login it won't be
+      # running — but the macOS system proxy it set PERSISTS across reboots.
+      if ! host_running; then
+        # Router down. If the user wants it up (intent=up) AND we are still in the
+        # boot it was started in, it CRASHED — bring it back. A reboot (boot id
+        # differs) or a deliberate 'rowt down' (intent!=up) must NOT resurrect it;
+        # instead clear any stale proxy still pointing at the dead 127.0.0.1:$PORT
+        # (rowt's proxy effect must not outlive a reboot; un-strands the network).
+        if [ "$intent" = up ] && [ "$(sget boot)" = "$(_boot_id)" ]; then
+          _watch_recover "router is DOWN but marked up (crashed?)" cmd_reload || true
+          exit 0
+        fi
+        local gsvc; gsvc="$(active_service 2>/dev/null || true)"
+        if [ -n "$gsvc" ] && _proxy_pointing_ok "$gsvc"; then
+          _watch_log "rowt not running but '$gsvc' proxy still set to 127.0.0.1:$PORT — clearing (stale, no-limbo)"
+          sudo -n /usr/sbin/networksetup -setsocksfirewallproxystate "$gsvc" off 2>/dev/null || true
+          sudo -n /usr/sbin/networksetup -setwebproxystate       "$gsvc" off 2>/dev/null || true
+          sudo -n /usr/sbin/networksetup -setsecurewebproxystate "$gsvc" off 2>/dev/null || true
+        fi
+        exit 0
+      fi
       sleep 2                                     # let the network settle
       host_running || exit 0                      # may have gone down while we waited
       local ifc cur svc need=0 nid last
@@ -2262,7 +2322,7 @@ PLIST
         # the self-heal for a wedge that doesn't move the network (server-side
         # connection death, a stuck UDP socket) — the case change-triggered
         # reload can't see.
-        _watch_health "$ifc"
+        _watch_health "$ifc" || true
         exit 0
       fi
       _watch_log "network change (iface '$cur' -> '$ifc', [$nid], service '$svc') — reloading"
@@ -2273,6 +2333,9 @@ PLIST
 }
 
 cmd_revert() {
+  # Mark intent DOWN first so the watchdog treats this as deliberate and won't
+  # try to resurrect the tunnel we are about to tear down.
+  sset intent down
   # Each step in a subshell so a die/exit inside one (e.g. no active network
   # service on a plane) can't abort teardown before sing-box is killed. The
   # sing-box kill is the important part — it must ALWAYS run.
