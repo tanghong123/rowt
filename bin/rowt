@@ -50,7 +50,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="2.3.6"
+ROWT_VERSION="2.3.7"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -1363,6 +1363,26 @@ _router_survives() {
   return 0
 }
 
+# A started router is only truly UP when its clash API answers — not merely when
+# the process is alive. A sing-box that binds then WEDGES (hung/spinning event
+# loop) leaves the process alive (kill -0 succeeds) but the API + data path dead;
+# the process-only check mistook that for a healthy start, so restart/reload
+# reported success while the tunnel was actually down. Poll up to $1 seconds:
+# bail immediately if the process dies, and require the API to have answered at
+# least once (a listening-but-hung API times out under -m and doesn't count).
+_router_ready() {
+  local n="${1:-5}" i=0 seen=0 ep sec; sec="$(clash_secret)"
+  while [ "$i" -lt "$n" ]; do
+    sleep 1
+    host_running || return 1
+    ep="$(controller 2>/dev/null || true)"
+    [ -n "$ep" ] && curl --noproxy '*' -sS -m 2 -H "Authorization: Bearer $sec" \
+      "http://$ep/version" >/dev/null 2>&1 && seen=1
+    i=$((i + 1))
+  done
+  [ "$seen" = 1 ]
+}
+
 # Stop the host router process only — NO proxy change. For callers that manage
 # the proxy themselves (restart, the up-retry).
 _router_stop() {
@@ -1385,16 +1405,17 @@ cmd_router() {
       ensure_singbox_host
       info "starting rule-router on 127.0.0.1:$PORT"
       _start_host_router 1
-      if _router_survives 3; then echo "  ✓ running (pid $(cat "$(host_pidfile)"))"; return 0; fi
-      # it didn't stay up. Show why, then retry ONCE after a settle, this time with
-      # plain logging (rules out both a startup-network blip and the splitter).
-      err "router exited within 3s of starting — see $HOST_LOG"; tail -8 "$HOST_LOG" >&2
+      if _router_ready 5; then echo "  ✓ running (pid $(cat "$(host_pidfile)"))"; return 0; fi
+      # it didn't come up healthy (exited, or alive but the clash API never
+      # answered = wedged). Show why, then retry ONCE after a settle, this time
+      # with plain logging (rules out both a startup-network blip and the splitter).
+      err "router did not come up healthy within 5s (exited or API wedged) — see $HOST_LOG"; tail -8 "$HOST_LOG" >&2
       info "retrying once (plain log, after a short settle)…"
       _router_stop   # clean up the failed process before retrying (proxy untouched)
       sleep 2
       _start_host_router 0
-      if _router_survives 3; then echo "  ✓ running (pid $(cat "$(host_pidfile)"))  [plain log]"; return 0; fi
-      err "router failed to stay up — see $HOST_LOG"; tail -8 "$HOST_LOG" >&2
+      if _router_ready 5; then echo "  ✓ running (pid $(cat "$(host_pidfile)"))  [plain log]"; return 0; fi
+      err "router failed to come up healthy — see $HOST_LOG"; tail -8 "$HOST_LOG" >&2
       _ensure_no_limbo   # never leave the proxy pointing at a router that won't start
       return 1
       ;;
@@ -1625,6 +1646,11 @@ cmd_proxy() {
     on|off|status|check) ;;
     *) die "usage: $PROG proxy [status | check | on [--force] | off | env [--off]]" ;;
   esac
+  # Record the user's proxy intent so the watchdog can stay hands-off when the
+  # proxy is deliberately OFF (a normal running state — router up, routing direct)
+  # and never re-enable a proxy you turned off. 'on' is stamped by up/reload/
+  # restart too (they call this). status/check don't change intent.
+  case "$action" in on) sset proxy_intent on ;; off) sset proxy_intent off ;; esac
   # Non-fatal: with no active network service (e.g. Wi-Fi off on a plane) there's
   # nothing to point at OR turn off — only 'on' truly needs a service. Dying here
   # would abort 'rowt down' (via cmd_revert -> cmd_proxy off) before it kills the
@@ -2049,12 +2075,14 @@ cmd_restart() {
   # is confirmed up. If the bounce fails, the proxy stays OFF (safe, not limbo).
   info "restart: turning the system proxy off first…"
   ( cmd_proxy off ) || true
-  if [ "$(sget mode)" = "vm" ]; then cmd_vm restart; else _router_stop; cmd_router up; fi
-  if host_running; then
+  local up_ok=0
+  if [ "$(sget mode)" = "vm" ]; then cmd_vm restart && host_running && up_ok=1 || true
+  else _router_stop; cmd_router up && up_ok=1 || true; fi
+  if [ "$up_ok" = 1 ]; then
     cmd_proxy on
     sset intent up; sset boot "$(_boot_id)"   # a live restart means "should be up"
   else
-    err "components did not come back up — leaving the system proxy OFF (no limbo). Check '$PROG status' / '$PROG router log'."
+    err "router did not come back up healthy (exited or clash API wedged) — leaving the system proxy OFF (no limbo). Check '$PROG status' / '$PROG router log'."
     return 1
   fi
 }
@@ -2069,10 +2097,22 @@ cmd_reload() {
   else
     cmd_render                            # re-detects the physical NIC -> new bind_interface
   fi
-  if host_running; then cmd_router restart; else cmd_router up; fi
+  # Bounce the router and REQUIRE it to come up healthy (clash API answering, not
+  # just the process alive) before touching the proxy — a wedged start must fail
+  # honestly, not report "reloaded" over a dead tunnel.
+  local mode up_ok=0; mode="$(sget mode)"; mode="${mode:-host}"
+  if host_running; then cmd_router restart && up_ok=1 || true
+  else cmd_router up && up_ok=1 || true; fi
+  # host: cmd_router's own API-readiness gate decides up_ok. vm: health is
+  # managed by cmd_vm, so fall back to the process check.
+  if [ "$mode" = host ]; then
+    [ "$up_ok" = 1 ] || { err "reload: router did not come up healthy — proxy left OFF (no limbo). See '$PROG router log'."; _ensure_no_limbo; return 1; }
+  else
+    host_running || { err "reload: router did not come up — proxy left OFF (no limbo)."; _ensure_no_limbo; return 1; }
+  fi
   cmd_proxy on                            # proxy + bypass on the now-active service
   sset intent up; sset boot "$(_boot_id)" # reload implies the tunnel should be up
-  info "reloaded (mode=$(sget mode))."
+  info "reloaded (mode=$mode)."
 }
 
 # ---------- auto-recover: network-change reload + liveness watchdog ----------
@@ -2316,7 +2356,14 @@ PLIST
       # still resolves if it fires at top-level scope after a fall-through path.
       trap 'rmdir "$CFG/watch.lock" 2>/dev/null || true' EXIT
 
-      local intent; intent="$(sget intent 2>/dev/null || true)"
+      local intent proxy_intent
+      intent="$(sget intent 2>/dev/null || true)"
+      proxy_intent="$(sget proxy_intent 2>/dev/null || true)"
+      # Deliberately proxy-off is a normal running state (router up, routing
+      # direct): the watchdog stays completely hands-off — no reload, no recovery,
+      # and it never re-enables a proxy the user turned off. Nothing to clear
+      # either (the proxy is already off), so a full early-out is correct.
+      if [ "$proxy_intent" = off ]; then exit 0; fi
       # rowt is a user tool with no auto-start, so after a reboot/login it won't be
       # running — but the macOS system proxy it set PERSISTS across reboots.
       if ! host_running; then
