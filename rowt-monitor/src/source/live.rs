@@ -96,9 +96,6 @@ pub struct LiveSource {
     prev_router_up: bool,         // detect router down->up (reload / net switch)
     last_force: Option<Instant>,  // throttle self-heal re-probes
 
-    started: Instant,
-    uptime_base: Option<u64>, // proxy process uptime (secs) sampled once
-
     // System-proxy state ("on"/"other"/"off"), refreshed on a background thread
     // (networksetup is ~100ms; the poll runs on the input loop, so we must not
     // block it). `rowt proxy on/off` shows up within ~2s.
@@ -115,7 +112,6 @@ impl LiveSource {
         let cfg = config_dir();
         let clash_port = env_port("ROWT_CLASH_PORT", 9090);
         let proxy_port = env_port("ROWT_PORT", 7890);
-        let uptime_base = proxy_uptime_secs();
         // Probe every 10 minutes by default (override with ROWT_MONITOR_PROBE_INTERVAL secs).
         let probe_interval = Duration::from_secs(env_port("ROWT_MONITOR_PROBE_INTERVAL", 600).max(5) as u64);
         LiveSource {
@@ -147,8 +143,6 @@ impl LiveSource {
             probe_tx: None,
             prev_router_up: true,
             last_force: None,
-            started: Instant::now(),
-            uptime_base,
             // Seed synchronously so the first frame is correct (no "off" flash).
             sysproxy: Arc::new(Mutex::new(read_system_proxy(proxy_port).to_string())),
             sysproxy_started: false,
@@ -721,10 +715,12 @@ impl Source for LiveSource {
 
         let iface = info.iface.unwrap_or_else(|| "—".to_string());
         let mode = format!("{} · {}", state.get("mode").map(String::as_str).unwrap_or("host"), iface);
-        let uptime = self
-            .uptime_base
-            .map(|b| fmt_uptime(b + self.started.elapsed().as_secs()))
-            .unwrap_or_else(|| "—".to_string());
+        // Read the router process's real uptime every poll — NOT a one-shot base
+        // sampled at launch plus the monitor's own runtime. A reload/recovery
+        // spawns a NEW sing-box, so the counter must track the current process
+        // (resetting on a restart), not keep climbing as if the original were
+        // still alive. "—" when no router process is running.
+        let uptime = proxy_uptime_secs().map(fmt_uptime).unwrap_or_else(|| "—".to_string());
         let router = if router_up {
             format!("running · :{}", self.proxy_port)
         } else {
