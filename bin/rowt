@@ -42,11 +42,14 @@
 #      ROWT_FINAL  bucket for unlisted traffic: direct|corp (default direct)
 #      ROWT_IFACE  force the physical interface (default: auto-detect)
 #      ROWT_DNS_DIRECT  DoH resolver for direct-lane names (default 223.5.5.5)
+#      ROWT_WATCH_INTERVAL  watchdog liveness-probe cadence, seconds (default 120)
+#      ROWT_HEALTH_FAILS/…_COOLDOWN  probe failures before auto-restart (3) / min
+#                   seconds between auto-restarts (600)
 #      SINGBOX_VERSION  pinned sing-box release (default 1.13.14, >=1.12 AnyTLS)
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="2.3.3"
+ROWT_VERSION="2.3.4"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -108,6 +111,13 @@ PING_URL="${ROWT_PING_URL:-https://cp.cloudflare.com/generate_204}"
 PING_TIMEOUT="${ROWT_PING_TIMEOUT:-8}"          # seconds per server
 LOG_LEVEL="${ROWT_LOG_LEVEL:-warn}"             # sing-box log level (info is very noisy)
 AUTO_INTERVAL="${ROWT_AUTO_INTERVAL:-20m}"       # how often 'auto' re-probes all servers
+# Watchdog liveness (see 'watch tick'). Network changes are caught instantly by
+# the LaunchAgent's WatchPaths; this timer only paces the periodic health probe,
+# so it can be relaxed without hurting network-change response.
+WATCH_INTERVAL="${ROWT_WATCH_INTERVAL:-120}"     # seconds between liveness probes (plist StartInterval)
+HEALTH_FAILS="${ROWT_HEALTH_FAILS:-3}"           # consecutive failed probes before an auto-restart
+HEALTH_COOLDOWN="${ROWT_HEALTH_COOLDOWN:-600}"   # min seconds between auto-restarts (anti-thrash)
+HEALTH_URL="${ROWT_HEALTH_URL:-https://cp.cloudflare.com/generate_204}"  # tiny 204, fetched via the proxy
 
 mkdir -p "$CFG" "$BIN" "$LOGDIR"
 
@@ -2024,16 +2034,20 @@ cmd_reload() {
   info "reloaded (mode=$(sget mode))."
 }
 
-# ---------- auto-reload on network change (LaunchAgent) ----------------------
-# A per-user LaunchAgent watches the resolver (which macOS rewrites on every
-# network/route transition) and runs 'watch tick' — a guarded, debounced reload
-# that only fires while the router is up. A scoped passwordless-sudo rule lets it
-# re-point the system proxy on a Wi-Fi<->Ethernet switch without a prompt.
+# ---------- auto-recover: network-change reload + liveness watchdog ----------
+# A per-user LaunchAgent runs 'watch tick' on two triggers: a resolver change
+# (macOS rewrites it on every network/route transition -> a guarded, debounced
+# reload) and a periodic timer (a liveness probe that auto-restarts a wedged
+# tunnel the network-change path can't see). Both only act while the router is
+# up. A scoped passwordless-sudo rule lets it re-point the system proxy on a
+# Wi-Fi<->Ethernet switch without a prompt.
 WATCH_LABEL="club.annaslife.rowt.watch"
 WATCH_PLIST="$HOME/Library/LaunchAgents/$WATCH_LABEL.plist"
 WATCH_SUDOERS="/etc/sudoers.d/rowt"          # no dot in the name, else sudo ignores it
 WATCH_LOG="$LOGDIR/watch.log"
 WATCH_NET="$CFG/watch.net"                   # last-seen network identity (for the log)
+WATCH_HEALTH="$CFG/watch.health"             # consecutive liveness-probe failures (streak counter)
+WATCH_RESTART="$CFG/watch.restart"           # epoch of the last auto-restart (cooldown gate)
 
 _watch_log() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$WATCH_LOG"; }
 
@@ -2052,6 +2066,41 @@ net_id() { # $1=iface
 }
 # Absolute path to THIS rowt — prefer the PATH symlink (stable across upgrades).
 _watch_self() { command -v "$PROG" 2>/dev/null || echo "$HERE/bin/$PROG"; }
+
+# Liveness recovery. Called by 'watch tick' only when the network did NOT change
+# (a change already triggers a full reload). Probes a real request through the
+# proxy; if it fails $HEALTH_FAILS ticks in a row the tunnel is wedged — not a
+# one-off blip — so bounce it in place. A $HEALTH_COOLDOWN gate means a genuinely
+# dead server (nothing local can fix) causes at most one restart per window, not
+# a storm. Silent on success (no log spam); logs only failures and restarts.
+# $1 = active physical interface (may be empty when offline).
+_watch_health() {
+  # Offline (no interface IP) — a restart can't help and a returning network
+  # fires its own resolver-change reload, so just reset the streak and bail.
+  local ip; ip="$(ipconfig getifaddr "${1:-}" 2>/dev/null || true)"
+  [ -n "$ip" ] || { rm -f "$WATCH_HEALTH"; return 0; }
+  # curl exits 0 for any HTTP response (even 4xx/5xx); only a dead/wedged tunnel
+  # (connection refused, timeout) makes it non-zero — exactly our signal.
+  if curl -sS -m 8 -x "http://127.0.0.1:$PORT" -o /dev/null "$HEALTH_URL" 2>/dev/null; then
+    rm -f "$WATCH_HEALTH"                         # healthy — clear the streak
+    return 0
+  fi
+  local fails; fails="$(( $(cat "$WATCH_HEALTH" 2>/dev/null || echo 0) + 1 ))"
+  printf '%s\n' "$fails" > "$WATCH_HEALTH" 2>/dev/null || true
+  if [ "$fails" -lt "$HEALTH_FAILS" ]; then
+    _watch_log "liveness probe failed ($fails/$HEALTH_FAILS) — tunnel not answering via 127.0.0.1:$PORT"
+    return 0
+  fi
+  local now last; now="$(date +%s)"; last="$(cat "$WATCH_RESTART" 2>/dev/null || echo 0)"
+  if [ "$(( now - last ))" -lt "$HEALTH_COOLDOWN" ]; then
+    _watch_log "liveness probe failed ($fails) but last auto-restart was $(( now - last ))s ago (< ${HEALTH_COOLDOWN}s cooldown) — holding off"
+    return 0
+  fi
+  printf '%s\n' "$now" > "$WATCH_RESTART" 2>/dev/null || true
+  rm -f "$WATCH_HEALTH"
+  _watch_log "tunnel wedged ($fails consecutive probe failures) — auto-restarting in place"
+  cmd_restart >>"$WATCH_LOG" 2>&1 && _watch_log "auto-restart ok" || _watch_log "auto-restart FAILED"
+}
 # Only the networksetup proxy toggles get NOPASSWD — nothing else.
 _watch_sudoers_body() {
   local u; u="$(id -un)"
@@ -2079,7 +2128,7 @@ cmd_watch() {
       done
       local envxml v val
       envxml="    <key>PATH</key><string>$agent_path</string>"
-      for v in XDG_CONFIG_HOME ROWT_PORT ROWT_CLASH_PORT ROWT_FINAL ROWT_IFACE ROWT_DNS_DIRECT SINGBOX_VERSION ROWT_LOG_LEVEL; do
+      for v in XDG_CONFIG_HOME ROWT_PORT ROWT_CLASH_PORT ROWT_FINAL ROWT_IFACE ROWT_DNS_DIRECT SINGBOX_VERSION ROWT_LOG_LEVEL ROWT_WATCH_INTERVAL ROWT_HEALTH_FAILS ROWT_HEALTH_COOLDOWN ROWT_HEALTH_URL; do
         val="${!v:-}"; [ -n "$val" ] && envxml="$envxml
     <key>$v</key><string>$val</string>"
       done
@@ -2106,6 +2155,7 @@ cmd_watch() {
 $envxml
   </dict>
   <key>RunAtLoad</key><true/>  <!-- also fire once at login: clear a stale proxy rowt left set -->
+  <key>StartInterval</key><integer>$WATCH_INTERVAL</integer>  <!-- periodic liveness poll (network changes come via WatchPaths, instantly) -->
 
   <key>ThrottleInterval</key><integer>5</integer>
   <key>StandardOutPath</key><string>$WATCH_LOG</string>
@@ -2127,8 +2177,9 @@ PLIST
       launchctl bootstrap "gui/$(id -u)" "$WATCH_PLIST" 2>/dev/null \
         || launchctl load -w "$WATCH_PLIST" 2>/dev/null \
         || die "could not load the LaunchAgent — try: launchctl bootstrap gui/$(id -u) $WATCH_PLIST"
-      info "watch installed — auto-reload on network changes (only while the router is up)."
+      info "watch installed — auto-reload on network changes + liveness watchdog (only while the router is up)."
       echo "  agent:  $WATCH_PLIST"
+      echo "  probe:  every ${WATCH_INTERVAL}s; auto-restart after $HEALTH_FAILS failures (>= ${HEALTH_COOLDOWN}s apart)"
       echo "  log:    $WATCH_LOG"
       echo "  status: $PROG watch status   ·   remove: $PROG watch uninstall"
       ;;
@@ -2172,8 +2223,22 @@ PLIST
         exit 0
       fi
       local lock="$CFG/watch.lock"
-      mkdir "$lock" 2>/dev/null || exit 0        # another tick already handling it
-      trap 'rmdir "$lock" 2>/dev/null || true' EXIT
+      if ! mkdir "$lock" 2>/dev/null; then       # another tick already handling it…
+        # …unless that lock is stale. A tick finishes in seconds (sleep 2 + a
+        # reload), so a lock older than a minute means a previous tick died
+        # without cleaning up. Reclaim it — a leaked lock must never brick the
+        # watchdog permanently (it did once: an EXIT trap that referenced an
+        # out-of-scope local under 'set -u' failed to rmdir, wedging every tick).
+        if [ -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+          rmdir "$lock" 2>/dev/null || true
+          mkdir "$lock" 2>/dev/null || exit 0
+        else
+          exit 0
+        fi
+      fi
+      # Clean the lock by its absolute path, not the local $lock, so the trap
+      # still resolves if it fires at top-level scope after a fall-through path.
+      trap 'rmdir "$CFG/watch.lock" 2>/dev/null || true' EXIT
       sleep 2                                     # let the network settle
       host_running || exit 0                      # may have gone down while we waited
       local ifc cur svc need=0 nid last
@@ -2188,15 +2253,20 @@ PLIST
       if [ "$need" -eq 0 ]; then
         # bind iface + proxy unchanged, so no reload needed. Say which network we're
         # on — and whether it actually moved (same iface, new IP = home->hotspot).
+        # Only log a network move (rare); a bare timer tick / resolver flap stays
+        # silent so the periodic liveness poll doesn't fill the log.
         if [ -n "$last" ] && [ "$last" != "$nid" ]; then
           _watch_log "moved network [$last -> $nid] but iface=$ifc + proxy '$svc' unchanged — no reload needed, skip"
-        else
-          _watch_log "resolver flap — still on [$nid] (iface=$ifc, proxy '$svc') — skip"
         fi
+        # Network is fine — but is the tunnel actually carrying traffic? This is
+        # the self-heal for a wedge that doesn't move the network (server-side
+        # connection death, a stuck UDP socket) — the case change-triggered
+        # reload can't see.
+        _watch_health "$ifc"
         exit 0
       fi
       _watch_log "network change (iface '$cur' -> '$ifc', [$nid], service '$svc') — reloading"
-      cmd_reload >>"$WATCH_LOG" 2>&1 && _watch_log "reload ok" || _watch_log "reload FAILED"
+      cmd_reload >>"$WATCH_LOG" 2>&1 && { _watch_log "reload ok"; rm -f "$WATCH_HEALTH"; } || _watch_log "reload FAILED"
       ;;
     *) die "usage: $PROG watch [install | uninstall | status]" ;;
   esac

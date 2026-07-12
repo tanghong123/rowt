@@ -208,6 +208,14 @@ as the only VPN, "direct" just meant "off my tunnel". escape splits that
   matches (`escape-domains.txt` / `corp-domains.txt`) and remember first-match
   order: corp rules are evaluated before escape. `rowt status` prints the
   bucket counts and validates the generated config.
+- **Wedged tunnel (auto-recover).** If the router process is alive but stops
+  carrying traffic — a stuck socket, a server-side connection death — the
+  `watch` LaunchAgent's liveness probe (a tiny request through the proxy every
+  `ROWT_WATCH_INTERVAL`s, default 120) catches it: after `ROWT_HEALTH_FAILS`
+  consecutive failures (default 3) it runs `rowt restart` in place, gated by
+  `ROWT_HEALTH_COOLDOWN` (default 600s) so a genuinely-dead server can't cause a
+  restart storm. Network *changes* are handled separately and instantly by the
+  same agent's `WatchPaths` reload. Requires `rowt watch install`.
 ```
 
 ## 9. Ideas / TODO (not built yet — need design)
