@@ -50,7 +50,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="2.3.5"
+ROWT_VERSION="2.3.6"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -67,6 +67,8 @@ LOG_MAX_BYTES="${ROWT_LOG_MAX_BYTES:-5242880}"   # rotate a log once it passes 5
 LOG_KEEP="${ROWT_LOG_KEEP:-9}"                    # keep this many rotated generations (.1 … .N)
 HOST_LOG="$CFG/log/host.log"         # rule-router log (per-lane connection noise diverted out)
 LANE_NAMES="block direct corp escape"  # per-lane connection logs: $LOGDIR/lane-<name>.log
+AUDIT_LOG="$CFG/log/audit.log"       # every mutating op (CLI or watchdog): who, what, outcome
+AUDIT_MAX="${ROWT_AUDIT_MAX:-5000}"  # keep the last N audit lines (0 = unlimited)
 lane_log() { printf '%s/lane-%s.log' "$LOGDIR" "$1"; }  # 'timestamp<TAB>domain<TAB>reason' per event
 CACHE="$CFG/cache"                   # pre-fetched artifacts (vm image, guest sing-box)
 OUTBOUND="$CFG/outbound.json"        # legacy single-server file (auto-migrated)
@@ -124,7 +126,37 @@ HEALTH_URL="${ROWT_HEALTH_URL:-https://www.gstatic.com/generate_204}"    # targe
 mkdir -p "$CFG" "$BIN" "$LOGDIR"
 
 err()  { echo "error: $*" >&2; }
-die()  { err "$*"; exit 1; }
+# _AUDIT_OP names the mutating op currently in flight (empty when none), so die()
+# can attribute a failure to it in the audit log without threading context.
+_AUDIT_OP=""
+die()  { err "$*"; [ -n "${_AUDIT_OP:-}" ] && _audit "ABORT ${_AUDIT_OP}: $*"; exit 1; }
+
+# ---------- audit log -------------------------------------------------------
+# One line per mutating operation — CLI or watchdog — so "what changed the
+# system, when, and who did it" is answerable after the fact. The caller context
+# (tty vs launchd) is the key field: it distinguishes a hands-on 'rowt down'
+# from a watchdog action, exactly the ambiguity that made the last incident hard
+# to diagnose. Best-effort and never fatal: auditing must not break a command.
+_audit_ctx() { # pid/parent/tty/version descriptor for the current process
+  local pc tty
+  pc="$(ps -o comm= -p "$PPID" 2>/dev/null | sed 's#.*/##' | tr -d ' ')"; pc="${pc:-?}"
+  tty="$(ps -o tty= -p "$$" 2>/dev/null | tr -d ' ')"
+  case "$tty" in ''|'?'|'??'|'-') tty="no-tty" ;; esac
+  printf 'pid=%s ppid=%s by=%s(%s) v%s' "$$" "$PPID" "$pc" "$tty" "$ROWT_VERSION"
+}
+_audit() { # $* = message
+  [ -n "${AUDIT_LOG:-}" ] || return 0
+  printf '%s  %s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')" "$(_audit_ctx)" "$*" \
+    >> "$AUDIT_LOG" 2>/dev/null || return 0
+  # Bound the file without dropping recent history (no copytruncate — audit is
+  # meant to be kept). Trim only once it drifts past the cap, cheaply.
+  if [ "${AUDIT_MAX:-0}" -gt 0 ]; then
+    local n; n="$(wc -l < "$AUDIT_LOG" 2>/dev/null || echo 0)"
+    if [ "$n" -gt "$(( AUDIT_MAX + 500 ))" ]; then
+      tail -n "$AUDIT_MAX" "$AUDIT_LOG" > "$AUDIT_LOG.tmp" 2>/dev/null && mv -f "$AUDIT_LOG.tmp" "$AUDIT_LOG" 2>/dev/null || true
+    fi
+  fi
+}
 # Progress/diagnostics go to stderr so a function's stdout stays pure data — this
 # is what lets value-returning helpers (used in "$(...)") log safely.
 info() { echo "==> $*" >&2; }
@@ -2124,13 +2156,20 @@ _watch_recover() {
   printf '%s\n' "$now" > "$WATCH_RESTART" 2>/dev/null || true
   rm -f "$WATCH_HEALTH"
   _watch_log "$reason — recovering ($*)"
+  # Attribute this mutation (and any die() inside it) to the watchdog in the
+  # audit log, so a watchdog reload is never mistaken for a hands-on one.
+  _AUDIT_OP="watchdog: $* ($reason)"
+  _audit "BEGIN watchdog recover: $* — $reason"
   "$@" >>"$WATCH_LOG" 2>&1 || true
   sleep 2
   if host_running && _watch_probe; then
     _watch_log "recovery ok — escape tunnel answering"
+    _audit "END   watchdog recover: $* — ok (tunnel answering)"
   else
     _watch_log "recovery INCOMPLETE — router $(host_running && echo up || echo DOWN), tunnel still not answering (retry after ${HEALTH_COOLDOWN}s)"
+    _audit "END   watchdog recover: $* — INCOMPLETE (router $(host_running && echo up || echo down))"
   fi
+  _AUDIT_OP=""
 }
 
 # Liveness check, called by 'watch tick' when the network did NOT change (a
@@ -2293,6 +2332,7 @@ PLIST
         local gsvc; gsvc="$(active_service 2>/dev/null || true)"
         if [ -n "$gsvc" ] && _proxy_pointing_ok "$gsvc"; then
           _watch_log "rowt not running but '$gsvc' proxy still set to 127.0.0.1:$PORT — clearing (stale, no-limbo)"
+          _audit "watchdog: cleared stale system proxy on '$gsvc' (router down, intent=${intent:-unset})"
           sudo -n /usr/sbin/networksetup -setsocksfirewallproxystate "$gsvc" off 2>/dev/null || true
           sudo -n /usr/sbin/networksetup -setwebproxystate       "$gsvc" off 2>/dev/null || true
           sudo -n /usr/sbin/networksetup -setsecurewebproxystate "$gsvc" off 2>/dev/null || true
@@ -2326,7 +2366,10 @@ PLIST
         exit 0
       fi
       _watch_log "network change (iface '$cur' -> '$ifc', [$nid], service '$svc') — reloading"
-      cmd_reload >>"$WATCH_LOG" 2>&1 && { _watch_log "reload ok"; rm -f "$WATCH_HEALTH"; } || _watch_log "reload FAILED"
+      _AUDIT_OP="watchdog: reload (network change '$cur'->'$ifc')"
+      _audit "BEGIN watchdog reload — network change (iface '$cur' -> '$ifc', [$nid])"
+      cmd_reload >>"$WATCH_LOG" 2>&1 && { _watch_log "reload ok"; rm -f "$WATCH_HEALTH"; _audit "END   watchdog reload — ok"; } || { _watch_log "reload FAILED"; _audit "END   watchdog reload — FAILED"; }
+      _AUDIT_OP=""
       ;;
     *) die "usage: $PROG watch [install | uninstall | status]" ;;
   esac
@@ -2434,6 +2477,12 @@ diag_body() {
   _d "----- router log (last 25 lines) -----"
   [ -f "$LOGDIR/host.log" ] && tail -25 "$LOGDIR/host.log" | sed 's/^/  /' || _d "  (no log yet)"
   _d ""
+  _d "----- audit trail: mutations, CLI + watchdog (last 30) -----"
+  [ -f "$AUDIT_LOG" ] && tail -30 "$AUDIT_LOG" | sed 's/^/  /' || _d "  (no audit log yet)"
+  _d ""
+  _d "----- watch log (last 15) -----"
+  [ -f "$WATCH_LOG" ] && tail -15 "$WATCH_LOG" | sed 's/^/  /' || _d "  (no watch log yet)"
+  _d ""
   _d "===== end rowt diag ====="
 }
 
@@ -2465,6 +2514,7 @@ o@lifecycle@connections [lane|-w]@live view: active connections + which lane eac
 o@lifecycle@monitor@read-only TUI: live connections, errors/blocked, server health
 o@lifecycle@run <command> [args…]@auto-pick a proxy env that reaches the net, then run the command
 a@lifecycle@report@full diagnostic report to a file (masked; shareable)
+o@lifecycle@audit [-n N|all|path|clear]@who changed what, when (CLI + watchdog mutations)
 o@servers & selection@server <list|add|rm|clear|import|dump>@manage the server pool
 o@servers & selection@sub <list|add|rm|update|clear|import|dump>@manage subscriptions
 c@servers & selection@use <tag>|auto@pin a server (manual) or auto-pick fastest live
@@ -2651,6 +2701,26 @@ $PROG report — full diagnostic report.
 Writes a detailed report (deps, state, configs, per-server reachability, DNS,
 through-proxy tests, log tail) to ~/.config/rowt/diag-*.txt, secrets masked —
 safe to share when something is wrong. Keeps the last 5.
+EOF
+;;
+    audit) cat <<EOF
+$PROG audit — the mutation trail.
+
+Every state-changing operation — whether you ran it or the 'watch' agent did —
+appends a line to $AUDIT_LOG:
+  <timestamp>  pid=.. ppid=.. by=<parent>(<tty>) v<ver>  BEGIN|END|ABORT <op> ...
+The 'by=' field is the point: 'by=zsh(s001)' is a hands-on command, 'by=launchd'
+is the watchdog — so "did I stop it, or did the watchdog?" is answerable. BEGIN
+is written before the work, so even a command that hangs leaves a trace.
+
+  $PROG audit            last 40 lines                                 [default]
+  $PROG audit -n <N>     last N lines
+  $PROG audit all        the whole log
+  $PROG audit path       print the log path
+  $PROG audit clear      truncate it
+
+Read-only commands are not recorded. Bounded to the last $AUDIT_MAX lines
+(ROWT_AUDIT_MAX; 0 = unlimited).
 EOF
 ;;
     server) cat <<EOF
@@ -2898,26 +2968,42 @@ rotate_log() { # $1=logfile
   : > "$f"
 }
 
-main() {
-  migrate
-  rotate_log "$HOST_LOG"
-  rotate_log "$LOGDIR/watch.log"
-  local _l; for _l in $LANE_NAMES; do rotate_log "$(lane_log "$_l")"; done
-  # no args: greet with the onboarding checklist, then the full command list
-  if [ "$#" -eq 0 ]; then cmd_onboard; echo; usage; return 0; fi
+# True for read-only commands (and the read-only sub-forms of mixed commands),
+# so the audit log records only operations that actually change the system. The
+# default is FALSE (audit it) — better to over-record than miss a mutation. Note
+# 'watch tick' is treated read-only here: it fires every couple of minutes and
+# usually does nothing; the rare tick that DOES mutate audits itself explicitly.
+_is_readonly() { # $1=cmd  $2=first arg
+  case "$1" in
+    status|report|explain|route|connections|conns|monitor|mon|ping|probe|version|\
+    run|onboard|shell-init|completion|_complete|help|audit|-h|--help|--version|-V) return 0 ;;
+    proxy)  case "${2:-status}" in on|off) return 1 ;; *) return 0 ;; esac ;;
+    router) case "${2:-status}" in up|down|restart) return 1 ;; *) return 0 ;; esac ;;
+    vm)     case "${2:-status}" in up|down|restart|delete) return 1 ;; *) return 0 ;; esac ;;
+    watch)  case "${2:-status}" in install|uninstall) return 1 ;; *) return 0 ;; esac ;;
+    escape|corp|block|direct) case "${2:-}" in ''|errors|stats|list|log) return 0 ;; *) return 1 ;; esac ;;
+    server) case "${2:-}" in ''|list|ls|show) return 0 ;; *) return 1 ;; esac ;;
+    sub)    case "${2:-}" in ''|list|ls|show|count) return 0 ;; *) return 1 ;; esac ;;
+    *) return 1 ;;
+  esac
+}
+
+# Show the audit trail (default: recent tail).
+cmd_audit() {
+  case "${1:-}" in
+    clear) : > "$AUDIT_LOG" 2>/dev/null && info "audit log cleared ($AUDIT_LOG)" || die "could not clear $AUDIT_LOG" ;;
+    path)  echo "$AUDIT_LOG" ;;
+    ""|-n) local n="${2:-40}"; [ -f "$AUDIT_LOG" ] || { echo "no audit log yet ($AUDIT_LOG)"; return 0; }
+           echo "# $AUDIT_LOG (last $n)"; tail -n "$n" "$AUDIT_LOG" ;;
+    all)   [ -f "$AUDIT_LOG" ] && cat "$AUDIT_LOG" || echo "no audit log yet ($AUDIT_LOG)" ;;
+    *)     die "usage: $PROG audit [ -n <N> | all | path | clear ]" ;;
+  esac
+}
+
+# The command table. Extracted from main() so mutating invocations can be
+# bracketed by audit BEGIN/END without duplicating the dispatch.
+run_command() {
   local cmd="$1"; shift
-  # help routing (single system): 'help [cmd]', top-level -h/--help, and the
-  # systematic '<cmd> --help' / '<cmd> -h' for every subcommand.
-  case "$cmd" in
-    help)         show_help "${1:-}"; return $? ;;
-    -h|--help)    usage; return 0 ;;
-    --version|-V) echo "$PROG $ROWT_VERSION"; return 0 ;;
-  esac
-  # exec-wrappers pass all args through to the wrapped program, so don't let a
-  # '--help'/'-h' meant for it trigger rowt's own help. (Use 'rowt help <cmd>'.)
-  case "$cmd" in run|monitor|mon) ;; *)
-    case " $* " in *" --help "*|*" -h "*) show_help "$cmd"; return $? ;; esac ;;
-  esac
   case "$cmd" in
     # lifecycle
     onboard)    cmd_onboard "$@" ;;
@@ -2928,6 +3014,7 @@ main() {
     watch)      cmd_watch "$@" ;;
     status)     cmd_status "$@" ;;
     report)     cmd_diag "$@" ;;
+    audit)      cmd_audit "$@" ;;
     explain|route) cmd_explain "$@" ;;   # 'route' kept as a hidden alias (renamed to avoid router/route confusion)
     connections|conns) cmd_connections "$@" ;;
     monitor|mon) cmd_monitor "$@" ;;
@@ -2956,6 +3043,43 @@ main() {
     version)    echo "$PROG $ROWT_VERSION" ;;
     *) err "unknown command: $cmd"; echo; usage; exit 1 ;;
   esac
+}
+
+main() {
+  migrate
+  rotate_log "$HOST_LOG"
+  rotate_log "$LOGDIR/watch.log"
+  local _l; for _l in $LANE_NAMES; do rotate_log "$(lane_log "$_l")"; done
+  # no args: greet with the onboarding checklist, then the full command list
+  if [ "$#" -eq 0 ]; then cmd_onboard; echo; usage; return 0; fi
+  local cmd="$1"; shift
+  # help routing (single system): 'help [cmd]', top-level -h/--help, and the
+  # systematic '<cmd> --help' / '<cmd> -h' for every subcommand.
+  case "$cmd" in
+    help)         show_help "${1:-}"; return $? ;;
+    -h|--help)    usage; return 0 ;;
+    --version|-V) echo "$PROG $ROWT_VERSION"; return 0 ;;
+  esac
+  # exec-wrappers pass all args through to the wrapped program, so don't let a
+  # '--help'/'-h' meant for it trigger rowt's own help. (Use 'rowt help <cmd>'.)
+  case "$cmd" in run|monitor|mon) ;; *)
+    case " $* " in *" --help "*|*" -h "*) show_help "$cmd"; return $? ;; esac ;;
+  esac
+  # Read-only commands run untouched; mutating ones are bracketed in the audit
+  # log (BEGIN before, END+rc after; a die() in between records an ABORT). The
+  # BEGIN line lands BEFORE the work, so even a command that hangs (e.g. proxy
+  # teardown stalling on a dead network) leaves a trace of what was attempted.
+  if _is_readonly "$cmd" "${1:-}"; then
+    run_command "$cmd" "$@"
+    return $?
+  fi
+  local _op="$cmd${*:+ $*}" _t0="$SECONDS" _rc=0
+  _AUDIT_OP="$_op"
+  _audit "BEGIN $_op"
+  run_command "$cmd" "$@" || _rc=$?
+  _audit "END   $_op rc=$_rc ($(( SECONDS - _t0 ))s)"
+  _AUDIT_OP=""
+  return "$_rc"
 }
 
 main "$@"

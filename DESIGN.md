@@ -226,6 +226,15 @@ as the only VPN, "direct" just meant "off my tunnel". escape splits that
 
   Network *changes* are handled separately and instantly by the same agent's
   `WatchPaths` reload. Requires `rowt watch install`.
+- **Diagnosing after the fact (audit log).** Every mutating operation — a CLI
+  command you ran or an action the `watch` agent took — appends a line to
+  `~/.config/rowt/log/audit.log` (`rowt audit`): `BEGIN`/`END`/`ABORT`, timing,
+  and a `by=<parent>(<tty>)` field. That field disambiguates a hands-on
+  `rowt down` (`by=zsh`) from a watchdog reload (`by=launchd`) — the exact
+  question that was unanswerable when a router went down mid-incident. `BEGIN`
+  is written before the work, so a command that *hangs* (e.g. proxy teardown
+  stalling on a dead network) still leaves a trace. Read-only commands and the
+  high-frequency `watch tick` no-op aren't recorded. Included in `rowt report`.
 ```
 
 ## 9. Ideas / TODO (not built yet — need design)
