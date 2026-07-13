@@ -215,7 +215,29 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, app: &App, present: bool, h
     };
     put(buf, x0 + 48 + reserve, y0 + 3, &ms, ms_st);
     put(buf, x0 + 70, y0 + 3, "router", dimmer);
-    put(buf, x0 + 78, y0 + 3, &app.snap.identity.router, bright);
+    // "running · N%" (CPU colored — orange/red flags a spin/wedge) or, when down,
+    // "down · <reason>" in red so a glance says what to fix.
+    if id.router_up {
+        put(buf, x0 + 78, y0 + 3, &id.router, bright);
+        if let Some(cpu) = id.router_cpu {
+            let cpu_c = if cpu >= 120.0 {
+                theme::PERSISTENT
+            } else if cpu >= 50.0 {
+                theme::UP
+            } else {
+                theme::DIRECT
+            };
+            put(buf, x0 + 78 + dw(&id.router) + 1, y0 + 3, "·", dimmer);
+            put(buf, x0 + 78 + dw(&id.router) + 3, y0 + 3, &format!("{cpu:.0}%"), theme::fg(cpu_c));
+        }
+    } else {
+        let down = if id.router_reason.is_empty() {
+            "down".to_string()
+        } else {
+            format!("down · {}", id.router_reason)
+        };
+        put(buf, x0 + 78, y0 + 3, &down, theme::fg(theme::PERSISTENT));
+    }
 
     // Row 4: system proxy / config. The left-column value column is at 47 (one
     // wider than the design's 46) so the 9-wide "sys proxy" label keeps a gap;
@@ -243,8 +265,16 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, app: &App, present: bool, h
     };
     put(buf, x0 + 37, y0 + 4, "sys proxy", label_st);
     put(buf, x0 + 47, y0 + 4, &proxy, proxy_st);
-    put(buf, x0 + 70, y0 + 4, "config", dimmer);
-    put(buf, x0 + 78, y0 + 4, &app.snap.identity.config, bright);
+    // Watchdog LaunchAgent: green = loaded/active, orange = installed-but-stopped
+    // (auto-recovery won't fire — worth noticing), dim = not installed.
+    put(buf, x0 + 70, y0 + 4, "watch", dimmer);
+    let watch = &app.snap.identity.watch;
+    let watch_st = match watch.as_str() {
+        "on" => theme::fg(theme::DIRECT),
+        "off" => theme::fg(theme::UP),
+        _ => theme::fg(theme::DIM),
+    };
+    put(buf, x0 + 78, y0 + 4, watch, watch_st);
 }
 
 /// Draw box borders + captions row / rule row / bottom row for a box spanning

@@ -650,7 +650,6 @@ impl Source for LiveSource {
         let Some(info) = self.host_info() else {
             return self.fallback.poll(window, lane);
         };
-        let config_ok = info.config_ok;
         let escape = info.escape;
         self.escape_members = info.members;
         let state = std::fs::read_to_string(self.cfg.join("state"))
@@ -715,16 +714,25 @@ impl Source for LiveSource {
 
         let iface = info.iface.unwrap_or_else(|| "—".to_string());
         let mode = format!("{} · {}", state.get("mode").map(String::as_str).unwrap_or("host"), iface);
-        // Read the router process's real uptime every poll — NOT a one-shot base
-        // sampled at launch plus the monitor's own runtime. A reload/recovery
-        // spawns a NEW sing-box, so the counter must track the current process
-        // (resetting on a restart), not keep climbing as if the original were
-        // still alive. "—" when no router process is running.
-        let uptime = proxy_uptime_secs().map(fmt_uptime).unwrap_or_else(|| "—".to_string());
-        let router = if router_up {
-            format!("running · :{}", self.proxy_port)
+        // Read the router process stats every poll — NOT a one-shot base sampled
+        // at launch plus the monitor's own runtime. A reload/recovery spawns a
+        // NEW sing-box, so the counter must track the current process (resetting
+        // on a restart). None = no sing-box process running.
+        let sb = sing_box_stat();
+        let uptime = sb.map(|(s, _)| fmt_uptime(s)).unwrap_or_else(|| "—".to_string());
+        // Router line: "running" carries CPU% (a spinning/wedged sing-box shows
+        // ~100%+), and "down" carries WHY, so a glance says what to fix:
+        //   wedged  — process alive but the clash API is unreachable (hung)
+        //   config  — host.json isn't valid, so it can't start
+        //   stopped — no process at all (crashed / never started)
+        let (router, router_cpu, router_reason) = if router_up {
+            ("running".to_string(), sb.map(|(_, c)| c), String::new())
+        } else if sb.is_some() {
+            ("down".to_string(), None, "wedged".to_string())
+        } else if !info.config_ok {
+            ("down".to_string(), None, "config".to_string())
         } else {
-            "down".to_string()
+            ("down".to_string(), None, "stopped".to_string())
         };
         // System-proxy state only (on/other/off) — NOT the router; the interface
         // is already shown in `mode`, so no suffix here. Refreshed on a background
@@ -739,10 +747,12 @@ impl Source for LiveSource {
                 server_name: if h.active.is_empty() { "—".into() } else { h.active.clone() },
                 server_ms: h.active_ms,
                 router,
+                router_cpu,
+                router_reason,
                 router_up,
                 active_ok: h.active_ok,
                 proxy,
-                config: if config_ok { "host.json OK".into() } else { "host.json ERR".into() },
+                watch: read_watch_status(),
                 name_reserve,
             },
             all,
@@ -996,15 +1006,41 @@ fn fmt_uptime(secs: u64) -> String {
     }
 }
 
-/// Best-effort proxy process uptime (seconds), via `ps` on the sing-box process.
-fn proxy_uptime_secs() -> Option<u64> {
+/// Watchdog LaunchAgent state for the header: "on" (loaded/active), "off"
+/// (installed but not loaded), or "—" (not installed). Cheap: one `launchctl
+/// list` call, plus a plist stat only when it isn't loaded.
+fn read_watch_status() -> String {
+    const LABEL: &str = "club.annaslife.rowt.watch";
+    let loaded = std::process::Command::new("launchctl")
+        .args(["list", LABEL])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if loaded {
+        return "on".into();
+    }
+    // Not loaded: distinguish "installed but stopped" from "never installed".
+    let installed = std::env::var_os("HOME")
+        .map(|h| PathBuf::from(h).join("Library/LaunchAgents").join(format!("{LABEL}.plist")))
+        .is_some_and(|p| p.exists());
+    if installed { "off".into() } else { "—".into() }
+}
+
+/// Best-effort sing-box process stats: (uptime secs, cpu percent). None when no
+/// sing-box process is running — which also tells the router-down reason apart
+/// (no process = stopped, vs. alive-but-API-down = wedged). One pgrep + one ps.
+fn sing_box_stat() -> Option<(u64, f32)> {
     let out = std::process::Command::new("pgrep").arg("-f").arg("sing-box").output().ok()?;
     let pid = String::from_utf8_lossy(&out.stdout).lines().next()?.trim().to_string();
     if pid.is_empty() {
         return None;
     }
-    let out = std::process::Command::new("ps").args(["-o", "etime=", "-p", &pid]).output().ok()?;
-    parse_etime(String::from_utf8_lossy(&out.stdout).trim())
+    let out = std::process::Command::new("ps").args(["-o", "etime=,%cpu=", "-p", &pid]).output().ok()?;
+    let line = String::from_utf8_lossy(&out.stdout);
+    let mut parts = line.split_whitespace(); // "16:57 3.2" — etime has no spaces
+    let secs = parse_etime(parts.next()?)?;
+    let cpu = parts.next().and_then(|c| c.parse::<f32>().ok()).unwrap_or(0.0);
+    Some((secs, cpu))
 }
 
 /// Parse `ps` etime `[[dd-]hh:]mm:ss` into seconds.

@@ -153,13 +153,15 @@ pub struct Identity {
     pub uptime: String,      // e.g. "3h 15m"
     pub server_name: String,     // e.g. "JP-Tokyo" (or "auto")
     pub server_ms: Option<u32>,  // active server RTT; None -> shown as "—"
-    pub router: String,      // e.g. "running · :7890"
+    pub router: String,      // base word: "running" | "down"
+    pub router_cpu: Option<f32>, // sing-box CPU% when running (for "running · N%")
+    pub router_reason: String,   // when down: "wedged" | "config" | "stopped" (else "")
     pub router_up: bool,     // proxy/router reachable — drives the LIVE/DOWN dot
     /// Active server probe result: Some(true) = reachable, Some(false) = failing
     /// (→ ERROR), None = not probed yet. Drives the LIVE/ERROR distinction.
     pub active_ok: Option<bool>,
     pub proxy: String,       // e.g. "on · Wi-Fi"
-    pub config: String,      // e.g. "host.json OK"
+    pub watch: String,       // watchdog LaunchAgent: "on" | "off" | "—"
     /// Columns reserved for the active server name in the header, so the ms
     /// column doesn't jump as the active server changes. Sized to the pool's
     /// longest name (bounded). 8 reproduces the golden (`JP-Tokyo`).
