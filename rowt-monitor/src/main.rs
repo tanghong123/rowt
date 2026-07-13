@@ -31,6 +31,7 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut force_fixtures = false;
     let mut render: Option<String> = None;
+    let mut render_ansi_spec: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -47,6 +48,10 @@ fn main() -> Result<()> {
                 i += 1;
                 render = Some(args.get(i).cloned().unwrap_or_default());
             }
+            "--render-ansi" => {
+                i += 1;
+                render_ansi_spec = Some(args.get(i).cloned().unwrap_or_default());
+            }
             other => {
                 eprintln!("rowt-monitor: unknown argument '{}'", other);
                 print_help();
@@ -58,6 +63,11 @@ fn main() -> Result<()> {
 
     if let Some(spec) = render {
         return render_frame(&spec);
+    }
+    if let Some(spec) = render_ansi_spec {
+        let (w, h) = parse_wh(&spec).ok_or_else(|| anyhow::anyhow!("bad --render-ansi spec '{}', want WxH", spec))?;
+        print!("{}", rowt_monitor::render_ansi(w, h));
+        return Ok(());
     }
 
     let source: Box<dyn Source> = if force_fixtures {
@@ -71,7 +81,7 @@ fn main() -> Result<()> {
 fn print_help() {
     println!(
         "rowt monitor — read-only proxy observer\n\n\
-         USAGE:\n  rowt-monitor [--fixtures] [--render WxH] [--version]\n\n\
+         USAGE:\n  rowt-monitor [--fixtures] [--render WxH] [--render-ansi WxH] [--version]\n\n\
          KEYS: ↑↓/jk move · ←→/hl pane · Tab focus · f lane · w window · y copy · p pause · ? help · q quit"
     );
 }

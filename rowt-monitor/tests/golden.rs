@@ -270,24 +270,25 @@ fn colors_spot_check() {
     assert_eq!(fg, Color::Rgb(134, 192, 122));
     assert!(m.contains(Modifier::BOLD));
 
-    // 'all' row name at (4,7): bold bright white.
-    let (sym, fg, m) = at(4, 7);
+    // 'all' row name at (2,7): bold bright white. (Single-frame layout: content
+    // starts at col 2; a blank breathing row under the logo puts the summary at 7.)
+    let (sym, fg, m) = at(2, 7);
     assert_eq!(sym, "a");
     assert_eq!(fg, Color::Rgb(233, 236, 243));
     assert!(m.contains(Modifier::BOLD));
 
-    // Header up-arrow '↑' at (11,7): up orange.
-    let (sym, fg, _) = at(11, 7);
+    // Header up-arrow '↑' at (9,7): up orange.
+    let (sym, fg, _) = at(9, 7);
     assert_eq!(sym, "↑");
     assert_eq!(fg, Color::Rgb(224, 163, 94));
 
-    // Errors TYPE is colored by category. In the stacked 96 frame the errors
-    // data rows begin at row 28: row 28 is `timeout` (persistent red), row 31
-    // is `dns` (transient orange). TYPE column is at x = pane_x0(3) + 9 = 12.
-    let (sym, fg, _) = at(12, 28);
+    // Errors TYPE is colored by category. Errors is now the right column; its
+    // data rows begin at row 13: row 13 is `timeout` (persistent red), row 16 is
+    // `dns` (transient orange). The TYPE column sits at x = 65 in the 96 frame.
+    let (sym, fg, _) = at(65, 13);
     assert_eq!(sym, "t"); // timeout
     assert_eq!(fg, Color::Rgb(224, 101, 94), "persistent = red");
-    let (sym, fg, _) = at(12, 31);
+    let (sym, fg, _) = at(65, 16);
     assert_eq!(sym, "d"); // dns
     assert_eq!(fg, Color::Rgb(224, 163, 94), "transient = orange");
 }

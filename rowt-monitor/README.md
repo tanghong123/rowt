@@ -36,10 +36,12 @@ to toggle it (hover-highlights).
 
 ## Layout
 
+- One **outer frame** (the only rounded corners); everything inside connects to
+  it with `├ ┤` rules — no inset boxes.
 - **Identity band** (neofetch-style logo + session facts) on top.
-- **`live · connections`** and **`errors & blocked`** panes — side by side at
-  ≥130 columns (one split box), stacked below 130.
-- Full-width **`server health`** strip at the bottom.
+- **`live · connections`** and **`errors & blocked`** panes — side by side,
+  split by a center rule (tab labels shorten on narrow terminals).
+- Full-width **`server health`** strip, merged onto the closing `┴` rule.
 
 ## Data sources
 

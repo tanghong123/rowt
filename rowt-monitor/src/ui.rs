@@ -51,86 +51,87 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, present: bool) -> Hit {
     }
     let border = theme::fg(theme::BORDER);
 
-    // ---- outer frame ----
-    put(buf, x0, y0, "╭", border);
-    hfill(buf, x0 + 1, x0 + w - 2, y0, '─', border);
-    put(buf, x0 + w - 1, y0, "╮", border);
-    for y in (y0 + 1)..(y0 + h - 1) {
-        put(buf, x0, y, "│", border);
-        put(buf, x0 + w - 1, y, "│", border);
-    }
-    put(buf, x0, y0 + h - 1, "╰", border);
-    hfill(buf, x0 + 1, x0 + w - 2, y0 + h - 1, '─', border);
-    put(buf, x0 + w - 1, y0 + h - 1, "╯", border);
+    // Single outer frame. The two panes and the server strip are NOT inset boxes;
+    // they connect straight into this frame with ├ ┤ rules (┬ ┼ ┴ at the column
+    // split), so the frame owns the only rounded corners. The "box" bounds ARE the
+    // frame edges — all column/row math below is unchanged from the inset version,
+    // only the border *drawing* differs.
+    let xl = x0;
+    let xr = x0 + w - 1;
 
-    // ---- vertical layout ----
-    let side = w >= 130;
-    let health_top = y0 + h - 5;
-    let panes_top = y0 + 6;
-    let panes_bot = health_top.saturating_sub(2); // blank row sits at health_top-1
+    // Column split: conn width L · divider · err width R, over the full interior.
+    let interior = (xr - 1) - (xl + 1) + 1; // content cells between the frame sides
+    let err_w = split_err_width(interior);
+    let div = xr - 1 - err_w; // center divider column
 
-    let xl = x0 + 2; // inner box left border
-    let xr = x0 + w - 3; // inner box right border
+    // Vertical layout (rows, top→bottom). One blank row (y0+5) sits below the
+    // identity band to give the logo breathing room; then the split divider.
+    // Server health merges onto the closing ┴ rule with one breathing row above.
+    let split_y = y0 + 6; // ├─┤ live · connections ├─┬─┤ errors & blocked ├─┤
+    let hdr_y = split_y + 1; // summary/rate rows
+    let cross_y = split_y + 5; // ├───┼───┤
+    let col_y = split_y + 6; // column headers
+    let list_y = split_y + 7; // data rows
+    let bottom = y0 + h - 1; // frame bottom ╰──╯
+    let chips_y = bottom - 1;
+    let stats_y = bottom - 2;
+    let merge_y = bottom - 3; // ├──┴─┤ server health ├─┤
+    let breathe_y = bottom - 4; // blank split row (center │ kept)
+    let list_bot = breathe_y - 1; // last data row
+    let list_h = (list_bot as i32 - list_y as i32 + 1).max(0) as usize;
 
     let mut hit = Hit {
-        side_by_side: side,
+        side_by_side: true,
         ..Default::default()
     };
 
+    // ---- frame top + identity band ----
+    put(buf, xl, y0, "╭", border);
+    hfill(buf, xl + 1, xr - 1, y0, '─', border);
+    put(buf, xr, y0, "╮", border);
+    for y in (y0 + 1)..=(y0 + 5) {
+        put(buf, xl, y, "│", border);
+        put(buf, xr, y, "│", border);
+    }
     draw_identity(buf, x0, y0, app, present, &mut hit);
 
-    if side {
-        // One split box. Divider column (see brief): connections/errors leftover
-        // splits ~5:2; errors held to >= 1/3 of interior.
-        let interior = (xr - 1) - (xl + 1) + 1; // content cells between borders
-        let err_w = split_err_width(interior);
-        let div = xr - 1 - err_w; // divider column
-        draw_box_frame(buf, xl, xr, panes_top, panes_bot, Some(div), border);
-        // captions
-        draw_caption(buf, xl, panes_top, "live · connections", app, present, Focus::Conn, border);
-        draw_caption(buf, div, panes_top, "errors & blocked", app, present, Focus::Err, border);
+    // ---- split divider (identity → tables), with both pane captions ----
+    rule_row(buf, xl, xr, split_y, Some((div, "┬")), border);
+    draw_caption(buf, xl, split_y, "live · connections", app, present, Focus::Conn, border);
+    draw_caption(buf, div, split_y, "errors & blocked", app, present, Focus::Err, border);
 
-        let hdr_y = panes_top + 1;
-        let col_y = panes_top + 6;
-        let list_y = panes_top + 7;
-        let list_h = panes_bot.saturating_sub(list_y) as usize; // rows before bottom border
-
-        // left pane
-        let lx0 = xl + 1;
-        let lw = div - lx0;
-        draw_conn_pane(buf, lx0, lw, hdr_y, col_y, list_y, list_h, app, present, &mut hit);
-        // right pane
-        let rx0 = div + 1;
-        let rw = (xr - 1) - rx0 + 1;
-        draw_err_pane(buf, rx0, rw, hdr_y, col_y, list_y, list_h, app, present, &mut hit);
-    } else {
-        // Stacked: connections box, blank, errors box. Split list rows evenly.
-        let total = panes_bot as i32 - panes_top as i32 + 1;
-        let list_total = (total - 17).max(2);
-        let r1 = ((list_total + 1) / 2) as u16;
-        let r2 = (list_total / 2) as u16;
-
-        // connections box
-        let c_top = panes_top;
-        let c_bot = c_top + 7 + r1;
-        draw_box_frame(buf, xl, xr, c_top, c_bot, None, border);
-        draw_caption(buf, xl, c_top, "live · connections", app, present, Focus::Conn, border);
-        let cx0 = xl + 1;
-        let cw = (xr - 1) - cx0 + 1;
-        draw_conn_pane(buf, cx0, cw, c_top + 1, c_top + 6, c_top + 7, r1 as usize, app, present, &mut hit);
-
-        // errors box
-        let e_top = c_bot + 2; // blank row between
-        let e_bot = panes_bot;
-        draw_box_frame(buf, xl, xr, e_top, e_bot, None, border);
-        draw_caption(buf, xl, e_top, "errors & blocked", app, present, Focus::Err, border);
-        draw_err_pane(buf, cx0, cw, e_top + 1, e_top + 6, e_top + 7, r2 as usize, app, present, &mut hit);
+    // ---- pane rows: sides + center │, with the header cross rule at cross_y ----
+    for y in hdr_y..=breathe_y {
+        if y == cross_y {
+            rule_row(buf, xl, xr, y, Some((div, "┼")), border);
+        } else {
+            put(buf, xl, y, "│", border);
+            put(buf, xr, y, "│", border);
+            put(buf, div, y, "│", border);
+        }
     }
 
-    // Chips render at xl+2 with width (xr-xl-3) — see draw_health; feed it back so
-    // App can freeze/scroll the ring to keep the selection visible.
+    // left / right pane content
+    let lx0 = xl + 1;
+    let lw = div - lx0;
+    draw_conn_pane(buf, lx0, lw, hdr_y, col_y, list_y, list_h, app, present, &mut hit);
+    let rx0 = div + 1;
+    let rw = (xr - 1) - rx0 + 1;
+    draw_err_pane(buf, rx0, rw, hdr_y, col_y, list_y, list_h, app, present, &mut hit);
+
+    // ---- server health: merge rule + full-width rows + frame bottom ----
+    for y in [stats_y, chips_y] {
+        put(buf, xl, y, "│", border);
+        put(buf, xr, y, "│", border);
+    }
+    put(buf, xl, bottom, "╰", border);
+    hfill(buf, xl + 1, xr - 1, bottom, '─', border);
+    put(buf, xr, bottom, "╯", border);
+
+    // Chips render at xl+2 with width (xr-xl-3); feed it back so App can
+    // freeze/scroll the ring to keep the selection visible.
     hit.strip_w = (xr.saturating_sub(xl)).saturating_sub(3);
-    draw_health(buf, xl, xr, health_top, app, present, border, &mut hit);
+    draw_health(buf, xl, xr, div, merge_y, stats_y, chips_y, app, present, border, &mut hit);
 
     // App-level drag selection highlight (secondary copy path).
     if !present {
@@ -277,45 +278,15 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, app: &App, present: bool, h
     put(buf, x0 + 78, y0 + 4, watch, watch_st);
 }
 
-/// Draw box borders + captions row / rule row / bottom row for a box spanning
-/// columns [xl..xr], rows [top..bot]. `div` adds a vertical rule.
-fn draw_box_frame(buf: &mut Buffer, xl: u16, xr: u16, top: u16, bot: u16, div: Option<u16>, border: Style) {
-    // top and captions are drawn by draw_caption; here we do the horizontal top
-    // fill baseline (caption overwrites the left part) plus corners.
-    put(buf, xl, top, "╭", border);
-    hfill(buf, xl + 1, xr - 1, top, '─', border);
-    put(buf, xr, top, "╮", border);
-    if let Some(d) = div {
-        put(buf, d, top, "┬", border);
-    }
-
-    // rule row is 5 rows below top (after 4 header rows)
-    let rule = top + 5;
-    put(buf, xl, rule, "├", border);
-    hfill(buf, xl + 1, xr - 1, rule, '─', border);
-    put(buf, xr, rule, "┤", border);
-    if let Some(d) = div {
-        put(buf, d, rule, "┼", border);
-    }
-
-    // vertical borders for every content row (the rule row already has ├─┼─┤)
-    for y in (top + 1)..bot {
-        if y == rule {
-            continue;
-        }
-        put(buf, xl, y, "│", border);
-        put(buf, xr, y, "│", border);
-        if let Some(d) = div {
-            put(buf, d, y, "│", border);
-        }
-    }
-
-    // bottom
-    put(buf, xl, bot, "╰", border);
-    hfill(buf, xl + 1, xr - 1, bot, '─', border);
-    put(buf, xr, bot, "╯", border);
-    if let Some(d) = div {
-        put(buf, d, bot, "┴", border);
+/// A horizontal rule that connects into the frame: `├` at `xl`, `─` fill, `┤` at
+/// `xr`, and an optional junction glyph at a divider column (`┬`/`┼`/`┴`). Section
+/// captions (`─┤ label ├`) are overlaid afterwards by `draw_caption`.
+fn rule_row(buf: &mut Buffer, xl: u16, xr: u16, y: u16, junction: Option<(u16, &str)>, border: Style) {
+    put(buf, xl, y, "├", border);
+    hfill(buf, xl + 1, xr - 1, y, '─', border);
+    put(buf, xr, y, "┤", border);
+    if let Some((d, glyph)) = junction {
+        put(buf, d, y, glyph, border);
     }
 }
 
@@ -588,9 +559,26 @@ fn draw_windows(buf: &mut Buffer, x0: u16, w: u16, y: u16, app: &App, hit: &mut 
 
 // ---------------- server health ----------------
 
+/// Server health connects onto the closing `┴` merge rule (no inset box): the
+/// `merge_y` rule carries the `server health` tab, then full-width stats + chips
+/// rows. `div` is the column split above, closed here by `┴`.
 #[allow(clippy::too_many_arguments)]
-fn draw_health(buf: &mut Buffer, xl: u16, xr: u16, top: u16, app: &App, present: bool, border: Style, hit: &mut Hit) {
-    draw_box_frame_health(buf, xl, xr, top, border);
+fn draw_health(
+    buf: &mut Buffer,
+    xl: u16,
+    xr: u16,
+    div: u16,
+    merge_y: u16,
+    stats_y: u16,
+    chips_y: u16,
+    app: &App,
+    present: bool,
+    border: Style,
+    hit: &mut Hit,
+) {
+    // Merge divider: the two panes close into ┴ here, and the section tab rides
+    // the same rule (right of the ┴).
+    rule_row(buf, xl, xr, merge_y, Some((div, "┴")), border);
     // Caption gains a focus ring like the panes (§5.1): brighten when focused,
     // amber once a chip is selected (frozen strip).
     let focused = !present && app.focus == Focus::Health;
@@ -601,9 +589,9 @@ fn draw_health(buf: &mut Buffer, xl: u16, xr: u16, top: u16, app: &App, present:
     } else {
         theme::fg(theme::DIMMER)
     };
-    put(buf, xl + 1, top, "─┤ ", border);
-    put(buf, xl + 4, top, "server health", cap);
-    put(buf, xl + 4 + dw("server health"), top, " ├", border);
+    put(buf, div + 1, merge_y, "─┤ ", border);
+    put(buf, div + 4, merge_y, "server health", cap);
+    put(buf, div + 4 + dw("server health"), merge_y, " ├", border);
 
     let x0 = xl + 1;
     let w = (xr - 1) - x0 + 1;
@@ -611,29 +599,16 @@ fn draw_health(buf: &mut Buffer, xl: u16, xr: u16, top: u16, app: &App, present:
     // Stats: the active server is named in the header identity band and marked
     // in the strip below, so it is not repeated here.
     let stats = format!("{} servers · {} up · {} down", s.servers_total, s.servers_up, s.servers_down);
-    put(buf, x0 + 1, top + 1, &stats, theme::fg(theme::DIM));
+    put(buf, x0 + 1, stats_y, &stats, theme::fg(theme::DIM));
 
     // chips row — or a "probing…" hint while the first round is still running
     // (router up, pool known, but nothing has come back yet), so an empty strip
     // never looks broken.
     if !present && s.identity.router_up && s.servers_total > 0 && s.servers_up == 0 && s.servers_down == 0 {
-        put(buf, x0 + 1, top + 2, "probing…", theme::fg(theme::DIM));
+        put(buf, x0 + 1, chips_y, "probing…", theme::fg(theme::DIM));
     } else {
-        draw_chips(buf, x0 + 1, top + 2, w.saturating_sub(2), app, present, hit);
+        draw_chips(buf, x0 + 1, chips_y, w.saturating_sub(2), app, present, hit);
     }
-}
-
-fn draw_box_frame_health(buf: &mut Buffer, xl: u16, xr: u16, top: u16, border: Style) {
-    put(buf, xl, top, "╭", border);
-    hfill(buf, xl + 1, xr - 1, top, '─', border);
-    put(buf, xr, top, "╮", border);
-    for y in (top + 1)..(top + 3) {
-        put(buf, xl, y, "│", border);
-        put(buf, xr, y, "│", border);
-    }
-    put(buf, xl, top + 3, "╰", border);
-    hfill(buf, xl + 1, xr - 1, top + 3, '─', border);
-    put(buf, xr, top + 3, "╯", border);
 }
 
 /// Draw the server strip. When a chip is selected the marquee is frozen: the ring

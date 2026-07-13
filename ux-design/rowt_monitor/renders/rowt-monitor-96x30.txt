@@ -1,41 +1,41 @@
 ╭──────────────────────────────────────────────────────────────────────────────────────────────╮
 │   _ __ _____      __| |_   MONITOR                                                           │
-│  | '__/ _ \ \ /\ / /| __|  ● LIVE  mode     host · en0           uptime  3h 15m              │
-│  | | | (_) \ V  V / | |_           server   JP-Tokyo 42 ms       router  running · :7890     │
-│   |_|  \___/ \_/\_/   \__|         proxy    on · Wi-Fi           config  host.json OK        │
+│  | '__/ _ \ \ /\ / /| __|  ● LIVE  mode      host · en0             uptime  3h 15m           │
+│  | | | (_) \ V  V / | |_           server    JP-Tokyo 42 ms         router  running · 3%     │
+│  |_|  \___/ \_/\_/   \__|          sys proxy on                     watch   on               │
 │                                                                                              │
-│ ╭─┤ live · connections ├───────────────────────────────────────────────────────────────────╮ │
-│ │ all    ↑ 2.9 MB/s   ↓ 3.5 MB/s                                                   25 conn │ │
-│ │ escape ↑ 2.7 MB/s   ↓ 3.5 MB/s                                                   20 conn │ │
-│ │ corp   ↑ 144 KB/s   ↓ 44 KB/s                                                     3 conn │ │
-│ │ direct ↑ 5 KB/s     ↓ 2 KB/s                                                      2 conn │ │
-│ ├──────────────────────────────────────────────────────────────────────────────────────────┤ │
-│ │ LANE   HOST:PORT                                   #         UP      DOWN  RULE          │ │
-│ │ escape i.ytimg.com:443                             5      ↑8.0M   ↓352.2M  domain_suffix │ │
-│ │ escape raw.githubusercontent.com:443               2      ↑915K    ↓96.8M  domain_suffix │ │
-│ │ escape fonts.gstatic.com:443                       3     ↑12.5M    ↓43.1M  domain_suffix │ │
-│ │ escape www.youtube.com:443                         5     ↑18.2M   ↓427.7M  domain_suffix │ │
-│ │ escape api.anthropic.com:443                       2    ↑376.1M   ↓414.4M  domain_suffix │ │
-│ │ escape en.wikipedia.org:443                        1      ↑1.4M     ↓1.8M  domain_suffix │ │
-│ ╰──────────────────────────────────────────────────────────────────────────────────────────╯ │
-│                                                                                              │
-│ ╭─┤ errors & blocked ├─────────────────────────────────────────────────────────────────────╮ │
-│ │ aggregated over                                                          5m [10m] 1h 24h │ │
-│ │ transient    12 · 1 dom                                                                  │ │
-│ │ persistent   50 · 5 dom                                                                  │ │
-│ │ blocked      57 · 5 dom                                                                  │ │
-│ ├──────────────────────────────────────────────────────────────────────────────────────────┤ │
-│ │ COUNT   TYPE        DOMAIN                                                               │ │
-│ │    15   timeout     vpn.corp.example.com                                                 │ │
-│ │    13   blocked     googlesyndication.com                                                │ │
-│ │    13   blocked     doubleclick.net                                                      │ │
-│ │    12   dns         gateway.icloud.com                                                   │ │
-│ │    11   timeout     dl.google.com                                                        │ │
-│ │    11   blocked     criteo.com                                                           │ │
-│ ╰──────────────────────────────────────────────────────────────────────────────────────────╯ │
-│                                                                                              │
-│ ╭─┤ server health ├────────────────────────────────────────────────────────────────────────╮ │
-│ │ 10 servers · 9 up · 1 down · active JP-Tokyo                                             │ │
-│ │ JP-Osaka 175 ms   KR-Seoul  72 ms   DE-Frankfurt 195 ms   HK-1  82 ms   SG-1  81 ms      │ │
-│ ╰──────────────────────────────────────────────────────────────────────────────────────────╯ │
+├─┤ live · connections ├───────────────────────────────┬─┤ errors & blocked ├──────────────────┤
+│ all    ↑ 2.9 MB/s   ↓ 3.5 MB/s               25 conn │ aggregated over       5m [10m] 1h 24h │
+│ escape ↑ 2.7 MB/s   ↓ 3.5 MB/s               20 conn │ transient    12 · 1 dom               │
+│ corp   ↑ 144 KB/s   ↓ 44 KB/s                 3 conn │ persistent   50 · 5 dom               │
+│ direct ↑ 5 KB/s     ↓ 2 KB/s                  2 conn │ blocked      57 · 5 dom               │
+├──────────────────────────────────────────────────────┼───────────────────────────────────────┤
+│ LANE   HOST:POR#         UP      DOWN  RULE          │ COUNT   TYPE        DOMAIN            │
+│ escape i.ytim… 5       8.0M    352.2M  domain_suffix │    15   timeout     vpn.corp.example.…│
+│ escape raw.gi… 2       915K     96.8M  domain_suffix │    13   blocked     googlesyndication…│
+│ escape fonts.… 3      12.5M     43.1M  domain_suffix │    13   blocked     doubleclick.net   │
+│ escape www.yo… 5      18.2M    427.7M  domain_suffix │    12   dns         gateway.icloud.com│
+│ escape api.an… 2     376.1M    414.4M  domain_suffix │    11   timeout     dl.google.com     │
+│ escape en.wik… 1       1.4M      1.8M  domain_suffix │    11   blocked     criteo.com        │
+│ corp   jira.c… 5       8.1M    414.6M  domain_suffix │    10   blocked     adnxs.com         │
+│ direct mirror… 1       509K    128.6M  final         │    10   blocked     google-analytics.…│
+│ direct dl.goo… 1       104K     47.8M  final         │    10   reset       x.com             │
+│ direct gatewa… 2       610K      519K  final         │     8   timeout     rr5.googlevideo.c…│
+│                                                      │                                       │
+│                                                      │                                       │
+│                                                      │                                       │
+│                                                      │                                       │
+│                                                      │                                       │
+│                                                      │                                       │
+│                                                      │                                       │
+│                                                      │                                       │
+│                                                      │                                       │
+│                                                      │                                       │
+│                                                      │                                       │
+│                                                      │                                       │
+│                                                      │                                       │
+│                                                      │                                       │
+├──────────────────────────────────────────────────────┴─┤ server health ├─────────────────────┤
+│ 10 servers · 9 up · 1 down                                                                   │
+│ ▶ JP-Tokyo  42 ms   JP-Osaka 175 ms   KR-Seoul  72 ms   DE-Frankfurt 195 ms   HK-1  82 ms    │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯

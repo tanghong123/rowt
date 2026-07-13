@@ -47,10 +47,13 @@ and the interactive HTML prototype, all live in
 source of truth for *what it looks like and how it behaves*; this document does
 not restate it.
 
-For orientation, the frame is: an **identity band** (logo + session facts +
-status dot) on top; **`live · connections`** and **`errors & blocked`** panes
-that sit side by side in one split box at **≥130 columns** and stack below; and a
-full-width **`server health`** strip. Two things the engineering below leans on
+For orientation, the frame is: a single **outer frame** (the only rounded
+corners) enclosing an **identity band** (logo + session facts + status dot) on
+top; **`live · connections`** and **`errors & blocked`** panes side by side,
+split by a center rule; and a full-width **`server health`** strip. Panes and the
+strip are not inset boxes — they connect straight into the frame with `├ ┤` rules
+(`┬ ┼ ┴` at the column split), and server health rides the closing `┴` merge
+rule with one breathing row above it. Two things the engineering below leans on
 that the handoff introduces: the lane color language (escape/corp/direct/block)
 and the error categories (dns=transient, timeout/reset/refused=persistent,
 blocked). Behaviors added *after* the frozen capture — the LIVE/DOWN/ERROR/PAUSED
@@ -129,14 +132,19 @@ panic hook and normal teardown that always restore the terminal.
 
 The renderer paints **absolute cells** into the `ratatui` Buffer (via `paint.rs`)
 rather than composing high-level widgets. This is the only way to hit the
-byte-exact column layout the design demands (box captions `╭─┤ label ├──╮`,
-right-anchored numeric columns, the split-box divider, etc.). Column offsets in
-`ui.rs` were measured from the ground-truth renders.
+byte-exact column layout the design demands (section captions `─┤ label ├` on the
+connecting rules, right-anchored numeric columns, the center divider, etc.).
+Column offsets in `ui.rs` were measured from the ground-truth renders.
 
-- **Reflow** at 130 columns is computed in `draw()`: side-by-side shares one box
-  split by a vertical rule at a divider column (connections/errors leftover
-  splits ~5:2, errors held ≥~1/3); stacked draws two boxes. List row counts fill
-  the available height. Focus + selection persist across the reflow.
+- **Single-frame topology.** `draw()` renders one outer frame (the only rounded
+  corners); the two panes and the server strip connect into it with `├ ┤` rules.
+  The identity band is followed directly by the split divider `├─┤ live ·
+  connections ├─┬─┤ errors & blocked ├─┤`, then the summary rows, a `├─┼─┤` header
+  cross, the data lists, one breathing row, and the `├─┴─┤ server health ├─┤`
+  merge rule that closes the split and labels the strip in one go. The column
+  split (connections/errors leftover ~5:2, errors held ≥~1/3) is two columns at
+  every width — narrow terminals shorten the tab labels, not the topology. List
+  row counts fill the available height. Focus + selection persist across reflow.
 - **`present` vs interactive.** `draw(.., present)` takes a bool. `present=true`
   is a neutral "screenshot" state (no focus-brightening, no selection highlight,
   no marquee, full-brightness dot) — this is what `--render` and the golden
@@ -299,7 +307,7 @@ interface, the system-proxy state, and router liveness/port.
 
 - **Focus model:** exactly one focused region — the two lists **and** the server
   strip (`Focus::{Conn,Err,Health}`), cycled by `Tab`. Focus is shown by
-  brightening that region's caption text (the single split box can't carry a
+  brightening that region's caption text (the single frame can't carry a
   per-pane border ring); the `┤ ├` connectors stay border-colored so they never
   look out of step. All focus changes route through `set_focus`, which **forgets
   the leaving region's selection** — re-focusing always starts fresh.

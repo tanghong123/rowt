@@ -70,21 +70,22 @@ The screen is one full-terminal frame with an outer rounded border. Top to botto
    `rowt monitor — ~/.config/rowt … HH:MM:SS · refresh 2s` — was **removed**: the path,
    clock, and refresh cadence were low-value chrome; the band now starts directly under
    the frame's top edge.)
-2. **Main area — two panes**, each drawn as a **fully closed box** (box-drawing
-   borders on all four sides, caption in the top edge `╭─┤ label ├──╮`):
+2. **Main area — two panes**, NOT inset boxes: they connect straight into the
+   single outer frame with `├ ┤` rules, captions riding those rules `─┤ label ├`:
    - **Left · `live · connections`** — instantaneous state.
    - **Right · `errors & blocked`** — rolling-window aggregate.
-   When the two sit **side by side** they share one box split by a single vertical
-   divider (`┬ … │ … ┴`) so there is a continuous rule between them — no gap.
-3. **Bottom · `server health`** — full width, boxed, two rows.
+   A single center divider splits them (`┬` at the split divider → `┼` at the
+   header cross → `┴` at the merge rule), a continuous rule with no gap.
+3. **Bottom · `server health`** — full width, two rows, merged onto the closing
+   `┴` rule (`├─┴─┤ server health ├─┤`) with one breathing row above it.
 
-**Reflow breakpoint:** at **≥ 130 columns** the two main panes sit **side by side**
-(one split box); **below 130** they **stack** as two separate boxes (connections above,
-errors below). Server health is always full width. When side by side, the
-`errors & blocked` pane is held to **no less than ~1/3 of the width** so it stays
-readable on very wide terminals (otherwise `live · connections` would swallow the extra
-space). See the three renders: `96x30` (stacked), `150x38` and `212x52` (side-by-side,
-the wider one showing more rows and more server chips).
+**Single-frame topology at every width:** the outer frame owns the only rounded
+corners; the two panes are always side by side (there is no stacked variant) —
+narrow terminals shorten the `connections`/`errors` tab labels rather than
+wrapping or stacking. The `errors & blocked` pane is held to **no less than ~1/3
+of the width** so it stays readable on very wide terminals (otherwise
+`live · connections` would swallow the extra space). See the three renders:
+`96x30`, `150x38`, `212x52` (wider ones show more rows and more server chips).
 
 ---
 
