@@ -50,7 +50,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="2.3.8"
+ROWT_VERSION="2.3.9"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -2373,7 +2373,16 @@ PLIST
         # instead clear any stale proxy still pointing at the dead 127.0.0.1:$PORT
         # (rowt's proxy effect must not outlive a reboot; un-strands the network).
         if [ "$intent" = up ] && [ "$(sget boot)" = "$(_boot_id)" ]; then
-          _watch_recover "router is DOWN but marked up (crashed?)" cmd_reload || true
+          # Only recover while ONLINE. Offline there is nothing to recover to (the
+          # escape server is unreachable and cmd_reload's proxy-on step can't run
+          # with no active service) — defer until the network returns, when a
+          # resolver-change tick fires and recovers cleanly. detect_iface is empty
+          # when no interface has both an IP and a gateway = offline.
+          if [ -n "$(detect_iface 2>/dev/null || true)" ]; then
+            _watch_recover "router is DOWN but marked up (crashed?)" cmd_reload || true
+          else
+            _watch_log "router down + marked up, but OFFLINE — deferring recovery until the network returns"
+          fi
           exit 0
         fi
         local gsvc; gsvc="$(active_service 2>/dev/null || true)"
