@@ -283,10 +283,13 @@ fn colors_spot_check() {
     assert_eq!(fg, Color::Rgb(233, 236, 243));
     assert!(m.contains(Modifier::BOLD));
 
-    // Header up-arrow '↑' at (9,7): up orange.
-    let (sym, fg, _) = at(9, 7);
-    assert_eq!(sym, "↑");
-    assert_eq!(fg, Color::Rgb(224, 163, 94));
+    // Header aggregate rows are per-lane: the `escape` row name at (2,8) is bold
+    // escape-blue. (At this width the Live ↑/↓ rate columns are dropped; the
+    // aligned #conns/byte aggregates remain.)
+    let (sym, fg, m) = at(2, 8);
+    assert_eq!(sym, "e");
+    assert_eq!(fg, Color::Rgb(124, 157, 240));
+    assert!(m.contains(Modifier::BOLD));
 
     // Errors TYPE is colored by category. Errors is now the right column; its
     // data rows begin at row 13: row 13 is `timeout` (persistent red), row 16 is

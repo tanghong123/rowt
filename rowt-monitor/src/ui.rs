@@ -370,48 +370,106 @@ fn draw_conn_pane(
     let up = theme::fg(theme::UP);
     let down = theme::fg(theme::DOWN);
 
-    // Header rate table: all + escape/corp/direct — shown in EVERY view (Live and
-    // the flipped metrics views), so the per-lane bandwidth tally is always there.
-    let rows: Vec<(Option<Lane>, f64, f64, u32, Style)> = {
-        let mut v = vec![(
-            None,
-            app.snap.all.up,
-            app.snap.all.down,
-            app.snap.all.conns,
-            theme::bold(theme::BRIGHT),
-        )];
-        for la in &app.snap.lanes {
-            v.push((Some(la.lane), la.up, la.down, la.conns, theme::bold(la.lane.color())));
+    // Header rows = a per-lane aggregate (all + escape/corp/direct) of the detail
+    // rows below, matching whichever columns the current view shows: Live sums
+    // #conns and ↑/↓ byte totals (aligned under the #/UP/DOWN columns) alongside
+    // the live ↑/↓ rate; a flipped view sums the four band columns (aligned under
+    // them). Block is excluded, as in the table.
+    #[derive(Default, Clone, Copy)]
+    struct Agg {
+        conns: u32,
+        lup: f64,
+        ldn: f64,
+        hu: [u64; 4],
+        hd: [u64; 4],
+    }
+    let acc = |a: &mut Agg, r: &crate::model::ConnRow| {
+        a.conns += r.conns;
+        a.lup += r.live_up;
+        a.ldn += r.live_down;
+        for i in 0..4 {
+            a.hu[i] += r.hist_up[i];
+            a.hd[i] += r.hist_down[i];
         }
-        v
     };
-    for (i, (lane, u, d, n, name_st)) in rows.iter().enumerate() {
+    let (mut all, mut esc, mut corp, mut direct) = (Agg::default(), Agg::default(), Agg::default(), Agg::default());
+    for r in &app.rows {
+        match r.lane {
+            Lane::Escape => acc(&mut esc, r),
+            Lane::Corp => acc(&mut corp, r),
+            Lane::Direct => acc(&mut direct, r),
+            Lane::Block => continue,
+        }
+        acc(&mut all, r);
+    }
+    let header = [(None, all), (Some(Lane::Escape), esc), (Some(Lane::Corp), corp), (Some(Lane::Direct), direct)];
+
+    let is_live = app.conn_view.is_live();
+    let dir_up = app.conn_view.is_up();
+    let bcols = app.band.cols();
+    const HCOLW: u16 = 8;
+    let hcol_x = |k: u16| x0 + w - 2 - k * HCOLW; // aligns with the metrics data columns
+    let hfmt = |v: u64, span: i64, is_rate: bool| -> String {
+        if is_rate {
+            format!("{}/s", format::bytes_total(v as f64 / span.max(1) as f64))
+        } else {
+            format::bytes_total(v as f64)
+        }
+    };
+    for (i, (lane, agg)) in header.iter().enumerate() {
         let y = hdr_y + i as u16;
         if y >= col_y {
             break;
         }
-        let name = lane.map_or("all", |l| l.label());
-        put(buf, x0 + 1, y, name, *name_st);
-        let val_st = if lane.is_none() { theme::bold(theme::BRIGHT) } else { dim };
-        // No connections in this row -> no meaningful rate; show "—".
-        let idle = *n == 0;
-        put(buf, x0 + 8, y, "↑", up);
-        if idle {
-            put(buf, x0 + 10, y, "—", dim);
+        let strong = lane.is_none();
+        let name_st = match lane {
+            None => theme::bold(theme::BRIGHT),
+            Some(l) => theme::bold(l.color()),
+        };
+        put(buf, x0 + 1, y, lane.map_or("all", |l| l.label()), name_st);
+        if is_live {
+            // Live ↑/↓ rate on the left (from the snapshot) — only when the pane is
+            // wide enough not to collide with the aligned # column.
+            let (ru, rd) = match lane {
+                None => (app.snap.all.up, app.snap.all.down),
+                Some(l) => app.snap.lanes.iter().find(|a| a.lane == *l).map(|a| (a.up, a.down)).unwrap_or((0.0, 0.0)),
+            };
+            let idle = agg.conns == 0;
+            let rate_st = if strong { theme::bold(theme::BRIGHT) } else { dim };
+            if w >= 72 {
+                put(buf, x0 + 8, y, "↑", up);
+                if idle {
+                    put(buf, x0 + 10, y, "—", dim);
+                } else {
+                    let (v, u2) = format::rate_parts(ru);
+                    put(buf, x0 + 10, y, &format!("{v} {u2}"), rate_st);
+                }
+                put(buf, x0 + 21, y, "↓", down);
+                if idle {
+                    put(buf, x0 + 23, y, "—", dim);
+                } else {
+                    let (v, u2) = format::rate_parts(rd);
+                    put(buf, x0 + 23, y, &format!("{v} {u2}"), rate_st);
+                }
+            }
+            // #conns / ↑bytes / ↓bytes aligned under the data columns.
+            put_right(buf, x0 + w - 38, y, &agg.conns.to_string(), if strong { theme::bold(theme::BRIGHT) } else { dimmer });
+            let (ust, dst) = if strong {
+                (theme::bold(theme::BRIGHT), theme::bold(theme::BRIGHT))
+            } else {
+                (theme::fg(theme::UP_TABLE), theme::fg(theme::DOWN_TABLE))
+            };
+            put_right(buf, x0 + w - 27, y, &format::bytes_total(agg.lup), ust);
+            put_right(buf, x0 + w - 17, y, &format::bytes_total(agg.ldn), dst);
         } else {
-            let (uv, uu) = format::rate_parts(*u);
-            put(buf, x0 + 10, y, &format!("{} {}", uv, uu), val_st);
+            let series = if dir_up { &agg.hu } else { &agg.hd };
+            let dir_c = if dir_up { theme::UP_TABLE } else { theme::DOWN_TABLE };
+            for k in 0..4u16 {
+                let (_, span, is_rate) = bcols[(3 - k) as usize];
+                let st = if strong { theme::bold(theme::BRIGHT) } else { theme::fg(dir_c) };
+                put_right(buf, hcol_x(k), y, &hfmt(series[(3 - k) as usize], span, is_rate), st);
+            }
         }
-        put(buf, x0 + 21, y, "↓", down);
-        if idle {
-            put(buf, x0 + 23, y, "—", dim);
-        } else {
-            let (dv, du) = format::rate_parts(*d);
-            put(buf, x0 + 23, y, &format!("{} {}", dv, du), val_st);
-        }
-        let conn = format!("{} conn", n);
-        let conn_st = if lane.is_none() { theme::bold(theme::BRIGHT) } else { dimmer };
-        put_right(buf, x0 + w - 2, y, &conn, conn_st);
         hit.lanes.push((Rect::new(x0 + 1, y, w - 2, 1), *lane));
     }
 
@@ -457,8 +515,8 @@ fn draw_conn_live_cols(buf: &mut Buffer, x0: u16, w: u16, col_y: u16, list_y: u1
         put(buf, x0 + 8, y, &shown, if dormant { dim } else { theme::fg(theme::BRIGHT) });
         put_right(buf, x0 + w - 38, y, &c.conns.to_string(), dimmer);
         let (up_st, down_st) = if dormant { (dim, dim) } else { (theme::fg(theme::UP_TABLE), theme::fg(theme::DOWN_TABLE)) };
-        put_right(buf, x0 + w - 27, y, &format::compact(c.live_up), up_st);
-        put_right(buf, x0 + w - 17, y, &format::compact(c.live_down), down_st);
+        put_right(buf, x0 + w - 27, y, &format::bytes_total(c.live_up), up_st);
+        put_right(buf, x0 + w - 17, y, &format::bytes_total(c.live_down), down_st);
         put(buf, x0 + w - 14, y, &truncate(&c.rule, 13), dimmer);
         if selected {
             highlight_row(buf, x0, y, w, c.lane.color());
