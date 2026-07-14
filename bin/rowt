@@ -50,7 +50,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="2.5.2"
+ROWT_VERSION="2.5.3"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -2607,7 +2607,7 @@ o@lifecycle@monitor@read-only TUI: live connections, errors/blocked, server heal
 o@lifecycle@run <command> [args...]@auto-pick a proxy env that reaches the net, then run the command
 a@lifecycle@report@full diagnostic report to a file (masked; shareable)
 o@lifecycle@audit [-n N|all|path|clear]@who changed what, when (CLI + watchdog mutations)
-o@lifecycle@metrics [status|top|path]@per-domain traffic history (bytes in/out over time)
+o@lifecycle@metrics [status|top|path|query]@per-domain traffic history (bytes in/out over time)
 o@servers & selection@server <list|add|rm|clear|import|dump>@manage the server pool
 o@servers & selection@sub <list|add|rm|update|clear|import|dump>@manage subscriptions
 c@servers & selection@use <tag>|auto@pin a server (manual) or auto-pick fastest live
@@ -2827,9 +2827,11 @@ for a year — at $CFG/metrics/traffic.db. Set ROWT_METRICS=off to disable it.
   $PROG metrics            collector status                             [default]
   $PROG metrics status     running? + last write, store path/size, row count
   $PROG metrics top [secs] top 20 domains by downloads over the last <secs> (default 3600)
-  $PROG metrics path       print the SQLite store path (query it yourself with sqlite3)
+  $PROG metrics path       print the SQLite store path + the table schema
+  $PROG metrics query "<SQL>"  run a read-only SQL query against the store
 
-Read-only. The richer view is the monitor: '$PROG monitor', then press 'v' to
+Read-only (even 'query' opens the DB read-only). The richer view is the monitor:
+'$PROG monitor', then press 'v' to
 flip the connections pane through live -> up-history -> down-history, with a
 'w'-selectable timescale band.
 EOF
@@ -3134,8 +3136,26 @@ cmd_metrics() {
         "SELECT domain, lane, sum(bytes_dn) dn, sum(bytes_up) up FROM sample_5s \
          WHERE ts >= $((now - span)) AND lane<>'-' GROUP BY domain,lane ORDER BY dn DESC LIMIT 20;"
       ;;
-    path) echo "$db" ;;
-    *) die "usage: $PROG metrics [ status | top [seconds] | path ]" ;;
+    path)
+      echo "$db"
+      { [ -f "$db" ] && command -v sqlite3 >/dev/null 2>&1; } || return 0
+      echo
+      echo "# columns: ts=bucket-start epoch · domain · lane · bytes_up(↑) · bytes_dn(↓)"
+      echo "# tiers:   sample_5s(1h) → sample_1m(24h) → sample_1h(90d) → sample_1d(1y)"
+      echo "#          meta = k/v (schema_version, pid, started, last_write); '(unattributed)' = sub-second reconciliation"
+      echo
+      sqlite3 "$db" ".schema" 2>/dev/null | sed 's/^/  /'
+      ;;
+    query)
+      shift
+      local sql="$*"
+      [ -n "$sql" ] || die "usage: $PROG metrics query \"<SQL>\"   (read-only)"
+      command -v sqlite3 >/dev/null 2>&1 || die "sqlite3 not found"
+      [ -f "$db" ] || die "no metrics store yet ($db) — is the collector running?"
+      # -readonly so an arbitrary query can never mutate the collector's store.
+      sqlite3 -readonly -header -column "$db" "$sql"
+      ;;
+    *) die "usage: $PROG metrics [ status | top [seconds] | path | query \"<SQL>\" ]" ;;
   esac
 }
 
