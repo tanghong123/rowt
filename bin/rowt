@@ -50,7 +50,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="2.5.1"
+ROWT_VERSION="2.5.2"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -2604,9 +2604,10 @@ c@lifecycle@status@state + config validity + reachability
 o@lifecycle@explain <domain|ip>@explain a destination's lane (escape / corp / direct)
 o@lifecycle@connections [lane|-w]@live view: active connections + which lane each is on
 o@lifecycle@monitor@read-only TUI: live connections, errors/blocked, server health
-o@lifecycle@run <command> [args…]@auto-pick a proxy env that reaches the net, then run the command
+o@lifecycle@run <command> [args...]@auto-pick a proxy env that reaches the net, then run the command
 a@lifecycle@report@full diagnostic report to a file (masked; shareable)
 o@lifecycle@audit [-n N|all|path|clear]@who changed what, when (CLI + watchdog mutations)
+o@lifecycle@metrics [status|top|path]@per-domain traffic history (bytes in/out over time)
 o@servers & selection@server <list|add|rm|clear|import|dump>@manage the server pool
 o@servers & selection@sub <list|add|rm|update|clear|import|dump>@manage subscriptions
 c@servers & selection@use <tag>|auto@pin a server (manual) or auto-pick fastest live
@@ -2813,6 +2814,24 @@ is written before the work, so even a command that hangs leaves a trace.
 
 Read-only commands are not recorded. Bounded to the last $AUDIT_MAX lines
 (ROWT_AUDIT_MAX; 0 = unlimited).
+EOF
+;;
+    metrics) cat <<EOF
+$PROG metrics — per-domain traffic history (bytes in/out over time).
+
+An always-on collector runs as a sidecar of the router (started when the router
+comes up healthy, stopped with it) and records per-domain, per-lane bytes into a
+tiered SQLite store — 5-second resolution for the last hour, rolled up to daily
+for a year — at $CFG/metrics/traffic.db. Set ROWT_METRICS=off to disable it.
+
+  $PROG metrics            collector status                             [default]
+  $PROG metrics status     running? + last write, store path/size, row count
+  $PROG metrics top [secs] top 20 domains by downloads over the last <secs> (default 3600)
+  $PROG metrics path       print the SQLite store path (query it yourself with sqlite3)
+
+Read-only. The richer view is the monitor: '$PROG monitor', then press 'v' to
+flip the connections pane through live -> up-history -> down-history, with a
+'w'-selectable timescale band.
 EOF
 ;;
     server) cat <<EOF
