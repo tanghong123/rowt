@@ -11,6 +11,12 @@ default-run = "rowt-monitor"
 name = "rowt-monitor"
 path = "src/main.rs"
 
+# Traffic-metrics collector: a separate always-on sidecar binary (shares the
+# crate's parsers/model but is its own process — never runs inside the TUI).
+[[bin]]
+name = "rowt-collector"
+path = "src/bin/rowt-collector.rs"
+
 [dependencies]
 ratatui = "0.29"
 crossterm = "0.28"
@@ -19,6 +25,11 @@ serde_json = "1"
 ureq = { version = "2", default-features = false, features = ["json"] }
 arboard = { version = "3", default-features = false }
 anyhow = "1"
+# Metrics store + the collector's clash /connections websocket. rusqlite is
+# bundled so the formula never has to find a system libsqlite3; tungstenite is
+# plain-ws only (handshake, no TLS — the controller is 127.0.0.1).
+rusqlite = { version = "0.32", features = ["bundled"] }
+tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 
 [profile.release]
 opt-level = 2

@@ -258,17 +258,23 @@ fn colors_spot_check() {
     assert_eq!(sym, "●");
     assert_eq!(fg, Color::Rgb(134, 192, 122));
 
-    // Server value 'J' (JP-Tokyo) at (47,3): escape bold (left value column = 47).
-    let (sym, fg, m) = at(47, 3);
+    // Server value 'J' (JP-Tokyo) now at (78,2): it moved into the top row of the
+    // right column (value column = 78), escape bold.
+    let (sym, fg, m) = at(78, 2);
     assert_eq!(sym, "J");
     assert_eq!(fg, Color::Rgb(124, 157, 240));
     assert!(m.contains(Modifier::BOLD));
 
-    // Latency '4' (42 ms) at (56,3): latency-ok green (<70), bold.
-    let (sym, fg, m) = at(56, 3);
+    // Latency '4' (42 ms) now at (87,2): ms sits at 79 + name_reserve(8), row 2.
+    let (sym, fg, m) = at(87, 2);
     assert_eq!(sym, "4");
     assert_eq!(fg, Color::Rgb(134, 192, 122));
     assert!(m.contains(Modifier::BOLD));
+
+    // Collector value 'o' (on) at (47,4): left column under sys proxy, green.
+    let (sym, fg, _) = at(47, 4);
+    assert_eq!(sym, "o");
+    assert_eq!(fg, Color::Rgb(134, 192, 122), "collector on = green");
 
     // 'all' row name at (2,7): bold bright white. (Single-frame layout: content
     // starts at col 2; a blank breathing row under the logo puts the summary at 7.)

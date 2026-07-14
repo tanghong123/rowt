@@ -753,6 +753,7 @@ impl Source for LiveSource {
                 active_ok: h.active_ok,
                 proxy,
                 watch: read_watch_status(),
+                collector: read_collector_status(router_up),
                 name_reserve,
             },
             all,
@@ -1024,6 +1025,21 @@ fn read_watch_status() -> String {
         .map(|h| PathBuf::from(h).join("Library/LaunchAgents").join(format!("{LABEL}.plist")))
         .is_some_and(|p| p.exists());
     if installed { "off".into() } else { "—".into() }
+}
+
+/// Metrics-sidecar status, by heartbeat freshness rather than a pidfile: the
+/// collector stamps `last_write` on every 5s bucket flush while its websocket is
+/// connected (even with no traffic), so a fresh stamp means it's healthily
+/// collecting. Two bucket periods of slack. When the router is down the collector
+/// is expected to be idle, so a stale/absent store shows "—", not "off".
+fn read_collector_status(router_up: bool) -> String {
+    let now = SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    match crate::metrics::last_write(&crate::metrics::db_path()) {
+        Some(w) if now - w <= 12 => "on".into(),
+        _ if !router_up => "—".into(),
+        Some(_) => "off".into(), // router up but the sidecar stopped writing
+        None => "—".into(),      // never established
+    }
 }
 
 /// Best-effort sing-box process stats: (uptime secs, cpu percent). None when no

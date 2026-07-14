@@ -93,11 +93,11 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, present: bool) -> Hit {
         put(buf, xl, y, "│", border);
         put(buf, xr, y, "│", border);
     }
-    draw_identity(buf, x0, y0, app, present, &mut hit);
+    draw_identity(buf, x0, y0, xr, app, present, &mut hit);
 
     // ---- split divider (identity → tables), with both pane captions ----
     rule_row(buf, xl, xr, split_y, Some((div, "┬")), border);
-    draw_caption(buf, xl, split_y, "live · connections", app, present, Focus::Conn, border);
+    draw_caption(buf, xl, split_y, "live connections", app, present, Focus::Conn, border);
     draw_caption(buf, div, split_y, "errors & blocked", app, present, Focus::Err, border);
 
     // ---- pane rows: sides + center │, with the header cross rule at cross_y ----
@@ -154,16 +154,29 @@ fn split_err_width(interior: u16) -> u16 {
     affine.max(floor).min(interior.saturating_sub(20))
 }
 
-fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, app: &App, present: bool, hit: &mut Hit) {
+fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, xr: u16, app: &App, present: bool, hit: &mut Hit) {
     let logo_st = theme::bold(theme::ESCAPE);
     for (i, line) in LOGO.iter().enumerate() {
         put(buf, x0 + 2, y0 + 1 + i as u16, line, logo_st);
     }
     let dimmer = theme::fg(theme::DIMMER);
     let bright = theme::fg(theme::BRIGHT);
+    let id = &app.snap.identity;
 
-    // Row 1: MONITOR
+    // Grid: left column labels @37 / values @47, right column labels @70 /
+    // values @78. Rows 2–4 carry (mode·server) (sys proxy·router) (collector·
+    // watch). `uptime` sits alone in the top-right corner (row 1), right-aligned
+    // to the frame — see METRICS.md §5.
+
+    // Row 1: MONITOR (left) · uptime (top-right corner)
     put(buf, x0 + 29, y0 + 1, "MONITOR", dimmer);
+    {
+        let val = id.uptime.as_str();
+        let vx = (xr.saturating_sub(2)).saturating_sub(dw(val).saturating_sub(1)); // value hugs the corner
+        let lx = vx.saturating_sub(8); // "uptime" (6) + 2-space gap
+        put(buf, lx, y0 + 1, "uptime", dimmer);
+        put(buf, vx, y0 + 1, val, bright);
+    }
 
     // Row 2: status dot, in priority order:
     //   DOWN  (red)    — router/clash API unreachable
@@ -172,7 +185,6 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, app: &App, present: bool, h
     //                    whole pool) is failing its probe
     //   LIVE  (green)  — healthy; breathes to show sampling is live
     // Present/golden mode is always the neutral LIVE dot.
-    let id = &app.snap.identity;
     let (dot_c, label, label_c, breathe) = if present {
         (theme::DIRECT, "LIVE", theme::BRIGHT, false)
     } else if !id.router_up {
@@ -192,32 +204,51 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, app: &App, present: bool, h
     put(buf, x0 + 29, y0 + 2, "●", theme::fg(dot_c));
     put(buf, x0 + 31, y0 + 2, label, theme::bold(label_c));
     put(buf, x0 + 37, y0 + 2, "mode", dimmer);
-    put(buf, x0 + 47, y0 + 2, &app.snap.identity.mode, bright);
-    put(buf, x0 + 70, y0 + 2, "uptime", dimmer);
-    put(buf, x0 + 78, y0 + 2, &app.snap.identity.uptime, bright);
+    put(buf, x0 + 47, y0 + 2, &id.mode, bright);
 
-    // Row 3: server / router
-    put(buf, x0 + 37, y0 + 3, "server", dimmer);
-    // Reserve name width from the pool's longest name so the ms column is
-    // stable; bounded (<=15) so name + ` NNN ms` never runs into the router
-    // column at 70. 8 reproduces the golden (JP-Tokyo -> ms at col 55).
+    // Row 2 right: server — moved up into the top row of the right column.
+    put(buf, x0 + 70, y0 + 2, "server", dimmer);
+    // Reserve name width from the pool's longest name so the ms column is stable;
+    // bounded (<=15). 8 reproduces the golden (JP-Tokyo).
     let reserve = id.name_reserve.clamp(6, 15);
-    // Gray out the server name unless it's confirmed reachable (present = ok).
     let name_st = if present || id.active_ok == Some(true) {
         theme::bold(theme::ESCAPE)
     } else {
         theme::fg(theme::DIM)
     };
-    put(buf, x0 + 47, y0 + 3, &truncate(&id.server_name, reserve), name_st);
-    // Latency, or "—" when there is no reading (router down / not probed).
+    put(buf, x0 + 78, y0 + 2, &truncate(&id.server_name, reserve), name_st);
     let (ms, ms_st) = match id.server_ms {
         Some(v) => (format!("{} ms", v), theme::bold(theme::latency_color(v))),
         None => ("—".to_string(), theme::fg(theme::DIM)),
     };
-    put(buf, x0 + 48 + reserve, y0 + 3, &ms, ms_st);
+    put(buf, x0 + 79 + reserve, y0 + 2, &ms, ms_st);
+
+    // Row 3: sys proxy (clickable) · router
+    // "sys proxy <state>" toggles the proxy on click — expose the whole
+    // label+value span and highlight it while the mouse hovers over it.
+    let proxy = app.proxy_display();
+    let px = x0 + 37;
+    let pw = (47 - 37) + dw(&proxy); // label col .. end of value
+    let proxy_rect = Rect::new(px, y0 + 3, pw, 1);
+    hit.sysproxy = proxy_rect;
+    let hovered = !present && app.hover.is_some_and(|(cx, cy)| rect_has(proxy_rect, cx, cy));
+    let base = match proxy.as_str() {
+        "on" => theme::DIRECT,
+        "off" => theme::PERSISTENT,
+        _ => theme::UP,
+    };
+    let (label_st, proxy_st) = if hovered {
+        let u = |c: Color| Style::default().fg(theme::brighten(c, 0.25)).add_modifier(Modifier::UNDERLINED);
+        (u(theme::DIMMER), u(base))
+    } else {
+        (dimmer, theme::fg(base))
+    };
+    put(buf, x0 + 37, y0 + 3, "sys proxy", label_st);
+    put(buf, x0 + 47, y0 + 3, &proxy, proxy_st);
+
+    // Row 3 right: "running · N%" (CPU colored — orange/red flags a spin/wedge)
+    // or, when down, "down · <reason>" in red so a glance says what to fix.
     put(buf, x0 + 70, y0 + 3, "router", dimmer);
-    // "running · N%" (CPU colored — orange/red flags a spin/wedge) or, when down,
-    // "down · <reason>" in red so a glance says what to fix.
     if id.router_up {
         put(buf, x0 + 78, y0 + 3, &id.router, bright);
         if let Some(cpu) = id.router_cpu {
@@ -240,42 +271,22 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, app: &App, present: bool, h
         put(buf, x0 + 78, y0 + 3, &down, theme::fg(theme::PERSISTENT));
     }
 
-    // Row 4: system proxy / config. The left-column value column is at 47 (one
-    // wider than the design's 46) so the 9-wide "sys proxy" label keeps a gap;
-    // mode/server values match it, so the column stays aligned.
-    // "sys proxy <state>" is clickable (toggles the proxy) — expose the whole
-    // label+value cell region and highlight it while the mouse hovers over it.
-    let proxy = app.proxy_display();
-    let px = x0 + 37;
-    let pw = (47 - 37) + dw(&proxy); // label col .. end of value
-    let proxy_rect = Rect::new(px, y0 + 4, pw, 1);
-    hit.sysproxy = proxy_rect;
-    let hovered = !present && app.hover.is_some_and(|(cx, cy)| rect_has(proxy_rect, cx, cy));
-    // Colour the state: green = on (pointing at rowt), red = off, orange = other.
-    let base = match proxy.as_str() {
-        "on" => theme::DIRECT,
-        "off" => theme::PERSISTENT,
-        _ => theme::UP,
-    };
-    let (label_st, proxy_st) = if hovered {
-        // hover feedback: brighten + underline the whole clickable span
-        let u = |c: Color| Style::default().fg(theme::brighten(c, 0.25)).add_modifier(Modifier::UNDERLINED);
-        (u(theme::DIMMER), u(base))
-    } else {
-        (dimmer, theme::fg(base))
-    };
-    put(buf, x0 + 37, y0 + 4, "sys proxy", label_st);
-    put(buf, x0 + 47, y0 + 4, &proxy, proxy_st);
-    // Watchdog LaunchAgent: green = loaded/active, orange = installed-but-stopped
-    // (auto-recovery won't fire — worth noticing), dim = not installed.
+    // Row 4: collector · watch — both 9-char labels, so the left one aligns under
+    // "sys proxy". Same on/off/— color coding as watch.
+    put(buf, x0 + 37, y0 + 4, "collector", dimmer);
+    put(buf, x0 + 47, y0 + 4, &id.collector, status_color(&id.collector));
     put(buf, x0 + 70, y0 + 4, "watch", dimmer);
-    let watch = &app.snap.identity.watch;
-    let watch_st = match watch.as_str() {
+    put(buf, x0 + 78, y0 + 4, &id.watch, status_color(&id.watch));
+}
+
+/// Shared on/off/— coloring for the watch + collector status values: green =
+/// active, orange = installed-but-stopped, dim = absent.
+fn status_color(v: &str) -> Style {
+    match v {
         "on" => theme::fg(theme::DIRECT),
         "off" => theme::fg(theme::UP),
         _ => theme::fg(theme::DIM),
-    };
-    put(buf, x0 + 78, y0 + 4, watch, watch_st);
+    }
 }
 
 /// A horizontal rule that connects into the frame: `├` at `xl`, `─` fill, `┤` at

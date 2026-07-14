@@ -140,6 +140,7 @@ impl Source for FixtureSource {
                 active_ok: Some(true),
                 proxy: "on".into(),
                 watch: "on".into(),
+                collector: "on".into(),
                 name_reserve: 8, // matches the golden (JP-Tokyo, ms at col 55)
             },
             all,

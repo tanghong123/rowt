@@ -5,6 +5,7 @@ pub mod app;
 pub mod clipboard;
 pub mod format;
 pub mod input;
+pub mod metrics;
 pub mod model;
 pub mod paint;
 pub mod source;

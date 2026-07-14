@@ -162,6 +162,7 @@ pub struct Identity {
     pub active_ok: Option<bool>,
     pub proxy: String,       // e.g. "on · Wi-Fi"
     pub watch: String,       // watchdog LaunchAgent: "on" | "off" | "—"
+    pub collector: String,   // metrics sidecar: "on" | "off" | "—" (by last-write freshness)
     /// Columns reserved for the active server name in the header, so the ms
     /// column doesn't jump as the active server changes. Sized to the pool's
     /// longest name (bounded). 8 reproduces the golden (`JP-Tokyo`).
