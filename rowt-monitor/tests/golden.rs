@@ -258,15 +258,15 @@ fn colors_spot_check() {
     assert_eq!(sym, "●");
     assert_eq!(fg, Color::Rgb(134, 192, 122));
 
-    // Server value 'J' (JP-Tokyo) now at (78,2): it moved into the top row of the
-    // right column (value column = 78), escape bold.
-    let (sym, fg, m) = at(78, 2);
+    // Server value 'J' (JP-Tokyo) at (70,2): the right column value sits at 70
+    // (pulled in from 78 to tighten the middle gap), escape bold.
+    let (sym, fg, m) = at(70, 2);
     assert_eq!(sym, "J");
     assert_eq!(fg, Color::Rgb(124, 157, 240));
     assert!(m.contains(Modifier::BOLD));
 
-    // Latency '4' (42 ms) now at (87,2): ms sits at 79 + name_reserve(8), row 2.
-    let (sym, fg, m) = at(87, 2);
+    // Latency '4' (42 ms) now at (79,2): ms sits at value(70) + 1 + name_reserve(8).
+    let (sym, fg, m) = at(79, 2);
     assert_eq!(sym, "4");
     assert_eq!(fg, Color::Rgb(134, 192, 122));
     assert!(m.contains(Modifier::BOLD));

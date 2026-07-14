@@ -1,8 +1,8 @@
 ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 │   _ __ _____      __| |_   MONITOR                                                                                                  uptime  3h 15m │
-│  | '__/ _ \ \ /\ / /| __|  ● LIVE  mode      host · en0             server  JP-Tokyo 42 ms                                                         │
-│  | | | (_) \ V  V / | |_           sys proxy on                     router  running · 3%                                                           │
-│  |_|  \___/ \_/\_/   \__|          collector on                     watch   on                                                                     │
+│  | '__/ _ \ \ /\ / /| __|  ● LIVE  mode      host · en0     server  JP-Tokyo 42 ms                                                                 │
+│  | | | (_) \ V  V / | |_           sys proxy on             router  running · 3%                                                                   │
+│  |_|  \___/ \_/\_/   \__|          collector on             watch   on                                                                             │
 │                                                                                                                                                    │
 ├─┤ live connections ├───────────────────────────────────────────────────────────────────────┬─┤ errors & blocked ├──────────────────────────────────┤
 │ all    ↑ 2.9 MB/s   ↓ 3.5 MB/s                                                     25 conn │ aggregated over                       5m [10m] 1h 24h │
@@ -21,8 +21,8 @@
 │ direct mirrors.aliyun.com:443                        1       509K    128.6M  final         │    10   blocked     google-analytics.com              │
 │ direct dl.google.com:443                             1       104K     47.8M  final         │    10   reset       x.com                             │
 │ direct gateway.icloud.com:443                        2       610K      519K  final         │     8   timeout     rr5.googlevideo.com               │
-│                                                                                            │                                                       │
-│                                                                                            │                                                       │
+│ escape netflix.com                                   0         0B        0B                │                                                       │
+│ corp   backups.corp.example.com                      0         0B        0B                │                                                       │
 │                                                                                            │                                                       │
 ├────────────────────────────────────────────────────────────────────────────────────────────┴─┤ server health ├─────────────────────────────────────┤
 │ 10 servers · 9 up · 1 down                                                                                                                         │

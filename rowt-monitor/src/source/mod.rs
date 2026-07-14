@@ -2,7 +2,13 @@
 //! and real adapters later. A source is polled once per 2s tick with the
 //! currently-selected error window (it scopes the log re-aggregation).
 
-use crate::model::{Lane, MetricRow, Snapshot, Window};
+use std::collections::HashMap;
+
+use crate::model::{Lane, Snapshot, Window};
+
+/// Per-domain byte history keyed by domain: `(dominant_lane, [up per col], [dn
+/// per col])` over the band's four spans (see `metrics::history_map`).
+pub type History = HashMap<String, (String, [u64; 4], [u64; 4])>;
 
 pub mod fixtures;
 pub mod parse;
@@ -24,11 +30,11 @@ pub trait Source {
     /// errors pane (None = all lanes).
     fn poll(&mut self, window: Window, lane: Option<Lane>) -> Snapshot;
 
-    /// Top domains for the flipped connections view, over the band's four spans in
-    /// the given direction (`up` = upload). `lane` scopes to one lane. Default
-    /// empty — the metrics store is a live-only concern.
-    fn metrics(&mut self, _up: bool, _spans: [i64; 4], _lane: Option<Lane>) -> Vec<MetricRow> {
-        Vec::new()
+    /// Per-domain byte history over the band's four spans, for the flipped
+    /// connections views (both directions, so `v` need not re-query). `lane`
+    /// scopes to one lane. Default empty — the store is a live-only concern.
+    fn history(&mut self, _spans: [i64; 4], _lane: Option<Lane>) -> History {
+        History::new()
     }
 
     /// Force an immediate server re-probe (and reset the periodic timer). No-op

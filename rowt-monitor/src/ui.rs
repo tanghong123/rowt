@@ -101,7 +101,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, present: bool) -> Hit {
     // "connections · ▲ upload" / "· ▼ download" when flipped (`v`).
     let conn_cap = match app.conn_view.chip() {
         None => "live connections".to_string(),
-        Some(c) => format!("connections · {c}"),
+        Some(c) => format!("connections · {c} · {}", app.band.label()),
     };
     draw_caption(buf, xl, split_y, &conn_cap, app, present, Focus::Conn, border);
     draw_caption(buf, div, split_y, "errors & blocked", app, present, Focus::Err, border);
@@ -210,10 +210,15 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, xr: u16, app: &App, present
     put(buf, x0 + 29, y0 + 2, "●", theme::fg(dot_c));
     put(buf, x0 + 31, y0 + 2, label, theme::bold(label_c));
     put(buf, x0 + 37, y0 + 2, "mode", dimmer);
-    put(buf, x0 + 47, y0 + 2, &id.mode, bright);
+    // The left value column is at 47; the right column is pulled in to 62/70 (from
+    // 70/78) to tighten the wide middle gap. Mode is bounded to the 15-cell left
+    // value column so it can't run into the right label.
+    put(buf, x0 + 47, y0 + 2, &truncate(&id.mode, 15), bright);
 
+    let rl = x0 + 62; // right column: label
+    let rv = x0 + 70; //               value
     // Row 2 right: server — moved up into the top row of the right column.
-    put(buf, x0 + 70, y0 + 2, "server", dimmer);
+    put(buf, rl, y0 + 2, "server", dimmer);
     // Reserve name width from the pool's longest name so the ms column is stable;
     // bounded (<=15). 8 reproduces the golden (JP-Tokyo).
     let reserve = id.name_reserve.clamp(6, 15);
@@ -222,12 +227,12 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, xr: u16, app: &App, present
     } else {
         theme::fg(theme::DIM)
     };
-    put(buf, x0 + 78, y0 + 2, &truncate(&id.server_name, reserve), name_st);
+    put(buf, rv, y0 + 2, &truncate(&id.server_name, reserve), name_st);
     let (ms, ms_st) = match id.server_ms {
         Some(v) => (format!("{} ms", v), theme::bold(theme::latency_color(v))),
         None => ("—".to_string(), theme::fg(theme::DIM)),
     };
-    put(buf, x0 + 79 + reserve, y0 + 2, &ms, ms_st);
+    put(buf, rv + 1 + reserve, y0 + 2, &ms, ms_st);
 
     // Row 3: sys proxy (clickable) · router
     // "sys proxy <state>" toggles the proxy on click — expose the whole
@@ -254,9 +259,9 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, xr: u16, app: &App, present
 
     // Row 3 right: "running · N%" (CPU colored — orange/red flags a spin/wedge)
     // or, when down, "down · <reason>" in red so a glance says what to fix.
-    put(buf, x0 + 70, y0 + 3, "router", dimmer);
+    put(buf, rl, y0 + 3, "router", dimmer);
     if id.router_up {
-        put(buf, x0 + 78, y0 + 3, &id.router, bright);
+        put(buf, rv, y0 + 3, &id.router, bright);
         if let Some(cpu) = id.router_cpu {
             let cpu_c = if cpu >= 120.0 {
                 theme::PERSISTENT
@@ -265,8 +270,8 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, xr: u16, app: &App, present
             } else {
                 theme::DIRECT
             };
-            put(buf, x0 + 78 + dw(&id.router) + 1, y0 + 3, "·", dimmer);
-            put(buf, x0 + 78 + dw(&id.router) + 3, y0 + 3, &format!("{cpu:.0}%"), theme::fg(cpu_c));
+            put(buf, rv + dw(&id.router) + 1, y0 + 3, "·", dimmer);
+            put(buf, rv + dw(&id.router) + 3, y0 + 3, &format!("{cpu:.0}%"), theme::fg(cpu_c));
         }
     } else {
         let down = if id.router_reason.is_empty() {
@@ -274,15 +279,15 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, xr: u16, app: &App, present
         } else {
             format!("down · {}", id.router_reason)
         };
-        put(buf, x0 + 78, y0 + 3, &down, theme::fg(theme::PERSISTENT));
+        put(buf, rv, y0 + 3, &down, theme::fg(theme::PERSISTENT));
     }
 
     // Row 4: collector · watch — both 9-char labels, so the left one aligns under
     // "sys proxy". Same on/off/— color coding as watch.
     put(buf, x0 + 37, y0 + 4, "collector", dimmer);
     put(buf, x0 + 47, y0 + 4, &id.collector, status_color(&id.collector));
-    put(buf, x0 + 70, y0 + 4, "watch", dimmer);
-    put(buf, x0 + 78, y0 + 4, &id.watch, status_color(&id.watch));
+    put(buf, rl, y0 + 4, "watch", dimmer);
+    put(buf, rv, y0 + 4, &id.watch, status_color(&id.watch));
 }
 
 /// Shared on/off/— coloring for the watch + collector status values: green =
@@ -360,16 +365,13 @@ fn draw_conn_pane(
     present: bool,
     hit: &mut Hit,
 ) {
-    if !app.conn_view.is_live() {
-        draw_conn_metrics(buf, x0, w, hdr_y, col_y, list_y, list_h, app, present, hit);
-        return;
-    }
     let dimmer = theme::fg(theme::DIMMER);
     let dim = theme::fg(theme::DIM);
     let up = theme::fg(theme::UP);
     let down = theme::fg(theme::DOWN);
 
-    // Header rate table: all + escape/corp/direct.
+    // Header rate table: all + escape/corp/direct — shown in EVERY view (Live and
+    // the flipped metrics views), so the per-lane bandwidth tally is always there.
     let rows: Vec<(Option<Lane>, f64, f64, u32, Style)> = {
         let mut v = vec![(
             None,
@@ -413,165 +415,114 @@ fn draw_conn_pane(
         hit.lanes.push((Rect::new(x0 + 1, y, w - 2, 1), *lane));
     }
 
-    // Column header.
+    // Columns + data rows: the row list is shared across views (app.rows); only
+    // the columns pan. host:port pinned; dormant rows (conns==0) render greyed.
+    let scroll = app.conn_scroll.min(app.rows.len().saturating_sub(1));
+    hit.conn_list = Rect::new(x0, list_y, w, list_h as u16);
+    hit.conn_pane = Rect::new(x0, hdr_y, w, (list_y + list_h as u16).saturating_sub(hdr_y));
+    hit.conn_h = list_h;
+    if app.conn_view.is_live() {
+        draw_conn_live_cols(buf, x0, w, col_y, list_y, list_h, scroll, app, present);
+    } else {
+        draw_conn_metric_cols(buf, x0, w, col_y, list_y, list_h, scroll, app, present);
+    }
+    if !present {
+        draw_scrollbar(buf, x0 + w - 1, list_y, list_h, app.rows.len(), scroll);
+    }
+}
+
+/// The connections column headers ARE the direction indicator in the flipped
+/// views (`↑`/`↓` on each label); Live keeps its `# / UP / DOWN / RULE`.
+/// Both render the shared `app.rows`.
+#[allow(clippy::too_many_arguments)]
+fn draw_conn_live_cols(buf: &mut Buffer, x0: u16, w: u16, col_y: u16, list_y: u16, list_h: usize, scroll: usize, app: &App, present: bool) {
+    let dimmer = theme::fg(theme::DIMMER);
+    let dim = theme::fg(theme::DIM);
     put(buf, x0 + 1, col_y, "LANE", dimmer);
     put(buf, x0 + 8, col_y, "HOST:PORT", dimmer);
     put_right(buf, x0 + w - 38, col_y, "#", dimmer);
     put_right(buf, x0 + w - 27, col_y, "UP", dimmer);
     put_right(buf, x0 + w - 17, col_y, "DOWN", dimmer);
     put(buf, x0 + w - 14, col_y, "RULE", dimmer);
-
-    // Data rows.
-    let view = app.conns_view();
-    let scroll = app.conn_scroll.min(view.len().saturating_sub(1));
-    hit.conn_list = Rect::new(x0, list_y, w, list_h as u16);
-    hit.conn_pane = Rect::new(x0, hdr_y, w, (list_y + list_h as u16).saturating_sub(hdr_y));
-    hit.conn_h = list_h;
-    let host_max = (w.saturating_sub(38)).saturating_sub(9); // host col8 .. before '#'
+    let host_max = (w.saturating_sub(38)).saturating_sub(9);
     for row in 0..list_h {
         let idx = scroll + row;
-        if idx >= view.len() {
-            break;
-        }
-        let c = view[idx];
+        let Some(c) = app.rows.get(idx) else { break };
         let y = list_y + row as u16;
-        // A dormant domain (no live connection — only carried-over history) is
-        // greyed and shows `#` 0; it sorts after all the live rows.
-        let dormant = c.conns == 0;
-        let lane_st = if dormant { dim } else { theme::bold(c.lane.color()) };
-        put(buf, x0 + 1, y, c.lane.label(), lane_st);
-        let hostport = format!("{}:{}", c.host, c.port);
+        let dormant = !c.is_live();
+        put(buf, x0 + 1, y, c.lane.label(), if dormant { dim } else { theme::bold(c.lane.color()) });
+        let hostport = host_label(c);
         let selected = !present && app.focus == Focus::Conn && app.conn_active() && idx == app.conn_sel;
-        let shown = if selected {
-            marquee(&hostport, host_max, app.started.elapsed().as_secs_f32())
-        } else {
-            truncate(&hostport, host_max)
-        };
+        let shown = if selected { marquee(&hostport, host_max, app.started.elapsed().as_secs_f32()) } else { truncate(&hostport, host_max) };
         put(buf, x0 + 8, y, &shown, if dormant { dim } else { theme::fg(theme::BRIGHT) });
         put_right(buf, x0 + w - 38, y, &c.conns.to_string(), dimmer);
-        // No ↑/↓ here — the UP/DOWN column headers already label these; the
-        // color still distinguishes up (warm) from down (teal). Dormant rows are
-        // uniformly grey.
-        let (up_st, down_st) = if dormant {
-            (dim, dim)
-        } else {
-            (theme::fg(theme::UP_TABLE), theme::fg(theme::DOWN_TABLE))
-        };
-        put_right(buf, x0 + w - 27, y, &format::compact(c.up), up_st);
-        put_right(buf, x0 + w - 17, y, &format::compact(c.down), down_st);
-        // RULE is the last column — truncate hard so a long/verbose rule can
-        // never spill across the divider into the errors pane.
+        let (up_st, down_st) = if dormant { (dim, dim) } else { (theme::fg(theme::UP_TABLE), theme::fg(theme::DOWN_TABLE)) };
+        put_right(buf, x0 + w - 27, y, &format::compact(c.live_up), up_st);
+        put_right(buf, x0 + w - 17, y, &format::compact(c.live_down), down_st);
         put(buf, x0 + w - 14, y, &truncate(&c.rule, 13), dimmer);
         if selected {
             highlight_row(buf, x0, y, w, c.lane.color());
         }
     }
-    if !present {
-        draw_scrollbar(buf, x0 + w - 1, list_y, list_h, view.len(), scroll);
-    }
 }
 
-/// The flipped connections pane: per-domain byte history in the current
-/// direction (↑/↓) over the band's four trailing-window columns. `host` is the
-/// pinned first column; selection/route/yank share the Live view's machinery
-/// (both key off the domain). See METRICS.md §5.
+/// The flipped view: per-domain byte history over the band's four trailing-window
+/// columns in the current direction (`↑`/`↓` prefix the column labels). Dormant
+/// hosts (not currently connected) render greyed. See METRICS.md §5.
 #[allow(clippy::too_many_arguments)]
-fn draw_conn_metrics(
-    buf: &mut Buffer,
-    x0: u16,
-    w: u16,
-    hdr_y: u16,
-    col_y: u16,
-    list_y: u16,
-    list_h: usize,
-    app: &App,
-    present: bool,
-    hit: &mut Hit,
-) {
+fn draw_conn_metric_cols(buf: &mut Buffer, x0: u16, w: u16, col_y: u16, list_y: u16, list_h: usize, scroll: usize, app: &App, present: bool) {
     let dimmer = theme::fg(theme::DIMMER);
     let dim = theme::fg(theme::DIM);
-    let bright = theme::fg(theme::BRIGHT);
     let up = app.conn_view.is_up();
+    let arrow = if up { "↑" } else { "↓" };
     let dir_c = if up { theme::UP_TABLE } else { theme::DOWN_TABLE };
     let cols = app.band.cols(); // [(label, span_secs, is_rate); 4], index 0 = leftmost
-
     const COLW: u16 = 8;
-    // Right-edge x of visual column k (k = 0 is rightmost = band column index 3).
-    let col_x = |k: u16| x0 + w - 2 - k * COLW;
+    let col_x = |k: u16| x0 + w - 2 - k * COLW; // k=0 rightmost = band col index 3
     let host_max = w.saturating_sub(4 * COLW + 10);
-    // A cell's text: rate columns show `/s` (bytes over the window / window), totals bare.
     let fmt = |v: u64, span: i64, is_rate: bool| -> String {
-        if is_rate {
-            format!("{}/s", format::bytes_total(v as f64 / span.max(1) as f64))
-        } else {
-            format::bytes_total(v as f64)
-        }
+        if is_rate { format!("{}/s", format::bytes_total(v as f64 / span.max(1) as f64)) } else { format::bytes_total(v as f64) }
     };
 
-    // Header zone: direction + band, then an `all` column-totals row.
-    let arrow_c = if up { theme::UP } else { theme::DOWN };
-    put(buf, x0 + 1, hdr_y, if up { "▲ upload" } else { "▼ download" }, theme::bold(arrow_c));
-    put_right(buf, x0 + w - 2, hdr_y, &format!("band {}", app.band.label()), dimmer);
-    let mut totals = [0u64; 4];
-    for m in &app.metric_rows {
-        for i in 0..4 {
-            totals[i] += m.cols[i];
-        }
-    }
-    let all_y = hdr_y + 1;
-    if all_y < col_y {
-        put(buf, x0 + 1, all_y, "all", theme::bold(theme::BRIGHT));
-        for k in 0..4u16 {
-            let (_, span, is_rate) = cols[(3 - k) as usize];
-            put_right(buf, col_x(k), all_y, &fmt(totals[(3 - k) as usize], span, is_rate), theme::bold(theme::BRIGHT));
-        }
-    }
-
-    // Column header row.
+    // Column header: LANE HOST + arrow-prefixed window labels (the arrow is the
+    // up/down indicator, per the "arrows in the column labels" request).
     put(buf, x0 + 1, col_y, "LANE", dimmer);
     put(buf, x0 + 8, col_y, "HOST", dimmer);
     for k in 0..4u16 {
-        let (lbl, _, is_rate) = cols[(3 - k) as usize];
-        let h = if is_rate { format!("{}/s", lbl) } else { lbl.to_string() };
-        put_right(buf, col_x(k), col_y, &h, dimmer);
+        let (lbl, _, _) = cols[(3 - k) as usize];
+        put_right(buf, col_x(k), col_y, &format!("{arrow}{lbl}"), theme::fg(dir_c));
     }
 
-    let rows = &app.metric_rows;
-    hit.conn_list = Rect::new(x0, list_y, w, list_h as u16);
-    hit.conn_pane = Rect::new(x0, hdr_y, w, (list_y + list_h as u16).saturating_sub(hdr_y));
-    hit.conn_h = list_h;
-    if rows.is_empty() {
-        let msg = "no traffic recorded yet — the collector is warming up";
-        put(buf, x0 + 1, list_y, &truncate(msg, w.saturating_sub(2)), dim);
-        return;
-    }
-    let scroll = app.conn_scroll.min(rows.len().saturating_sub(1));
     for row in 0..list_h {
         let idx = scroll + row;
-        if idx >= rows.len() {
-            break;
-        }
-        let m = &rows[idx];
+        let Some(c) = app.rows.get(idx) else { break };
         let y = list_y + row as u16;
+        let dormant = !c.is_live();
+        put(buf, x0 + 1, y, c.lane.label(), if dormant { dim } else { theme::bold(c.lane.color()) });
         let selected = !present && app.focus == Focus::Conn && app.conn_active() && idx == app.conn_sel;
-        put(buf, x0 + 1, y, m.lane.label(), theme::bold(m.lane.color()));
-        let shown = if selected {
-            marquee(&m.domain, host_max, app.started.elapsed().as_secs_f32())
-        } else {
-            truncate(&m.domain, host_max)
-        };
-        put(buf, x0 + 8, y, &shown, bright);
+        let host = host_label(c);
+        let shown = if selected { marquee(&host, host_max, app.started.elapsed().as_secs_f32()) } else { truncate(&host, host_max) };
+        put(buf, x0 + 8, y, &shown, if dormant { dim } else { theme::fg(theme::BRIGHT) });
+        let series = if up { &c.hist_up } else { &c.hist_down };
         for k in 0..4u16 {
             let (_, span, is_rate) = cols[(3 - k) as usize];
-            let v = m.cols[(3 - k) as usize];
-            put_right(buf, col_x(k), y, &fmt(v, span, is_rate), if v > 0 { theme::fg(dir_c) } else { dim });
+            let v = series[(3 - k) as usize];
+            let st = if dormant { dim } else if v > 0 { theme::fg(dir_c) } else { dim };
+            put_right(buf, col_x(k), y, &fmt(v, span, is_rate), st);
         }
         if selected {
-            highlight_row(buf, x0, y, w, m.lane.color());
+            highlight_row(buf, x0, y, w, c.lane.color());
         }
     }
-    if !present {
-        draw_scrollbar(buf, x0 + w - 1, list_y, list_h, rows.len(), scroll);
+}
+
+/// A row's pinned first-column label: `host:port` for a live connection, or just
+/// `host` for a historical row (no live port).
+fn host_label(c: &crate::model::ConnRow) -> String {
+    if c.port == 0 {
+        c.host.clone()
+    } else {
+        format!("{}:{}", c.host, c.port)
     }
 }
 

@@ -103,7 +103,7 @@ impl MetricsBand {
     /// The four columns: (header label, trailing-window seconds, is_rate).
     pub fn cols(self) -> [(&'static str, i64, bool); 4] {
         match self {
-            MetricsBand::Recent => [("now", 5, true), ("1m", 60, true), ("1h", 3600, false), ("24h", 86_400, false)],
+            MetricsBand::Recent => [("1m", 60, true), ("5m", 300, true), ("1h", 3600, false), ("24h", 86_400, false)],
             MetricsBand::Days => [("1h", 3600, false), ("6h", 21_600, false), ("24h", 86_400, false), ("7d", 604_800, false)],
             MetricsBand::Year => [("24h", 86_400, false), ("7d", 604_800, false), ("30d", 2_592_000, false), ("1y", 31_536_000, false)],
         }
@@ -114,20 +114,31 @@ impl MetricsBand {
     }
 }
 
-/// One row of the flipped metrics view: a domain, its dominant lane, and the
-/// per-column byte totals for the active band (direction already selected).
+/// One row of the connections pane, unified across all views (METRICS.md §5): a
+/// host with its live stats AND its per-band byte history in both directions, so
+/// `v` pans columns without reordering or re-querying. Live rows (`conns > 0`)
+/// sort on top by throughput; dormant/historical rows (`conns == 0`) follow,
+/// ranked by history and rendered greyed.
 #[derive(Clone, Debug)]
-pub struct MetricRow {
-    pub domain: String,
+pub struct ConnRow {
+    pub host: String,
+    pub port: u16,
     pub lane: Lane,
-    pub cols: [u64; 4],
+    pub conns: u32,     // live concurrency (0 = dormant/historical → greyed)
+    pub live_up: f64,   // live cumulative bytes (the Live view's UP/DOWN columns)
+    pub live_down: f64,
+    pub rule: String,
+    pub hist_up: [u64; 4], // per-band-column history (the ↑ metrics view)
+    pub hist_down: [u64; 4], // the ↓ metrics view
 }
 
-impl MetricRow {
-    /// The routed/copied key — the domain (matches `Conn::key`, so the shared
-    /// selection machinery works over either list).
+impl ConnRow {
+    /// Routed/copied/selection key — the domain (matches `Conn::key`).
     pub fn key(&self) -> String {
-        self.domain.clone()
+        self.host.clone()
+    }
+    pub fn is_live(&self) -> bool {
+        self.conns > 0
     }
 }
 

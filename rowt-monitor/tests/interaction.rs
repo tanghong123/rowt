@@ -107,8 +107,9 @@ fn stacked_left_right_is_noop_but_falls_through_vertically() {
     assert_eq!(a.focus, Focus::Conn, "left/right do nothing when stacked");
 
     // Walk the connections selection to its last row, then Down falls into errors.
+    // The pane list is the unified `rows` (live + historical), not just conns_view.
     a.update(Action::Down); // activate at 0
-    for _ in 0..a.conns_view().len() {
+    for _ in 0..a.rows.len() {
         a.update(Action::Down);
     }
     assert_eq!(a.focus, Focus::Err);
@@ -117,12 +118,16 @@ fn stacked_left_right_is_noop_but_falls_through_vertically() {
     // Up off the top of errors falls back into connections' bottom.
     a.update(Action::Up);
     assert_eq!(a.focus, Focus::Conn);
-    assert_eq!(a.conn_sel, a.conns_view().len() - 1);
+    assert_eq!(a.conn_sel, a.rows.len() - 1);
 }
 
 #[test]
 fn window_cycle_and_step_and_set() {
     let mut a = app();
+    // `w`/`[`/`]` are pane-scoped: the errors window only cycles when the errors
+    // pane is focused (in the Live connections view `w` is a no-op).
+    a.update(Action::FocusRight);
+    assert_eq!(a.focus, Focus::Err);
     assert_eq!(a.window, Window::M10);
     a.update(Action::WindowCycle);
     assert_eq!(a.window, Window::H1);

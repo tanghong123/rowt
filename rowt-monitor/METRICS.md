@@ -80,22 +80,32 @@ well under ~15 MB steady-state.
 
 ## 5. Surfacing in the monitor
 
-No second UX. The connections pane flips between views; `host:port` stays pinned
-as column 1.
+No second UX. The connections pane is one conceptually-wide table with a pinned
+`host` column; `v` pans the visible columns across `[live | ↑ upload | ↓ download]`
+and wraps.
 
-- **`v`** cycles the connections pane: `● live → ▲ upload → ▼ download → live`
-  (caption chip shows which). Live = today's view. Upload/Download read the DB.
-- **`w`** (+ `[` `]`) becomes **pane-scoped** (focused pane's window). In a
-  metrics view it shifts the *timescale band* of the columns:
-  - recent: `now  1m  1h  24h`   · days: `1h  6h  24h  7d`   · year: `24h 7d 30d 1y`
+**One unified row list across all views** (so order is stable as you pan): the
+live connections (in the source's throughput order) plus the top historical
+domains not currently connected, appended and ranked by history. Hosts with no
+live connection render **greyed** (`conns == 0`). Selection/route/yank/`e c b d`
+key off the domain, so they work in every view. Both directions are loaded at
+once, so `v` never re-queries or reorders.
+
+- **`v`** pans `live → ▲ upload → ▼ download → live`; the caption shows
+  `connections · ▲ upload · <band>`.
+- **`w`** (+ `[` `]`) is **pane-scoped**: it cycles the *timescale band* when the
+  connections pane is focused in a flipped view, or the errors window when the
+  errors pane is focused — and is a **no-op** in the Live connections view.
+  - recent: `1m  5m  1h  24h`   · days: `1h  6h  24h  7d`   · year: `24h 7d 30d 1y`
 - **`f`** (+ `1/2/3/0`) unchanged — lane filter, scopes both panes incl. metrics.
 
-Column semantics: short windows (`now`, `1m`) show **rate** (`/s`, from the live
-snapshot + recent 5s buckets); longer windows show **total bytes** over the
-trailing rolling window (summed from the tier covering that span). Absolute
-magnitude is the number+unit; no per-row axis (rows sorted by the window desc, so
-magnitude ordering is visual). Tier chosen by window size: ≤1h→5s, ≤24h→1m,
-≤90d→1h, else 1d.
+The per-lane bandwidth rate table (`all / escape / corp / direct`) shows in the
+header of **every** view. Column semantics: the two short columns render as
+**rate** (`/s`), the longer two as **total bytes**; the `↑`/`↓` direction is the
+prefix on each column label. A window spans tiers, so each column sums a UNION of
+all four tiers filtered by `ts` (recent hour in `sample_5s`, older in the coarser
+tiers — time-disjoint post-rollup). Magnitude is the number+unit (B→T); rows keep
+the connection order, so no per-row axis is needed.
 
 ### Header identity grid
 

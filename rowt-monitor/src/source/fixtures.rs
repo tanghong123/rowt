@@ -70,28 +70,30 @@ impl Source for FixtureSource {
         "fixtures"
     }
 
-    fn metrics(&mut self, up: bool, spans: [i64; 4], lane: Option<Lane>) -> Vec<MetricRow> {
-        // Synthetic history so `v` demos offline. Each anchor is a plausible
-        // 24h-ish download total; the four band columns scale by span so the
-        // shape reads right. Upload is a fraction of download.
+    fn history(&mut self, spans: [i64; 4], lane: Option<Lane>) -> crate::source::History {
+        // Synthetic history so `v` demos offline. Some hosts overlap the live
+        // connections (they'll show live + history); two (netflix / backups) are
+        // dormant-only — heavy in history but not connected now — to show the
+        // greyed superset rows. Each anchor is a ~24h download total, apportioned
+        // across the band columns by span; upload is a fraction.
         let anchors: [(&str, Lane, u64); 6] = [
             ("api.anthropic.com", Lane::Escape, 1_240_000_000),
-            ("mail.google.com", Lane::Escape, 340_000_000),
-            ("github.githubassets.com", Lane::Escape, 96_000_000),
-            ("gateway.icloud.com", Lane::Escape, 74_000_000),
-            ("hire.aliyun-inc.com", Lane::Corp, 22_000_000),
-            ("h-adashx.dingtalkapps.com", Lane::Direct, 8_000_000),
+            ("www.youtube.com", Lane::Escape, 980_000_000),
+            ("netflix.com", Lane::Escape, 1_500_000_000), // dormant-only
+            ("mirrors.aliyun.com", Lane::Direct, 128_000_000),
+            ("backups.corp.example.com", Lane::Corp, 340_000_000), // dormant-only
+            ("mail.google.com", Lane::Escape, 96_000_000),
         ];
         let widest = spans[3] as f64;
         anchors
             .iter()
             .filter(|(_, l, _)| lane.is_none_or(|f| *l == f))
             .map(|(dom, l, day)| {
-                let total = if up { *day / 6 } else { *day } as f64;
-                // Apportion by each column's share of the widest span (rough but
-                // monotone), so recent columns are smaller than longer ones.
-                let cols = std::array::from_fn(|i| (total * (spans[i] as f64 / widest)) as u64);
-                MetricRow { domain: (*dom).to_string(), lane: *l, cols }
+                let dn = *day as f64;
+                let up = dn / 6.0;
+                let dcols = std::array::from_fn(|i| (dn * (spans[i] as f64 / widest)) as u64);
+                let ucols = std::array::from_fn(|i| (up * (spans[i] as f64 / widest)) as u64);
+                ((*dom).to_string(), (l.label().to_string(), ucols, dcols))
             })
             .collect()
     }

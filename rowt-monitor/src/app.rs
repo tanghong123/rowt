@@ -3,7 +3,10 @@
 
 use std::time::{Duration, Instant};
 
-use crate::model::{Conn, ConnView, Lane, MetricRow, MetricsBand, Snapshot, Window};
+use std::collections::HashSet;
+
+use crate::model::{Conn, ConnRow, ConnView, Lane, MetricsBand, Snapshot, Window};
+use crate::source::History;
 use crate::source::Source;
 
 /// After the last committed lane edit, wait this long before issuing the single
@@ -161,18 +164,22 @@ pub struct App {
     pub side_by_side: bool,
 
     // Connections pane view (`v` pans live → ↑ upload → ↓ download) + the metrics
-    // timescale band (`w` when the pane is focused in a metrics view). `metric_rows`
-    // is the DB-backed list shown in the non-live views (empty in Live).
+    // timescale band (`w` when the pane is focused in a metrics view). `history` is
+    // the per-domain byte history for the current band; `rows` is the unified
+    // per-tick row list (live connections + top historical domains) rendered in
+    // every view — see METRICS.md §5.
     pub conn_view: ConnView,
     pub band: MetricsBand,
-    pub metric_rows: Vec<MetricRow>,
+    pub history: History,
+    pub rows: Vec<ConnRow>,
 }
 
 impl App {
     pub fn new(mut source: Box<dyn Source>) -> Self {
         let window = Window::M10;
         let snap = source.poll(window, None);
-        App {
+        let history = source.history(MetricsBand::Recent.spans(), None);
+        let mut app = App {
             source,
             snap,
             paused: false,
@@ -207,17 +214,18 @@ impl App {
             side_by_side: true,
             conn_view: ConnView::Live,
             band: MetricsBand::Recent,
-            metric_rows: Vec::new(),
-        }
+            history,
+            rows: Vec::new(),
+        };
+        app.rebuild_rows();
+        app
     }
 
     /// Data tick: re-poll unless paused.
     pub fn tick(&mut self) {
         if !self.paused {
             self.snap = self.source.poll(self.window, self.lane_filter);
-            if !self.conn_view.is_live() {
-                self.refetch_metrics();
-            }
+            self.refetch_history();
             self.resolve_keys();
             self.clamp_selection();
         }
@@ -640,53 +648,104 @@ impl App {
         }
     }
 
-    /// `w` / `[` / `]` are pane-scoped: in a metrics view of the (focused)
-    /// connections pane they shift the timescale band; otherwise the errors
-    /// window. `d` is the step (+1 cycle).
+    /// `w` / `[` / `]` are pane-scoped: they shift the metrics timescale band when
+    /// the connections pane is focused in a flipped view, or the errors window
+    /// when the errors pane is focused. No-op otherwise (Live connections view,
+    /// server strip) — `w` there would be meaningless. `d` is the step (+1 cycle).
     fn window_action(&mut self, d: i32) {
-        if self.focus == Focus::Conn && !self.conn_view.is_live() {
-            let n = MetricsBand::ALL.len() as i32;
-            let i = (self.band.index() as i32 + d).rem_euclid(n);
-            self.band = MetricsBand::ALL[i as usize];
-            self.refetch_metrics();
-            self.clamp_selection();
-        } else {
-            let n = Window::ALL.len() as i32;
-            let i = (self.window.index() as i32 + d).rem_euclid(n);
-            self.window = Window::ALL[i as usize];
-            self.tick_window();
+        match self.focus {
+            Focus::Conn if !self.conn_view.is_live() => {
+                let n = MetricsBand::ALL.len() as i32;
+                let i = (self.band.index() as i32 + d).rem_euclid(n);
+                self.band = MetricsBand::ALL[i as usize];
+                self.refetch_history();
+                self.clamp_selection();
+            }
+            Focus::Err => {
+                let n = Window::ALL.len() as i32;
+                let i = (self.window.index() as i32 + d).rem_euclid(n);
+                self.window = Window::ALL[i as usize];
+                self.tick_window();
+            }
+            _ => {} // Live connections view or the server strip: no window to cycle.
         }
     }
 
-    /// `v`: pan the connections pane across live / ↑ upload / ↓ download. The
-    /// locked domain rides along (resolve_keys re-finds it in the new list).
+    /// `v`: pan the connections pane across live / ↑ upload / ↓ download. The row
+    /// list and order don't change (both directions are already loaded), so the
+    /// selection stays put — only the visible columns change.
     fn pan_conn_view(&mut self) {
         self.conn_view = self.conn_view.pan_next();
-        self.conn_scroll = 0;
-        self.refetch_metrics();
-        self.resolve_keys();
-        self.clamp_selection();
+        self.ensure_visible(Focus::Conn);
     }
 
-    /// Refresh the DB-backed metrics list for the current view/band/lane (empty in
-    /// the Live view — that list comes from the live `Snapshot`).
-    fn refetch_metrics(&mut self) {
-        self.metric_rows = if self.conn_view.is_live() {
-            Vec::new()
-        } else {
-            self.source.metrics(self.conn_view.is_up(), self.band.spans(), self.lane_filter)
-        };
+    /// Re-query the per-domain history for the current band/lane and rebuild the
+    /// unified row list.
+    fn refetch_history(&mut self) {
+        self.history = self.source.history(self.band.spans(), self.lane_filter);
+        self.rebuild_rows();
     }
 
-    /// The domains of the connections pane's current rows — the live connections
-    /// list or the metrics rows, depending on the view. The shared selection /
-    /// route / yank machinery keys off these, so it works over either.
-    pub fn conn_row_keys(&self) -> Vec<String> {
-        if self.conn_view.is_live() {
-            self.conns_view().iter().map(|c| c.key()).collect()
-        } else {
-            self.metric_rows.iter().map(|m| m.key()).collect()
+    fn rebuild_rows(&mut self) {
+        self.rows = self.build_conn_rows();
+    }
+
+    /// The unified connections list: live connections (with their history looked
+    /// up) plus top historical domains not currently connected, one row per host.
+    /// Live rows sort first by throughput; dormant/historical rows follow, ranked
+    /// by history over the band's widest column. Rendered greyed when `conns == 0`.
+    fn build_conn_rows(&self) -> Vec<ConnRow> {
+        let mut rows: Vec<ConnRow> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        // Live + this-session-dormant connections, in the source's own order (the
+        // live source already sorts live-by-throughput then session-dormant), so
+        // the established connections ordering is preserved across the `v` pan.
+        for c in self.conns_view() {
+            let (hu, hd) = self.history.get(&c.host).map(|(_, u, d)| (*u, *d)).unwrap_or_default();
+            rows.push(ConnRow {
+                host: c.host.clone(),
+                port: c.port,
+                lane: c.lane,
+                conns: c.conns,
+                live_up: c.up,
+                live_down: c.down,
+                rule: c.rule.clone(),
+                hist_up: hu,
+                hist_down: hd,
+            });
+            seen.insert(c.host.clone());
         }
+        // Historical domains not currently connected (already lane-scoped by the
+        // query) — appended below the live list, ranked by history over the widest
+        // column; host breaks ties so the order is deterministic (HashMap iteration
+        // isn't). Rendered greyed (conns == 0).
+        let mut extra: Vec<ConnRow> = self
+            .history
+            .iter()
+            .filter(|(host, _)| !seen.contains(*host))
+            .map(|(host, (lane_s, hu, hd))| ConnRow {
+                host: host.clone(),
+                port: 0,
+                lane: Lane::from_label(lane_s),
+                conns: 0,
+                live_up: 0.0,
+                live_down: 0.0,
+                rule: String::new(),
+                hist_up: *hu,
+                hist_down: *hd,
+            })
+            .collect();
+        extra.sort_by(|a, b| {
+            (b.hist_down[3] + b.hist_up[3]).cmp(&(a.hist_down[3] + a.hist_up[3])).then_with(|| a.host.cmp(&b.host))
+        });
+        rows.extend(extra);
+        rows
+    }
+
+    /// The domains of the connections pane's current rows — the shared selection /
+    /// route / yank machinery keys off these.
+    pub fn conn_row_keys(&self) -> Vec<String> {
+        self.rows.iter().map(|r| r.key()).collect()
     }
 
     /// Re-aggregate the errors pane for the new window immediately.
@@ -703,7 +762,7 @@ impl App {
         self.conn_scroll = 0;
         self.conn_key = None;
         self.repoll();
-        self.refetch_metrics();
+        self.refetch_history();
         self.err_sel = 0;
         self.err_scroll = 0;
         self.err_key = None;

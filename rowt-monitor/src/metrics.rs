@@ -83,10 +83,6 @@ pub fn get_meta(conn: &Connection, k: &str) -> Option<String> {
     conn.query_row("SELECT v FROM meta WHERE k=?1", params![k], |r| r.get(0)).ok()
 }
 
-fn get_meta_i64(conn: &Connection, k: &str) -> Option<i64> {
-    get_meta(conn, k).and_then(|s| s.parse().ok())
-}
-
 // ---------------- writes ----------------
 
 /// In-flight per-bucket accumulation: `(domain, lane) -> (up, dn)` bytes.
@@ -172,38 +168,36 @@ pub fn open_read(path: &std::path::Path) -> Option<Connection> {
     Connection::open(path).ok()
 }
 
-/// Top domains for the flipped metrics view: for each of the band's four spans,
-/// sum `up`/`dn` bytes per domain over the trailing window (from the covering
-/// tier), rank by the widest column, and take the top `limit`. Rows merge lanes
-/// (one row per domain, keyed by domain for routing) and carry the dominant lane
-/// label for coloring. `lane` filters to a single lane. Returns
-/// `(domain, lane_label, [col0..col3])`.
-pub fn metric_rows(
+// ---------------- reads (monitor) ----------------
+
+/// Per-domain byte history for the connections pane's flipped views: for each of
+/// the band's four spans, sum `bytes_up` and `bytes_dn` per domain over the
+/// trailing window `[now-span, now]`, UNIONed across all tiers (a window spans
+/// tiers — the recent hour is only in sample_5s, older data only in the coarser
+/// ones; post-rollup they are time-disjoint, so UNION ALL sums without double
+/// counting). Lanes are merged (one entry per domain) with the dominant lane kept
+/// for coloring. `lane` filters to one lane. Returns
+/// `domain -> (dominant_lane_label, [up per column], [dn per column])`.
+pub fn history_map(
     conn: &Connection,
     now: i64,
     spans: [i64; 4],
     lane: Option<&str>,
-    up: bool,
-    limit: usize,
-) -> rusqlite::Result<Vec<(String, String, [u64; 4])>> {
-    let col = if up { "bytes_up" } else { "bytes_dn" };
-    let mut acc: HashMap<String, [u64; 4]> = HashMap::new();
-    // Dominant lane per domain, weighted by bytes over the widest (ranking) span.
-    let mut lane_bytes: HashMap<String, HashMap<String, u64>> = HashMap::new();
+) -> rusqlite::Result<HashMap<String, (String, [u64; 4], [u64; 4])>> {
     let lane_arg = lane.unwrap_or("");
-    // A trailing window can span tiers: the last hour lives only in sample_5s, older
-    // data only in the coarser tiers (post-rollup they're time-disjoint, so UNION ALL
-    // sums cleanly without double-counting). Each subquery filters by ts for its index.
     let union: String = TIERS
         .iter()
-        .map(|t| format!("SELECT domain, lane, {col} AS b FROM {} WHERE ts >= ?1", t.table))
+        .map(|t| format!("SELECT domain, lane, bytes_up AS u, bytes_dn AS d FROM {} WHERE ts >= ?1", t.table))
         .collect::<Vec<_>>()
         .join(" UNION ALL ");
+    let mut up: HashMap<String, [u64; 4]> = HashMap::new();
+    let mut dn: HashMap<String, [u64; 4]> = HashMap::new();
+    // Dominant lane per domain, weighted by total bytes over the widest span.
+    let mut lane_bytes: HashMap<String, HashMap<String, u64>> = HashMap::new();
     for (ci, &span) in spans.iter().enumerate() {
-        // `?2 = ''` disables the lane filter (all lanes); '-' (unattributed) is
-        // always excluded from the per-domain view.
+        // `?2 = ''` disables the lane filter; '-' (unattributed) is always excluded.
         let sql = format!(
-            "SELECT domain, lane, sum(b) FROM ({union}) \
+            "SELECT domain, lane, sum(u), sum(d) FROM ({union}) \
              WHERE (?2 = '' OR lane = ?2) AND lane <> '-' GROUP BY domain, lane",
         );
         let mut stmt = conn.prepare(&sql)?;
@@ -212,111 +206,26 @@ pub fn metric_rows(
         while let Some(r) = rows.next()? {
             let d: String = r.get(0)?;
             let l: String = r.get(1)?;
-            let b: i64 = r.get(2)?;
-            acc.entry(d.clone()).or_default()[ci] += b.max(0) as u64;
+            let su = r.get::<_, i64>(2)?.max(0) as u64;
+            let sd = r.get::<_, i64>(3)?.max(0) as u64;
+            up.entry(d.clone()).or_default()[ci] += su;
+            dn.entry(d.clone()).or_default()[ci] += sd;
             if widest {
-                *lane_bytes.entry(d).or_default().entry(l).or_default() += b.max(0) as u64;
+                *lane_bytes.entry(d).or_default().entry(l).or_default() += su + sd;
             }
         }
     }
-    let mut rows: Vec<(String, [u64; 4])> = acc.into_iter().collect();
-    // Rank by the widest column desc, then domain for stability.
-    rows.sort_by(|a, b| b.1[3].cmp(&a.1[3]).then_with(|| a.0.cmp(&b.0)));
-    rows.truncate(limit);
-    Ok(rows
+    Ok(up
         .into_iter()
-        .map(|(d, cols)| {
+        .map(|(d, ucols)| {
+            let dcols = dn.get(&d).copied().unwrap_or_default();
             let lane = lane_bytes
                 .get(&d)
                 .and_then(|m| m.iter().max_by_key(|(_, v)| **v).map(|(k, _)| k.clone()))
                 .unwrap_or_else(|| "direct".into());
-            (d, lane, cols)
+            (d, (lane, ucols, dcols))
         })
         .collect())
-}
-
-// ---------------- reads (monitor) ----------------
-
-/// Collector liveness as the monitor sees it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CollectorState {
-    /// Heartbeat fresh — collecting. `last_write` within `fresh_secs`.
-    On,
-    /// Heartbeat stale — process may be up but not writing (router wedged/down).
-    Stale,
-    /// No DB / never written.
-    Absent,
-}
-
-/// Read the collector heartbeat. `now` is wall-clock epoch seconds; a write
-/// within `fresh` seconds counts as live.
-pub fn collector_state(conn: &Connection, now: i64, fresh: i64) -> CollectorState {
-    match get_meta_i64(conn, "last_write") {
-        Some(w) if now - w <= fresh => CollectorState::On,
-        Some(_) => CollectorState::Stale,
-        None => CollectorState::Absent,
-    }
-}
-
-/// One domain's totals over a window, for the flipped connections view.
-#[derive(Clone, Debug)]
-pub struct DomTotal {
-    pub domain: String,
-    pub lane: String,
-    pub bytes_up: u64,
-    pub bytes_dn: u64,
-}
-
-/// Pick the tier whose resolution best covers a trailing window of `span` seconds
-/// (§5): ≤1h→5s, ≤24h→1m, ≤90d→1h, else 1d.
-pub fn tier_for(span: i64) -> &'static Tier {
-    TIERS.iter().find(|t| span <= t.retain).unwrap_or(TIERS.last().unwrap())
-}
-
-/// Top domains by total bytes over the trailing window `[now-span, now]`, summed
-/// from the covering tier. `lane` filters (None = all lanes, excludes the
-/// `(unattributed)` reconciliation row unless `include_unattr`). Ranked by the
-/// chosen direction (`up`) descending.
-pub fn top_domains(
-    conn: &Connection,
-    now: i64,
-    span: i64,
-    lane: Option<&str>,
-    up: bool,
-    limit: usize,
-    include_unattr: bool,
-) -> rusqlite::Result<Vec<DomTotal>> {
-    let tier = tier_for(span);
-    let order = if up { "s_up" } else { "s_dn" };
-    let lane_clause = match lane {
-        Some(_) => "AND lane = ?3",
-        None if include_unattr => "",
-        None => "AND lane <> '-'",
-    };
-    let sql = format!(
-        "SELECT domain, \
-                CASE WHEN ?4 THEN '' ELSE max(lane) END AS lane, \
-                sum(bytes_up) AS s_up, sum(bytes_dn) AS s_dn \
-         FROM {t} WHERE ts >= ?1 {lane_clause} GROUP BY domain \
-         ORDER BY {order} DESC LIMIT ?2",
-        t = tier.table,
-        lane_clause = lane_clause,
-        order = order,
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let group_all_lanes = lane.is_none();
-    let rows = stmt.query_map(
-        params![now - span, limit as i64, lane.unwrap_or(""), group_all_lanes],
-        |r| {
-            Ok(DomTotal {
-                domain: r.get(0)?,
-                lane: r.get(1)?,
-                bytes_up: r.get::<_, i64>(2)? as u64,
-                bytes_dn: r.get::<_, i64>(3)? as u64,
-            })
-        },
-    )?;
-    rows.collect()
 }
 
 #[cfg(test)]
@@ -384,33 +293,9 @@ mod tests {
     }
 
     #[test]
-    fn top_domains_ranks_and_filters() {
-        let c = mem();
-        let now = 10_000;
-        for (dom, lane, up, dn) in [
-            ("a.com", "escape", 100u64, 900u64),
-            ("b.com", "direct", 50, 50),
-            ("(unattributed)", "-", 1, 1),
-        ] {
-            let mut b: Bucket = Bucket::new();
-            bucket_add(&mut b, dom, lane, up, dn);
-            flush_bucket(&c, now - 10, &b).unwrap();
-        }
-        // By download, all lanes, excluding the reconciliation row.
-        let dn = top_domains(&c, now, 3600, None, false, 10, false).unwrap();
-        assert_eq!(dn[0].domain, "a.com");
-        assert!(!dn.iter().any(|d| d.domain == "(unattributed)"));
-        // Lane filter = direct keeps only b.com.
-        let d2 = top_domains(&c, now, 3600, Some("direct"), true, 10, false).unwrap();
-        assert_eq!(d2.len(), 1);
-        assert_eq!(d2[0].domain, "b.com");
-    }
-
-    #[test]
-    fn metric_rows_multi_span_rank_and_lane() {
+    fn history_map_multi_span_and_lane() {
         let c = mem();
         let now = 100_000;
-        // a.com: escape, big; b.com: direct, small; plus an unattributed row.
         for (ts, dom, lane, up, dn) in [
             (now - 10, "a.com", "escape", 10u64, 1000u64),
             (now - 2000, "a.com", "escape", 5, 500), // in 1h/24h windows, not 60s
@@ -421,20 +306,19 @@ mod tests {
             bucket_add(&mut b, dom, lane, up, dn);
             flush_bucket(&c, ts, &b).unwrap();
         }
-        // Recent band spans; download; all lanes.
-        let spans = [5i64, 60, 3600, 86_400];
-        let rows = metric_rows(&c, now, spans, None, false, 10).unwrap();
-        // unattributed excluded; a.com ranks first (bigger widest-col total).
-        assert!(!rows.iter().any(|(d, _, _)| d == "(unattributed)"));
-        assert_eq!(rows[0].0, "a.com");
-        assert_eq!(rows[0].1, "escape"); // dominant lane
-        // a.com's 60s column excludes the 4000s-old bucket; the 1h/24h include it.
-        let (_, _, cols) = &rows[0];
-        assert_eq!(cols[1], 1000, "1m col: only the recent bucket");
-        assert_eq!(cols[2], 1500, "1h col: both buckets");
+        let spans = [60i64, 300, 3600, 86_400];
+        let m = history_map(&c, now, spans, None).unwrap();
+        // unattributed excluded; both domains present with dominant lane.
+        assert!(!m.contains_key("(unattributed)"));
+        let (lane, up, dn) = &m["a.com"];
+        assert_eq!(lane, "escape");
+        // a.com's 60s column excludes the 2000s-old bucket; 1h/24h include both.
+        assert_eq!(dn[0], 1000, "1m col: only the recent bucket");
+        assert_eq!(dn[2], 1500, "1h col: both buckets");
+        assert_eq!(up[2], 15, "1h up col: both buckets");
         // Lane filter = direct keeps only b.com.
-        let only = metric_rows(&c, now, spans, Some("direct"), false, 10).unwrap();
+        let only = history_map(&c, now, spans, Some("direct")).unwrap();
         assert_eq!(only.len(), 1);
-        assert_eq!(only[0].0, "b.com");
+        assert!(only.contains_key("b.com"));
     }
 }
