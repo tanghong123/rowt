@@ -50,7 +50,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="2.5.4"
+ROWT_VERSION="2.5.5"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -3138,13 +3138,28 @@ cmd_metrics() {
       ;;
     path)
       echo "$db"
-      { [ -f "$db" ] && command -v sqlite3 >/dev/null 2>&1; } || return 0
-      echo
-      echo "# columns: ts=bucket-start epoch · domain · lane · bytes_up(↑) · bytes_dn(↓)"
-      echo "# tiers:   sample_5s(1h) → sample_1m(24h) → sample_1h(90d) → sample_1d(1y)"
-      echo "#          meta = k/v (schema_version, pid, started, last_write); '(unattributed)' = sub-second reconciliation"
-      echo
-      sqlite3 "$db" ".schema" 2>/dev/null | sed 's/^/  /'
+      cat <<EOF
+
+Four tables share one schema, each keeping traffic at a coarser resolution as it
+ages (older buckets roll up into the next tier):
+  sample_5s   5-second buckets   kept 1 hour
+  sample_1m   1-minute buckets   kept 24 hours
+  sample_1h   1-hour buckets     kept 90 days
+  sample_1d   1-day buckets      kept 1 year
+
+  column      type      attributes
+  ----------  --------  ------------------------------------------------
+  ts          INTEGER   NOT NULL · bucket-start epoch seconds · part of PK
+  domain      TEXT      NOT NULL · part of PK
+  lane        TEXT      NOT NULL · escape | corp | direct | - · part of PK
+  bytes_up    INTEGER   NOT NULL DEFAULT 0 · upload (↑)
+  bytes_dn    INTEGER   NOT NULL DEFAULT 0 · download (↓)
+  (PRIMARY KEY (ts, domain, lane); tables are WITHOUT ROWID)
+
+Also 'meta' (k TEXT PRIMARY KEY, v TEXT) — the collector heartbeat:
+schema_version, pid, started, last_write. Rows with domain '(unattributed)' hold
+sub-second traffic reconciled against the router's monotonic grand totals.
+EOF
       ;;
     query)
       shift
