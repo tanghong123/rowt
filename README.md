@@ -427,6 +427,7 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 | `explain <domain\|ip>` | explain which lane a destination takes — `escape` (proxy), `corp` (into the corp VPN), `block`, or `direct` (pass-through) — and which rule matched. Mirrors the real routing: hand-list domain suffixes win by **longest match** across all three lanes, then corp CIDR (on the resolved IP), then final; adds a live HTTP check if the router is running. (`route` still works as a hidden alias.) |
 | `report` | full offline diagnostic (deps, configs, per-server reachability, DNS, through-proxy tests, log + audit tail) → `~/.config/rowt/diag-*.txt`, **secrets masked**, for sharing. |
 | `audit [-n N\|all\|path\|clear]` | the **mutation trail** — one line per state-changing op, whether you ran it or the `watch` agent did, with `BEGIN`/`END`/`ABORT`, timing, and a `by=<parent>(<tty>)` field that says whether it was hands-on (`by=zsh`) or the watchdog (`by=launchd`). `BEGIN` is written before the work, so even a command that hangs leaves a trace. Read-only commands aren't recorded. → `~/.config/rowt/log/audit.log`. |
+| `metrics [status\|top\|path\|query]` | **per-domain traffic history** — a `collector` sidecar records bytes in/out per domain/lane into a tiered SQLite store (5s → 1y). `status` shows liveness; `top [secs]` the heaviest domains; `path` the store path + schema; `query "<SQL>"` a read-only SQL passthrough. Surfaced interactively in `monitor` via the `v` flip. See [Traffic metrics](#traffic-metrics). |
 | `monitor` | **full-screen TUI** (`htop`-style) — the live view of everything at once: connections + throughput, errors/blocked over a rolling window, and server health, plus confirmed, reversible controls (server switch, lane routing, proxy toggle). See [Monitor (TUI)](#monitor-tui). |
 | `run <command> [args…]` | run a command through whatever proxy path actually reaches the internet — probes, in order, the current shell proxy env → the macOS system proxy → rowt's port (if the router is up and the system proxy is off) → direct, and execs the command with the first where the target host answers (default `https://www.google.com/`; override `ROWT_RUN_TARGET`). Aborts without running if none work. Handy for CLI tools (`claude`, `git`, `npm`…) that ignore the system proxy: `rowt run claude`. |
 
@@ -503,16 +504,28 @@ rowt monitor --fixtures # force the offline demo
 
 **Layout** (reflows at 130 columns — side-by-side above, stacked below):
 
-- **identity band** — mode/interface, active server + latency, router, proxy,
-  config validity, uptime, and a status dot: green **LIVE** (breathing), red
-  **DOWN** (router unreachable), orange **ERROR** (active server failing its
-  probe / auto-mode with nothing reachable), grey **PAUSED**.
-- **live · connections** — per-lane throughput rates (`↑`/`↓` B/s) and a table of
-  domains (host:port, concurrency, cumulative bytes, matched rule), colored by
-  lane. Byte totals **persist per domain across short-lived connections** (so
-  bursty domains still show where your traffic went); a domain with no live
-  connection stays as a greyed **dormant** row (concurrency 0), sorted after the
-  live ones. Block-lane traffic is excluded.
+- **identity band** — mode/interface, active server + latency, router
+  (`running · N%` CPU, or `down · <reason>`), `sys proxy`, `watch` (the
+  auto-reload agent), `collector` (the metrics sidecar), uptime, and a status dot:
+  green **LIVE** (breathing), red **DOWN** (router unreachable), orange **ERROR**
+  (active server failing its probe / auto-mode with nothing reachable), grey
+  **PAUSED**.
+- **live connections** — press **`v`** to pan this pane across three views:
+  **live** → **▲ upload** → **▼ download** (wrapping). `host` stays pinned as the
+  first column while the rest of the columns change; selection rides along, so
+  `e/c/b/d`/`y`/`f` work in every view.
+  - *live* — a table of domains (host:port, concurrency, cumulative bytes, matched
+    rule), colored by lane. Byte totals **persist per domain across short-lived
+    connections**; a domain with no live connection stays as a greyed **dormant**
+    row (concurrency 0), sorted after the live ones.
+  - *upload / download* — per-domain byte **history** from the metrics store (see
+    [Traffic metrics](#traffic-metrics)) over four trailing-window columns chosen
+    by a **`w`**-selectable band: `recent` (1m/5m/1h/24h) · `days` (1h/6h/24h/7d) ·
+    `year` (24h/7d/30d/1y). The same greyed list includes top historical domains
+    not currently connected.
+  - The header rows are a **per-lane aggregate** of whatever the pane shows (all /
+    escape / corp / direct), and stay all-lanes even when `f` filters the detail
+    list. Block-lane traffic is excluded.
 - **errors & blocked** — failures and sinkholed domains over a rolling window
   (`5m`/`10m`/`1h`/`24h`), colored by category (dns = transient, timeout/reset/
   refused = persistent, blocked = purple).
@@ -525,7 +538,9 @@ rowt monitor --fixtures # force the offline demo
 mid-tick re-sort can't shift what you act on; `Esc` unlocks; leaving a pane forgets
 its selection) · `←→`/`hl` switch pane / pick a server chip (the strip freezes
 in place and wraps at the ends) · `Tab` cycle focus (connections → errors → health)
-· `f` (or `1`/`2`/`3`, `0`) lane filter · `w` / `[` `]` errors window · `y` copy the
+· `v` flip the connections pane (live / ↑ upload / ↓ download) · `f` (or `1`/`2`/`3`,
+`0`) lane filter · `w` / `[` `]` **pane-scoped** window (the metrics timescale band
+in a flipped view, or the errors window on the errors pane) · `y` copy the
 selected domain · `p` pause · `?` help · `q` quit. Mouse: wheel scrolls the list
 under the pointer; click a lane / window tab / row, a server chip (selects it in
 place), or `sys proxy` to toggle it (hover-highlights).
@@ -544,6 +559,48 @@ place), or `sys proxy` to toggle it (hover-highlights).
 and `lane-*.log`. Env: `ROWT_MONITOR_PROBE_INTERVAL` (secs, default 600),
 `ROWT_PING_URL` (probe target). It's a small Rust/`ratatui` binary built and
 installed alongside `rowt` (also runnable standalone as `rowt-monitor`).
+
+## Traffic metrics
+
+A lightweight **always-on collector** records per-domain, per-lane bytes in/out
+over time — so you can see where your bandwidth actually went, from the last five
+seconds to the last year. It runs as a **sidecar of the router** (started once the
+router comes up healthy, stopped with it — no separate service to manage), holding
+the clash API's `/connections` websocket and diffing each connection's cumulative
+counters into 5-second buckets. Set `ROWT_METRICS=off` to disable it.
+
+Storage is a single **tiered SQLite** file at `~/.config/rowt/metrics/traffic.db`,
+consolidated RRD-style so it stays tiny (well under ~15 MB):
+
+| tier | resolution | retained |
+|------|-----------|----------|
+| `sample_5s` | 5 seconds | 1 hour |
+| `sample_1m` | 1 minute  | 24 hours |
+| `sample_1h` | 1 hour    | 90 days |
+| `sample_1d` | 1 day     | 1 year |
+
+Each row is `(ts, domain, lane, bytes_up, bytes_dn)`; a `meta` table holds the
+collector heartbeat. Bytes moved by connections too short-lived to sample land in
+an `(unattributed)` row, reconciled against the router's monotonic grand totals so
+the books always balance.
+
+```sh
+rowt metrics                     # collector status: running? last write, size, rows
+rowt metrics top [seconds]       # top 20 domains by download over the last N s (default 3600)
+rowt metrics path                # the SQLite path + the table schema
+rowt metrics query "<SQL>"       # run a read-only SQL query against the store
+```
+
+`query` opens the DB read-only, so an arbitrary statement can never mutate the
+collector's data. Example — total bytes moved today:
+
+```sh
+rowt metrics query "SELECT sum(bytes_up) up, sum(bytes_dn) dn FROM sample_1m"
+```
+
+The richer, interactive view is the monitor: `rowt monitor`, then **`v`** to flip
+the connections pane through the upload/download history (see
+[Monitor](#monitor-tui)).
 
 ## How it decides (probe)
 
