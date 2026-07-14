@@ -679,15 +679,21 @@ impl App {
         self.ensure_visible(Focus::Conn);
     }
 
-    /// Re-query the per-domain history for the current band/lane and rebuild the
-    /// unified row list.
+    /// Re-query the per-domain history for the current band (ALL lanes — the lane
+    /// filter scopes only the visible list, not the header) and rebuild the rows.
     fn refetch_history(&mut self) {
-        self.history = self.source.history(self.band.spans(), self.lane_filter);
+        self.history = self.source.history(self.band.spans(), None);
         self.rebuild_rows();
     }
 
     fn rebuild_rows(&mut self) {
         self.rows = self.build_conn_rows();
+    }
+
+    /// The lane-filtered subset of `rows` — the detail list actually shown (and
+    /// navigated). The full `rows` still back the per-lane header aggregate.
+    pub fn visible_rows(&self) -> Vec<&ConnRow> {
+        self.rows.iter().filter(|r| self.lane_filter.is_none_or(|l| r.lane == l)).collect()
     }
 
     /// The unified connections list: live connections (with their history looked
@@ -697,10 +703,11 @@ impl App {
     fn build_conn_rows(&self) -> Vec<ConnRow> {
         let mut rows: Vec<ConnRow> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
-        // Live + this-session-dormant connections, in the source's own order (the
-        // live source already sorts live-by-throughput then session-dormant), so
+        // Live + this-session-dormant connections (ALL lanes — the lane filter
+        // scopes only the visible detail list, never the per-lane header aggregate),
+        // in the source's own order (live-by-throughput then session-dormant), so
         // the established connections ordering is preserved across the `v` pan.
-        for c in self.conns_view() {
+        for c in self.snap.conns.iter().filter(|c| c.lane != Lane::Block) {
             let (hu, hd) = self.history.get(&c.host).map(|(_, u, d)| (*u, *d)).unwrap_or_default();
             rows.push(ConnRow {
                 host: c.host.clone(),
@@ -742,10 +749,10 @@ impl App {
         rows
     }
 
-    /// The domains of the connections pane's current rows — the shared selection /
-    /// route / yank machinery keys off these.
+    /// The domains of the connections pane's *visible* (lane-filtered) rows — the
+    /// shared selection / route / yank machinery keys off these.
     pub fn conn_row_keys(&self) -> Vec<String> {
-        self.rows.iter().map(|r| r.key()).collect()
+        self.visible_rows().iter().map(|r| r.key()).collect()
     }
 
     /// Re-aggregate the errors pane for the new window immediately.
@@ -762,7 +769,7 @@ impl App {
         self.conn_scroll = 0;
         self.conn_key = None;
         self.repoll();
-        self.refetch_history();
+        self.rebuild_rows(); // rows are lane-independent; just refresh from the new poll
         self.err_sel = 0;
         self.err_scroll = 0;
         self.err_key = None;

@@ -473,19 +473,20 @@ fn draw_conn_pane(
         hit.lanes.push((Rect::new(x0 + 1, y, w - 2, 1), *lane));
     }
 
-    // Columns + data rows: the row list is shared across views (app.rows); only
-    // the columns pan. host:port pinned; dormant rows (conns==0) render greyed.
-    let scroll = app.conn_scroll.min(app.rows.len().saturating_sub(1));
+    // Detail list: the lane-filtered subset (the header above stays all-lanes).
+    // The columns pan with the view; host:port pinned; dormant rows greyed.
+    let visible = app.visible_rows();
+    let scroll = app.conn_scroll.min(visible.len().saturating_sub(1));
     hit.conn_list = Rect::new(x0, list_y, w, list_h as u16);
     hit.conn_pane = Rect::new(x0, hdr_y, w, (list_y + list_h as u16).saturating_sub(hdr_y));
     hit.conn_h = list_h;
     if app.conn_view.is_live() {
-        draw_conn_live_cols(buf, x0, w, col_y, list_y, list_h, scroll, app, present);
+        draw_conn_live_cols(buf, x0, w, col_y, list_y, list_h, scroll, &visible, app, present);
     } else {
-        draw_conn_metric_cols(buf, x0, w, col_y, list_y, list_h, scroll, app, present);
+        draw_conn_metric_cols(buf, x0, w, col_y, list_y, list_h, scroll, &visible, app, present);
     }
     if !present {
-        draw_scrollbar(buf, x0 + w - 1, list_y, list_h, app.rows.len(), scroll);
+        draw_scrollbar(buf, x0 + w - 1, list_y, list_h, visible.len(), scroll);
     }
 }
 
@@ -493,7 +494,7 @@ fn draw_conn_pane(
 /// views (`↑`/`↓` on each label); Live keeps its `# / UP / DOWN / RULE`.
 /// Both render the shared `app.rows`.
 #[allow(clippy::too_many_arguments)]
-fn draw_conn_live_cols(buf: &mut Buffer, x0: u16, w: u16, col_y: u16, list_y: u16, list_h: usize, scroll: usize, app: &App, present: bool) {
+fn draw_conn_live_cols(buf: &mut Buffer, x0: u16, w: u16, col_y: u16, list_y: u16, list_h: usize, scroll: usize, rows: &[&crate::model::ConnRow], app: &App, present: bool) {
     let dimmer = theme::fg(theme::DIMMER);
     let dim = theme::fg(theme::DIM);
     put(buf, x0 + 1, col_y, "LANE", dimmer);
@@ -505,7 +506,10 @@ fn draw_conn_live_cols(buf: &mut Buffer, x0: u16, w: u16, col_y: u16, list_y: u1
     let host_max = (w.saturating_sub(38)).saturating_sub(9);
     for row in 0..list_h {
         let idx = scroll + row;
-        let Some(c) = app.rows.get(idx) else { break };
+        if idx >= rows.len() {
+            break;
+        }
+        let c = rows[idx];
         let y = list_y + row as u16;
         let dormant = !c.is_live();
         put(buf, x0 + 1, y, c.lane.label(), if dormant { dim } else { theme::bold(c.lane.color()) });
@@ -528,7 +532,7 @@ fn draw_conn_live_cols(buf: &mut Buffer, x0: u16, w: u16, col_y: u16, list_y: u1
 /// columns in the current direction (`↑`/`↓` prefix the column labels). Dormant
 /// hosts (not currently connected) render greyed. See METRICS.md §5.
 #[allow(clippy::too_many_arguments)]
-fn draw_conn_metric_cols(buf: &mut Buffer, x0: u16, w: u16, col_y: u16, list_y: u16, list_h: usize, scroll: usize, app: &App, present: bool) {
+fn draw_conn_metric_cols(buf: &mut Buffer, x0: u16, w: u16, col_y: u16, list_y: u16, list_h: usize, scroll: usize, rows: &[&crate::model::ConnRow], app: &App, present: bool) {
     let dimmer = theme::fg(theme::DIMMER);
     let dim = theme::fg(theme::DIM);
     let up = app.conn_view.is_up();
@@ -553,7 +557,10 @@ fn draw_conn_metric_cols(buf: &mut Buffer, x0: u16, w: u16, col_y: u16, list_y: 
 
     for row in 0..list_h {
         let idx = scroll + row;
-        let Some(c) = app.rows.get(idx) else { break };
+        if idx >= rows.len() {
+            break;
+        }
+        let c = rows[idx];
         let y = list_y + row as u16;
         let dormant = !c.is_live();
         put(buf, x0 + 1, y, c.lane.label(), if dormant { dim } else { theme::bold(c.lane.color()) });
