@@ -97,7 +97,13 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, present: bool) -> Hit {
 
     // ---- split divider (identity → tables), with both pane captions ----
     rule_row(buf, xl, xr, split_y, Some((div, "┬")), border);
-    draw_caption(buf, xl, split_y, "live connections", app, present, Focus::Conn, border);
+    // The connections caption reflects the pane's view: "live connections", or
+    // "connections · ▲ upload" / "· ▼ download" when flipped (`v`).
+    let conn_cap = match app.conn_view.chip() {
+        None => "live connections".to_string(),
+        Some(c) => format!("connections · {c}"),
+    };
+    draw_caption(buf, xl, split_y, &conn_cap, app, present, Focus::Conn, border);
     draw_caption(buf, div, split_y, "errors & blocked", app, present, Focus::Err, border);
 
     // ---- pane rows: sides + center │, with the header cross rule at cross_y ----
@@ -354,6 +360,10 @@ fn draw_conn_pane(
     present: bool,
     hit: &mut Hit,
 ) {
+    if !app.conn_view.is_live() {
+        draw_conn_metrics(buf, x0, w, hdr_y, col_y, list_y, list_h, app, present, hit);
+        return;
+    }
     let dimmer = theme::fg(theme::DIMMER);
     let dim = theme::fg(theme::DIM);
     let up = theme::fg(theme::UP);
@@ -458,6 +468,110 @@ fn draw_conn_pane(
     }
     if !present {
         draw_scrollbar(buf, x0 + w - 1, list_y, list_h, view.len(), scroll);
+    }
+}
+
+/// The flipped connections pane: per-domain byte history in the current
+/// direction (↑/↓) over the band's four trailing-window columns. `host` is the
+/// pinned first column; selection/route/yank share the Live view's machinery
+/// (both key off the domain). See METRICS.md §5.
+#[allow(clippy::too_many_arguments)]
+fn draw_conn_metrics(
+    buf: &mut Buffer,
+    x0: u16,
+    w: u16,
+    hdr_y: u16,
+    col_y: u16,
+    list_y: u16,
+    list_h: usize,
+    app: &App,
+    present: bool,
+    hit: &mut Hit,
+) {
+    let dimmer = theme::fg(theme::DIMMER);
+    let dim = theme::fg(theme::DIM);
+    let bright = theme::fg(theme::BRIGHT);
+    let up = app.conn_view.is_up();
+    let dir_c = if up { theme::UP_TABLE } else { theme::DOWN_TABLE };
+    let cols = app.band.cols(); // [(label, span_secs, is_rate); 4], index 0 = leftmost
+
+    const COLW: u16 = 8;
+    // Right-edge x of visual column k (k = 0 is rightmost = band column index 3).
+    let col_x = |k: u16| x0 + w - 2 - k * COLW;
+    let host_max = w.saturating_sub(4 * COLW + 10);
+    // A cell's text: rate columns show `/s` (bytes over the window / window), totals bare.
+    let fmt = |v: u64, span: i64, is_rate: bool| -> String {
+        if is_rate {
+            format!("{}/s", format::bytes_total(v as f64 / span.max(1) as f64))
+        } else {
+            format::bytes_total(v as f64)
+        }
+    };
+
+    // Header zone: direction + band, then an `all` column-totals row.
+    let arrow_c = if up { theme::UP } else { theme::DOWN };
+    put(buf, x0 + 1, hdr_y, if up { "▲ upload" } else { "▼ download" }, theme::bold(arrow_c));
+    put_right(buf, x0 + w - 2, hdr_y, &format!("band {}", app.band.label()), dimmer);
+    let mut totals = [0u64; 4];
+    for m in &app.metric_rows {
+        for i in 0..4 {
+            totals[i] += m.cols[i];
+        }
+    }
+    let all_y = hdr_y + 1;
+    if all_y < col_y {
+        put(buf, x0 + 1, all_y, "all", theme::bold(theme::BRIGHT));
+        for k in 0..4u16 {
+            let (_, span, is_rate) = cols[(3 - k) as usize];
+            put_right(buf, col_x(k), all_y, &fmt(totals[(3 - k) as usize], span, is_rate), theme::bold(theme::BRIGHT));
+        }
+    }
+
+    // Column header row.
+    put(buf, x0 + 1, col_y, "LANE", dimmer);
+    put(buf, x0 + 8, col_y, "HOST", dimmer);
+    for k in 0..4u16 {
+        let (lbl, _, is_rate) = cols[(3 - k) as usize];
+        let h = if is_rate { format!("{}/s", lbl) } else { lbl.to_string() };
+        put_right(buf, col_x(k), col_y, &h, dimmer);
+    }
+
+    let rows = &app.metric_rows;
+    hit.conn_list = Rect::new(x0, list_y, w, list_h as u16);
+    hit.conn_pane = Rect::new(x0, hdr_y, w, (list_y + list_h as u16).saturating_sub(hdr_y));
+    hit.conn_h = list_h;
+    if rows.is_empty() {
+        let msg = "no traffic recorded yet — the collector is warming up";
+        put(buf, x0 + 1, list_y, &truncate(msg, w.saturating_sub(2)), dim);
+        return;
+    }
+    let scroll = app.conn_scroll.min(rows.len().saturating_sub(1));
+    for row in 0..list_h {
+        let idx = scroll + row;
+        if idx >= rows.len() {
+            break;
+        }
+        let m = &rows[idx];
+        let y = list_y + row as u16;
+        let selected = !present && app.focus == Focus::Conn && app.conn_active() && idx == app.conn_sel;
+        put(buf, x0 + 1, y, m.lane.label(), theme::bold(m.lane.color()));
+        let shown = if selected {
+            marquee(&m.domain, host_max, app.started.elapsed().as_secs_f32())
+        } else {
+            truncate(&m.domain, host_max)
+        };
+        put(buf, x0 + 8, y, &shown, bright);
+        for k in 0..4u16 {
+            let (_, span, is_rate) = cols[(3 - k) as usize];
+            let v = m.cols[(3 - k) as usize];
+            put_right(buf, col_x(k), y, &fmt(v, span, is_rate), if v > 0 { theme::fg(dir_c) } else { dim });
+        }
+        if selected {
+            highlight_row(buf, x0, y, w, m.lane.color());
+        }
+    }
+    if !present {
+        draw_scrollbar(buf, x0 + w - 1, list_y, list_h, rows.len(), scroll);
     }
 }
 
@@ -819,27 +933,30 @@ fn marquee(s: &str, max: u16, secs: f32) -> String {
 
 fn draw_help(buf: &mut Buffer, area: Rect) {
     let lines = [
-        "  rowt monitor — keys                          ",
-        "                                               ",
-        "  ↑↓ / j k   move selection (locks the row)    ",
-        "  ←→ / h l   switch pane · select server chip  ",
-        "  Tab        cycle focus (conns/errors/health) ",
-        "  f 1 2 3 0  lane filter / jump / clear        ",
-        "  w [ ]      errors window                     ",
-        "  y          copy the selected domain          ",
-        "  e c b d    route selected → escape/corp/     ",
+        "  rowt monitor — keys",
+        "",
+        "  ↑↓ / j k   move selection (locks the row)",
+        "  ←→ / h l   switch pane · select server chip",
+        "  Tab        cycle focus (conns/errors/health)",
+        "  v          flip pane · live / ↑ upload / ↓ download",
+        "  f 1 2 3 0  lane filter / jump / clear",
+        "  w [ ]      window (metrics view: timescale band)",
+        "  y          copy the selected domain",
+        "  e c b d    route selected → escape/corp/",
         "             block / direct  (↵ or key×2 apply)",
-        "  u          use the selected server           ",
-        "  o          toggle the system proxy on/off    ",
-        "  r          re-probe servers now              ",
-        "  p          pause sampling   · esc  cancel    ",
-        "  ?          toggle this help · q  quit        ",
-        "                                               ",
-        "  observe + confirmed, reversible overrides.   ",
+        "  u          use the selected server",
+        "  o          toggle the system proxy on/off",
+        "  r          re-probe servers now",
+        "  p          pause sampling   · esc  cancel",
+        "  ?          toggle this help · q  quit",
+        "",
+        "  observe + confirmed, reversible overrides.",
     ];
-    let bw = lines[0].chars().count() as u16;
+    // Pad every line to the widest so the box is opaque regardless of content.
+    let cw = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16;
+    let bw = cw + 1; // one trailing pad column
     let bh = lines.len() as u16 + 2;
-    let bx = area.left() + (area.width.saturating_sub(bw)) / 2;
+    let bx = area.left() + (area.width.saturating_sub(bw + 2)) / 2;
     let by = area.top() + (area.height.saturating_sub(bh)) / 2;
     let border = theme::fg(theme::BORDER_FOCUS);
     put(buf, bx, by, "╭", border);
@@ -848,6 +965,7 @@ fn draw_help(buf: &mut Buffer, area: Rect) {
     for (i, l) in lines.iter().enumerate() {
         let y = by + 1 + i as u16;
         put(buf, bx, y, "│", border);
+        hfill(buf, bx + 1, bx + bw, y, ' ', theme::fg(theme::BRIGHT)); // opaque row
         put(buf, bx + 1, y, l, theme::fg(theme::BRIGHT));
         put(buf, bx + bw + 1, y, "│", border);
     }
@@ -875,9 +993,9 @@ pub fn draw_footer(buf: &mut Buffer, area: Rect, app: &App) {
 
     // Normal: global group, then a contextual group when something is live.
     let global = if app.paused {
-        " ↑↓←→ navigate · f lane · w window · o proxy · p resume · ? help · q quit "
+        " ↑↓←→ navigate · v flip · f lane · w window · o proxy · p resume · ? help · q quit "
     } else {
-        " ↑↓←→ navigate · f lane · w window · o proxy · p pause · ? help · q quit "
+        " ↑↓←→ navigate · v flip · f lane · w window · o proxy · p pause · ? help · q quit "
     };
     let shown = truncate(global, area.width);
     put(buf, left, y, &shown, dimmer);

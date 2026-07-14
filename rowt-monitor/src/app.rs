@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::model::{Conn, Lane, Snapshot, Window};
+use crate::model::{Conn, ConnView, Lane, MetricRow, MetricsBand, Snapshot, Window};
 use crate::source::Source;
 
 /// After the last committed lane edit, wait this long before issuing the single
@@ -79,6 +79,7 @@ pub enum Action {
     WindowCycle,
     WindowStep(i8),
     WindowSet(Window),
+    ConnViewCycle, // v — pan the connections pane: live → ↑ upload → ↓ download
     Yank,
     TogglePause,
     ToggleHelp,
@@ -158,6 +159,13 @@ pub struct App {
     pub conn_h: usize,
     pub err_h: usize,
     pub side_by_side: bool,
+
+    // Connections pane view (`v` pans live → ↑ upload → ↓ download) + the metrics
+    // timescale band (`w` when the pane is focused in a metrics view). `metric_rows`
+    // is the DB-backed list shown in the non-live views (empty in Live).
+    pub conn_view: ConnView,
+    pub band: MetricsBand,
+    pub metric_rows: Vec<MetricRow>,
 }
 
 impl App {
@@ -197,6 +205,9 @@ impl App {
             conn_h: 1,
             err_h: 1,
             side_by_side: true,
+            conn_view: ConnView::Live,
+            band: MetricsBand::Recent,
+            metric_rows: Vec::new(),
         }
     }
 
@@ -204,6 +215,9 @@ impl App {
     pub fn tick(&mut self) {
         if !self.paused {
             self.snap = self.source.poll(self.window, self.lane_filter);
+            if !self.conn_view.is_live() {
+                self.refetch_metrics();
+            }
             self.resolve_keys();
             self.clamp_selection();
         }
@@ -257,7 +271,7 @@ impl App {
     /// on the tick); drop the lock if the domain has left the list (§5.2).
     fn resolve_keys(&mut self) {
         if let Some(k) = self.conn_key.clone() {
-            match self.conns_view().iter().position(|c| c.key() == k) {
+            match self.conn_row_keys().iter().position(|c| *c == k) {
                 Some(i) => {
                     self.conn_sel = i;
                     self.ensure_visible(Focus::Conn);
@@ -299,7 +313,7 @@ impl App {
     }
 
     fn conn_len(&self) -> usize {
-        self.conns_view().len()
+        self.conn_row_keys().len()
     }
     fn err_len(&self) -> usize {
         self.snap.errors.len()
@@ -362,21 +376,13 @@ impl App {
                 self.lane_filter = l;
                 self.on_lane_change();
             }
-            WindowCycle => {
-                let i = (self.window.index() + 1) % Window::ALL.len();
-                self.window = Window::ALL[i];
-                self.tick_window();
-            }
-            WindowStep(d) => {
-                let n = Window::ALL.len() as i32;
-                let i = (self.window.index() as i32 + d as i32).rem_euclid(n);
-                self.window = Window::ALL[i as usize];
-                self.tick_window();
-            }
+            WindowCycle => self.window_action(1),
+            WindowStep(d) => self.window_action(d as i32),
             WindowSet(win) => {
                 self.window = win;
                 self.tick_window();
             }
+            ConnViewCycle => self.pan_conn_view(),
             Yank => self.yank(),
             FocusConn => self.set_focus(Focus::Conn),
             FocusErr => self.set_focus(Focus::Err),
@@ -634,6 +640,55 @@ impl App {
         }
     }
 
+    /// `w` / `[` / `]` are pane-scoped: in a metrics view of the (focused)
+    /// connections pane they shift the timescale band; otherwise the errors
+    /// window. `d` is the step (+1 cycle).
+    fn window_action(&mut self, d: i32) {
+        if self.focus == Focus::Conn && !self.conn_view.is_live() {
+            let n = MetricsBand::ALL.len() as i32;
+            let i = (self.band.index() as i32 + d).rem_euclid(n);
+            self.band = MetricsBand::ALL[i as usize];
+            self.refetch_metrics();
+            self.clamp_selection();
+        } else {
+            let n = Window::ALL.len() as i32;
+            let i = (self.window.index() as i32 + d).rem_euclid(n);
+            self.window = Window::ALL[i as usize];
+            self.tick_window();
+        }
+    }
+
+    /// `v`: pan the connections pane across live / ↑ upload / ↓ download. The
+    /// locked domain rides along (resolve_keys re-finds it in the new list).
+    fn pan_conn_view(&mut self) {
+        self.conn_view = self.conn_view.pan_next();
+        self.conn_scroll = 0;
+        self.refetch_metrics();
+        self.resolve_keys();
+        self.clamp_selection();
+    }
+
+    /// Refresh the DB-backed metrics list for the current view/band/lane (empty in
+    /// the Live view — that list comes from the live `Snapshot`).
+    fn refetch_metrics(&mut self) {
+        self.metric_rows = if self.conn_view.is_live() {
+            Vec::new()
+        } else {
+            self.source.metrics(self.conn_view.is_up(), self.band.spans(), self.lane_filter)
+        };
+    }
+
+    /// The domains of the connections pane's current rows — the live connections
+    /// list or the metrics rows, depending on the view. The shared selection /
+    /// route / yank machinery keys off these, so it works over either.
+    pub fn conn_row_keys(&self) -> Vec<String> {
+        if self.conn_view.is_live() {
+            self.conns_view().iter().map(|c| c.key()).collect()
+        } else {
+            self.metric_rows.iter().map(|m| m.key()).collect()
+        }
+    }
+
     /// Re-aggregate the errors pane for the new window immediately.
     fn tick_window(&mut self) {
         self.repoll();
@@ -648,6 +703,7 @@ impl App {
         self.conn_scroll = 0;
         self.conn_key = None;
         self.repoll();
+        self.refetch_metrics();
         self.err_sel = 0;
         self.err_scroll = 0;
         self.err_key = None;
@@ -723,7 +779,7 @@ impl App {
 
     /// Lock the connections selection onto row `i` (by key), or clear if absent.
     fn set_conn_index(&mut self, i: usize) {
-        match self.conns_view().get(i).map(|c| c.key()) {
+        match self.conn_row_keys().get(i).cloned() {
             Some(k) => {
                 self.conn_key = Some(k);
                 self.conn_sel = i;
@@ -805,7 +861,7 @@ impl App {
     /// whether or not it's locked — copying is harmless).
     pub fn yank_target(&self) -> Option<String> {
         match self.focus {
-            Focus::Conn => self.conns_view().get(self.conn_sel).map(|c| c.key()),
+            Focus::Conn => self.conn_row_keys().get(self.conn_sel).cloned(),
             Focus::Err => self.snap.errors.get(self.err_sel).map(|e| e.domain.clone()),
             Focus::Health => self.strip_sel.and_then(|i| self.snap.chips.get(i)).map(|s| s.name.clone()),
         }

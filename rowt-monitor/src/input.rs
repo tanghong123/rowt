@@ -32,6 +32,7 @@ pub fn key(k: KeyEvent, app: &App) -> Option<Action> {
         KeyCode::Char('2') => Action::LaneSet(Some(Lane::Corp)),
         KeyCode::Char('3') => Action::LaneSet(Some(Lane::Direct)),
         KeyCode::Char('0') => Action::LaneSet(None),
+        KeyCode::Char('v') => Action::ConnViewCycle,
         KeyCode::Char('w') => Action::WindowCycle,
         KeyCode::Char(']') => Action::WindowStep(1),
         KeyCode::Char('[') => Action::WindowStep(-1),

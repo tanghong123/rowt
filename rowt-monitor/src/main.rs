@@ -82,7 +82,7 @@ fn print_help() {
     println!(
         "rowt monitor — read-only proxy observer\n\n\
          USAGE:\n  rowt-monitor [--fixtures] [--render WxH] [--render-ansi WxH] [--version]\n\n\
-         KEYS: ↑↓/jk move · ←→/hl pane · Tab focus · f lane · w window · y copy · p pause · ? help · q quit"
+         KEYS: ↑↓/jk move · ←→/hl pane · Tab focus · v flip · f lane · w window · y copy · p pause · ? help · q quit"
     );
 }
 

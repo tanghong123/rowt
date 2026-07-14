@@ -554,6 +554,19 @@ impl Source for LiveSource {
         "live"
     }
 
+    fn metrics(&mut self, up: bool, spans: [i64; 4], lane: Option<Lane>) -> Vec<MetricRow> {
+        let Some(conn) = crate::metrics::open_read(&crate::metrics::db_path()) else {
+            return Vec::new();
+        };
+        let now = SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+        let lane_s = lane.map(|l| l.label());
+        crate::metrics::metric_rows(&conn, now, spans, lane_s, up, 200)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(domain, l, cols)| MetricRow { domain, lane: Lane::from_label(&l), cols })
+            .collect()
+    }
+
     fn force_probe(&self) {
         // Wake the prober; ignore if it hasn't started or the channel is gone.
         if let Some(tx) = &self.probe_tx {

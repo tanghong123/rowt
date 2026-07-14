@@ -33,6 +33,102 @@ impl Lane {
     }
     /// The three lanes shown in the connections rate table (block is excluded).
     pub const FILTERABLE: [Lane; 3] = [Lane::Escape, Lane::Corp, Lane::Direct];
+    /// Parse a lane label back to the enum (as stored in the metrics DB).
+    pub fn from_label(s: &str) -> Lane {
+        match s {
+            "escape" => Lane::Escape,
+            "corp" => Lane::Corp,
+            "block" => Lane::Block,
+            _ => Lane::Direct,
+        }
+    }
+}
+
+/// Which columns the connections pane is showing. `v` pans this window across a
+/// conceptually-wide table (pinned `host:port` + [live | ↑ upload | ↓ download])
+/// and wraps — see METRICS.md §5. Selection is by domain, so it rides the pan.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ConnView {
+    Live,
+    Up,
+    Down,
+}
+
+impl ConnView {
+    pub fn pan_next(self) -> Self {
+        match self {
+            ConnView::Live => ConnView::Up,
+            ConnView::Up => ConnView::Down,
+            ConnView::Down => ConnView::Live,
+        }
+    }
+    pub fn is_live(self) -> bool {
+        matches!(self, ConnView::Live)
+    }
+    pub fn is_up(self) -> bool {
+        matches!(self, ConnView::Up)
+    }
+    /// Caption chip suffix for the pane title (None in the Live view).
+    pub fn chip(self) -> Option<&'static str> {
+        match self {
+            ConnView::Live => None,
+            ConnView::Up => Some("▲ upload"),
+            ConnView::Down => Some("▼ download"),
+        }
+    }
+}
+
+/// The timescale band for the flipped metrics columns (cycled by `w` when the
+/// connections pane is focused in a metrics view). Each band defines four
+/// trailing-window columns; `now`/`1m` render as rates, the rest as totals.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MetricsBand {
+    Recent,
+    Days,
+    Year,
+}
+
+impl MetricsBand {
+    pub const ALL: [MetricsBand; 3] = [MetricsBand::Recent, MetricsBand::Days, MetricsBand::Year];
+    pub fn index(self) -> usize {
+        Self::ALL.iter().position(|b| *b == self).unwrap()
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            MetricsBand::Recent => "recent",
+            MetricsBand::Days => "days",
+            MetricsBand::Year => "year",
+        }
+    }
+    /// The four columns: (header label, trailing-window seconds, is_rate).
+    pub fn cols(self) -> [(&'static str, i64, bool); 4] {
+        match self {
+            MetricsBand::Recent => [("now", 5, true), ("1m", 60, true), ("1h", 3600, false), ("24h", 86_400, false)],
+            MetricsBand::Days => [("1h", 3600, false), ("6h", 21_600, false), ("24h", 86_400, false), ("7d", 604_800, false)],
+            MetricsBand::Year => [("24h", 86_400, false), ("7d", 604_800, false), ("30d", 2_592_000, false), ("1y", 31_536_000, false)],
+        }
+    }
+    pub fn spans(self) -> [i64; 4] {
+        let c = self.cols();
+        [c[0].1, c[1].1, c[2].1, c[3].1]
+    }
+}
+
+/// One row of the flipped metrics view: a domain, its dominant lane, and the
+/// per-column byte totals for the active band (direction already selected).
+#[derive(Clone, Debug)]
+pub struct MetricRow {
+    pub domain: String,
+    pub lane: Lane,
+    pub cols: [u64; 4],
+}
+
+impl MetricRow {
+    /// The routed/copied key — the domain (matches `Conn::key`, so the shared
+    /// selection machinery works over either list).
+    pub fn key(&self) -> String {
+        self.domain.clone()
+    }
 }
 
 /// Failure / block classification for an errors-pane row.
