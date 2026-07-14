@@ -50,7 +50,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="2.4.0"
+ROWT_VERSION="2.5.0"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -1386,10 +1386,46 @@ _router_ready() {
 # Stop the host router process only — NO proxy change. For callers that manage
 # the proxy themselves (restart, the up-retry).
 _router_stop() {
+  _stop_collector
   local p; p="$(cat "$(host_pidfile)" 2>/dev/null || true)"
   [ -n "$p" ] && kill "$p" 2>/dev/null || true
   rm -f "$(host_pidfile)"
   pkill -f "$SB run -c $HOST_CFG" 2>/dev/null || true
+}
+
+# ---- traffic-metrics collector (sidecar; see rowt-monitor/METRICS.md) --------
+# An always-on companion that records per-domain bytes in/out over time into
+# ~/.config/rowt/metrics/traffic.db. Tied to the router's lifecycle: started
+# once the router is healthy, stopped with it. Best-effort — it never blocks or
+# fails the router bring-up. Set ROWT_METRICS=off to disable.
+_collector_bin() { # located like the monitor: built alongside it, or in $BIN
+  local b
+  for b in "$HERE/bin/rowt-collector" \
+           "$HERE/rowt-monitor/target/release/rowt-collector" \
+           "$HERE/rowt-monitor/target/debug/rowt-collector"; do
+    [ -x "$b" ] && { echo "$b"; return 0; }
+  done
+  command -v rowt-collector 2>/dev/null
+}
+collector_pidfile() { echo "$CFG/collector.pid"; }
+_collector_running() { local p; p="$(cat "$(collector_pidfile)" 2>/dev/null || true)"; [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }
+_start_collector() {
+  [ "${ROWT_METRICS:-on}" = off ] && return 0
+  _collector_running && return 0
+  local bin ep sec; bin="$(_collector_bin)"; [ -n "$bin" ] || return 0
+  ep="$(controller 2>/dev/null || true)"; [ -n "$ep" ] || return 0
+  sec="$(clash_secret)"
+  mkdir -p "$LOGDIR"
+  ROWT_COLLECT_EP="$ep" ROWT_COLLECT_SECRET="$sec" ROWT_CFG="$CFG" \
+    nohup "$bin" >>"$LOGDIR/collector.log" 2>&1 &
+  echo $! > "$(collector_pidfile)"
+}
+_stop_collector() {
+  local p; p="$(cat "$(collector_pidfile)" 2>/dev/null || true)"
+  [ -n "$p" ] && kill "$p" 2>/dev/null || true
+  rm -f "$(collector_pidfile)"
+  local bin; bin="$(_collector_bin 2>/dev/null || true)"
+  [ -n "$bin" ] && pkill -f "$bin" 2>/dev/null || true
 }
 # Invariant guard: if the router isn't up, the system proxy must NOT be left
 # pointing at the (now dead) 127.0.0.1:$PORT. Safe to call anywhere — it only acts
@@ -1405,7 +1441,7 @@ cmd_router() {
       ensure_singbox_host
       info "starting rule-router on 127.0.0.1:$PORT"
       _start_host_router 1
-      if _router_ready 5; then echo "  ✓ running (pid $(cat "$(host_pidfile)"))"; return 0; fi
+      if _router_ready 5; then _start_collector; echo "  ✓ running (pid $(cat "$(host_pidfile)"))"; return 0; fi
       # it didn't come up healthy (exited, or alive but the clash API never
       # answered = wedged). Show why, then retry ONCE after a settle, this time
       # with plain logging (rules out both a startup-network blip and the splitter).
@@ -1414,7 +1450,7 @@ cmd_router() {
       _router_stop   # clean up the failed process before retrying (proxy untouched)
       sleep 2
       _start_host_router 0
-      if _router_ready 5; then echo "  ✓ running (pid $(cat "$(host_pidfile)"))  [plain log]"; return 0; fi
+      if _router_ready 5; then _start_collector; echo "  ✓ running (pid $(cat "$(host_pidfile)"))  [plain log]"; return 0; fi
       err "router failed to come up healthy — see $HOST_LOG"; tail -8 "$HOST_LOG" >&2
       _ensure_no_limbo   # never leave the proxy pointing at a router that won't start
       return 1
@@ -3032,7 +3068,7 @@ rotate_log() { # $1=logfile
 _is_readonly() { # $1=cmd  $2=first arg
   case "$1" in
     status|report|explain|route|connections|conns|monitor|mon|ping|probe|version|\
-    run|onboard|shell-init|completion|_complete|help|audit|-h|--help|--version|-V) return 0 ;;
+    run|onboard|shell-init|completion|_complete|help|audit|metrics|-h|--help|--version|-V) return 0 ;;
     proxy)  case "${2:-status}" in on|off) return 1 ;; *) return 0 ;; esac ;;
     router) case "${2:-status}" in up|down|restart) return 1 ;; *) return 0 ;; esac ;;
     vm)     case "${2:-status}" in up|down|restart|delete) return 1 ;; *) return 0 ;; esac ;;
@@ -3056,6 +3092,34 @@ cmd_audit() {
   esac
 }
 
+# Traffic-metrics collector status + a quick CLI top-N (the monitor's `v` view is
+# the richer surface). Read-only; queries the sidecar's SQLite store directly.
+cmd_metrics() {
+  local db="$CFG/metrics/traffic.db" now; now="$(date +%s)"
+  case "${1:-status}" in
+    status|"")
+      if _collector_running; then echo "collector: running (pid $(cat "$(collector_pidfile)"))"
+      else echo "collector: stopped${ROWT_METRICS:+ (ROWT_METRICS=$ROWT_METRICS)}"; fi
+      [ -f "$db" ] || { echo "store:     none yet ($db)"; return 0; }
+      local lw; lw="$(sqlite3 "$db" "SELECT v FROM meta WHERE k='last_write'" 2>/dev/null)"
+      [ -n "$lw" ] && echo "last write: $(date -r "$lw" '+%H:%M:%S' 2>/dev/null) ($((now - lw))s ago)"
+      echo "store:     $db ($(du -h "$db" 2>/dev/null | awk '{print $1}'))"
+      sqlite3 "$db" "SELECT '5s rows='||count(*) FROM sample_5s" 2>/dev/null
+      ;;
+    top)
+      command -v sqlite3 >/dev/null 2>&1 || die "sqlite3 not found"
+      [ -f "$db" ] || die "no metrics store yet ($db) — is the collector running?"
+      local span="${2:-3600}"
+      echo "# top domains by ↓download over the last ${span}s"
+      sqlite3 -header -column "$db" \
+        "SELECT domain, lane, sum(bytes_dn) dn, sum(bytes_up) up FROM sample_5s \
+         WHERE ts >= $((now - span)) AND lane<>'-' GROUP BY domain,lane ORDER BY dn DESC LIMIT 20;"
+      ;;
+    path) echo "$db" ;;
+    *) die "usage: $PROG metrics [ status | top [seconds] | path ]" ;;
+  esac
+}
+
 # The command table. Extracted from main() so mutating invocations can be
 # bracketed by audit BEGIN/END without duplicating the dispatch.
 run_command() {
@@ -3071,6 +3135,7 @@ run_command() {
     status)     cmd_status "$@" ;;
     report)     cmd_diag "$@" ;;
     audit)      cmd_audit "$@" ;;
+    metrics)    cmd_metrics "$@" ;;
     explain|route) cmd_explain "$@" ;;   # 'route' kept as a hidden alias (renamed to avoid router/route confusion)
     connections|conns) cmd_connections "$@" ;;
     monitor|mon) cmd_monitor "$@" ;;
