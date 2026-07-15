@@ -520,8 +520,8 @@ rowt monitor --fixtures # force the offline demo
     row (concurrency 0), sorted after the live ones.
   - *upload / download* — per-domain byte **history** from the metrics store (see
     [Traffic metrics](#traffic-metrics)) over four trailing-window columns chosen
-    by a **`w`**-selectable band: `recent` (1m/5m/1h/24h) · `days` (1h/6h/24h/7d) ·
-    `year` (24h/7d/30d/1y). The same greyed list includes top historical domains
+    by a **`w`**-selectable band: `recent` (1m/5m/1h/24h) · `days` (1d/3d/5d/7d) ·
+    `year` (7d/30d/120d/1y). The same greyed list includes top historical domains
     not currently connected.
   - The header rows are a **per-lane aggregate** of whatever the pane shows (all /
     escape / corp / direct), and stay all-lanes even when `f` filters the detail

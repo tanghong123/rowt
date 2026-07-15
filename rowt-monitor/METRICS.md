@@ -96,7 +96,7 @@ once, so `v` never re-queries or reorders.
 - **`w`** (+ `[` `]`) is **pane-scoped**: it cycles the *timescale band* when the
   connections pane is focused in a flipped view, or the errors window when the
   errors pane is focused — and is a **no-op** in the Live connections view.
-  - recent: `1m  5m  1h  24h`   · days: `1h  6h  24h  7d`   · year: `24h 7d 30d 1y`
+  - recent: `1m  5m  1h  24h`   · days: `1d  3d  5d  7d`   · year: `7d 30d 120d 1y`
 - **`f`** (+ `1/2/3/0`) unchanged — lane filter, scopes both panes incl. metrics.
 
 The per-lane bandwidth rate table (`all / escape / corp / direct`) shows in the

@@ -104,8 +104,8 @@ impl MetricsBand {
     pub fn cols(self) -> [(&'static str, i64, bool); 4] {
         match self {
             MetricsBand::Recent => [("1m", 60, true), ("5m", 300, true), ("1h", 3600, false), ("24h", 86_400, false)],
-            MetricsBand::Days => [("1h", 3600, false), ("6h", 21_600, false), ("24h", 86_400, false), ("7d", 604_800, false)],
-            MetricsBand::Year => [("24h", 86_400, false), ("7d", 604_800, false), ("30d", 2_592_000, false), ("1y", 31_536_000, false)],
+            MetricsBand::Days => [("1d", 86_400, false), ("3d", 259_200, false), ("5d", 432_000, false), ("7d", 604_800, false)],
+            MetricsBand::Year => [("7d", 604_800, false), ("30d", 2_592_000, false), ("120d", 10_368_000, false), ("1y", 31_536_000, false)],
         }
     }
     pub fn spans(self) -> [i64; 4] {
