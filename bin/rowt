@@ -50,7 +50,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="2.5.8"
+ROWT_VERSION="2.5.9"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -108,9 +108,11 @@ FINAL_ROUTE="${ROWT_FINAL:-direct}"            # bucket for unlisted traffic
 # names are resolved by the VPS, corp names by the system resolver). Default
 # AliDNS. Override with an IP or host that serves DoH on 443 (e.g. 1.1.1.1).
 DNS_DIRECT="${ROWT_DNS_DIRECT:-223.5.5.5}"
-# ping liveness check: a globally-reachable URL (incl. from China exits) so a
-# node isn't marked dead just because it can't reach Google.
-PING_URL="${ROWT_PING_URL:-https://cp.cloudflare.com/generate_204}"
+# ping liveness check: Google's gstatic generate_204 — the SAME target the
+# monitor's server-health probe and the watchdog use, so `ping`, the TUI, and
+# auto-recovery all agree on what's up. (gstatic is a CDN edge that stays
+# reachable from China exits even when google.com proper is blocked.)
+PING_URL="${ROWT_PING_URL:-https://www.gstatic.com/generate_204}"
 PING_TIMEOUT="${ROWT_PING_TIMEOUT:-8}"          # seconds per server
 LOG_LEVEL="${ROWT_LOG_LEVEL:-warn}"             # sing-box log level (info is very noisy)
 AUTO_INTERVAL="${ROWT_AUTO_INTERVAL:-20m}"       # how often 'auto' re-probes all servers
