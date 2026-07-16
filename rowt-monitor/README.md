@@ -23,9 +23,9 @@ rowt-monitor --render 150x38   # print one frame as plain text (dev/testing)
 **Navigate:** `↑↓`/`jk` move (first press locks a row by domain; leaving a pane
 forgets it) · `←→`/`hl` switch pane / pick a server chip · `Tab` cycle focus
 (conns → errors → health) · `v` flip the connections pane (live / ↑ upload /
-↓ download history) · `f` lane filter (`1`/`2`/`3` jump, `0` clear) · `w` or
-`[`/`]` pane-scoped window (metrics timescale band in a flipped view, else the
-errors window) · `y` yank selected domain · `p` pause · `?` help · `q` quit.
+↓ download history) · `s` span (metrics timescale band) · `f` lane filter
+(`1`/`2`/`3` jump, `0` clear) · `w` or `[`/`]` errors window · `y` yank selected
+domain · `p` pause · `?` help · `q` quit. (`v`/`s`/`f`/`w` are all global.)
 
 **Controls** (confirmed, reversible; each runs the matching `rowt` command):
 `e`/`c`/`b`/`d` route the locked domain → escape/corp/block/direct (arm, then

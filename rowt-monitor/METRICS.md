@@ -93,11 +93,13 @@ once, so `v` never re-queries or reorders.
 
 - **`v`** pans `live → ▲ upload → ▼ download → live`; the caption shows
   `connections · ▲ upload · <band>`.
-- **`w`** (+ `[` `]`) is **pane-scoped**: it cycles the *timescale band* when the
-  connections pane is focused in a flipped view, or the errors window when the
-  errors pane is focused — and is a **no-op** in the Live connections view.
+- **`s`** (span) cycles the metrics-view *timescale band* — a **global** key like
+  `f`/`v` (the band persists across the `v` flip; in the Live view it just sets
+  what the flipped views will show):
   - recent: `1m  5m  1h  24h`   · days: `1d  3d  5d  7d`   · year: `7d 30d 120d 1y`
-- **`f`** (+ `1/2/3/0`) unchanged — lane filter, scopes both panes incl. metrics.
+- **`w`** (+ `[` `]`) — the errors pane's rolling window, **global** (kept separate
+  from `s` so neither key needs focus).
+- **`f`** (+ `1/2/3/0`) — lane filter, scopes both panes incl. metrics.
 
 The per-lane bandwidth rate table (`all / escape / corp / direct`) shows in the
 header of **every** view. Column semantics: the two short columns render as
@@ -118,10 +120,11 @@ color-coded like `watch`.
 Also: the `live · connections` caption drops its spurious mid-word dot → `live
 connections` (the `·`-as-separator convention stays for real field joins).
 
-## 6. Keys summary (no overloads)
+## 6. Keys summary (all global — no focus required)
 
-| key | scope | effect |
-|-----|-------|--------|
-| `v` | connections pane | flip live / ↑ upload / ↓ download |
-| `w` `[` `]` | focused pane | window (metrics: timescale band) |
-| `f` `1/2/3/0` | both panes | lane filter |
+| key | effect |
+|-----|--------|
+| `v` | flip the connections pane: live / ↑ upload / ↓ download |
+| `s` | span — cycle the metrics-view timescale band (recent/days/year) |
+| `w` `[` `]` | errors pane rolling window |
+| `f` `1/2/3/0` | lane filter (scopes both panes) |

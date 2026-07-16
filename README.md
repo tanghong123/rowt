@@ -520,7 +520,7 @@ rowt monitor --fixtures # force the offline demo
     row (concurrency 0), sorted after the live ones.
   - *upload / download* — per-domain byte **history** from the metrics store (see
     [Traffic metrics](#traffic-metrics)) over four trailing-window columns chosen
-    by a **`w`**-selectable band: `recent` (1m/5m/1h/24h) · `days` (1d/3d/5d/7d) ·
+    by an **`s`**-selectable band: `recent` (1m/5m/1h/24h) · `days` (1d/3d/5d/7d) ·
     `year` (7d/30d/120d/1y). The same greyed list includes top historical domains
     not currently connected.
   - The header rows are a **per-lane aggregate** of whatever the pane shows (all /
@@ -538,10 +538,10 @@ rowt monitor --fixtures # force the offline demo
 mid-tick re-sort can't shift what you act on; `Esc` unlocks; leaving a pane forgets
 its selection) · `←→`/`hl` switch pane / pick a server chip (the strip freezes
 in place and wraps at the ends) · `Tab` cycle focus (connections → errors → health)
-· `v` flip the connections pane (live / ↑ upload / ↓ download) · `f` (or `1`/`2`/`3`,
-`0`) lane filter · `w` / `[` `]` **pane-scoped** window (the metrics timescale band
-in a flipped view, or the errors window on the errors pane) · `y` copy the
-selected domain · `p` pause · `?` help · `q` quit. Mouse: wheel scrolls the list
+· `v` flip the connections pane (live / ↑ upload / ↓ download) · `s` span (the
+metrics timescale band) · `f` (or `1`/`2`/`3`, `0`) lane filter · `w` / `[` `]`
+errors window · `y` copy the selected domain · `p` pause · `?` help · `q` quit —
+all focus-independent. Mouse: wheel scrolls the list
 under the pointer; click a lane / window tab / row, a server chip (selects it in
 place), or `sys proxy` to toggle it (hover-highlights).
 

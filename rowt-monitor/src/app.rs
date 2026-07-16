@@ -83,6 +83,7 @@ pub enum Action {
     WindowStep(i8),
     WindowSet(Window),
     ConnViewCycle, // v — pan the connections pane: live → ↑ upload → ↓ download
+    BandCycle,     // s — cycle the metrics-view timescale band (span)
     Yank,
     TogglePause,
     ToggleHelp,
@@ -384,13 +385,14 @@ impl App {
                 self.lane_filter = l;
                 self.on_lane_change();
             }
-            WindowCycle => self.window_action(1),
-            WindowStep(d) => self.window_action(d as i32),
+            WindowCycle => self.cycle_window(1),
+            WindowStep(d) => self.cycle_window(d as i32),
             WindowSet(win) => {
                 self.window = win;
                 self.tick_window();
             }
             ConnViewCycle => self.pan_conn_view(),
+            BandCycle => self.cycle_band(),
             Yank => self.yank(),
             FocusConn => self.set_focus(Focus::Conn),
             FocusErr => self.set_focus(Focus::Err),
@@ -648,27 +650,23 @@ impl App {
         }
     }
 
-    /// `w` / `[` / `]` are pane-scoped: they shift the metrics timescale band when
-    /// the connections pane is focused in a flipped view, or the errors window
-    /// when the errors pane is focused. No-op otherwise (Live connections view,
-    /// server strip) — `w` there would be meaningless. `d` is the step (+1 cycle).
-    fn window_action(&mut self, d: i32) {
-        match self.focus {
-            Focus::Conn if !self.conn_view.is_live() => {
-                let n = MetricsBand::ALL.len() as i32;
-                let i = (self.band.index() as i32 + d).rem_euclid(n);
-                self.band = MetricsBand::ALL[i as usize];
-                self.refetch_history();
-                self.clamp_selection();
-            }
-            Focus::Err => {
-                let n = Window::ALL.len() as i32;
-                let i = (self.window.index() as i32 + d).rem_euclid(n);
-                self.window = Window::ALL[i as usize];
-                self.tick_window();
-            }
-            _ => {} // Live connections view or the server strip: no window to cycle.
-        }
+    /// `w` / `[` / `]` — cycle the errors pane's rolling window. Global (focus-
+    /// independent), like `f`/`v`. `d` is the step (+1 = cycle).
+    fn cycle_window(&mut self, d: i32) {
+        let n = Window::ALL.len() as i32;
+        let i = (self.window.index() as i32 + d).rem_euclid(n);
+        self.window = Window::ALL[i as usize];
+        self.tick_window();
+    }
+
+    /// `s` — cycle the connections pane's metrics-view timescale **span** (band).
+    /// Global; the band persists across the `v` flip (in the Live view it just
+    /// sets what the flipped views will show).
+    fn cycle_band(&mut self) {
+        let i = (self.band.index() + 1) % MetricsBand::ALL.len();
+        self.band = MetricsBand::ALL[i];
+        self.refetch_history();
+        self.clamp_selection();
     }
 
     /// `v`: pan the connections pane across live / ↑ upload / ↓ download. The row

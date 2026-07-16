@@ -3,7 +3,7 @@
 //! 10 connections (6 escape / 1 corp / 3 direct), 10 error rows, window = 10m.
 
 use rowt_monitor::app::{Action, App, Focus};
-use rowt_monitor::model::{Lane, Window};
+use rowt_monitor::model::{Lane, MetricsBand, Window};
 use rowt_monitor::source::FixtureSource;
 
 fn app() -> App {
@@ -124,10 +124,9 @@ fn stacked_left_right_is_noop_but_falls_through_vertically() {
 #[test]
 fn window_cycle_and_step_and_set() {
     let mut a = app();
-    // `w`/`[`/`]` are pane-scoped: the errors window only cycles when the errors
-    // pane is focused (in the Live connections view `w` is a no-op).
-    a.update(Action::FocusRight);
-    assert_eq!(a.focus, Focus::Err);
+    // `w`/`[`/`]` cycle the errors window globally (no focus needed) — default
+    // focus is the connections pane.
+    assert_eq!(a.focus, Focus::Conn);
     assert_eq!(a.window, Window::M10);
     a.update(Action::WindowCycle);
     assert_eq!(a.window, Window::H1);
@@ -139,6 +138,15 @@ fn window_cycle_and_step_and_set() {
     assert_eq!(a.window, Window::H24, "wraps around");
     a.update(Action::WindowSet(Window::M10));
     assert_eq!(a.window, Window::M10);
+
+    // `s` cycles the metrics-view band, also global (still on the conn pane).
+    assert_eq!(a.band, MetricsBand::Recent);
+    a.update(Action::BandCycle);
+    assert_eq!(a.band, MetricsBand::Days);
+    a.update(Action::BandCycle);
+    assert_eq!(a.band, MetricsBand::Year);
+    a.update(Action::BandCycle);
+    assert_eq!(a.band, MetricsBand::Recent, "wraps");
 }
 
 #[test]

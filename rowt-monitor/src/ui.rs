@@ -955,8 +955,9 @@ fn draw_help(buf: &mut Buffer, area: Rect) {
         "  ←→ / h l   switch pane · select server chip",
         "  Tab        cycle focus (conns/errors/health)",
         "  v          flip pane · live / ↑ upload / ↓ download",
+        "  s          span — metrics-view timescale band (recent/days/year)",
         "  f 1 2 3 0  lane filter / jump / clear",
-        "  w [ ]      window (metrics view: timescale band)",
+        "  w [ ]      errors window (rolling)",
         "  y          copy the selected domain",
         "  e c b d    route selected → escape/corp/",
         "             block / direct  (↵ or key×2 apply)",
@@ -1009,43 +1010,27 @@ pub fn draw_footer(buf: &mut Buffer, area: Rect, app: &App) {
 
     // Normal: global group, then a contextual group when something is live.
     let global = if app.paused {
-        " ↑↓←→ navigate · v flip · f lane · o proxy · p resume · ? help · q quit "
+        " ↑↓←→ navigate · v flip · s span · f lane · w window · o proxy · p resume · ? help · q quit "
     } else {
-        " ↑↓←→ navigate · v flip · f lane · o proxy · p pause · ? help · q quit "
+        " ↑↓←→ navigate · v flip · s span · f lane · w window · o proxy · p pause · ? help · q quit "
     };
     let shown = truncate(global, area.width);
     put(buf, left, y, &shown, dimmer);
     let mut x = left + dw(&shown);
 
-    // Contextual group: pane-scoped keys that apply right now (set off by a
-    // vertical bar, shown only when there are any). `w` lives here — it cycles the
-    // errors window or the metrics band depending on focus/view, so it is NOT a
-    // global key and only appears where it does something.
-    let mut hints: Vec<String> = Vec::new();
-    match app.focus {
-        Focus::Conn => {
-            if !app.conn_view.is_live() {
-                hints.push("w band".into()); // flipped view: `w` cycles the timescale band
-            }
-            if app.conn_active() {
-                hints.push("e·c·b·d route".into());
-                hints.push("y copy".into());
-            }
-        }
-        Focus::Err => {
-            hints.push("w window".into()); // errors pane: `w` cycles the rolling window
-            if app.err_active() {
-                hints.push("e·c·b·d route".into());
-                hints.push("y copy".into());
-            }
-        }
+    // Contextual group: same colour as the global keys, set off by a vertical bar
+    // — and the bar only appears when there actually are contextual keys. (`w`/`s`
+    // are global now, so they live in the global group, not here.)
+    let ctx: Option<String> = match app.focus {
+        Focus::Conn if app.conn_active() => Some("e·c·b·d route · y copy ".to_string()),
+        Focus::Err if app.err_active() => Some("e·c·b·d route · y copy ".to_string()),
         Focus::Health => match app.strip_sel.and_then(|i| app.snap.chips.get(i)) {
-            None => hints.push("←→ select server".into()),
-            Some(s) if !s.active => hints.push(format!("u use {}", s.name)),
-            Some(_) => hints.push("active server".into()),
+            None => Some("←→ select server ".to_string()),
+            Some(s) if !s.active => Some(format!("u use {} ", s.name)),
+            Some(_) => Some("active server ".to_string()),
         },
-    }
-    let ctx: Option<String> = (!hints.is_empty()).then(|| format!("{} ", hints.join(" · ")));
+        _ => None,
+    };
     if let Some(c) = ctx {
         let group = format!("│ {c}");
         if x + 1 < area.right() {
