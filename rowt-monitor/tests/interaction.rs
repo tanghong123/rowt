@@ -139,12 +139,12 @@ fn window_cycle_and_step_and_set() {
     a.update(Action::WindowSet(Window::M10));
     assert_eq!(a.window, Window::M10);
 
-    // `s` from the Live view first engages the ↓ download span view (band
-    // unchanged) — so the bands become visible…
+    // `s` from the Live view first engages the ↑ upload span view (band
+    // unchanged) — matching `v`'s live→↑ ordering — so the bands become visible…
     assert!(a.conn_view.is_live());
     assert_eq!(a.band, MetricsBand::Recent);
     a.update(Action::BandCycle);
-    assert_eq!(a.conn_view, ConnView::Down);
+    assert_eq!(a.conn_view, ConnView::Up);
     assert_eq!(a.band, MetricsBand::Recent, "first s just reveals the spans");
     // …then `s` cycles the band.
     a.update(Action::BandCycle);

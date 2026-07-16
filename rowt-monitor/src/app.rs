@@ -660,11 +660,11 @@ impl App {
     }
 
     /// `s` — the metrics-view **span** (band) key, global. From the Live view it
-    /// first engages the span view (▼ download) so the bands are actually visible;
-    /// once in a flipped view it cycles the band (recent → days → year).
+    /// first engages the span view (▲ upload, matching `v`'s live→↑ ordering) so
+    /// the bands become visible; once flipped it cycles the band (recent→days→year).
     fn cycle_band(&mut self) {
         if self.conn_view.is_live() {
-            self.conn_view = ConnView::Down;
+            self.conn_view = ConnView::Up;
             self.ensure_visible(Focus::Conn);
             return;
         }

@@ -955,7 +955,7 @@ fn draw_help(buf: &mut Buffer, area: Rect) {
         "  ←→ / h l   switch pane · select server chip",
         "  Tab        cycle focus (conns/errors/health)",
         "  v          flip pane · live / ↑ upload / ↓ download",
-        "  s          span — metrics band (recent/days/year); from Live, opens ↓ download",
+        "  s          span — metrics band (recent/days/year); from Live, opens ↑ upload",
         "  f 1 2 3 0  lane filter / jump / clear",
         "  w [ ]      errors window (rolling)",
         "  y          copy the selected domain",
