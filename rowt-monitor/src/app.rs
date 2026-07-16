@@ -659,10 +659,15 @@ impl App {
         self.tick_window();
     }
 
-    /// `s` — cycle the connections pane's metrics-view timescale **span** (band).
-    /// Global; the band persists across the `v` flip (in the Live view it just
-    /// sets what the flipped views will show).
+    /// `s` — the metrics-view **span** (band) key, global. From the Live view it
+    /// first engages the span view (▼ download) so the bands are actually visible;
+    /// once in a flipped view it cycles the band (recent → days → year).
     fn cycle_band(&mut self) {
+        if self.conn_view.is_live() {
+            self.conn_view = ConnView::Down;
+            self.ensure_visible(Focus::Conn);
+            return;
+        }
         let i = (self.band.index() + 1) % MetricsBand::ALL.len();
         self.band = MetricsBand::ALL[i];
         self.refetch_history();

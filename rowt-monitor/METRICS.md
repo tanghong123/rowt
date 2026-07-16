@@ -93,9 +93,9 @@ once, so `v` never re-queries or reorders.
 
 - **`v`** pans `live → ▲ upload → ▼ download → live`; the caption shows
   `connections · ▲ upload · <band>`.
-- **`s`** (span) cycles the metrics-view *timescale band* — a **global** key like
-  `f`/`v` (the band persists across the `v` flip; in the Live view it just sets
-  what the flipped views will show):
+- **`s`** (span) — the metrics *timescale band*, a **global** key like `f`/`v`.
+  From the Live view the first `s` engages the ▼ download span view (so the bands
+  are visible); after that `s` cycles the band:
   - recent: `1m  5m  1h  24h`   · days: `1d  3d  5d  7d`   · year: `7d 30d 120d 1y`
 - **`w`** (+ `[` `]`) — the errors pane's rolling window, **global** (kept separate
   from `s` so neither key needs focus).
@@ -125,6 +125,6 @@ connections` (the `·`-as-separator convention stays for real field joins).
 | key | effect |
 |-----|--------|
 | `v` | flip the connections pane: live / ↑ upload / ↓ download |
-| `s` | span — cycle the metrics-view timescale band (recent/days/year) |
+| `s` | span — from Live opens ↓ download, then cycles the band (recent/days/year) |
 | `w` `[` `]` | errors pane rolling window |
 | `f` `1/2/3/0` | lane filter (scopes both panes) |
