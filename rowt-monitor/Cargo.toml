@@ -30,6 +30,9 @@ anyhow = "1"
 # plain-ws only (handshake, no TLS — the controller is 127.0.0.1).
 rusqlite = { version = "0.32", features = ["bundled"] }
 tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+# Host-name search filter (`/`). Compiled once per pattern change; matched
+# unanchored + case-insensitive over a few hundred rows/keystroke.
+regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-case"] }
 
 [profile.release]
 opt-level = 2

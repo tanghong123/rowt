@@ -527,6 +527,11 @@ rowt monitor --fixtures # force the offline demo
   - The header rows are a **per-lane aggregate** of whatever the pane shows (all /
     escape / corp / direct), and stay all-lanes even when `f` filters the detail
     list. Block-lane traffic is excluded.
+  - Press **`/`** to search hosts by **regex** (case-insensitive; a literal-substring
+    fallback if it doesn't compile). It filters the detail rows of **both** panes at
+    once and composes **AND** with the lane filter, but — like `f` — never touches
+    the header aggregate. Full line-editing with a block cursor; `↵` commits (and
+    persists across `v`/`s`/`f`), `esc` clears.
 - **errors & blocked** — failures and sinkholed domains over a rolling window
   (`5m`/`10m`/`1h`/`24h`), colored by category (dns = transient, timeout/reset/
   refused = persistent, blocked = purple).
@@ -540,7 +545,8 @@ mid-tick re-sort can't shift what you act on; `Esc` unlocks; leaving a pane forg
 its selection) · `←→`/`hl` switch pane / pick a server chip (the strip freezes
 in place and wraps at the ends) · `Tab` cycle focus (connections → errors → health)
 · `v` flip the connections pane (live / ↑ upload / ↓ download) · `s` span (the
-metrics timescale band) · `f` (or `1`/`2`/`3`, `0`) lane filter · `w` / `[` `]`
+metrics timescale band) · `f` (or `1`/`2`/`3`, `0`) lane filter · `/` search
+hosts (regex, filters both panes; `↵` commit, `esc` clear) · `w` / `[` `]`
 errors window · `y` copy the selected domain · `p` pause · `?` help · `q` quit —
 all focus-independent. Mouse: wheel scrolls the list
 under the pointer; click a lane / window tab / row, a server chip (selects it in

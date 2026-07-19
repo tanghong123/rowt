@@ -100,6 +100,16 @@ once, so `v` never re-queries or reorders.
 - **`w`** (+ `[` `]`) — the errors pane's rolling window, **global** (kept separate
   from `s` so neither key needs focus).
 - **`f`** (+ `1/2/3/0`) — lane filter, scopes both panes incl. metrics.
+- **`/`** — host search: a case-insensitive regex (literal-substring fallback if it
+  doesn't compile) on the host name, filtering the **detail rows of both panes**,
+  composed **AND** with `f`. It never touches the header aggregate — search hides
+  rows, it doesn't re-total. `/` opens a footer line-editor (block cursor, full
+  mid-string editing: `←/→`, `Home`/`End`, `Backspace`/`Delete`, `Ctrl-U`/`Ctrl-W`);
+  rows filter incrementally as you type. `↵` commits + persists (across `v`/`s`/`f`);
+  `Esc` in the editor cancels the edit, `Esc` with a committed filter and nothing
+  focused clears it. The committed indicator (`/pat/ (n/m)`, `n` = matched conns,
+  `m` = conns before search) sits right-aligned in the footer; on a narrow terminal
+  it echoes full for 10 s then retreats to `(n/m)`, then hides — the hotkey hints win.
 
 The per-lane bandwidth rate table (`all / escape / corp / direct`) shows in the
 header of **every** view. Column semantics: the two short columns render as
@@ -128,3 +138,4 @@ connections` (the `·`-as-separator convention stays for real field joins).
 | `s` | span — from Live opens ↑ upload, then cycles the band (recent/days/year) |
 | `w` `[` `]` | errors pane rolling window |
 | `f` `1/2/3/0` | lane filter (scopes both panes) |
+| `/` | host search — regex filter on both panes (AND with `f`); `↵` commit · `esc` clear |

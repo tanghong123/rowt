@@ -480,6 +480,9 @@ fn draw_conn_pane(
     hit.conn_list = Rect::new(x0, list_y, w, list_h as u16);
     hit.conn_pane = Rect::new(x0, hdr_y, w, (list_y + list_h as u16).saturating_sub(hdr_y));
     hit.conn_h = list_h;
+    if visible.is_empty() {
+        draw_empty_match(buf, x0, list_y, w, app);
+    }
     if app.conn_view.is_live() {
         draw_conn_live_cols(buf, x0, w, col_y, list_y, list_h, scroll, &visible, app, present);
     } else {
@@ -581,6 +584,16 @@ fn draw_conn_metric_cols(buf: &mut Buffer, x0: u16, w: u16, col_y: u16, list_y: 
     }
 }
 
+/// When a pane's detail list is emptied by an active search, say so rather than
+/// leaving a blank pane (only when a search is actually filtering — a genuinely
+/// empty pane with no search stays blank, as before).
+fn draw_empty_match(buf: &mut Buffer, x0: u16, list_y: u16, w: u16, app: &App) {
+    if let Some(pat) = app.search_pattern() {
+        let msg = truncate(&format!("no hosts match /{pat}/"), w.saturating_sub(2));
+        put(buf, x0 + 1, list_y, &msg, theme::fg(theme::DIM));
+    }
+}
+
 /// A row's pinned first-column label: `host:port` for a live connection, or just
 /// `host` for a historical row (no live port).
 fn host_label(c: &crate::model::ConnRow) -> String {
@@ -634,12 +647,15 @@ fn draw_err_pane(
     put(buf, x0 + 9, col_y, "TYPE", dimmer);
     put(buf, x0 + 21, col_y, "DOMAIN", dimmer);
 
-    // Data rows.
-    let errs = &app.snap.errors;
+    // Data rows (search-filtered; the category header above stays whole).
+    let errs = app.errors_view();
     let scroll = app.err_scroll.min(errs.len().saturating_sub(1));
     hit.err_list = Rect::new(x0, list_y, w, list_h as u16);
     hit.err_pane = Rect::new(x0, hdr_y, w, (list_y + list_h as u16).saturating_sub(hdr_y));
     hit.err_h = list_h;
+    if errs.is_empty() {
+        draw_empty_match(buf, x0, list_y, w, app);
+    }
     let dom_max = w.saturating_sub(21);
     for row in 0..list_h {
         let idx = scroll + row;
@@ -957,6 +973,7 @@ fn draw_help(buf: &mut Buffer, area: Rect) {
         "  v          flip pane · live / ↑ upload / ↓ download",
         "  s          span — metrics band (recent/days/year); from Live, opens ↑ upload",
         "  f 1 2 3 0  lane filter / jump / clear",
+        "  /          search hosts (regex) · esc clears",
         "  w [ ]      errors window (rolling)",
         "  y          copy the selected domain",
         "  e c b d    route selected → escape/corp/",
@@ -1000,6 +1017,13 @@ pub fn draw_footer(buf: &mut Buffer, area: Rect, app: &App) {
     let y = area.bottom().saturating_sub(1);
     let left = area.left();
 
+    // Search editor owns the footer while open (a little line editor with a block
+    // cursor); everything else is suppressed until Enter/Esc.
+    if app.search.editing {
+        draw_search_editor(buf, area, y, app);
+        return;
+    }
+
     // Armed → confirm bar (overrides the whole left side).
     if let Some(a) = &app.armed {
         let bar = format!(" CONFIRM  {}  · press {} again or ↵ to apply · esc cancel ", a.label(), a.key);
@@ -1010,9 +1034,9 @@ pub fn draw_footer(buf: &mut Buffer, area: Rect, app: &App) {
 
     // Normal: global group, then a contextual group when something is live.
     let global = if app.paused {
-        " ↑↓←→ navigate · v flip · s span · f lane · w window · o proxy · p resume · ? help · q quit "
+        " ↑↓←→ navigate · v flip · s span · f lane · / search · w window · o proxy · p resume · ? help · q quit "
     } else {
-        " ↑↓←→ navigate · v flip · s span · f lane · w window · o proxy · p pause · ? help · q quit "
+        " ↑↓←→ navigate · v flip · s span · f lane · / search · w window · o proxy · p pause · ? help · q quit "
     };
     let shown = truncate(global, area.width);
     put(buf, left, y, &shown, dimmer);
@@ -1039,18 +1063,72 @@ pub fn draw_footer(buf: &mut Buffer, area: Rect, app: &App) {
             x += dw(&group);
         }
     }
-    let _ = x;
 
-    // Right edge: the pending-reload countdown chip, else a transient toast.
+    // Right edge, in priority order: a pending-reload countdown chip, else a
+    // transient toast, else — when neither is showing — the persistent search
+    // indicator, which degrades as it would collide with the hints (`x` = the
+    // first free column past them).
+    let toast_fresh = app.toast.as_ref().filter(|(_, at)| at.elapsed() < std::time::Duration::from_secs(4));
     if let Some(t) = app.pending_reload {
         let secs = t.saturating_duration_since(std::time::Instant::now()).as_secs() + 1;
         let chip = format!(" ◍ lane edits queued · reload in ~{secs}s ");
         put_right(buf, area.right().saturating_sub(1), y, &truncate(&chip, area.width), theme::fg(theme::ARMED));
-    } else if let Some((msg, at)) = &app.toast {
-        if at.elapsed() < std::time::Duration::from_secs(4) {
-            let color = if msg.starts_with('⚠') { theme::PERSISTENT } else { theme::DIRECT };
-            let m = truncate(&format!(" {msg} "), area.width);
-            put_right(buf, area.right().saturating_sub(1), y, &m, theme::fg(color));
-        }
+    } else if let Some((msg, _)) = toast_fresh {
+        let color = if msg.starts_with('⚠') { theme::PERSISTENT } else { theme::DIRECT };
+        let m = truncate(&format!(" {msg} "), area.width);
+        put_right(buf, area.right().saturating_sub(1), y, &m, theme::fg(color));
+    } else if app.search_committed() {
+        draw_search_indicator(buf, area, y, x, app);
     }
+}
+
+/// The `/`-editor footer: a `/` prompt, the pattern with a block cursor (reversed
+/// cell), and a right-aligned key hint. Full mid-string editing lives in `app`.
+fn draw_search_editor(buf: &mut Buffer, area: Rect, y: u16, app: &App) {
+    let left = area.left();
+    let base = theme::fg(theme::BRIGHT);
+    let cursor_st = base.add_modifier(Modifier::REVERSED);
+    put(buf, left, y, "/", theme::bold(theme::BRIGHT));
+    let chars: Vec<char> = app.search.buf.chars().collect();
+    let cur = app.search.cursor.min(chars.len());
+    let mut x = left + 1;
+    for (i, ch) in chars.iter().enumerate() {
+        let mut b = [0u8; 4];
+        put(buf, x, y, ch.encode_utf8(&mut b), if i == cur { cursor_st } else { base });
+        x += 1;
+    }
+    if cur >= chars.len() {
+        put(buf, x, y, " ", cursor_st); // block cursor sitting past the last char
+        x += 1;
+    }
+    // Right-aligned key hint (only if it clears the typed text).
+    let hint = " regex · ↵ apply · esc cancel ";
+    let start = area.right().saturating_sub(dw(hint));
+    if start > x + 1 {
+        put_right(buf, area.right().saturating_sub(1), y, hint, theme::fg(theme::DIMMER));
+    }
+}
+
+/// The committed-search indicator, right-aligned, with the space-adaptive degrade
+/// ladder (METRICS.md): full `/pat/ (n/m)` when it fits — or for 10 s after the
+/// pattern last changed even if it collides with the hints — then it retreats to
+/// `(n/m)`, then hides entirely if even that would collide. `hints_end` is the
+/// first free column past the left-hand hints.
+fn draw_search_indicator(buf: &mut Buffer, area: Rect, y: u16, hints_end: u16, app: &App) {
+    let (n, m) = app.search_counts();
+    let pat = truncate(&app.search.committed, 40);
+    let full = format!(" /{pat}/ ({n}/{m}) ");
+    let reduced = format!(" ({n}/{m}) ");
+    let right = area.right().saturating_sub(1);
+    // start column if right-aligned; fits when it clears the hints by ≥1 cell.
+    let fits = |s: &str| right.saturating_sub(dw(s).saturating_sub(1)) > hints_end;
+    let within10 = app.search.changed_at.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(10));
+    let st = theme::fg(theme::BRIGHT);
+    if fits(&full) || within10 {
+        // Blocks the hint tail during the 10 s echo window when it doesn't fit.
+        put_right(buf, right, y, &truncate(&full, area.width), st);
+    } else if fits(&reduced) {
+        put_right(buf, right, y, &reduced, st);
+    }
+    // else: even `(n/m)` would collide — hidden; the hints win.
 }

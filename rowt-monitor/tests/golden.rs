@@ -153,6 +153,65 @@ fn footer_global_and_contextual_groups() {
 }
 
 #[test]
+fn footer_search_editor_shows_prompt_and_block_cursor() {
+    std::env::set_var("ROWT_MONITOR_NO_CLIPBOARD", "1");
+    let mut app = App::new(Box::new(FixtureSource::still()));
+    app.side_by_side = true;
+    app.conn_h = 6;
+    app.err_h = 6;
+    app.update(Action::SearchOpen);
+    for c in "goog".chars() {
+        app.update(Action::SearchInput(c));
+    }
+    // Move the block cursor into the middle so we can assert a reversed cell there.
+    app.update(Action::SearchCursor(-1));
+
+    let (w, h) = (150u16, 41u16);
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    term.draw(|f| {
+        let a = f.area();
+        ui::draw_footer(f.buffer_mut(), a, &app);
+    })
+    .unwrap();
+    let buf = term.backend().buffer();
+    let footer = row_text(buf, w, h - 1);
+    assert!(footer.starts_with("/goog"), "editor shows the / prompt + pattern: {footer:?}");
+    assert!(footer.contains("esc cancel"), "editor shows the key hint: {footer:?}");
+    // The cursor sits on the 4th char (index 3 = 'g'): that cell is REVERSED.
+    let cur = buf.cell((4, h - 1)).unwrap(); // col 0='/', 1='g',2='o',3='o',4='g'
+    assert_eq!(cur.symbol(), "g");
+    assert!(cur.modifier.contains(Modifier::REVERSED), "block cursor is a reversed cell");
+}
+
+#[test]
+fn footer_search_indicator_after_commit() {
+    std::env::set_var("ROWT_MONITOR_NO_CLIPBOARD", "1");
+    let mut app = App::new(Box::new(FixtureSource::still()));
+    app.side_by_side = true;
+    app.conn_h = 6;
+    app.err_h = 6;
+    app.update(Action::SearchOpen);
+    for c in "google".chars() {
+        app.update(Action::SearchInput(c));
+    }
+    app.update(Action::SearchCommit);
+
+    let (w, h) = (150u16, 41u16);
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    term.draw(|f| {
+        let a = f.area();
+        ui::draw_footer(f.buffer_mut(), a, &app);
+    })
+    .unwrap();
+    let footer = row_text(term.backend().buffer(), w, h - 1);
+    // Wide terminal: the full indicator fits, right-aligned, and the hints remain.
+    assert!(footer.contains("/google/"), "committed indicator echoes the pattern: {footer:?}");
+    assert!(footer.contains("/ search"), "the / search hint stays on the left: {footer:?}");
+    let (n, m) = app.search_counts();
+    assert!(footer.contains(&format!("({n}/{m})")), "indicator shows the n/m match count: {footer:?}");
+}
+
+#[test]
 fn selected_server_strip_fills_row_circularly() {
     std::env::set_var("ROWT_MONITOR_NO_CLIPBOARD", "1");
     let mut app = App::new(Box::new(FixtureSource::still()));

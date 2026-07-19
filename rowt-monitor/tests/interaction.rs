@@ -365,6 +365,123 @@ fn strip_selection_wraps_and_anchors() {
     assert_eq!(a.strip_sel, Some(n - 1), "wraps before the start to the last");
 }
 
+// ---- host search (`/`) ------------------------------------------------------
+
+#[test]
+fn search_editor_cursor_and_edits() {
+    let mut a = app();
+    a.update(Action::SearchOpen);
+    assert!(a.search.editing);
+    for c in "abc".chars() {
+        a.update(Action::SearchInput(c));
+    }
+    assert_eq!(a.search.buf, "abc");
+    assert_eq!(a.search.cursor, 3);
+    // Mid-string insert: move left one, type X → "abXc".
+    a.update(Action::SearchCursor(-1));
+    assert_eq!(a.search.cursor, 2);
+    a.update(Action::SearchInput('X'));
+    assert_eq!(a.search.buf, "abXc");
+    assert_eq!(a.search.cursor, 3);
+    // Backspace removes the char before the cursor (X) → "abc".
+    a.update(Action::SearchBackspace);
+    assert_eq!(a.search.buf, "abc");
+    assert_eq!(a.search.cursor, 2);
+    // Delete removes the char AT the cursor (c) → "ab".
+    a.update(Action::SearchDelete);
+    assert_eq!(a.search.buf, "ab");
+    assert_eq!(a.search.cursor, 2);
+    // Home / End.
+    a.update(Action::SearchHome);
+    assert_eq!(a.search.cursor, 0);
+    a.update(Action::SearchEnd);
+    assert_eq!(a.search.cursor, 2);
+    // Ctrl-U clears.
+    a.update(Action::SearchKillLine);
+    assert_eq!(a.search.buf, "");
+    assert_eq!(a.search.cursor, 0);
+}
+
+#[test]
+fn search_filters_both_panes_incrementally_and_persists() {
+    let mut a = app();
+    let rows_before = a.rows.len();
+    a.update(Action::SearchOpen);
+    for c in "google".chars() {
+        a.update(Action::SearchInput(c));
+    }
+    // Incremental (still editing): both panes already filtered off the buffer.
+    assert!(!a.visible_rows().is_empty());
+    assert!(a.visible_rows().iter().all(|r| r.host.to_lowercase().contains("google")));
+    assert!(a.errors_view().iter().all(|e| e.domain.to_lowercase().contains("google")));
+    // Header aggregate is untouched: the full row set is unchanged.
+    assert_eq!(a.rows.len(), rows_before, "search must not touch the header row set");
+    // Commit persists across a view flip.
+    a.update(Action::SearchCommit);
+    assert!(!a.search.editing);
+    assert!(a.search_committed());
+    a.update(Action::ConnViewCycle);
+    assert!(a.visible_rows().iter().all(|r| r.host.to_lowercase().contains("google")));
+}
+
+#[test]
+fn search_composes_and_with_lane_filter() {
+    let mut a = app();
+    a.update(Action::LaneSet(Some(Lane::Direct)));
+    a.update(Action::SearchOpen);
+    for c in "google".chars() {
+        a.update(Action::SearchInput(c));
+    }
+    a.update(Action::SearchCommit);
+    // AND: every visible row is BOTH the direct lane AND matches "google".
+    assert!(!a.visible_rows().is_empty());
+    assert!(a.visible_rows().iter().all(|r| r.lane == Lane::Direct && r.host.to_lowercase().contains("google")));
+}
+
+#[test]
+fn search_invalid_regex_falls_back_to_substring() {
+    let mut a = app();
+    a.update(Action::SearchOpen);
+    // A dangling group is not a valid regex → literal substring; nothing contains
+    // the literal "google(", so it filters to empty without panicking.
+    for c in "google(".chars() {
+        a.update(Action::SearchInput(c));
+    }
+    assert!(a.visible_rows().is_empty(), "literal-substring fallback matches nothing here");
+    // A valid regex still works once the pattern compiles again.
+    a.update(Action::SearchKillLine);
+    for c in "google".chars() {
+        a.update(Action::SearchInput(c));
+    }
+    assert!(!a.visible_rows().is_empty());
+    assert!(a.visible_rows().iter().all(|r| r.host.to_lowercase().contains("google")));
+}
+
+#[test]
+fn search_cancel_reverts_and_esc_clears() {
+    let mut a = app();
+    a.update(Action::SearchOpen);
+    for c in "google".chars() {
+        a.update(Action::SearchInput(c));
+    }
+    a.update(Action::SearchCommit);
+    let committed_n = a.visible_rows().len();
+    assert!(committed_n > 0 && a.search_committed());
+    // Re-open (prefilled), edit, then cancel → reverts to the committed pattern.
+    a.update(Action::SearchOpen);
+    assert_eq!(a.search.buf, "google", "editor opens prefilled with the committed pattern");
+    a.update(Action::SearchInput('X'));
+    a.update(Action::SearchCancel);
+    assert!(!a.search.editing);
+    assert_eq!(a.search.committed, "google");
+    assert_eq!(a.visible_rows().len(), committed_n, "cancel reverts to the committed filter");
+    // Esc (nothing focused) clears the committed filter entirely.
+    a.update(Action::Escape);
+    assert!(!a.search_committed());
+    assert_eq!(a.search.committed, "");
+    assert!(a.visible_rows().len() > committed_n, "clearing the filter restores the full list");
+}
+
 #[test]
 fn esc_priority_arm_then_selection_then_filter() {
     let mut a = app();

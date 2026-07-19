@@ -18,7 +18,31 @@ pub fn key(k: KeyEvent, app: &App) -> Option<Action> {
             _ => None,
         };
     }
+    // Search editor owns the keyboard while open: every printable key edits the
+    // pattern; Enter commits, Esc (or Ctrl-C) cancels. Nothing else fires.
+    if app.search.editing {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = k.modifiers.contains(KeyModifiers::ALT);
+        return match k.code {
+            KeyCode::Enter => Some(Action::SearchCommit),
+            KeyCode::Esc => Some(Action::SearchCancel),
+            KeyCode::Char('c') if ctrl => Some(Action::SearchCancel),
+            KeyCode::Left => Some(Action::SearchCursor(-1)),
+            KeyCode::Right => Some(Action::SearchCursor(1)),
+            KeyCode::Home => Some(Action::SearchHome),
+            KeyCode::End => Some(Action::SearchEnd),
+            KeyCode::Char('a') if ctrl => Some(Action::SearchHome),
+            KeyCode::Char('e') if ctrl => Some(Action::SearchEnd),
+            KeyCode::Char('u') if ctrl => Some(Action::SearchKillLine),
+            KeyCode::Char('w') if ctrl => Some(Action::SearchKillWord),
+            KeyCode::Backspace => Some(Action::SearchBackspace),
+            KeyCode::Delete => Some(Action::SearchDelete),
+            KeyCode::Char(c) if !ctrl && !alt => Some(Action::SearchInput(c)),
+            _ => None,
+        };
+    }
     Some(match k.code {
+        KeyCode::Char('/') => Action::SearchOpen,
         KeyCode::Char('q') => Action::Quit,
         KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => Action::Quit,
         KeyCode::Up | KeyCode::Char('k') => Action::Up,

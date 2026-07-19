@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 
 use std::collections::HashSet;
 
-use crate::model::{Conn, ConnRow, ConnView, Lane, MetricsBand, Snapshot, Window};
+use regex::RegexBuilder;
+
+use crate::model::{Conn, ConnRow, ConnView, ErrRow, Lane, MetricsBand, Snapshot, Window};
 use crate::source::History;
 use crate::source::Source;
 
@@ -67,6 +69,51 @@ impl Drag {
     }
 }
 
+/// Compiled host-search predicate. A case-insensitive, unanchored regex when the
+/// pattern compiles; a case-insensitive literal-substring fallback when it
+/// doesn't (so a mid-edit `foo(` still filters instead of erroring or freezing).
+#[derive(Clone)]
+pub enum Matcher {
+    Regex(regex::Regex),
+    Literal(String), // lower-cased needle
+}
+
+impl Matcher {
+    /// Compile `pat` (empty → `None`, meaning no filtering).
+    pub fn compile(pat: &str) -> Option<Matcher> {
+        if pat.is_empty() {
+            return None;
+        }
+        // Bound the compiled program so a pathological pattern can't blow memory;
+        // on any build error fall back to a plain lower-cased substring search.
+        Some(match RegexBuilder::new(pat).case_insensitive(true).size_limit(1 << 20).build() {
+            Ok(re) => Matcher::Regex(re),
+            Err(_) => Matcher::Literal(pat.to_lowercase()),
+        })
+    }
+    pub fn is_match(&self, host: &str) -> bool {
+        match self {
+            Matcher::Regex(re) => re.is_match(host),
+            Matcher::Literal(s) => host.to_lowercase().contains(s),
+        }
+    }
+}
+
+/// Host-name search state (`/`). While `editing`, the footer is a line editor and
+/// the pane rows filter *incrementally* off `buf`; on Enter the pattern commits to
+/// `committed` and persists. The effective predicate `matcher` reflects `buf` while
+/// editing, else `committed`. Composed AND with the lane filter; never touches the
+/// per-lane header aggregate. Applies to BOTH panes (one shared pattern).
+#[derive(Clone, Default)]
+pub struct Search {
+    pub editing: bool,
+    pub buf: String,             // editor buffer (meaningful while editing)
+    pub cursor: usize,           // block-cursor char index into buf (0..=len)
+    pub committed: String,       // last committed pattern ("" = inactive)
+    pub matcher: Option<Matcher>, // effective predicate (buf while editing, else committed)
+    pub changed_at: Option<Instant>, // when the committed pattern last changed (10s degrade)
+}
+
 /// One interaction, decoded from a key or mouse event (see `input.rs`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Action {
@@ -103,6 +150,18 @@ pub enum Action {
     SelectConn(usize), // absolute index in the filtered view
     SelectErr(usize),
     SelectServer(usize), // click a server chip: focus the strip + select it in place
+    // Host search (`/`): open the editor, edit the pattern, commit/cancel.
+    SearchOpen,          // / — open (prefilled with the active pattern to edit it)
+    SearchInput(char),   // a printable key while editing → insert at the cursor
+    SearchBackspace,     // delete the char before the cursor
+    SearchDelete,        // delete the char at the cursor
+    SearchCursor(i8),    // ←/→ move the block cursor
+    SearchHome,          // Home / Ctrl-A
+    SearchEnd,           // End / Ctrl-E
+    SearchKillLine,      // Ctrl-U — clear the buffer
+    SearchKillWord,      // Ctrl-W — delete the word before the cursor
+    SearchCommit,        // Enter — commit the pattern, leave the editor
+    SearchCancel,        // Esc — cancel the edit, revert to the committed pattern
 }
 
 pub struct App {
@@ -173,6 +232,10 @@ pub struct App {
     pub band: MetricsBand,
     pub history: History,
     pub rows: Vec<ConnRow>,
+
+    // Host-name search (`/`): a regex/literal filter on host rows, applied to both
+    // panes and composed AND with the lane filter. Never touches the header agg.
+    pub search: Search,
 }
 
 impl App {
@@ -217,6 +280,7 @@ impl App {
             band: MetricsBand::Recent,
             history,
             rows: Vec::new(),
+            search: Search::default(),
         };
         app.rebuild_rows();
         app
@@ -289,7 +353,10 @@ impl App {
             }
         }
         if let Some(k) = self.err_key.clone() {
-            match self.snap.errors.iter().position(|e| e.domain == k) {
+            // Position within the *filtered* errors view (drops the lock if the
+            // domain has been filtered out or has left the window).
+            let pos = self.errors_view().iter().position(|e| e.domain == k);
+            match pos {
                 Some(i) => {
                     self.err_sel = i;
                     self.ensure_visible(Focus::Err);
@@ -325,7 +392,7 @@ impl App {
         self.conn_row_keys().len()
     }
     fn err_len(&self) -> usize {
-        self.snap.errors.len()
+        self.errors_view().len()
     }
 
     pub fn update(&mut self, a: Action) {
@@ -413,7 +480,158 @@ impl App {
                 self.set_err_index(i.min(self.err_len().saturating_sub(1)));
             }
             SelectServer(i) => self.select_server(i),
+            SearchOpen => self.search_open(),
+            SearchInput(c) => self.search_input(c),
+            SearchBackspace => self.search_backspace(),
+            SearchDelete => self.search_delete(),
+            SearchCursor(d) => self.search_move_cursor(d as i32),
+            SearchHome => self.search.cursor = 0,
+            SearchEnd => self.search.cursor = self.search.buf.chars().count(),
+            SearchKillLine => self.search_kill_line(),
+            SearchKillWord => self.search_kill_word(),
+            SearchCommit => self.search_commit(),
+            SearchCancel => self.search_cancel(),
         }
+    }
+
+    // ---- host search (`/`) ---------------------------------------------------
+
+    /// Open the editor, prefilled with the committed pattern so `/` doubles as
+    /// "edit the current search". The cursor lands at the end.
+    fn search_open(&mut self) {
+        self.search.editing = true;
+        self.search.buf = self.search.committed.clone();
+        self.search.cursor = self.search.buf.chars().count();
+        self.recompile_search();
+    }
+
+    /// Byte offset of char index `i` within the editor buffer (len if past the end).
+    fn search_byte_at(&self, i: usize) -> usize {
+        self.search.buf.char_indices().nth(i).map(|(b, _)| b).unwrap_or(self.search.buf.len())
+    }
+
+    fn search_input(&mut self, c: char) {
+        let b = self.search_byte_at(self.search.cursor);
+        self.search.buf.insert(b, c);
+        self.search.cursor += 1;
+        self.recompile_search();
+        self.on_search_change();
+    }
+
+    fn search_backspace(&mut self) {
+        if self.search.cursor == 0 {
+            return;
+        }
+        let b = self.search_byte_at(self.search.cursor - 1);
+        self.search.buf.remove(b);
+        self.search.cursor -= 1;
+        self.recompile_search();
+        self.on_search_change();
+    }
+
+    fn search_delete(&mut self) {
+        if self.search.cursor >= self.search.buf.chars().count() {
+            return;
+        }
+        let b = self.search_byte_at(self.search.cursor);
+        self.search.buf.remove(b);
+        self.recompile_search();
+        self.on_search_change();
+    }
+
+    fn search_move_cursor(&mut self, d: i32) {
+        let len = self.search.buf.chars().count() as i32;
+        self.search.cursor = (self.search.cursor as i32 + d).clamp(0, len) as usize;
+    }
+
+    fn search_kill_line(&mut self) {
+        self.search.buf.clear();
+        self.search.cursor = 0;
+        self.recompile_search();
+        self.on_search_change();
+    }
+
+    /// Ctrl-W: delete the whitespace-delimited word before the cursor.
+    fn search_kill_word(&mut self) {
+        let chars: Vec<char> = self.search.buf.chars().collect();
+        let mut i = self.search.cursor;
+        while i > 0 && chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        while i > 0 && !chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        let kept: String = chars[..i].iter().chain(chars[self.search.cursor..].iter()).collect();
+        self.search.buf = kept;
+        self.search.cursor = i;
+        self.recompile_search();
+        self.on_search_change();
+    }
+
+    fn search_commit(&mut self) {
+        self.search.editing = false;
+        self.search.committed = self.search.buf.clone();
+        self.recompile_search(); // now sourced from `committed` (== buf)
+        self.search.changed_at = Some(Instant::now());
+        self.on_search_change();
+    }
+
+    /// Esc while editing: drop the edit and revert to the committed pattern.
+    fn search_cancel(&mut self) {
+        self.search.editing = false;
+        self.search.buf.clear();
+        self.search.cursor = 0;
+        self.recompile_search(); // reverts to `committed`
+        self.on_search_change();
+    }
+
+    /// Esc while a committed filter is active and nothing is focused: clear it.
+    fn search_clear(&mut self) {
+        self.search = Search::default();
+        self.on_search_change();
+    }
+
+    /// Recompile the effective matcher from the buffer (while editing) or the
+    /// committed pattern (otherwise). Empty → no filtering.
+    fn recompile_search(&mut self) {
+        let src = if self.search.editing { &self.search.buf } else { &self.search.committed };
+        self.search.matcher = Matcher::compile(src);
+    }
+
+    /// A committed (persisted) search filter is in effect — drives the footer
+    /// indicator and the Esc-to-clear path. False while the editor is open.
+    pub fn search_committed(&self) -> bool {
+        !self.search.editing && !self.search.committed.is_empty()
+    }
+
+    /// The effective pattern iff something is being filtered (for the empty-match
+    /// placeholder), whether typed live or committed.
+    pub fn search_pattern(&self) -> Option<&str> {
+        self.search.matcher.as_ref().map(|_| if self.search.editing { self.search.buf.as_str() } else { self.search.committed.as_str() })
+    }
+
+    /// (matched, before-search) connection-row counts — powers the `n/m` indicator.
+    /// Both sides are lane-filtered (search composes AND with the lane filter); the
+    /// denominator is the pane's visible count *before* search narrows it.
+    pub fn search_counts(&self) -> (usize, usize) {
+        let base: Vec<&ConnRow> = self.rows.iter().filter(|r| self.lane_filter.is_none_or(|l| r.lane == l)).collect();
+        let m = base.len();
+        let n = match self.search.matcher.as_ref() {
+            Some(mm) => base.iter().filter(|r| mm.is_match(&r.host)).count(),
+            None => m,
+        };
+        (n, m)
+    }
+
+    /// The search filter changed: reset both panes' selection/scroll (the selected
+    /// host may have just vanished) — same reset the lane filter does.
+    fn on_search_change(&mut self) {
+        self.conn_sel = 0;
+        self.conn_scroll = 0;
+        self.conn_key = None;
+        self.err_sel = 0;
+        self.err_scroll = 0;
+        self.err_key = None;
     }
 
     /// Click a server chip: focus the strip and select that chip *in place* — the
@@ -503,7 +721,7 @@ impl App {
     }
 
     /// Esc priority: cancel an arm, else clear the focused selection, else clear
-    /// the lane filter (the shipped Esc behavior).
+    /// the host search, else clear the lane filter.
     fn handle_escape(&mut self) {
         if self.armed.take().is_some() {
             return;
@@ -522,6 +740,10 @@ impl App {
                 return;
             }
             _ => {}
+        }
+        if self.search_committed() {
+            self.search_clear();
+            return;
         }
         if self.lane_filter.is_some() {
             self.lane_filter = None;
@@ -693,10 +915,24 @@ impl App {
         self.rows = self.build_conn_rows();
     }
 
-    /// The lane-filtered subset of `rows` — the detail list actually shown (and
-    /// navigated). The full `rows` still back the per-lane header aggregate.
+    /// The lane- and search-filtered subset of `rows` — the detail list actually
+    /// shown (and navigated). The full `rows` still back the per-lane header
+    /// aggregate, so neither filter touches the header totals.
     pub fn visible_rows(&self) -> Vec<&ConnRow> {
-        self.rows.iter().filter(|r| self.lane_filter.is_none_or(|l| r.lane == l)).collect()
+        let m = self.search.matcher.as_ref();
+        self.rows
+            .iter()
+            .filter(|r| self.lane_filter.is_none_or(|l| r.lane == l))
+            .filter(|r| m.is_none_or(|mm| mm.is_match(&r.host)))
+            .collect()
+    }
+
+    /// The search-filtered errors rows — the errors *detail* list. The per-category
+    /// header counts (transient/persistent/blocked) come from the whole snapshot and
+    /// are never filtered, mirroring the connections header aggregate.
+    pub fn errors_view(&self) -> Vec<&ErrRow> {
+        let m = self.search.matcher.as_ref();
+        self.snap.errors.iter().filter(|e| m.is_none_or(|mm| mm.is_match(&e.domain))).collect()
     }
 
     /// The unified connections list: live connections (with their history looked
@@ -859,7 +1095,8 @@ impl App {
     }
 
     fn set_err_index(&mut self, i: usize) {
-        match self.snap.errors.get(i).map(|e| e.domain.clone()) {
+        let dom = self.errors_view().get(i).map(|e| e.domain.clone());
+        match dom {
             Some(k) => {
                 self.err_key = Some(k);
                 self.err_sel = i;
@@ -931,7 +1168,7 @@ impl App {
     pub fn yank_target(&self) -> Option<String> {
         match self.focus {
             Focus::Conn => self.conn_row_keys().get(self.conn_sel).cloned(),
-            Focus::Err => self.snap.errors.get(self.err_sel).map(|e| e.domain.clone()),
+            Focus::Err => self.errors_view().get(self.err_sel).map(|e| e.domain.clone()),
             Focus::Health => self.strip_sel.and_then(|i| self.snap.chips.get(i)).map(|s| s.name.clone()),
         }
     }
