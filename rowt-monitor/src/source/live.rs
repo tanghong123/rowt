@@ -707,18 +707,25 @@ impl Source for LiveSource {
             self.last_active_traffic = Some(Instant::now());
         }
         let traffic_recent = self.last_active_traffic.is_some_and(|t| t.elapsed() < Duration::from_secs(20));
+        // Capture the RAW probe verdict before the display override, so the
+        // self-heal below still re-probes a genuinely-failed probe (the override
+        // would otherwise mask it and suppress recovery).
+        let probe_failed = h.active_ok == Some(false);
         h.active_ok = health_with_traffic(h.active_ok, traffic_recent);
 
-        // Self-heal a stale ERROR: after a network switch the active server's
-        // last (pre-switch) probe can read failed for up to the 10-min cycle,
-        // even though it's reachable again. Re-probe when the router just came
-        // back (reload / net change) or keep re-probing ~every 60s while the
-        // active server is failing, so it clears within seconds instead.
+        // Self-heal a stale probe. The prober runs on a slow interval (default
+        // 10 min), so a transient failure — a network blip / switch, the active
+        // server's last pre-switch probe — would otherwise show ERROR (and a `—`
+        // latency) until the next scheduled round even after the path is back.
+        // Live escape traffic is strong evidence the path IS back, so when the
+        // probe reads down *and* bytes are flowing we retry on a short 15s window
+        // (this also refreshes the active server's latency and the whole strip);
+        // with no traffic to corroborate, fall back to the slow 60s retry. A
+        // just-recovered router always re-probes immediately.
         if router_up {
             let recovered = !self.prev_router_up;
-            let erroring = h.active_ok == Some(false);
-            let due = self.last_force.is_none_or(|t| t.elapsed() > Duration::from_secs(60));
-            if recovered || (erroring && due) {
+            let since = self.last_force.map(|t| t.elapsed());
+            if should_force_probe(probe_failed, traffic_recent, recovered, since) {
                 self.force_probe();
                 self.last_force = Some(Instant::now());
             }
@@ -990,6 +997,23 @@ fn health_with_traffic(active_ok: Option<bool>, traffic_recent: bool) -> Option<
     }
 }
 
+/// Whether to force an immediate re-probe (bypassing the slow scheduled round).
+/// A just-recovered router always re-probes. Otherwise only a *failed* active
+/// probe is worth chasing: with live escape traffic (strong evidence the path is
+/// back) retry on a short window so a transient failure clears fast and the
+/// latency refreshes; without traffic, retry slowly. `since_last` is how long ago
+/// we last forced a probe (`None` = never).
+fn should_force_probe(probe_failed: bool, traffic_recent: bool, router_recovered: bool, since_last: Option<Duration>) -> bool {
+    if router_recovered {
+        return true;
+    }
+    if !probe_failed {
+        return false;
+    }
+    let throttle = if traffic_recent { Duration::from_secs(15) } else { Duration::from_secs(60) };
+    since_last.is_none_or(|d| d > throttle)
+}
+
 fn env_port(key: &str, default: u16) -> u16 {
     std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
@@ -1142,5 +1166,23 @@ mod tests {
         assert_eq!(health_with_traffic(Some(true), true), Some(true));
         assert_eq!(health_with_traffic(None, true), None);
         assert_eq!(health_with_traffic(None, false), None);
+    }
+
+    #[test]
+    fn force_probe_is_traffic_aware() {
+        use std::time::Duration;
+        let s = Some; // brevity
+        // A just-recovered router always re-probes, regardless of the rest.
+        assert!(should_force_probe(false, false, true, s(Duration::from_secs(1))));
+        // Never forced when the probe is healthy/pending.
+        assert!(!should_force_probe(false, true, false, None));
+        // Failed probe + live traffic → retry on the short 15s window.
+        assert!(should_force_probe(true, true, false, s(Duration::from_secs(16))));
+        assert!(!should_force_probe(true, true, false, s(Duration::from_secs(10))), "throttled within 15s");
+        // Failed probe, no traffic → slow 60s retry (15s is not yet due).
+        assert!(!should_force_probe(true, false, false, s(Duration::from_secs(20))));
+        assert!(should_force_probe(true, false, false, s(Duration::from_secs(61))));
+        // Never forced yet (None) → due immediately when the probe is failing.
+        assert!(should_force_probe(true, true, false, None));
     }
 }
