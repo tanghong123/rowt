@@ -7,7 +7,7 @@
     vless-parse.py --combine < array.json                  # dedupe + uniquify tags
 
 Emits sing-box outbound(s) on stdout. Supported protocols: VLESS (incl. Reality),
-AnyTLS, and hysteria2 (incl. Salamander obfs). In --multi/--sub each outbound
+VMess, AnyTLS, and hysteria2 (incl. Salamander obfs). In --multi/--sub each outbound
 gets a unique tag from the link's #name (sanitized), falling back to "server-N".
 Stdlib only — no dependencies. Credentials never touch the repo; the caller
 stores output under ~/.config/rowt/.
@@ -169,10 +169,82 @@ def parse_hysteria2(link: str, tag: str = "escape") -> dict:
     return out
 
 
+def parse_vmess(link: str, tag: str = "escape") -> dict:
+    """Turn a vmess:// share link into a sing-box VMess outbound dict.
+
+    Handles the dominant v2rayN format — `vmess://` + base64(JSON) — covering the
+    tcp / ws / grpc / http(h2) transports and TLS. kcp/quic transports (which
+    sing-box's vmess outbound doesn't speak) are rejected, as is the older
+    `security:uuid@host` non-JSON body.
+    """
+    body = link[len("vmess://") :].strip()
+    pad = "=" * (-len(body) % 4)
+    try:
+        raw = base64.b64decode(body.replace("-", "+").replace("_", "/") + pad)
+        cfg = json.loads(raw.decode("utf-8", "replace"))
+    except Exception as e:  # noqa: BLE001
+        raise ValueError(f"vmess link is not base64-JSON ({e})") from e
+    if not isinstance(cfg, dict):
+        raise ValueError("vmess link is not a JSON object")
+
+    def s(key: str, default: str = "") -> str:
+        v = cfg.get(key)
+        return str(v).strip() if v is not None else default
+
+    server = s("add")
+    uuid = s("id")
+    if not server or not uuid:
+        raise ValueError("vmess link missing id or host")
+
+    net = (s("net", "tcp") or "tcp").lower()
+    host = s("host")
+    path = s("path", "/")
+
+    out: dict = {
+        "type": "vmess",
+        "tag": tag,
+        "server": server,
+        "server_port": int(cfg.get("port", 443)),
+        "uuid": uuid,
+        "security": s("scy", "auto") or "auto",
+        "alter_id": int(cfg.get("aid", 0) or 0),
+    }
+
+    if net in ("ws", "websocket"):
+        transport: dict = {"type": "ws", "path": path or "/"}
+        if host:
+            transport["headers"] = {"Host": host}
+        out["transport"] = transport
+    elif net == "grpc":
+        out["transport"] = {"type": "grpc", "service_name": path}
+    elif net in ("http", "h2"):
+        transport = {"type": "http", "path": path or "/"}
+        if host:
+            transport["host"] = [h for h in host.split(",") if h]
+        out["transport"] = transport
+    elif net in ("kcp", "quic"):
+        raise ValueError(f"vmess {net} transport unsupported by sing-box")
+    # net == "tcp": plain (http-header obfs isn't supported by sing-box, ignored).
+
+    if s("tls").lower() in ("tls", "reality", "xtls", "1", "true"):
+        tls: dict = {"enabled": True, "server_name": s("sni") or host or server}
+        alpn = s("alpn")
+        if alpn:
+            tls["alpn"] = [a for a in alpn.split(",") if a]
+        fp = s("fp")
+        if fp:
+            tls["utls"] = {"enabled": True, "fingerprint": fp}
+        out["tls"] = tls
+
+    return out
+
+
 def parse_link(link: str, tag: str = "escape") -> dict:
     """Dispatch a share link to the right protocol parser."""
     if link.startswith("vless://"):
         return parse_vless(link, tag)
+    if link.startswith("vmess://"):
+        return parse_vmess(link, tag)
     if link.startswith("anytls://"):
         return parse_anytls(link, tag)
     if link.startswith(("hysteria2://", "hy2://")):
@@ -180,9 +252,27 @@ def parse_link(link: str, tag: str = "escape") -> dict:
     raise ValueError("unsupported protocol")
 
 
+def _link_name(link: str) -> str:
+    """The human name of a share link: the URI `#fragment` for vless/anytls/hy2,
+    or the `ps` field for vmess:// (whose name lives inside the base64 JSON)."""
+    if link.startswith("vmess://"):
+        body = link[len("vmess://") :].strip()
+        pad = "=" * (-len(body) % 4)
+        try:
+            cfg = json.loads(
+                base64.b64decode(body.replace("-", "+").replace("_", "/") + pad).decode(
+                    "utf-8", "replace"
+                )
+            )
+        except Exception:  # noqa: BLE001
+            return ""
+        return str(cfg.get("ps", "")).strip() if isinstance(cfg, dict) else ""
+    return unquote(urlsplit(link).fragment).strip()
+
+
 def _tag_for(link: str, index: int, used: set[str]) -> str:
-    """Derive a unique, filesystem/API-safe tag from a link's #name."""
-    name = unquote(urlsplit(link).fragment).strip()
+    """Derive a unique, filesystem/API-safe tag from a link's name."""
+    name = _link_name(link)
     base = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-") or f"server-{index}"
     if base in RESERVED:
         base = f"{base}-{index}"
@@ -204,7 +294,9 @@ def parse_many(links: list[str]) -> list[dict]:
             continue
         if "://" not in link:
             continue  # subscription header lines (e.g. "REMARKS=...") — skip quietly
-        if not link.startswith(("vless://", "anytls://", "hysteria2://", "hy2://")):
+        if not link.startswith(
+            ("vless://", "vmess://", "anytls://", "hysteria2://", "hy2://")
+        ):
             proto = link.split("://", 1)[0]
             print(f"warning: skipping unsupported link ({proto}://)", file=sys.stderr)
             continue
@@ -213,21 +305,37 @@ def parse_many(links: list[str]) -> list[dict]:
         except ValueError as e:
             print(f"warning: skipping a link ({e})", file=sys.stderr)
     if not out:
-        raise ValueError("no usable vless:// / anytls:// / hysteria2:// links found")
+        raise ValueError(
+            "no usable vless:// / vmess:// / anytls:// / hysteria2:// links found"
+        )
     return out
 
 
+def key_of(o: dict) -> str:
+    """Identity of an outbound — the same endpoint regardless of its display name.
+    Two outbounds with this key equal are the same server (dedup unit)."""
+    secret = o.get("uuid") or o.get("password") or ""
+    return f"{o.get('type')}:{o.get('server')}:{o.get('server_port')}:{secret}"
+
+
 def combine(outbounds: list[dict]) -> list[dict]:
-    """Dedupe outbounds by (type, server, port, secret) and uniquify tags."""
+    """Dedupe outbounds by identity (type/server/port/secret) — even when the names
+    differ — keeping the FIRST occurrence and uniquifying tags. A dropped duplicate
+    is announced on stderr (so importing a server you already have is visible, not
+    silent), naming both the kept and the skipped tag."""
     used: set[str] = set(RESERVED)
-    seen: set[str] = set()
+    kept: dict[str, str] = {}  # identity key -> the tag we kept for it
     result: list[dict] = []
     for i, o in enumerate(outbounds, 1):
-        secret = o.get("uuid") or o.get("password") or ""
-        key = f"{o.get('type')}:{o.get('server')}:{o.get('server_port')}:{secret}"
-        if key in seen:
+        key = key_of(o)
+        if key in kept:
+            dropped = o.get("tag") or f"server-{i}"
+            if dropped != kept[key]:
+                print(
+                    f"note: not importing '{dropped}' — same server as '{kept[key]}' ({o.get('server')}:{o.get('server_port')})",
+                    file=sys.stderr,
+                )
             continue
-        seen.add(key)
         base = o.get("tag") or f"server-{i}"
         if base in RESERVED:
             base = f"{base}-{i}"
@@ -237,6 +345,7 @@ def combine(outbounds: list[dict]) -> list[dict]:
             n += 1
         used.add(tag)
         o["tag"] = tag
+        kept[key] = tag
         result.append(o)
     return result
 

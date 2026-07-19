@@ -6,7 +6,9 @@ Run:  python3 config/test_parse.py   (prints "ok" and exits 0 on success)
 
 from __future__ import annotations
 
+import base64
 import importlib.util
+import json
 import pathlib
 
 _here = pathlib.Path(__file__).resolve().parent
@@ -14,6 +16,10 @@ _spec = importlib.util.spec_from_file_location("vparse", _here / "vless-parse.py
 assert _spec and _spec.loader
 vp = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(vp)
+
+
+def _vmess(**cfg) -> str:
+    return "vmess://" + base64.b64encode(json.dumps(cfg).encode()).decode()
 
 
 def eq(got, want, msg):
@@ -82,6 +88,108 @@ def test_missing_password_raises():
     except ValueError:
         return
     raise AssertionError("expected ValueError for missing password")
+
+
+def test_vmess_ws_tls():
+    link = _vmess(
+        ps="Tokyo",
+        add="cdn.example.com",
+        port="443",
+        id="b831381d-6324-4d53-ad4f-8cda48b30811",
+        aid="0",
+        scy="auto",
+        net="ws",
+        host="cdn.example.com",
+        path="/ray",
+        tls="tls",
+    )
+    o = vp.parse_vmess(link, "Tokyo")
+    eq(o["type"], "vmess", "type")
+    eq(o["server"], "cdn.example.com", "server")
+    eq(o["server_port"], 443, "port")
+    eq(o["uuid"], "b831381d-6324-4d53-ad4f-8cda48b30811", "uuid")
+    eq(o["security"], "auto", "security")
+    eq(o["alter_id"], 0, "alter_id")
+    eq(
+        o["transport"],
+        {"type": "ws", "path": "/ray", "headers": {"Host": "cdn.example.com"}},
+        "ws transport",
+    )
+    eq(o["tls"]["server_name"], "cdn.example.com", "tls sni")
+
+
+def test_vmess_tcp_plain():
+    o = vp.parse_vmess(
+        _vmess(ps="p", add="1.2.3.4", port="8080", id="u", net="tcp", tls=""), "t"
+    )
+    assert "transport" not in o, "tcp has no transport"
+    assert "tls" not in o, "no tls when tls empty"
+    eq(o["server_port"], 8080, "port")
+
+
+def test_vmess_tag_from_ps():
+    # In --multi the tag comes from the vmess `ps` field (not a #fragment).
+    out = vp.parse_many(
+        [_vmess(ps="My Node", add="h.example", port="443", id="u", net="tcp")]
+    )
+    eq(out[0]["tag"], "My-Node", "vmess tag from ps")
+
+
+def test_vmess_kcp_rejected():
+    try:
+        vp.parse_vmess(_vmess(ps="p", add="h", port="443", id="u", net="kcp"), "t")
+    except ValueError:
+        return
+    raise AssertionError("expected ValueError for kcp transport")
+
+
+def test_vmess_dispatch():
+    link = _vmess(ps="d", add="h.example", port="443", id="u", net="tcp")
+    eq(vp.parse_link(link, "d"), vp.parse_vmess(link, "d"), "parse_link routes vmess")
+
+
+def test_key_of_ignores_name():
+    a = {"type": "vless", "tag": "Elm", "server": "h", "server_port": 443, "uuid": "u"}
+    b = {
+        "type": "vless",
+        "tag": "Hong-Server",
+        "server": "h",
+        "server_port": 443,
+        "uuid": "u",
+    }
+    eq(vp.key_of(a), vp.key_of(b), "same endpoint, different name → same key")
+
+
+def test_combine_dedups_by_identity():
+    outs = [
+        {
+            "type": "vless",
+            "tag": "Ds415",
+            "server": "h",
+            "server_port": 443,
+            "uuid": "u",
+        },
+        {
+            "type": "vless",
+            "tag": "Xuhui",
+            "server": "h",
+            "server_port": 443,
+            "uuid": "u",
+        },
+        {
+            "type": "vless",
+            "tag": "Other",
+            "server": "h2",
+            "server_port": 443,
+            "uuid": "u",
+        },
+    ]
+    res = vp.combine(outs)
+    eq(
+        [o["tag"] for o in res],
+        ["Ds415", "Other"],
+        "keeps first of a dup pair, drops the alias",
+    )
 
 
 def main() -> int:

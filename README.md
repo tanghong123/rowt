@@ -1,6 +1,6 @@
 # rowt — personal VLESS/AnyTLS VPN alongside a corporate VPN
 
-Run a personal **VLESS / AnyTLS / hysteria2** VPN for selected sites **while the corporate
+Run a personal **VLESS / VMess / AnyTLS / hysteria2** VPN for selected sites **while the corporate
 VPN keeps the default route**, without the two clients fighting over the tunnel.
 
 ## TL;DR — the common path
@@ -15,9 +15,10 @@ the corp VPN once it's up and working.
 # 1. install
 brew install tanghong123/tap/rowt          # or: ./install.sh
 
-# 2. bring your servers in — easiest is straight from Shadowrocket:
-rowt server import            # writes an editable review file, prints a summary
-$EDITOR ~/.config/rowt/sr-review.json   # delete stale servers/subs
+# 2. bring your servers in — import from another client you already use:
+rowt server import                        # from Shadowrocket (default)
+#   or: rowt server import --from clash-verge | v2box | flclash
+$EDITOR ~/.config/rowt/import-review.json  # delete stale servers/subs
 rowt server import --apply    # (or: rowt server add '<vless://…>' / rowt sub add '<url>')
 
 # 3. set up & start (auto-fetches sing-box if missing, then renders/starts/proxies)
@@ -241,17 +242,28 @@ just run it in place from the repo as `./bin/rowt` without installing.
 ./bin/rowt up
 ```
 
-### Import from Shadowrocket
+### Import from another client (Shadowrocket / Clash Verge / V2Box / FlClash)
 
-`server import` reads your Shadowrocket install (servers, subscriptions, and `PROXY`
-rules) and writes an **editable review file** to `~/.config/rowt/`. Delete
-the entries you don't want (stale servers/subs), then apply:
+`server import` reads a proxy client you already use and writes a **source-independent,
+editable review file** (`~/.config/rowt/import-review.json`). Delete the entries you
+don't want (stale servers/subs), then apply — `--apply` doesn't care which source it
+came from:
 
 ```sh
-./bin/rowt server import            # dump review file + print a summary
-$EDITOR ~/.config/rowt/sr-review.json
+./bin/rowt server import                        # from Shadowrocket (default)
+./bin/rowt server import --from clash-verge      # …or Clash Verge Rev
+./bin/rowt server import --from v2box            # …or V2Box
+./bin/rowt server import --from flclash          # …or FlClash
+$EDITOR ~/.config/rowt/import-review.json
 ./bin/rowt server import --apply    # import what remains; fetches the subs fresh
 ```
+
+Each source contributes its **servers** (only the protocols rowt speaks — VLESS /
+VMess / AnyTLS / hysteria2; others are counted as skipped) and, where it has them,
+its **subscription URLs** (added to `subs.txt` so they stay auto-updating — e.g. a
+Clash Verge *remote* profile). Clash sources need [`yq`](https://github.com/mikefarah/yq)
+(`brew install yq`); V2Box is read from its local database. The apps don't need to be
+running — rowt reads their on-disk config.
 
 VLESS and AnyTLS servers import; Shadowsocks/other protocols are reported as
 skipped. `PROXY`-rule domains are merged into your escape list.
@@ -437,9 +449,9 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 | command | what it does |
 | --- | --- |
 | `server list` | list servers (`*` = active). |
-| `server add '<vless://\|anytls://\|hysteria2://…>' [more…]` | add manual server(s) from link(s), deduped. |
+| `server add '<vless://\|vmess://\|anytls://\|hysteria2://…>' [more…]` | add manual server(s) from link(s), deduped. |
 | `server rm <tag>` / `server clear` | remove a manual server / clear all manual. |
-| `server import [--apply]` | import from Shadowrocket (servers **and** subs) via an editable review file. |
+| `server import [--from shadowrocket\|clash-verge\|v2box\|flclash] [--apply]` | import servers **and** subs from another client via an editable, source-independent review file. |
 | `server import <file.json>` | restore manual servers from a `server dump` (round-trips). |
 | `server dump [file]` | export the manual servers as JSON (backup; has secrets). Subscription servers come from their subs — use `sub dump`. |
 | `sub list\|add <url>\|rm <n>\|update\|clear` | manage subscriptions. |

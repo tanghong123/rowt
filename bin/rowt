@@ -27,7 +27,7 @@
 # ROWT_AUTO_INTERVAL (default 20m). The selector lives wherever the tunnel runs
 # (host in mode host, the VM in mode vm).
 #
-# Servers are VLESS or AnyTLS, from manual links and/or subscriptions. Commands
+# Servers are VLESS / VMess / AnyTLS / hysteria2, from manual links and/or subscriptions. Commands
 # are grouped by noun (run 'rowt help' for the full list):
 #
 #   lifecycle : up [host|vm] · down · restart · reload · status · route <dest> · report
@@ -50,7 +50,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="2.5.12"
+ROWT_VERSION="2.5.13"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -100,7 +100,9 @@ ADS_SRS="$CACHE/geosite-category-ads-all.srs"
 ADS_SRS_URL="${ROWT_ADS_SRS_URL:-https://github.com/SagerNet/sing-geosite/raw/rule-set/geosite-category-ads-all.srs}"
 PARSER="$HERE/config/vless-parse.py"
 SR_IMPORT="$HERE/config/sr-import.py"            # Shadowrocket importer
-SR_REVIEW="$CFG/sr-review.json"                  # editable Shadowrocket import (secret)
+FOREIGN_IMPORT="$HERE/config/foreign-import.py"  # Clash Verge / V2Box / FlClash importer
+IMPORT_REVIEW="$CFG/import-review.json"           # editable, source-independent import (secret)
+SR_REVIEW="$IMPORT_REVIEW"                        # back-compat alias (was sr-review.json)
 MANUAL="$CFG/manual.json"                        # manually-imported servers (secret)
 SUBS_FILE="$CFG/subs.txt"                        # subscription URLs, one per line
 FINAL_ROUTE="${ROWT_FINAL:-direct}"            # bucket for unlisted traffic
@@ -978,7 +980,7 @@ after_import() {
 }
 
 cmd_import() {
-  [ "$#" -ge 1 ] || die "usage: $PROG server add '<vless://|anytls://...>' [more...]"
+  [ "$#" -ge 1 ] || die "usage: $PROG server add '<vless://|vmess://|anytls://|hysteria2://...>' [more...]"
   have python3 || die "python3 not found"
   local new; new="$(printf '%s\n' "$@" | python3 "$PARSER" --multi)" || exit 1
   # append to the manual set and dedupe it in place (so re-importing the same
@@ -1061,38 +1063,66 @@ subs_remove() {
   rebuild_servers; after_import
 }
 
-# Import from Shadowrocket in two steps: dump an editable review file, let the
-# user prune stale entries, then --apply what remains.
+# Import servers from another client in two steps: dump an editable, source-
+# independent review file, let the user prune stale entries, then --apply what
+# remains. Sources: shadowrocket (default), clash-verge, v2box, flclash.
 cmd_from_shadowrocket() {
   have python3 || die "python3 not found"
+  # --apply is source-agnostic: it just applies whatever is in the review file.
   if [ "${1:-}" = "--apply" ]; then
     shift
-    local src="${1:-$SR_REVIEW}"
-    [ -s "$src" ] || die "no review file — run '$PROG server import' first (without --apply)"
+    local src="${1:-$IMPORT_REVIEW}"
+    [ -s "$src" ] || die "no review file — run '$PROG server import [--from <source>]' first (without --apply)"
     jq -e . "$src" >/dev/null 2>&1 || die "review file is not valid JSON: $src"
-    apply_sr "$src"
+    apply_import "$src"
     return 0
   fi
-  # dump/review step
-  python3 "$SR_IMPORT" > "$SR_REVIEW.tmp" 2>"$SR_REVIEW.err" \
-    || { cat "$SR_REVIEW.err" >&2; rm -f "$SR_REVIEW.tmp" "$SR_REVIEW.err"; die "could not read Shadowrocket data"; }
-  cat "$SR_REVIEW.err" >&2 2>/dev/null; rm -f "$SR_REVIEW.err"
-  mv "$SR_REVIEW.tmp" "$SR_REVIEW"; chmod 600 "$SR_REVIEW"
-  echo "Extracted from Shadowrocket:"
-  jq -r '.servers[] | "\(.tag)\t\(.type)\t\(.server):\(.server_port)"' "$SR_REVIEW" \
+  # dump/review step — pick the source dumper.
+  local source="shadowrocket" path="" label
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --from) shift; source="${1:?--from needs a source}" ;;
+      --from=*) source="${1#--from=}" ;;
+      --path) shift; path="${1:?--path needs a value}" ;;
+      --path=*) path="${1#--path=}" ;;
+      *) die "unknown option: $1  (use '--from <source>' or '--apply')" ;;
+    esac
+    shift
+  done
+  local dumper foreign=0
+  case "$source" in
+    shadowrocket|sr) dumper=(python3 "$SR_IMPORT"); label="Shadowrocket" ;;
+    clash-verge|clashverge|verge) dumper=(python3 "$FOREIGN_IMPORT" --from clash-verge); label="Clash Verge"; foreign=1 ;;
+    v2box) dumper=(python3 "$FOREIGN_IMPORT" --from v2box); label="V2Box"; foreign=1 ;;
+    flclash) dumper=(python3 "$FOREIGN_IMPORT" --from flclash); label="FlClash"; foreign=1 ;;
+    *) die "unknown source: $source  (want: shadowrocket | clash-verge | v2box | flclash)" ;;
+  esac
+  [ -n "$path" ] && dumper+=(--path "$path")
+  # Let the foreign importer skip servers already in the pool (by identity, even
+  # if the name differs), so the review only lists genuinely new servers.
+  if [ "$foreign" = 1 ]; then
+    [ -s "$SERVERS" ] && dumper+=(--existing "$SERVERS")
+    [ -s "$MANUAL" ] && dumper+=(--existing "$MANUAL")
+  fi
+  "${dumper[@]}" > "$IMPORT_REVIEW.tmp" 2>"$IMPORT_REVIEW.err" \
+    || { cat "$IMPORT_REVIEW.err" >&2; rm -f "$IMPORT_REVIEW.tmp" "$IMPORT_REVIEW.err"; die "could not read $label data"; }
+  cat "$IMPORT_REVIEW.err" >&2 2>/dev/null; rm -f "$IMPORT_REVIEW.err"
+  mv "$IMPORT_REVIEW.tmp" "$IMPORT_REVIEW"; chmod 600 "$IMPORT_REVIEW"
+  echo "Extracted from $label:"
+  jq -r '.servers[] | "\(.tag)\t\(.type)\t\(.server):\(.server_port)"' "$IMPORT_REVIEW" \
     | while IFS=$'\t' read -r a t b; do printf '  %-20s %-7s %s\n' "$a" "$t" "$b"; done | head -40
-  echo "  ($(jq '.servers|length' "$SR_REVIEW") servers, $(jq '.subscriptions|length' "$SR_REVIEW") subscriptions, $(jq '.proxy_domains|length' "$SR_REVIEW") proxy-domains)"
-  jq -r '.skipped | to_entries[] | "  skipped \(.value) \(.key) server(s) — unsupported by escape"' "$SR_REVIEW"
+  echo "  ($(jq '.servers|length' "$IMPORT_REVIEW") servers, $(jq '.subscriptions|length' "$IMPORT_REVIEW") subscriptions, $(jq '.proxy_domains|length' "$IMPORT_REVIEW") proxy-domains)"
+  jq -r '.skipped | to_entries[] | if .key=="duplicate" then "  skipped \(.value) server(s) already in your pool (same endpoint, different name)" else "  skipped \(.value) \(.key) server(s) — unsupported by escape" end' "$IMPORT_REVIEW"
   echo
   echo "Review file written to:"
-  echo "  $SR_REVIEW"
+  echo "  $IMPORT_REVIEW"
   echo "Edit it — delete unwanted entries from \"servers\" / \"subscriptions\""
   echo "(tip: keep your own nodes under \"servers\", delete ones that come from a"
   echo " subscription since those are fetched fresh) — then import what remains:"
   echo "  $PROG server import --apply"
 }
 
-apply_sr() {
+apply_import() {
   local j="$1"
   [ -s "$MANUAL" ] || echo '[]' > "$MANUAL"
   jq -s '.[0] + (.[1].servers // [])' "$MANUAL" "$j" > "$MANUAL.n" && mv "$MANUAL.n" "$MANUAL"
@@ -1101,7 +1131,7 @@ apply_sr() {
   sort -u "$SUBS_FILE" -o "$SUBS_FILE"
   # merge PROXY domains into escape-domains.txt (dedupe non-comment lines)
   local merged; merged="$(mktemp)"
-  { cat "$DOMAINS"; echo "# --- imported from Shadowrocket ---"; jq -r '.proxy_domains[]? // empty' "$j"; } > "$merged"
+  { cat "$DOMAINS"; echo "# --- imported ---"; jq -r '.proxy_domains[]? // empty' "$j"; } > "$merged"
   awk '!/^[[:space:]]*#/ && NF {if(seen[$0]++)next} {print}' "$merged" > "$DOMAINS"
   rm -f "$merged"
   info "importing… rebuilding server set (this fetches the subscriptions)"
@@ -1114,12 +1144,13 @@ cmd_server() {
   local action="${1:-list}"; [ "$#" -gt 0 ] && shift || true
   case "$action" in
     list)      servers_list ;;
-    add)       cmd_import "$@" ;;               # parse vless:// / anytls:// link(s)
+    add)       cmd_import "$@" ;;               # parse vless:// / vmess:// / anytls:// / hysteria2:// link(s)
     rm|remove) servers_remove "$@" ;;
     clear)     echo '[]' > "$MANUAL"; chmod 600 "$MANUAL"; info "manual servers cleared"; rebuild_servers; after_import ;;
-    import)    # a JSON file (not --apply) restores a `server dump`; else Shadowrocket
-      if [ -n "${1:-}" ] && [ "$1" != "--apply" ] && [ -f "$1" ]; then server_load_dump "$1"
-      else cmd_from_shadowrocket "$@"; fi ;;    # from Shadowrocket (servers + subs)
+    import)    # a JSON file (not --apply/--from) restores a `server dump`; else
+               # import from another client: --from shadowrocket|clash-verge|v2box|flclash
+      if [ -n "${1:-}" ] && [ "$1" != "--apply" ] && [ "$1" != "--from" ] && [ -f "$1" ]; then server_load_dump "$1"
+      else cmd_from_shadowrocket "$@"; fi ;;
     dump)      # export the manual servers (JSON) for backup; subs -> 'sub dump'
       local out; out="$([ -s "$MANUAL" ] && jq . "$MANUAL" 2>/dev/null || echo '[]')"
       if [ -n "${1:-}" ]; then printf '%s\n' "$out" > "$1"; chmod 600 "$1"; echo "  dumped manual servers -> $1 (contains secrets, chmod 600)" >&2
@@ -2864,11 +2895,14 @@ EOF
 $PROG server <subcommand> — manage the server pool.
 
   list                 list servers; * marks the live one            [default]
-  add '<link>' [more]  add manual server(s) from vless:// / anytls:// links
+  add '<link>' [more]  add manual server(s) from vless:// / vmess:// / anytls:// / hysteria2:// links
   rm <tag> [more]      remove a manual server (for a subscription node, remove the sub)
   clear                remove all manual servers
-  import [--apply]     import from Shadowrocket (servers + subs): run once to dump
-                       an editable review file, prune it, then re-run with --apply
+  import [--from SRC]  import servers + subs from another client. SRC is one of
+                       shadowrocket (default) | clash-verge | v2box | flclash.
+                       Runs in two steps: dump an editable review file, prune it,
+                       then re-run 'server import --apply' (source-independent).
+  import --apply       apply the pruned review file
   import <file.json>   restore manual servers from a 'server dump' (round-trip)
   dump [file]          export the manual servers as JSON (backup; has secrets).
                        Subscription servers come from their subs — see 'sub dump'.

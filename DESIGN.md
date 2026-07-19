@@ -178,11 +178,13 @@ touching the host's corp setup.
 Shadowrocket uses the Surge-style config format. The pieces map like this:
 
 Use `rowt server import` to do this automatically (it decodes Shadowrocket's
-server store + rules into an editable review file). The mapping:
+server store + rules into an editable review file). The same command imports from
+other clients too — `rowt server import --from clash-verge|v2box|flclash` — all
+writing the same source-independent review file, then `--apply`. The mapping:
 
 | Shadowrocket | rowt |
 |--------------|------------|
-| `[Proxy]` entries / subscription URLs | servers — `rowt server add` / `subscribe` / `from-sr` (VLESS + AnyTLS; SS etc. skipped) |
+| `[Proxy]` entries / subscription URLs | servers — `rowt server add` / `subscribe` / `import` (VLESS / VMess / AnyTLS / hysteria2; SS/trojan etc. skipped) |
 | `[Rule] …,PROXY` | `escape-domains.txt` (→ escape) |
 | `[Rule] …,DIRECT` for **intranet** domains | `corp-domains.txt` (→ corp) |
 | `[Rule] …,DIRECT` for **everything else** | nothing to do — escape's `final` is already `direct` |
