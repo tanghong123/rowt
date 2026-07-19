@@ -95,6 +95,7 @@ pub struct LiveSource {
     probe_tx: Option<Sender<()>>, // signal the prober to run now
     prev_router_up: bool,         // detect router down->up (reload / net switch)
     last_force: Option<Instant>,  // throttle self-heal re-probes
+    last_active_traffic: Option<Instant>, // last tick the escape lane moved bytes (health override)
 
     // System-proxy state ("on"/"other"/"off"), refreshed on a background thread
     // (networksetup is ~100ms; the poll runs on the input loop, so we must not
@@ -143,6 +144,7 @@ impl LiveSource {
             probe_tx: None,
             prev_router_up: true,
             last_force: None,
+            last_active_traffic: None,
             // Seed synchronously so the first frame is correct (no "off" flash).
             sysproxy: Arc::new(Mutex::new(read_system_proxy(proxy_port).to_string())),
             sysproxy_started: false,
@@ -691,7 +693,21 @@ impl Source for LiveSource {
         }
 
         let (transient, persistent, blocked, errors) = self.errors(window, lane);
-        let h = self.servers(&state, router_up);
+        let mut h = self.servers(&state, router_up);
+
+        // Ground truth beats the synthetic probe. The health dot goes ERROR when
+        // the active server's `generate_204` delay probe fails — but some servers
+        // can't reach gstatic yet proxy real sites fine, so a failed probe while
+        // the escape lane is actively moving bytes is a false alarm. Note when the
+        // escape lane has throughput and treat that as "live" for a short window
+        // (so a lull between requests doesn't flip the dot), then let it override a
+        // *failed* probe. Pending (None) and healthy (Some(true)) are left alone.
+        let escape_rate = lanes.iter().find(|l| l.lane == Lane::Escape).map(|l| l.up + l.down).unwrap_or(0.0);
+        if escape_rate > 0.0 {
+            self.last_active_traffic = Some(Instant::now());
+        }
+        let traffic_recent = self.last_active_traffic.is_some_and(|t| t.elapsed() < Duration::from_secs(20));
+        h.active_ok = health_with_traffic(h.active_ok, traffic_recent);
 
         // Self-heal a stale ERROR: after a network switch the active server's
         // last (pre-switch) probe can read failed for up to the 10-min cycle,
@@ -961,6 +977,19 @@ fn config_dir() -> PathBuf {
     }
 }
 
+/// Active-server health with real traffic as the tie-breaker: a *failed* probe
+/// (`Some(false)`) while the escape lane has recently moved bytes is a false alarm
+/// (some servers can't reach the probe URL yet proxy real sites fine), so it reads
+/// healthy. A healthy probe (`Some(true)`) or a pending one (`None`) is unchanged;
+/// a failed probe with no recent traffic stays failed (genuinely unreachable).
+fn health_with_traffic(active_ok: Option<bool>, traffic_recent: bool) -> Option<bool> {
+    if active_ok == Some(false) && traffic_recent {
+        Some(true)
+    } else {
+        active_ok
+    }
+}
+
 fn env_port(key: &str, default: u16) -> u16 {
     std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
@@ -1099,5 +1128,19 @@ mod tests {
         assert_eq!(fmt_uptime(3 * 3600 + 15 * 60), "3h 15m");
         assert_eq!(fmt_uptime(45 * 60), "45m");
         assert_eq!(fmt_uptime(2 * 86400 + 3 * 3600), "2d 3h");
+    }
+
+    #[test]
+    fn traffic_overrides_a_failed_probe() {
+        // The reported bug: probe fails but the escape lane is moving bytes → the
+        // header must read healthy, not ERROR.
+        assert_eq!(health_with_traffic(Some(false), true), Some(true));
+        // Failed probe with no traffic → genuinely unreachable, stays failed.
+        assert_eq!(health_with_traffic(Some(false), false), Some(false));
+        // A healthy or pending probe is never downgraded/altered by traffic.
+        assert_eq!(health_with_traffic(Some(true), false), Some(true));
+        assert_eq!(health_with_traffic(Some(true), true), Some(true));
+        assert_eq!(health_with_traffic(None, true), None);
+        assert_eq!(health_with_traffic(None, false), None);
     }
 }
