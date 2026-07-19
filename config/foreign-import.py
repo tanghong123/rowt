@@ -37,7 +37,7 @@ import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
-from urllib.parse import quote, urlencode
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 # Reuse the share-link parser (hyphenated filename → importlib).
 _HERE = Path(__file__).resolve().parent
@@ -261,11 +261,44 @@ def load_existing_keys(paths: list[str]) -> dict[str, str]:
     return known
 
 
+def norm_sub(url: str) -> str:
+    """Normalize a subscription URL for dup detection: drop a display-only `name`
+    query param (clients add it) and a trailing slash, lowercase scheme/host."""
+    try:
+        u = urlsplit(url.strip())
+    except Exception:  # noqa: BLE001
+        return url.strip()
+    q = [
+        (k, v)
+        for k, v in parse_qsl(u.query, keep_blank_values=True)
+        if k.lower() != "name"
+    ]
+    return urlunsplit(
+        (u.scheme.lower(), u.netloc.lower(), u.path.rstrip("/"), urlencode(q), "")
+    )
+
+
+def load_existing_subs(paths: list[str]) -> set[str]:
+    """Normalized set of subscription URLs already saved (one per line in subs.txt)."""
+    known: set[str] = set()
+    for p in paths:
+        try:
+            lines = Path(p).read_text().splitlines()
+        except Exception:  # noqa: BLE001
+            continue
+        for line in lines:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                known.add(norm_sub(line))
+    return known
+
+
 def build_review(
     links: list[str],
     subs: list[dict],
     skipped: Counter,
     existing: dict[str, str] | None = None,
+    existing_subs: set[str] | None = None,
 ) -> dict:
     parsed: list[dict] = []
     if links:
@@ -290,9 +323,24 @@ def build_review(
             continue
         seen_keys[k] = o.get("tag") or "?"
         servers.append(o)
-    # Dedupe subscriptions by URL, preserving order.
-    seen: set[str] = set()
-    uniq_subs = [s for s in subs if s["url"] not in seen and not seen.add(s["url"])]
+    # Subscriptions: drop ones already saved (matched by normalized URL, ignoring a
+    # display-only name= param) — warn, don't re-add — plus within-source dups.
+    existing_subs = existing_subs or set()
+    seen_subs: set[str] = set()
+    uniq_subs: list[dict] = []
+    for s in subs:
+        n = norm_sub(s["url"])
+        if n in existing_subs:
+            print(
+                f"note: subscription already saved — skipping {s['url']}",
+                file=sys.stderr,
+            )
+            skipped["duplicate-subscription"] += 1
+            continue
+        if n in seen_subs:
+            continue
+        seen_subs.add(n)
+        uniq_subs.append(s)
     return {
         "servers": servers,
         "subscriptions": uniq_subs,
@@ -316,6 +364,13 @@ def main() -> int:
         default=[],
         metavar="FILE",
         help="an existing pool (servers.json / manual.json); its servers are skipped as duplicates",
+    )
+    ap.add_argument(
+        "--existing-subs",
+        action="append",
+        default=[],
+        metavar="FILE",
+        help="an existing subs list (subs.txt); URLs already saved are skipped",
     )
     args = ap.parse_args()
 
@@ -353,10 +408,16 @@ def main() -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
 
-    review = build_review(links, subs, skipped, load_existing_keys(args.existing))
+    review = build_review(
+        links,
+        subs,
+        skipped,
+        load_existing_keys(args.existing),
+        load_existing_subs(args.existing_subs),
+    )
     if not review["servers"] and not review["subscriptions"]:
         print(
-            "note: nothing new to import (all servers already in your pool)",
+            "note: nothing new to import (already in your pool / subscriptions)",
             file=sys.stderr,
         )
     json.dump(review, sys.stdout, indent=2)

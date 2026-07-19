@@ -50,7 +50,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="2.5.14"
+ROWT_VERSION="2.5.15"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -1103,6 +1103,7 @@ cmd_from_shadowrocket() {
   if [ "$foreign" = 1 ]; then
     [ -s "$SERVERS" ] && dumper+=(--existing "$SERVERS")
     [ -s "$MANUAL" ] && dumper+=(--existing "$MANUAL")
+    [ -s "$SUBS_FILE" ] && dumper+=(--existing-subs "$SUBS_FILE")
   fi
   "${dumper[@]}" > "$IMPORT_REVIEW.tmp" 2>"$IMPORT_REVIEW.err" \
     || { cat "$IMPORT_REVIEW.err" >&2; rm -f "$IMPORT_REVIEW.tmp" "$IMPORT_REVIEW.err"; die "could not read $label data"; }
@@ -1112,7 +1113,7 @@ cmd_from_shadowrocket() {
   jq -r '.servers[] | "\(.tag)\t\(.type)\t\(.server):\(.server_port)"' "$IMPORT_REVIEW" \
     | while IFS=$'\t' read -r a t b; do printf '  %-20s %-7s %s\n' "$a" "$t" "$b"; done | head -40
   echo "  ($(jq '.servers|length' "$IMPORT_REVIEW") servers, $(jq '.subscriptions|length' "$IMPORT_REVIEW") subscriptions, $(jq '.proxy_domains|length' "$IMPORT_REVIEW") proxy-domains)"
-  jq -r '.skipped | to_entries[] | if .key=="duplicate" then "  skipped \(.value) server(s) already in your pool (same endpoint, different name)" else "  skipped \(.value) \(.key) server(s) — unsupported by escape" end' "$IMPORT_REVIEW"
+  jq -r '.skipped | to_entries[] | if .key=="duplicate" then "  skipped \(.value) server(s) already in your pool (same endpoint, different name)" elif .key=="duplicate-subscription" then "  skipped \(.value) subscription(s) already saved" else "  skipped \(.value) \(.key) server(s) — unsupported by escape" end' "$IMPORT_REVIEW"
   echo
   echo "Review file written to:"
   echo "  $IMPORT_REVIEW"

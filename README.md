@@ -265,11 +265,12 @@ Clash Verge *remote* profile). Clash sources need [`yq`](https://github.com/mike
 (`brew install yq`); V2Box is read from its local database. The apps don't need to be
 running — rowt reads their on-disk config.
 
-Servers you **already have are skipped**, matched by *identity* (address / port /
-credentials — **not** name), so importing the same node under a different name (say
-`Elm` when you already have `Hong-Server`) won't create a duplicate — it's reported
-and left out. `import --apply` is source-independent: it applies whatever's in the
-review file, regardless of which client it came from.
+Anything you **already have is skipped** and reported: servers are matched by
+*identity* (address / port / credentials — **not** name), so importing the same node
+under a different name (say `Elm` when you already have `Hong-Server`) won't create a
+duplicate; and a **subscription URL already in `subs.txt`** is skipped too (matched
+ignoring a display-only `name=` param). `import --apply` is source-independent: it
+applies whatever's in the review file, regardless of which client it came from.
 
 VLESS and AnyTLS servers import; Shadowsocks/other protocols are reported as
 skipped. `PROXY`-rule domains are merged into your escape list.

@@ -135,6 +135,38 @@ def test_build_review_keeps_new_server():
     eq([s["tag"] for s in review["servers"]], ["New"], "a genuinely new server is kept")
 
 
+def test_norm_sub_ignores_name_param_and_slash():
+    a = fi.norm_sub("https://Sub.Example.com/x/?name=ByWave&token=abc")
+    b = fi.norm_sub("https://sub.example.com/x?token=abc")
+    eq(a, b, "name= param and trailing slash ignored, host lowercased")
+
+
+def test_build_review_skips_existing_subscription():
+    from collections import Counter
+
+    subs = [
+        {"url": "https://sub.example.com/x?token=abc&name=ByWave", "name": "ByWave"}
+    ]
+    existing = {fi.norm_sub("https://sub.example.com/x?token=abc")}
+    review = fi.build_review([], subs, Counter(), {}, existing)
+    eq(review["subscriptions"], [], "already-saved subscription is skipped")
+    eq(review["skipped"].get("duplicate-subscription"), 1, "counted as a duplicate sub")
+
+
+def test_build_review_dedupes_subs_within_source():
+    from collections import Counter
+
+    subs = [
+        {"url": "https://s/x?name=A", "name": "A"},
+        {
+            "url": "https://s/x?name=B",
+            "name": "B",
+        },  # same endpoint, different display name
+    ]
+    review = fi.build_review([], subs, Counter(), {}, set())
+    eq(len(review["subscriptions"]), 1, "within-source duplicate subs collapsed")
+
+
 def main() -> int:
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
