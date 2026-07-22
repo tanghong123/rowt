@@ -5,6 +5,12 @@
 #
 # One domain suffix per line. A suffix matches the domain and all subdomains:
 #   google.com   matches  google.com, www.google.com, mail.google.com
+#   (but NOT google.com.hk / google.de — those are different suffixes)
+#
+# To grab a whole service across all its domains/ccTLDs, pull a maintained
+# sing-geosite category with a `geosite:` line (fetched + cached on `fetch`/`up`):
+#   geosite:google    all Google domains (search, gmail, youtube, gstatic, …)
+#   geosite:telegram
 #
 # Lines starting with # and blank lines are ignored. Edit and re-run:
 #   rowt reload

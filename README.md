@@ -197,6 +197,43 @@ Unlisted traffic defaults to **direct**; set `ROWT_FINAL=corp` to send the
 catch-all through the corp VPN instead. Edit a list then reload:
 `rowt reload`.
 
+### Whole services via geosite (`geosite:<name>`)
+
+A plain suffix like `google.com` matches `google.com` and `*.google.com` — but
+**not** `google.com.hk`, `google.de`, `google.co.jp`, and the ~200 other ccTLDs.
+Instead of enumerating them, add a **maintained [sing-geosite](https://github.com/SagerNet/sing-geosite)
+category** to any lane file with a `geosite:` line:
+
+```
+# config/escape-domains.txt
+geosite:google        # all Google domains (search, gmail, youtube, gstatic, …), all ccTLDs
+geosite:telegram
+api.anthropic.com     # normal suffixes still work alongside
+```
+
+It's fetched + cached (`rowt fetch host`, or automatically on the next `up`) and
+rendered as a sing-box `rule_set` for that lane — the same mechanism the block lane
+already uses for the ad/tracker set. It sits **after** your hand suffixes (an explicit
+entry still wins) and before the ad-block set. Supported in the **escape** and
+**block** lanes (block a whole service with `geosite:tiktok`); **not** corp, which
+routes internal domains/CIDRs. A category that isn't cached yet is skipped with a
+warning until you `rowt fetch host`.
+
+`geosite:` is always an **explicit, deliberate** choice — rowt never swaps a specific
+domain for a whole-service category behind your back. As a convenience, adding a
+plain domain *shows* (does not apply) any categories that also cover it, so you can
+opt in if you want:
+
+```
+$ rowt escape add cloudfront.net
+  added: cloudfront.net
+    cloudfront.net is also covered by these geosite categories — add a whole service if you want:
+        rowt escape add geosite:amazon
+```
+
+A specific domain always beats a `geosite:` rule (suffix rules are matched first),
+so keeping individual domains alongside a broad category is safe and deterministic.
+
 Fixing the tunnel-uplink problem (so escape traffic doesn't get swallowed by the
 corp tunnel) is done two ways, picked automatically by `probe`:
 

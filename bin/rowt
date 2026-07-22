@@ -50,7 +50,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="2.5.15"
+ROWT_VERSION="2.5.16"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -98,9 +98,13 @@ BLOCK_DOMAINS="$CFG/block-domains.txt"           # -> block (ad/telemetry sinkho
 # like the other artifacts so 'up' works offline; rendered in only when present.
 ADS_SRS="$CACHE/geosite-category-ads-all.srs"
 ADS_SRS_URL="${ROWT_ADS_SRS_URL:-https://github.com/SagerNet/sing-geosite/raw/rule-set/geosite-category-ads-all.srs}"
+# Base URL for `geosite:<name>` rule-sets a lane can pull (e.g. `geosite:google`
+# in escape-domains.txt). Cached as $CACHE/geosite-<name>.srs, same as the ad set.
+GEOSITE_BASE="${ROWT_GEOSITE_BASE:-https://github.com/SagerNet/sing-geosite/raw/rule-set}"
 PARSER="$HERE/config/vless-parse.py"
 SR_IMPORT="$HERE/config/sr-import.py"            # Shadowrocket importer
 FOREIGN_IMPORT="$HERE/config/foreign-import.py"  # Clash Verge / V2Box / FlClash importer
+GEOSITE_LOOKUP="$HERE/config/geosite-lookup.py"  # "this domain is also covered by geosite:…" hint
 IMPORT_REVIEW="$CFG/import-review.json"           # editable, source-independent import (secret)
 SR_REVIEW="$IMPORT_REVIEW"                        # back-compat alias (was sr-review.json)
 MANUAL="$CFG/manual.json"                        # manually-imported servers (secret)
@@ -362,13 +366,44 @@ fetch_ads_ruleset() {
   fi
 }
 
+# Pre-fetch a `geosite:<name>` rule-set (.srs) onto the HOST. Best-effort by
+# default (a typo'd/unknown category shouldn't halt the whole fetch); rendering
+# skips any category that isn't cached and warns.
+fetch_geosite() {
+  local name="$1"
+  local dst="$CACHE/geosite-$name.srs" url="$GEOSITE_BASE/geosite-$name.srs"
+  [ -f "$dst" ] && { info "geosite:$name already cached"; return 0; }
+  mkdir -p "$CACHE"
+  info "fetching geosite:$name rule-set"
+  info "  ↓ $url"
+  if curl -fL -# --connect-timeout 12 --retry 1 "$url" -o "$dst"; then
+    info "geosite:$name cached: $dst"
+  else
+    rm -f "$dst"
+    err "could not fetch geosite:$name — check the category name is a real sing-geosite tag, then '$PROG fetch host' when a VPN is on"
+    return 1
+  fi
+}
+
+# Fetch every geosite category referenced across the lane files.
+fetch_all_geosites() {
+  local name any=0
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    any=1; fetch_geosite "$name" || true
+  done <<EOF
+$(all_geosites)
+EOF
+  [ "$any" = 1 ] || return 0
+}
+
 # rowt fetch [host|vm|both] — pre-download while a working VPN is on, so 'up'
 # works after you switch to the corp VPN (Shadowrocket off).
 cmd_fetch() {
   case "${1:-both}" in
-    host)         ensure_singbox_host; fetch_ads_ruleset --required ;;
+    host)         ensure_singbox_host; fetch_ads_ruleset --required; fetch_all_geosites ;;
     vm)           fetch_vm_artifacts ;;
-    both|all|"")  ensure_singbox_host; fetch_ads_ruleset --required; fetch_vm_artifacts ;;
+    both|all|"")  ensure_singbox_host; fetch_ads_ruleset --required; fetch_all_geosites; fetch_vm_artifacts ;;
     *) die "usage: $PROG fetch [host|vm|both]" ;;
   esac
   info "done — you can now run '$PROG up' without internet to GitHub."
@@ -380,13 +415,26 @@ cmd_fetch() {
 list_json() {
   local f="$1" filt="${2:-}"
   [ -f "$f" ] || { echo '[]'; return 0; }
-  grep -vE '^[[:space:]]*(#|$)' "$f" | sed 's/[[:space:]]//g' \
+  # `geosite:<name>` lines are meta (they pull a rule-set) — never suffixes/CIDRs.
+  grep -vE '^[[:space:]]*(#|$)' "$f" | sed 's/[[:space:]]//g' | grep -vE '^geosite:' \
     | case "$filt" in
         cidr)   grep -E '/[0-9]+$' || true ;;
         domain) grep -vE '/[0-9]+$' || true ;;
         *)      cat ;;
       esac \
     | jq -R . | jq -s 'map(select(length>0))'
+}
+
+# The geosite categories a lane file references via `geosite:<name>` lines.
+geosites_of() {
+  [ -f "$1" ] || return 0
+  sed -nE 's/^[[:space:]]*geosite:[[:space:]]*([A-Za-z0-9._-]+).*/\1/p' "$1"
+}
+
+# Every geosite category referenced across the geosite-capable lanes (escape +
+# block; corp is domains/CIDRs only), deduped.
+all_geosites() {
+  { geosites_of "$DOMAINS"; geosites_of "$BLOCK_DOMAINS"; } | sort -u | grep -vE '^$' || true
 }
 
 domains_json()    { list_json "$DOMAINS"; }                 # escape suffixes
@@ -442,6 +490,27 @@ _list_add_file() { # $1=list-file $2=source-file $3=label
   echo "  $3 += $added new, $already already present (from $2)"
 }
 
+# After a plain-domain add on a geosite-capable lane (escape/block), SHOW — never
+# apply — the geosite categories that also cover it, as copy-paste commands. Pure
+# information: a specific domain always beats a geosite, and we never swap one for
+# the other. Best-effort + offline-safe (prints nothing if the lookup can't run).
+#   $1=lane-file  $2=label  $3=domain
+_geosite_hint() {
+  have python3 && [ -x "$SB" ] || return 0
+  local sug have_cats
+  have_cats="$(geosites_of "$1" | paste -sd, - 2>/dev/null)"
+  sug="$(ROWT_CACHE="$CACHE" ROWT_SB="$SB" ROWT_GEOSITE_BASE="$GEOSITE_BASE" \
+         python3 "$GEOSITE_LOOKUP" "$3" --have "$have_cats" 2>/dev/null)" || return 0
+  [ -n "$sug" ] || return 0
+  case "$sug" in
+    have:*) echo "    (already covered by geosite:${sug#have:} on this lane)" ;;
+    *)  echo "    $3 is also covered by these geosite categories — add a whole service if you want:"
+        printf '%s\n' "$sug" | while IFS= read -r c; do
+          [ -n "$c" ] && printf '        %s %s add geosite:%s\n' "$PROG" "$2" "$c"
+        done ;;
+  esac
+}
+
 # rowt escape / corp  [list | add <e>… | rm <e>… | import <file> | clear | dump [file]]
 edit_list() {
   local file="$1" label="$2" action="${3:-list}"; shift 3 2>/dev/null || true
@@ -472,9 +541,22 @@ edit_list() {
       touch "$file"; local e
       for e in "$@"; do
         e="$(printf '%s' "$e" | tr -d '[:space:]')"; [ -z "$e" ] && continue
+        # geosite: is escape/block only (corp routes internal domains/CIDRs).
+        case "$e" in
+          geosite:*) [ "$label" = corp ] && { echo "  skipped $e — geosite: is only for the escape and block lanes"; continue; } ;;
+        esac
         if grep -qxF "$e" "$file" 2>/dev/null; then echo "  already present: $e"
         else printf '%s\n' "$e" >> "$file"; echo "  added: $e"; fi
         _lane_dedupe "$file" "$e"  # single-lane invariant: pull it from the other lanes
+        case "$e" in
+          # An explicit `geosite:<name>` add fetches its rule-set so the next render
+          # has it (a deliberate whole-service choice — we never swap a suffix for one).
+          geosite:*) fetch_geosite "${e#geosite:}" || true ;;
+          # A plain-domain add on a geosite-capable lane shows (never applies) the
+          # geosite categories that also cover it. Skipped for the TUI's batched
+          # edits (--no-reload) so it never blocks on the network.
+          *) [ "$no_reload" -eq 0 ] && [ "$label" != corp ] && _geosite_hint "$file" "$label" "$e" ;;
+        esac
       done ;;
     import)   # batch-add one domain per line from a file
       [ -n "${1:-}" ] || die "usage: $PROG $label import <file>   (one domain per line)"
@@ -848,6 +930,42 @@ assemble_vm() {
 # DNS mirrors this: corp names resolve via the system resolver (corp DNS), the
 # rest via a China resolver over the physical NIC (no corp-DNS leak/poison).
 #   $1=escape-outbounds  $2=listen  $3=clash-listen
+# JSON array of a lane file's geosite categories that are CACHED (renderable).
+_lane_geo_json() {
+  local name json='[]'
+  while IFS= read -r name; do
+    [ -n "$name" ] && [ -f "$CACHE/geosite-$name.srs" ] \
+      && json="$(printf '%s' "$json" | jq --arg n "$name" '. + [$n]')"
+  done <<EOF
+$(geosites_of "$1")
+EOF
+  printf '%s' "$json"
+}
+
+# rule_set definitions for every cached geosite referenced by any lane (deduped).
+_geo_sets_json() {
+  local name json='[]'
+  while IFS= read -r name; do
+    [ -n "$name" ] && [ -f "$CACHE/geosite-$name.srs" ] \
+      && json="$(printf '%s' "$json" | jq --arg t "geosite-$name" --arg p "$CACHE/geosite-$name.srs" \
+                 '. + [{type:"local", tag:$t, format:"binary", path:$p}]')"
+  done <<EOF
+$(all_geosites)
+EOF
+  printf '%s' "$json"
+}
+
+# Warn about referenced-but-uncached geosite categories (they're skipped in render).
+_warn_uncached_geosites() {
+  local name
+  while IFS= read -r name; do
+    [ -n "$name" ] && [ ! -f "$CACHE/geosite-$name.srs" ] \
+      && err "geosite:$name not cached — run '$PROG fetch host' (skipping it in this render)"
+  done <<EOF
+$(all_geosites)
+EOF
+}
+
 assemble_host() {
   local escs="$1" listen="$2" clash="$3" ifc secret ads=""
   ifc="$(detect_iface)" || die "no physical interface found"
@@ -855,7 +973,18 @@ assemble_host() {
   # geosite ad/tracker rule-set: rendered in ONLY when the .srs is cached, so a
   # first render offline still works (the hand list keeps working regardless).
   [ -f "$ADS_SRS" ] && ads="$ADS_SRS"
+  # Per-lane `geosite:<name>` categories (escape + block only — same cache-or-skip
+  # discipline as ads). A geosite: line hand-added to corp is ignored + flagged.
+  _warn_uncached_geosites
+  [ -n "$(geosites_of "$CORP_DOMAINS")" ] && err "geosite: in corp-domains.txt is ignored — only the escape and block lanes support geosite:"
+  local esc_geo block_geo geo_sets
+  esc_geo="$(_lane_geo_json "$DOMAINS")"
+  block_geo="$(_lane_geo_json "$BLOCK_DOMAINS")"
+  geo_sets="$(_geo_sets_json)"
   jq -n \
+    --argjson esc_geo "$esc_geo" \
+    --argjson block_geo "$block_geo" \
+    --argjson geo_sets "$geo_sets" \
     --argjson escs "$escs" \
     --arg listen "$listen" \
     --argjson port "$PORT" \
@@ -885,12 +1014,18 @@ assemble_host() {
      | sort_by([(.s|split(".")|length), (.s|length)]) | reverse
      | map({domain_suffix:[.s], outbound:.o})) as $suffix_rules
     |
+    # Per-lane `geosite:<name>` rule-sets (e.g. `geosite:google` in escape) sit after
+    # the hand suffixes (an explicit entry still wins) and before the broad ad set.
+    ( ($esc_geo   | map({rule_set:["geosite-"+.], outbound:"escape"}))
+    + ($block_geo | map({rule_set:["geosite-"+.], outbound:"block"})) ) as $geo_rules
+    |
     # The geosite ad set is opaque (thousands of suffixes we cannot interleave), so
     # it sits AFTER the hand lists — an explicit escape/corp entry overrides the
     # broad blocklist — but still before the default, so ad/tracker domains are
     # still sunk to `block` with no dial (the direct-lane retry-storm CPU fix).
     ([ {action:"sniff"} ]
      + $suffix_rules
+     + $geo_rules
      + [ if ($corp_cidr|length) > 0 then {ip_cidr:$corp_cidr, outbound:"corp"} else empty end,
          if $ads != ""              then {rule_set:["geosite-ads"], outbound:"block"} else empty end ]) as $rules
     |
@@ -917,7 +1052,8 @@ assemble_host() {
       # and halves load on the single direct DNS socket.
       route:(({rules:$rules, final:$final, auto_detect_interface:false,
                default_domain_resolver:{server:"dns-direct", strategy:"prefer_ipv4"}})
-             + (if $ads != "" then {rule_set:[{type:"local", tag:"geosite-ads", format:"binary", path:$ads}]} else {} end))
+             + (($geo_sets + (if $ads != "" then [{type:"local", tag:"geosite-ads", format:"binary", path:$ads}] else [] end)) as $allsets
+                | if ($allsets|length) > 0 then {rule_set:$allsets} else {} end))
     }
     + (if $clash=="" then {}
        else {experimental:{clash_api:{external_controller:$clash, secret:$secret}}} end)'
@@ -1947,6 +2083,7 @@ cmd_setup() {
   # best-effort: grab the ad-block rule-set while we (probably) have a VPN up.
   # Non-fatal — the block hand-list works without it; 'fetch host' retries later.
   [ -f "$ADS_SRS" ] || fetch_ads_ruleset || true
+  fetch_all_geosites || true   # pull any referenced geosite:<name> not yet cached
   case "$forced" in
     host) sset mode host; info "mode forced to 'host' (skipping probe)" ;;
     vm)   info "mode: vm (skipping probe) — bringing up the VM first"
@@ -2105,7 +2242,13 @@ cmd_explain() {
   esac
   printf '%s%s  ->  %s   (%s)\n' "$dest" "${ip:+ ($ip)}" "$(printf '%s' "$lane" | tr 'a-z' 'A-Z')" "$desc"
   echo "  matched: $why"
-  [ -f "$ADS_SRS" ] && [ "$lane" != block ] && echo "  note:    the geosite ad rule-set may still block this (not shown — binary set)"
+  # Opaque binary rule-sets (the ad-block set, and any `geosite:<name>` a lane
+  # pulls) can't be inspected here, so they may route/block this beyond what the
+  # hand lists show.
+  if [ "$lane" != block ] && { [ -f "$ADS_SRS" ] || [ -n "$(all_geosites)" ]; }; then
+    local gs; gs="$(all_geosites | paste -sd, - 2>/dev/null)"
+    echo "  note:    a geosite rule-set may still match this (not shown — binary set)${gs:+: geosite:$gs}$([ -f "$ADS_SRS" ] && echo ' + ad-block')"
+  fi
   if [ "$lane" = block ]; then echo "  live:    (skipped — blocked by design)"
   elif host_running; then
     # NOTE: do NOT pass --noproxy '*' here — it overrides -x and makes curl go
@@ -2126,7 +2269,7 @@ cmd_status() {
   echo "router:       $(host_running && echo "running (pid $(cat "$(host_pidfile)"))" || echo stopped) on 127.0.0.1:$PORT"
   local svc; svc="$(active_service 2>/dev/null || true)"
   [ -n "$svc" ] && printf 'system proxy: %s (%s)\n' "$(networksetup -getsecurewebproxy "$svc" 2>/dev/null | awk '/Enabled/{print $2}' | head -1)" "$svc"
-  echo "buckets:      escape=$(domains_json | jq length) corp=$(( $(corp_domains_json | jq length) + $(corp_cidrs_json | jq length) )) block=$(block_domains_json | jq length)$([ -f "$ADS_SRS" ] && echo '+geosite') final=$FINAL_ROUTE"
+  echo "buckets:      escape=$(domains_json | jq length) corp=$(( $(corp_domains_json | jq length) + $(corp_cidrs_json | jq length) )) block=$(block_domains_json | jq length)$([ -f "$ADS_SRS" ] && echo '+ads')$(g="$(all_geosites | paste -sd, - 2>/dev/null)"; [ -n "$g" ] && echo " +geosite:$g") final=$FINAL_ROUTE"
   if [ -x "$SB" ] && [ -f "$HOST_CFG" ]; then
     "$SB" check -c "$HOST_CFG" >/dev/null 2>&1 && echo "config:       host.json OK" || echo "config:       host.json INVALID (run '$PROG render')"
   fi
@@ -2550,7 +2693,7 @@ diag_body() {
   else _d "  (none)"; fi
   _d "  subscriptions: $(sub_count)"
   [ -s "$SUBS_FILE" ] && sed -E 's#(https?://.{10}).*#  \1…(masked)#' "$SUBS_FILE" | grep -vE '^\s*#' || true
-  _d "  buckets: escape=$(domains_json | jq length) corp=$(( $(corp_domains_json | jq length) + $(corp_cidrs_json | jq length) )) block=$(block_domains_json | jq length)$([ -f "$ADS_SRS" ] && echo ' +geosite-ads')"
+  _d "  buckets: escape=$(domains_json | jq length) corp=$(( $(corp_domains_json | jq length) + $(corp_cidrs_json | jq length) )) block=$(block_domains_json | jq length)$([ -f "$ADS_SRS" ] && echo ' +geosite-ads')$(g="$(all_geosites | paste -sd, - 2>/dev/null)"; [ -n "$g" ] && echo " +geosite:$g")"
   _d ""
   _d "----- generated configs -----"
   if [ -x "$SB" ]; then
