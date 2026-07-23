@@ -50,7 +50,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="2.5.18"
+ROWT_VERSION="2.5.19"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -3032,6 +3032,58 @@ PLIST
   esac
 }
 
+# Remove rowt's shell integration (both forms) from the user's rc files: the
+# pasted `# >>> rowt shell integration >>>`…`<<<` block, and/or a bare line that
+# evals `rowt shell-init`.
+_strip_shell_init() {
+  local rc tmp changed=0
+  for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" "$HOME/.zprofile"; do
+    [ -f "$rc" ] || continue
+    grep -qE 'rowt shell integration|rowt shell-init' "$rc" 2>/dev/null || continue
+    tmp="$(mktemp)"
+    awk '
+      /# >>> rowt shell integration >>>/ { skip=1 }
+      skip==1 { if (/# <<< rowt shell integration <<</) skip=0; next }
+      /rowt shell-init/ { next }
+      { print }
+    ' "$rc" > "$tmp" && mv "$tmp" "$rc" && { info "stripped shell integration from $rc"; changed=1; }
+  done
+  [ "$changed" = 0 ] && info "no shell integration found in rc files"
+  return 0
+}
+
+# rowt uninstall [--purge] — reverse everything setup did, for a clean re-onboard.
+# Stops the router, turns the system proxy off, removes the watcher (LaunchAgent +
+# sudoers), and strips shell integration. --purge also deletes ~/.config/rowt.
+# The binary itself is removed separately (a tool can't cleanly remove its own PATH
+# entry) — we print the exact command.
+cmd_uninstall() {
+  local purge=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --purge) purge=1 ;;
+      -h|--help) echo "usage: $PROG uninstall [--purge]   (--purge also removes $CFG)"; return 0 ;;
+      *) die "usage: $PROG uninstall [--purge]" ;;
+    esac; shift
+  done
+  info "uninstalling rowt — reversing setup…"
+  cmd_revert >/dev/null 2>&1 || true          # down: proxy off + stop sing-box + vm down
+  cmd_proxy off >/dev/null 2>&1 || true        # belt-and-suspenders on the active service
+  cmd_watch uninstall || true                  # LaunchAgent + /etc/sudoers.d/rowt (asks admin)
+  _strip_shell_init
+  if [ "$purge" = 1 ]; then
+    rm -rf "$CFG" && info "removed all config/state ($CFG)"
+  else
+    info "kept config/state at $CFG  (re-run with --purge to remove servers/subs/lanes/state)"
+  fi
+  [ -f /private/etc/sudoers.d/lima ] && info "VM sudoers still at /private/etc/sudoers.d/lima — 'sudo rm -f' it if you used VM mode"
+  echo
+  info "done. To remove the rowt binary itself:"
+  echo "    brew uninstall rowt          # if installed via Homebrew"
+  echo "    # or, if installed from the repo:  <repo>/install.sh --uninstall"
+  return 0
+}
+
 cmd_revert() {
   # Mark intent DOWN first so the watchdog treats this as deliberate and won't
   # try to resurrect the tunnel we are about to tear down.
@@ -3162,6 +3214,7 @@ cat <<'REG'
 c@lifecycle@onboard@guided getting-started checklist (what to run next)
 c@lifecycle@up [host|vm] [--force]@set up & start (no arg = auto-detect the mode)
 c@lifecycle@down@tear down: proxy off + stop sing-box + vm down
+o@lifecycle@uninstall [--purge]@reverse setup for a clean re-onboard (--purge wipes config)
 o@lifecycle@restart@bounce the tunnel in place (no re-render / proxy change)
 c@lifecycle@reload@re-apply after a network switch (re-render + restart + proxy)
 o@lifecycle@watch <install|uninstall|status>@auto-reload on net change; clears a stale proxy at login
@@ -3258,6 +3311,16 @@ $PROG down — tear everything down.
 
 Turns the macOS system proxy off, kills the sing-box router (including strays),
 and stops the VM. Use to fully stop rowt, or if sing-box is stuck/high-CPU.
+EOF
+;;
+    uninstall) cat <<EOF
+$PROG uninstall [--purge] — reverse setup for a clean slate (repeatable re-onboard).
+
+Runs 'down' (proxy off + stop router), removes the watcher LaunchAgent and its
+/etc/sudoers.d/rowt entry, and strips the shell integration from your rc files.
+By default it KEEPS ~/.config/rowt (servers/subs/lane rules/state); add --purge to
+delete that too. The binary is removed separately — it prints the 'brew uninstall
+rowt' command to finish. (The corp-route daemon, if any, is separate.)
 EOF
 ;;
     run) cat <<EOF
@@ -3838,6 +3901,7 @@ run_command() {
     onboard)    cmd_onboard "$@" ;;
     up)         cmd_setup "$@" ;;          # up [host|vm]
     down)       cmd_revert "$@" ;;
+    uninstall)  cmd_uninstall "$@" ;;
     restart)    cmd_restart "$@" ;;
     reload)     cmd_reload "$@" ;;
     watch)      cmd_watch "$@" ;;
