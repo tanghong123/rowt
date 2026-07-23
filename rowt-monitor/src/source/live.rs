@@ -911,10 +911,14 @@ fn read_system_proxy(port: u16) -> &'static str {
     }
 }
 
-/// The network-service name (e.g. "Wi-Fi") carrying the default route, matching
-/// rowt's `active_service`. Honours ROWT_IFACE like rowt's `detect_iface`.
+/// The network-service name (e.g. "Wi-Fi") carrying rowt's system proxy, matching
+/// rowt's `active_service`. Honours ROWT_IFACE, else falls back to the physical
+/// NIC exactly like rowt's `detect_iface` — NOT the default-route interface,
+/// which is a `utunN` when a full-tunnel VPN is up (rowt's core case). A utun has
+/// no Hardware Port block here, so mapping it would return None and read the
+/// proxy as "off" although rowt set it on the physical service.
 fn active_service() -> Option<String> {
-    let iface = std::env::var("ROWT_IFACE").ok().or_else(default_route_iface)?;
+    let iface = std::env::var("ROWT_IFACE").ok().or_else(physical_iface)?;
     let out = std::process::Command::new("networksetup").arg("-listnetworkserviceorder").output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     // Blocks look like: "(Hardware Port: Wi-Fi, Device: en0)".
@@ -928,6 +932,47 @@ fn active_service() -> Option<String> {
         }
     }
     None
+}
+
+/// The physical (non-tunnel) interface — an `enX` with an IPv4 and a router —
+/// mirroring rowt's `detect_iface` exactly. This is the service rowt applies the
+/// system proxy to, so the monitor must read the same one.
+///
+/// Prefer the physical NIC carrying the default route (the primary service apps'
+/// system-proxy queries resolve to); fall back to the first qualifying `enX`
+/// when a VPN owns the default route via a `utun`.
+fn physical_iface() -> Option<String> {
+    if let Some(def) = default_route_iface() {
+        if def.starts_with("en") && iface_up(&def) {
+            return Some(def);
+        }
+    }
+    let out = std::process::Command::new("networksetup").arg("-listallhardwareports").output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let Some(dev) = line.trim().strip_prefix("Device: ") else { continue };
+        let dev = dev.trim();
+        if dev.starts_with("en") && iface_up(dev) {
+            return Some(dev.to_string());
+        }
+    }
+    None
+}
+
+/// An `enX` with both an IPv4 address and a router (real connectivity), matching
+/// rowt's `_iface_up`.
+fn iface_up(dev: &str) -> bool {
+    let has_ip = std::process::Command::new("ipconfig")
+        .args(["getifaddr", dev])
+        .output()
+        .map(|o| o.status.success() && !o.stdout.trim_ascii().is_empty())
+        .unwrap_or(false);
+    let has_router = std::process::Command::new("ipconfig")
+        .args(["getoption", dev, "router"])
+        .output()
+        .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+        .unwrap_or(false);
+    has_ip && has_router
 }
 
 /// Interface carrying the default route (`route -n get default`).
