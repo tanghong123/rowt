@@ -34,11 +34,21 @@ Repo `tanghong123/rowt`; tap **`~/personal/homebrew-tap`** (`Formula/rowt.rb`), 
 1. Clean tree at the intended `ROWT_VERSION` (confirm `grep ROWT_VERSION= bin/rowt`).
 2. `git tag -a vX.Y.Z -m "…"` && `git push origin vX.Y.Z`.
 3. `gh release create vX.Y.Z --title "rowt X.Y.Z" --notes "…"`.
-4. `sha256`: `curl -sL https://github.com/tanghong123/rowt/archive/refs/tags/vX.Y.Z.tar.gz | shasum -a 256` (or download then shasum).
-5. Update `Formula/rowt.rb`: the `url` (`…/refs/tags/vX.Y.Z.tar.gz`), the `sha256`, and the `assert_match "rowt X.Y.Z"` test. `git pull --rebase` the tap first (it may have other commits), commit `rowt X.Y.Z`, push.
-6. Validate: `brew update && brew fetch tanghong123/tap/rowt` (errors on sha mismatch) and `brew info tanghong123/tap/rowt` (shows `stable X.Y.Z`).
+4. **Prebuilt monitor asset (Apple Silicon pours it — the formula's `resource "rowt-monitor"`).** Release-build both bins and tar them **at the archive root** (the formula `stage`s and installs `rowt-monitor` + `rowt-collector`), then attach to the release:
+   ```
+   (cd rowt-monitor && cargo build --release --bins)
+   COPYFILE_DISABLE=1 tar --no-mac-metadata -czf /tmp/rowt-monitor-aarch64-apple-darwin.tar.gz \
+     -C rowt-monitor/target/release rowt-monitor rowt-collector
+   tar tzf /tmp/rowt-monitor-aarch64-apple-darwin.tar.gz    # must list exactly the two names
+   gh release upload vX.Y.Z /tmp/rowt-monitor-aarch64-apple-darwin.tar.gz -R tanghong123/rowt
+   MON_SHA=$(shasum -a 256 /tmp/rowt-monitor-aarch64-apple-darwin.tar.gz | awk '{print $1}')
+   ```
+   (Build on an `arm64` mac — this is a native, non-cross build.) Intel has no asset; the formula compiles from source (`depends_on "rust" => :build`).
+5. Source `sha256`: `curl -sL https://github.com/tanghong123/rowt/archive/refs/tags/vX.Y.Z.tar.gz | shasum -a 256` (or download then shasum).
+6. Update `Formula/rowt.rb`: the source `url` (`…/refs/tags/vX.Y.Z.tar.gz`) + its `sha256`, the **`resource "rowt-monitor"` `url` (`…/releases/download/vX.Y.Z/…`) + its `sha256` (`$MON_SHA` from step 4)**, and the `assert_match "rowt X.Y.Z"` test. Keep the `caveats`/`depends_on` current with any new user-facing command. `git pull --rebase` the tap first (it may have other commits), commit `rowt X.Y.Z`, push.
+7. Validate: `brew update && brew fetch tanghong123/tap/rowt` (errors on either sha mismatch) and `brew info tanghong123/tap/rowt` (shows `stable X.Y.Z`).
 
-Monitor-only releases still need step 1's manual `ROWT_VERSION` bump first (the tap builds the whole tagged tree, so the recompiled `rowt-monitor` ships with it).
+Monitor-only releases still need step 1's manual `ROWT_VERSION` bump first, and still rebuild + re-upload the step-4 asset (the pinned resource must point at the new tag).
 
 ## Notes
 
