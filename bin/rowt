@@ -50,7 +50,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="2.5.16"
+ROWT_VERSION="2.5.18"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -105,11 +105,21 @@ PARSER="$HERE/config/vless-parse.py"
 SR_IMPORT="$HERE/config/sr-import.py"            # Shadowrocket importer
 FOREIGN_IMPORT="$HERE/config/foreign-import.py"  # Clash Verge / V2Box / FlClash importer
 GEOSITE_LOOKUP="$HERE/config/geosite-lookup.py"  # "this domain is also covered by geosite:…" hint
+NET_DETECT="$HERE/config/net-detect.py"          # scutil --dns -> internal/corp domain suggestions
 IMPORT_REVIEW="$CFG/import-review.json"           # editable, source-independent import (secret)
 SR_REVIEW="$IMPORT_REVIEW"                        # back-compat alias (was sr-review.json)
 MANUAL="$CFG/manual.json"                        # manually-imported servers (secret)
 SUBS_FILE="$CFG/subs.txt"                        # subscription URLs, one per line
 FINAL_ROUTE="${ROWT_FINAL:-direct}"            # bucket for unlisted traffic
+# Private/overlay IP ranges default to the UNBOUND (corp) lane, never en0-bound
+# direct: for RFC1918 / CGNAT / link-local, binding the physical NIC can't be
+# right — unbound defers to the OS routing table, so the IP flows into whatever
+# VPN/overlay tunnel routes it (Tailscale, a corp VPN), and falls back to en0
+# exactly like direct when nothing does. This makes overlay hosts + standard-VPN
+# intranets work with no corp config. Set ROWT_PRIVATE_DEFAULT=direct to restore
+# the always-en0 behavior (e.g. to reach a LAN host a full-tunnel VPN captured).
+PRIVATE_DEFAULT="${ROWT_PRIVATE_DEFAULT:-corp}"
+PRIVATE_CIDRS='["10.0.0.0/8","172.16.0.0/12","192.168.0.0/16","100.64.0.0/10","169.254.0.0/16"]'
 # Resolver for DIRECT-lane names (queried over the physical NIC via DoH; escape
 # names are resolved by the VPS, corp names by the system resolver). Default
 # AliDNS. Override with an IP or host that serves DoH on 443 (e.g. 1.1.1.1).
@@ -597,11 +607,273 @@ cmd_escape() {
     *)            edit_list "$DOMAINS" escape "$a" "$@" ;;
   esac
 }
+# --- corp sync: mirror an overlay VPN's split-tunnel routes into the corp lane ---
+# Any split-tunnel overlay (a corp VPN — AliLang/AnyConnect/GlobalProtect… — OR
+# Tailscale/WireGuard) installs routes for its CIDRs into the OS routing table,
+# pointing at its tunnel interface. rowt's `direct` lane BINDS the socket to the
+# physical NIC, which OVERRIDES the routing table — so a proxied connection to one
+# of those IPs goes out en0 and never enters the tunnel (office-egress rejection,
+# or an unreachable overlay host). `corp sync` reads those routes and mirrors the
+# CIDRs into the corp lane, so rowt sends them UNBOUND and the OS route carries them
+# into the tunnel. Vendor-agnostic; it just reads the routing table.
+#
+# Which overlays to mirror is a set of LABELS in sync-ifaces.txt (default: 'corp'):
+#   corp       auto-detect the corp VPN (busiest non-Tailscale utun/ipsec/ppp)
+#   tailscale  the Tailscale tunnel (its inet is in 100.64/10)
+#   utunN      a specific interface
+# SUPERSET, MINIMAL-RELOAD reconcile (all labels share one auto-managed block):
+# the corp lane only has to CONTAIN every live tunnel route. Each sync leaves the
+# block untouched (no reload) while it's already a superset of what's up now — so a
+# reconnect whose routes are already remembered, or a route already covered by a
+# broad hand-added CIDR, costs nothing. When a live route ISN'T covered we make the
+# minimal edit to restore the superset: add the missing routes, and drop any kept
+# CIDR that COLLIDES (overlaps) a live route — whole, never shrunk. Persisted CIDRs
+# from a now-down tunnel that collide with nothing stay (still needed in-office).
+# Hand-added CIDRs (outside the block) are never touched. Tunnel-bound CIDRs are
+# intranet/overlay, so they only ever belong in corp — never escape or block.
+SYNC_IFACES="$CFG/sync-ifaces.txt"
+CORP_SYNC_RECONCILE="$HERE/config/corp-sync-reconcile.py"
+CORP_SYNC_MARKER="# --- rowt corp sync (auto-managed; superset of live tunnel routes — do not edit below) ---"
+# corp sync ALSO mirrors the physical NIC's DHCP search domains into the corp lane:
+# a domain the network advertises resolves via the system (split-horizon) resolver
+# only — in escape it'd hit the VPS, in direct the DoH resolver, both wrong — so it
+# belongs in corp (resolve locally, route via the OS). Persist-union across networks
+# (a learned internal domain is still internal later, e.g. reached over the VPN).
+# SAFE conflict rule: a domain you explicitly put in escape/block WINS (a network
+# must not de-tunnel it); auto-corp only wins over the direct fall-through. Disable
+# with ROWT_AUTO_CORP_DOMAINS=0.
+CORP_SYNC_DOM_MARKER="# --- rowt corp sync: DHCP search domains (auto-managed, do not edit below) ---"
+AUTO_CORP_DOMAINS="${ROWT_AUTO_CORP_DOMAINS:-1}"
+
+# The busiest non-Tailscale tunnel (the corp VPN), or empty if none is up.
+_vpn_iface() {
+  local ifc best="" bestn=0 n
+  for ifc in $(ifconfig -l 2>/dev/null | tr ' ' '\n' | grep -E '^(utun|ipsec|ppp)[0-9]'); do
+    ifconfig "$ifc" 2>/dev/null | grep -qE 'inet 100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.' && continue
+    n="$(netstat -rn -f inet 2>/dev/null | awk -v i="$ifc" '$NF==i && $1!="default"{c++} END{print c+0}')"
+    [ "$n" -gt "$bestn" ] && { best="$ifc"; bestn="$n"; }
+  done
+  [ "$bestn" -ge 3 ] && printf '%s\n' "$best"
+}
+
+# The Tailscale tunnel: the utun whose inet sits in 100.64/10 (CGNAT), or empty.
+_tailscale_iface() {
+  local ifc
+  for ifc in $(ifconfig -l 2>/dev/null | tr ' ' '\n' | grep -E '^utun[0-9]'); do
+    ifconfig "$ifc" 2>/dev/null | grep -qE 'inet 100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.' && { printf '%s\n' "$ifc"; return; }
+  done
+}
+
+# Resolve a sync label to the current tunnel interface (empty if it isn't up).
+_resolve_sync_iface() {
+  case "$1" in
+    corp|auto|vpn)     _vpn_iface ;;
+    tailscale|ts)      _tailscale_iface ;;
+    utun*|ipsec*|ppp*) ifconfig "$1" >/dev/null 2>&1 && printf '%s\n' "$1" ;;
+  esac
+}
+
+# The labels to keep mirrored: the config file, one per line, or 'corp' by default.
+_sync_labels() {
+  if [ -s "$SYNC_IFACES" ]; then awk 'NF && $0 !~ /^[[:space:]]*#/{gsub(/[[:space:]]/,"");print}' "$SYNC_IFACES"
+  else echo corp; fi
+}
+
+# The CIDRs a tunnel routes: its non-default routes, normalized from netstat's
+# shorthand (47.88/16 -> 47.88.0.0/16, 30 -> 30.0.0.0/8), minus the tunnel's own
+# host route.
+_vpn_cidrs() {
+  local ifc="$1" gw; gw="$(ifconfig "$ifc" 2>/dev/null | awk '/inet /{print $2; exit}')"
+  netstat -rn -f inet 2>/dev/null | awk -v i="$ifc" -v gw="$gw" '
+    $NF==i && $1!="default" && $1!=gw {
+      d=$1; p=""; k=index(d,"/"); if(k){ p=substr(d,k+1); d=substr(d,1,k-1) }
+      n=split(d,a,"."); if(p==""){ p=(n==4)?"32":(n*8) }
+      while(n<4){ a[++n]="0" }
+      print a[1]"."a[2]"."a[3]"."a[4]"/"p
+    }' | sort -t. -k1,1n -k2,2n -k3,3n -k4,4n -u
+}
+
+# An IPv4 address or CIDR, on its own line (optionally indented). Used to tell the
+# corp lane's CIDR entries apart from its domain suffixes.
+_CIDR_RE='^[[:space:]]*[0-9]{1,3}(\.[0-9]{1,3}){1,3}(/[0-9]+)?[[:space:]]*$'
+
+# Everything in $CORP_DOMAINS ABOVE the first sync marker: hand-added domains and
+# CIDRs, preserved verbatim. Trailing blank lines are trimmed so the block below
+# doesn't accumulate gaps across rewrites.
+_corp_head() {
+  [ -f "$CORP_DOMAINS" ] || return 0
+  awk '/^# --- rowt corp sync/ { exit } { print }' "$CORP_DOMAINS" \
+    | awk '{ln[NR]=$0} END{ last=NR; while(last>0 && ln[last] ~ /^[[:space:]]*$/) last--; for(i=1;i<=last;i++) print ln[i] }'
+}
+
+# Hand-added CIDRs (the ones we must NEVER touch): CIDR-looking lines in the head.
+_corp_handadded_cidrs() {
+  _corp_head | grep -E "$_CIDR_RE" | tr -d ' \t' || true
+}
+
+# The CIDRs currently in the auto-managed block: CIDR-looking lines at/after the
+# first sync marker (old per-label markers are recognized too, so they migrate).
+_corp_block_cidrs() {
+  [ -f "$CORP_DOMAINS" ] || return 0
+  awk '/^# --- rowt corp sync/ { inblk=1; next } inblk' "$CORP_DOMAINS" \
+    | grep -E "$_CIDR_RE" | tr -d ' \t' || true
+}
+
+# The domains currently in the auto-managed DHCP-search-domain block.
+_corp_block_domains() {
+  [ -f "$CORP_DOMAINS" ] || return 0
+  awk -v m="$CORP_SYNC_DOM_MARKER" '
+    index($0,"# --- rowt corp sync")==1 { inblk=($0==m); next }
+    inblk && NF && $0 !~ /^[[:space:]]*#/ { gsub(/[[:space:]]/,""); if($0!="") print }
+  ' "$CORP_DOMAINS"
+}
+
+# DHCP search domains the physical NIC advertises (corp/internal by definition).
+_dhcp_search_domains() {
+  [ "$AUTO_CORP_DOMAINS" = 1 ] || return 0
+  python3 "$NET_DETECT" 2>/dev/null | jq -r '.physical_search[]?' 2>/dev/null || true
+}
+
+# Domain suffixes the user has explicitly put in escape or block — their choice
+# wins over an auto-discovered corp domain (a network must not de-tunnel them).
+_esc_block_suffixes() {
+  { domains_json; block_domains_json; } 2>/dev/null | jq -r '.[]?' 2>/dev/null | sort -u || true
+}
+
+# Rewrite $CORP_DOMAINS = head + DHCP-domain block + CIDR block (either may be empty).
+_corp_sync_write() {
+  local dom="$1" cidr="$2"
+  touch "$CORP_DOMAINS"
+  local tmp; tmp="$(mktemp)"
+  _corp_head > "$tmp"
+  [ -n "$dom" ]  && { printf '\n%s\n' "$CORP_SYNC_DOM_MARKER" >> "$tmp"; printf '%s\n' "$dom"  >> "$tmp"; }
+  [ -n "$cidr" ] && { printf '\n%s\n' "$CORP_SYNC_MARKER"     >> "$tmp"; printf '%s\n' "$cidr" >> "$tmp"; }
+  mv "$tmp" "$CORP_DOMAINS"; chmod 600 "$CORP_DOMAINS" 2>/dev/null || true
+}
+
+# rowt corp sync [--iface utunN|<label>] [--dry-run] [--no-reload] [--quiet]
+corp_sync() {
+  local one="" dry=0 noreload=0 quiet=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --iface) shift; one="${1:?--iface needs a value}" ;;
+      --iface=*) one="${1#--iface=}" ;;
+      --dry-run|-n) dry=1 ;;
+      --no-reload) noreload=1 ;;
+      --quiet|-q) quiet=1 ;;
+      *) die "usage: $PROG corp sync [--iface utunN|<label>] [--dry-run] [--no-reload] [--quiet]" ;;
+    esac; shift
+  done
+  local labels; if [ -n "$one" ]; then labels="$one"; else labels="$(_sync_labels)"; fi
+
+  # A = union of routes across the labels whose tunnel is up right now.
+  local af hf bf; af="$(mktemp)"; hf="$(mktemp)"; bf="$(mktemp)"
+  local label iface up="" nlabels=0 nup=0
+  for label in $labels; do
+    nlabels=$((nlabels+1))
+    iface="$(_resolve_sync_iface "$label")"
+    [ -z "$iface" ] && continue
+    _vpn_cidrs "$iface" >> "$af"
+    up="$up $label->$iface"; nup=$((nup+1))
+  done
+  sort -u "$af" -o "$af"
+  _corp_handadded_cidrs > "$hf"
+  _corp_block_cidrs > "$bf"
+  local pf; pf="$(mktemp)"; printf '%s\n' "$PRIVATE_CIDRS" | jq -r '.[]' > "$pf" 2>/dev/null || true
+  local na; na="$(grep -cE '.' "$af" 2>/dev/null || true)"
+
+  # ---- CIDR side: superset reconcile (NOCHANGE keeps the block verbatim) ----
+  local out status body_cidr cur_cidr; cur_cidr="$(_corp_block_cidrs)"
+  out="$(python3 "$CORP_SYNC_RECONCILE" --active "$af" --handadded "$hf" --block "$bf" --private "$pf")" \
+    || { rm -f "$af" "$hf" "$bf" "$pf"; die "corp sync: reconcile failed"; }
+  rm -f "$af" "$hf" "$bf" "$pf"
+  status="$(printf '%s\n' "$out" | head -1)"
+  if [ "$status" = NOCHANGE ]; then body_cidr="$cur_cidr"; else body_cidr="$(printf '%s\n' "$out" | tail -n +2 | grep -E '.' || true)"; fi
+
+  # ---- domain side: mirror the physical NIC's DHCP search domains ----
+  # persist-union of (block ∪ advertised) minus anything the user tunnels/blocks.
+  local cur_dom desired_dom="" dropped=""
+  cur_dom="$(_corp_block_domains)"
+  if [ "$AUTO_CORP_DOMAINS" = 1 ]; then
+    local union esc; union="$(printf '%s\n%s\n' "$cur_dom" "$(_dhcp_search_domains)" | awk 'NF' | tr 'A-Z' 'a-z' | sort -u)"
+    esc="$(_esc_block_suffixes)"
+    if [ -n "$esc" ]; then
+      dropped="$(comm -12 <(printf '%s\n' "$union") <(printf '%s\n' "$esc"))"
+      desired_dom="$(comm -23 <(printf '%s\n' "$union") <(printf '%s\n' "$esc") | grep -E '.' || true)"
+    else desired_dom="$union"; fi
+  else desired_dom="$cur_dom"; fi
+
+  # ---- assemble the desired file; a byte-identical result means no reload ----
+  local want; want="$(mktemp)"
+  { _corp_head
+    [ -n "$desired_dom" ]  && { printf '\n%s\n' "$CORP_SYNC_DOM_MARKER"; printf '%s\n' "$desired_dom"; }
+    [ -n "$body_cidr" ]    && { printf '\n%s\n' "$CORP_SYNC_MARKER";     printf '%s\n' "$body_cidr"; }
+  } > "$want"
+  local nd nc; nd="$(printf '%s' "$desired_dom" | grep -cE '.' || true)"; nc="$(printf '%s' "$body_cidr" | grep -cE '.' || true)"
+
+  if [ "$dry" = 1 ]; then
+    echo "corp sync (dry-run): labels [$labels]; up:${up:- none}; $na live CIDR(s)"
+    if cmp -s "$want" "$CORP_DOMAINS" 2>/dev/null; then echo "  corp lane already in sync — no change, no reload"
+    else echo "  would set corp lane to $nd DHCP domain(s) + $nc CIDR(s):"; diff <(cat "$CORP_DOMAINS" 2>/dev/null) "$want" | grep -E '^[<>]' | head -40; fi
+    rm -f "$want"; return 0
+  fi
+
+  if cmp -s "$want" "$CORP_DOMAINS" 2>/dev/null; then
+    rm -f "$want"
+    [ "$quiet" = 1 ] || info "corp lane already in sync ($nd DHCP domain(s), $nc CIDR(s); ${nup}/${nlabels} tunnel(s) up)"
+    return 0
+  fi
+  [ -n "$dropped" ] && [ "$quiet" != 1 ] && while IFS= read -r d; do [ -n "$d" ] && err "corp sync: '$d' is DHCP-advertised but you keep it in escape/block — your rule wins"; done <<< "$dropped"
+  _corp_sync_write "$desired_dom" "$body_cidr"; rm -f "$want"
+  [ "$quiet" = 1 ] || info "corp sync: updated corp lane — $nd DHCP domain(s) + $nc CIDR(s) (superset of $na live route(s))"
+  [ "$noreload" = 0 ] && reload_if_running || true
+  return 0
+}
+
+# rowt corp suggest — read the DNS domains this network/VPN advertises and suggest
+# corp-lane suffixes to add. SUGGEST only (many internal domains may be visible;
+# the human picks). Only sees anything when the signal is live: on the corp LAN or
+# with the corp VPN up. Nothing is added automatically.
+corp_suggest() {
+  local j; j="$(python3 "$NET_DETECT" 2>/dev/null || echo '{}')"
+  local doms phys ns
+  doms="$(printf '%s' "$j" | jq -r '.internal_domains[]?' 2>/dev/null)"
+  phys="$(printf '%s' "$j" | jq -r '.physical_search[]?' 2>/dev/null)"
+  ns="$(printf '%s' "$j" | jq -r '.corp_nameservers[]?' 2>/dev/null | paste -sd', ' -)"
+  if [ -z "$doms" ]; then
+    info "no internal DNS domains visible right now."
+    echo "  This only sees them when the signal is live — on the corp LAN, or with the"
+    echo "  corp VPN connected. Re-run while on your work network / VPN."
+    return 0
+  fi
+  echo "Internal DNS domains this network advertises:"
+  local d tag extras=""
+  while IFS= read -r d; do
+    [ -z "$d" ] && continue
+    if printf '%s\n' "$phys" | grep -qxF "$d"; then tag="  ← DHCP search domain — rowt corp-routes this AUTOMATICALLY"; else tag=""; extras="$extras $d"; fi
+    printf '  %s%s\n' "$d" "$tag"
+  done <<EOF
+$doms
+EOF
+  [ -n "$ns" ] && echo "Corp/private DNS servers seen: $ns"
+  echo
+  if [ -n "$(printf '%s' "$extras" | tr -d ' ')" ]; then
+    echo "The DHCP search domain(s) above are added for you. The rest are only candidates"
+    echo "(scoped resolvers) — add the ones that are truly your intranet:"
+    echo "  $PROG corp add$(printf ' %s' $extras)"
+    echo "Drop any that aren't yours (e.g. a shared resolver's own domain)."
+  else
+    echo "These are corp-routed for you automatically — nothing to add."
+  fi
+}
+
 cmd_corp() {
   local a="${1:-list}"; [ "$#" -gt 0 ] && shift
   case "$a" in
     errors|stats) lane_errors corp "${1:-10m}" ;;
     log)          _lane_log_tail corp ;;
+    sync)         corp_sync "$@" ;;
+    suggest)      corp_suggest "$@" ;;
     *)            edit_list "$CORP_DOMAINS" corp "$a" "$@" ;;
   esac
 }
@@ -999,6 +1271,8 @@ assemble_host() {
     --argjson corp_dom "$(corp_domains_json)" \
     --argjson corp_cidr "$(corp_cidrs_json)" \
     --argjson block_dom "$(block_domains_json)" \
+    --arg priv_default "$PRIVATE_DEFAULT" \
+    --argjson private_cidrs "$PRIVATE_CIDRS" \
     '
     # route rules, first match wins. sniff first so domain rules see host names.
     #
@@ -1023,11 +1297,18 @@ assemble_host() {
     # it sits AFTER the hand lists — an explicit escape/corp entry overrides the
     # broad blocklist — but still before the default, so ad/tracker domains are
     # still sunk to `block` with no dial (the direct-lane retry-storm CPU fix).
+    #
+    # Private/overlay IPs (RFC1918 / CGNAT / link-local) default to the UNBOUND
+    # `corp` lane rather than falling through to en0-bound `direct` — so an overlay
+    # or corp-VPN IP follows the OS route into its tunnel instead of being forced
+    # onto the physical NIC. Explicit escape/corp/block rules above still win; only
+    # otherwise-unmatched private IPs are caught. Toggle with ROWT_PRIVATE_DEFAULT.
     ([ {action:"sniff"} ]
      + $suffix_rules
      + $geo_rules
-     + [ if ($corp_cidr|length) > 0 then {ip_cidr:$corp_cidr, outbound:"corp"} else empty end,
-         if $ads != ""              then {rule_set:["geosite-ads"], outbound:"block"} else empty end ]) as $rules
+     + [ if ($corp_cidr|length) > 0     then {ip_cidr:$corp_cidr, outbound:"corp"} else empty end,
+         if $priv_default == "corp"      then {ip_cidr:$private_cidrs, outbound:"corp"} else empty end,
+         if $ads != ""                   then {rule_set:["geosite-ads"], outbound:"block"} else empty end ]) as $rules
     |
     # dns-direct is DoH (not plain UDP): a persistent UDP DNS socket wedges on a
     # network transition and the sing-box UDPTransport.recvLoop then busy-spins on
@@ -1199,11 +1480,30 @@ subs_remove() {
   rebuild_servers; after_import
 }
 
+# Which supported VPN clients on THIS machine have importable data (one per line:
+# shadowrocket / clash-verge / v2box / flclash), via each importer's --detect.
+detect_import_sources() {
+  { python3 "$SR_IMPORT" --detect 2>/dev/null; python3 "$FOREIGN_IMPORT" --detect 2>/dev/null; } | grep -vE '^[[:space:]]*$' || true
+}
+
 # Import servers from another client in two steps: dump an editable, source-
 # independent review file, let the user prune stale entries, then --apply what
 # remains. Sources: shadowrocket (default), clash-verge, v2box, flclash.
 cmd_from_shadowrocket() {
   have python3 || die "python3 not found"
+  # --detect: list the clients found on this machine + the command for each.
+  if [ "${1:-}" = "--detect" ]; then
+    local found; found="$(detect_import_sources)"
+    if [ -z "$found" ]; then
+      echo "no supported VPN client with importable data found on this Mac."
+      echo "  add servers directly:  $PROG server add '<vless://…>'  |  $PROG sub add '<url>'"
+      return 0
+    fi
+    echo "found these VPN clients — import from each (prune $IMPORT_REVIEW, then --apply):"
+    printf '%s\n' "$found" | while IFS= read -r s; do printf '  %s server import --from %s\n' "$PROG" "$s"; done
+    echo "  $PROG server import --apply"
+    return 0
+  fi
   # --apply is source-agnostic: it just applies whatever is in the review file.
   if [ "${1:-}" = "--apply" ]; then
     shift
@@ -2115,45 +2415,115 @@ _ob_todo() { echo "  [ ] $1"; echo "      → $2"; }
 
 # A state-aware getting-started checklist: shows how far you are and the exact
 # next command. Safe to run anytime — reads state, changes nothing.
+# The single shared getting-started + reference surface: a human runs `rowt
+# onboard` to see where they are and what to do next; the AI "rowt" skill also
+# runs it as the authoritative, version-current guide. So it ALWAYS prints the
+# full reference (import options, lanes, everyday commands, doc paths) after the
+# stateful checklist — not just when everything is already set up.
 cmd_onboard() {
-  echo "rowt onboarding — where you are and what to do next:"
+  echo "rowt onboarding — a macOS split-router: chosen sites via a personal tunnel"
+  echo "(escape), corp intranet via the corp VPN (corp), everything else direct."
+  echo
+  echo "Where you are and what to do next:"
   echo
   local pending=0 mode; mode="$(sget mode)"; mode="${mode:-?}"
 
   # 1. installed on PATH
   if command -v "$PROG" >/dev/null 2>&1; then _ob_ok "installed on PATH"
-  else _ob_todo "install" "from the repo run:  ./install.sh   (symlinks '$PROG' onto your PATH)"; pending=$((pending+1)); fi
+  else _ob_todo "install" "brew install tanghong123/tap/rowt   (or, from the repo: ./install.sh)"; pending=$((pending+1)); fi
 
-  # 2. sing-box present (host binary)
+  # 2. sing-box present (host binary) — auto-fetched, but needs GitHub reachable
   if sb_ok "$SB" 2>/dev/null; then _ob_ok "sing-box ready ($("$SB" version 2>/dev/null | awk 'NR==1{print $3}'))"
-  else _ob_todo "fetch sing-box" "turn a working VPN (Shadowrocket) ON, then:  $PROG fetch host   (or '$PROG fetch' for host+vm)"; pending=$((pending+1)); fi
+  else _ob_todo "fetch sing-box" "with a working VPN ON (so GitHub is reachable):  $PROG fetch host   ('up' also fetches it)"; pending=$((pending+1)); fi
 
-  # 3. at least one server configured
+  # 3. at least one server configured — importing from an existing client is easiest
   local nsrv; nsrv="$(jq length "$SERVERS" 2>/dev/null || echo 0)"
   if [ "${nsrv:-0}" -gt 0 ]; then _ob_ok "$nsrv server(s) configured (selected: $(sget selected))"
-  else _ob_todo "add servers" "from Shadowrocket:  $PROG server import  →  edit the review file  →  $PROG server import --apply
-        or add directly:  $PROG server add '<vless://…>'   /   $PROG sub add '<url>'"; pending=$((pending+1)); fi
+  else
+    # Auto-detect VPN clients already on this Mac and offer to import from each.
+    local det; det="$(detect_import_sources)"
+    local msg
+    if [ -n "$det" ]; then
+      msg="found these VPN clients — import from each (rowt reads their config; the apps can be closed):"
+      while IFS= read -r s; do [ -n "$s" ] && msg="$msg
+        $PROG server import --from $s"; done <<EOF
+$det
+EOF
+      msg="$msg
+      …then prune $IMPORT_REVIEW and:  $PROG server import --apply
+      (or add directly: $PROG server add '<vless://…>'  /  $PROG sub add '<url>')"
+    else
+      msg="import from a client (Shadowrocket / Clash Verge / V2Box / FlClash):  $PROG server import [--from <src>]
+      or add directly:  $PROG server add '<vless://|vmess://|anytls://|hysteria2://…>'  /  $PROG sub add '<url>'"
+    fi
+    _ob_todo "add servers" "$msg"; pending=$((pending+1))
+  fi
 
   # 4. router up
-  if host_running; then _ob_ok "router running (mode $mode) — check with '$PROG status'"
-  else _ob_todo "start" "connect the CORP VPN (Shadowrocket OFF), then:  $PROG up"; pending=$((pending+1)); fi
+  if host_running; then _ob_ok "router running (mode $mode) — details: '$PROG status'"
+  else _ob_todo "start" "connect the CORP VPN (turn the other VPN app OFF), then:  $PROG up"; pending=$((pending+1)); fi
 
   echo
-  if [ "$pending" -eq 0 ]; then
-    cat <<EOF
-✓ All set. Day to day:
-    rowt-proxy-on / rowt-proxy-off  point THIS shell's curl/git/npm/… at rowt (or undo)
-    $PROG escape add <domain>      route another site through the tunnel
-    $PROG corp add <domain|cidr>   send a site/subnet into the corp VPN
-    $PROG use <tag>  ·  $PROG ping  pick / test servers
-    $PROG explain <domain|ip>      which lane will a destination take?
-    $PROG status                   is it working?
-    $PROG reload                   after switching Wi-Fi / wired / hotspot
-    $PROG down                     stop everything
-EOF
+  if [ "$pending" -eq 0 ]; then echo "✓ All set — the checks above pass."
+  else echo "→ do the first unchecked [ ] step above, then re-run '$PROG onboard'."; fi
+
+  # ---- recommended next steps (state-aware; these don't gate "All set") ----
+  echo
+  echo "Recommended (round out the setup):"
+  # b) confirm a fast, working server
+  echo "  [ ] confirm a fast, working server:  $PROG ping  →  $PROG use <tag>  (or '$PROG use auto'), then re-check '$PROG status'"
+  # a) auto-reload watcher
+  if [ -f "$WATCH_PLIST" ]; then echo "  [✓] auto-reload watcher installed"
+  else echo "  [ ] auto-reload on Wi-Fi / VPN changes:  $PROG watch install"; fi
+  # c) shell integration (aliases + tab-completion)
+  if grep -qs 'rowt shell integration' "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" 2>/dev/null; then
+    echo "  [✓] shell aliases + tab-completion in your rc"
+  else echo "  [ ] shell aliases + tab-completion:  add to ~/.zshrc:  eval \"\$($PROG shell-init)\""; fi
+  # d) corp lane — escape+block ship with defaults; corp domains are DISCOVERED
+  #    automatically from whatever network/VPN you're on (its DHCP search domains),
+  #    and corp-VPN route CIDRs are mirrored in on connect. Nothing to configure.
+  local auto_dom; auto_dom="$(_dhcp_search_domains 2>/dev/null | paste -sd', ' - 2>/dev/null)"
+  if [ -n "$auto_dom" ]; then
+    echo "  [✓] corp auto-setup: this network advertises  $auto_dom  — rowt routes these through the corp lane for you (applied on the next reload / watcher tick)."
   else
-    echo "→ do the first unchecked [ ] step above. Re-run '$PROG onboard' to see progress."
+    echo "  [ ] corp auto-setup: nothing to do — connect your work network / corp VPN and rowt auto-adds its internal domains (+ VPN route CIDRs) to the corp lane."
   fi
+  echo "      Add extra intranet domains/CIDRs yourself anytime:  $PROG corp add '*.corp.example.com' 10.0.0.0/8   ·   see everything detected:  $PROG corp suggest"
+
+  # e) running → welcome + point at the live monitor
+  if host_running; then
+    echo
+    echo "🎉 rowt is running — your chosen sites tunnel through escape, corp intranet rides the corp VPN, the rest goes direct."
+    echo "   Open a NEW terminal and run  '$PROG monitor'  to watch connections, throughput and server health live."
+  fi
+
+  # ---- always-on reference (so this doubles as the guide) ----
+  cat <<EOF
+
+Choose what goes where (edit anytime; lane 'add' auto-renders + restarts):
+    $PROG escape add google.com            tunnel a site
+    $PROG escape add geosite:google        …or a whole maintained service (all Google domains, all ccTLDs)
+    $PROG corp   add '*.corp.example' 10.0.0.0/8   into the corp VPN (domains AND CIDRs)
+    $PROG corp   suggest                   list this network's internal domains (on corp LAN / VPN up)
+    $PROG corp   sync                      mirror the corp VPN's DHCP domains + routed CIDRs into the corp lane
+    $PROG block  add ads.example           sinkhole (ad/telemetry); a big ad set is on by default
+    unlisted traffic → direct (physical NIC); private/overlay IPs → OS routing (unbound).  '$PROG explain <domain|ip>' shows a destination's lane.
+
+Everyday:
+    $PROG status            is it working (state + reachability)?
+    $PROG reload            re-apply after switching Wi-Fi / wired / corp VPN on-off
+    $PROG monitor           live TUI    ·    $PROG proxy on | off    macOS system proxy
+    $PROG config export     move the whole setup to another Mac (holds secrets — send encrypted)
+    $PROG down              stop everything
+EOF
+
+  # Installed docs (shipped alongside the tool) + per-command help.
+  local readme="$HERE/README.md" design="$HERE/DESIGN.md"
+  echo
+  echo "More: $PROG <command> --help   (per-command detail, version-current)"
+  [ -f "$readme" ] && echo "      $readme   (full user guide)"
+  [ -f "$design" ] && echo "      $design   (how the routing works)"
+  echo "Config lives in: $CFG"
 }
 
 # ---------- route explainer ------------------------------------------------
@@ -2169,6 +2539,15 @@ _cidr_has() {
   case "$2" in */*) ;; *) bits=32 ;; esac
   local mask; [ "$bits" -eq 0 ] && mask=0 || mask=$(( (0xFFFFFFFF << (32 - bits)) & 0xFFFFFFFF ))
   [ "$(( $(_ipint "$ip") & mask ))" -eq "$(( $(_ipint "$net") & mask ))" ]
+}
+# echo the private/overlay CIDR that IPv4 $1 falls in (rc 0), else nothing (rc 1).
+# Only meaningful when ROWT_PRIVATE_DEFAULT=corp (these default to the unbound lane).
+_private_hit() {
+  [ "$PRIVATE_DEFAULT" = corp ] || return 1
+  local c; for c in $(printf '%s' "$PRIVATE_CIDRS" | jq -r '.[]' 2>/dev/null); do
+    _cidr_has "$1" "$c" && { echo "$c"; return 0; }
+  done
+  return 1
 }
 resolve_ip() {
   local d="$1" ip=""
@@ -2225,12 +2604,14 @@ cmd_explain() {
   if is_ipv4 "$dest"; then
     ip="$dest"
     if m="$(_list_hit "$dest" "$CORP_DOMAINS" cidr)"; then lane=corp; why="corp CIDR '$m'"
+    elif m="$(_private_hit "$dest")"; then lane=corp; why="private/overlay range '$m' — defaults to unbound (OS routing)"
     else lane="$FINAL_ROUTE"; why="no corp CIDR matched; final route = $FINAL_ROUTE"; fi
   elif hit="$(_longest_domain_hit "$dest")"; then
     lane="${hit%% *}"; m="${hit#* }"; why="longest-match ${lane}-domains suffix '$m'"
   else
     ip="$(resolve_ip "$dest")"
     if [ -n "$ip" ] && m="$(_list_hit "$ip" "$CORP_DOMAINS" cidr)"; then lane=corp; why="resolves to $ip — in corp CIDR '$m'"
+    elif [ -n "$ip" ] && m="$(_private_hit "$ip")"; then lane=corp; why="resolves to $ip — private/overlay range '$m' (unbound, OS routing)"
     else lane="$FINAL_ROUTE"; why="no block/corp/escape rule; final route = $FINAL_ROUTE"; fi
   fi
   local desc
@@ -2610,6 +2991,13 @@ PLIST
       fi
       sleep 2                                     # let the network settle
       host_running || exit 0                      # may have gone down while we waited
+      # Corp-lane sync: mirror the physical NIC's DHCP search domains AND any
+      # corp/Tailscale VPN routes into the corp lane (reloads itself only if the
+      # result CHANGED; a no-op when nothing new — learned domains/CIDRs persist).
+      # Runs before the net-change check so a plain VPN or LAN change (which needn't
+      # move the physical iface) still applies.
+      corp_sync --quiet || true
+      host_running || exit 0                      # corp_sync may have reloaded/restarted
       local ifc cur svc need=0 nid last
       ifc="$(detect_iface 2>/dev/null || true)"
       cur="$(jq -r '.outbounds[]?|select(.tag=="direct")|.bind_interface // empty' "$HOST_CFG" 2>/dev/null || true)"
@@ -2792,7 +3180,7 @@ c@servers & selection@use <tag>|auto@pin a server (manual) or auto-pick fastest 
 c@servers & selection@ping [tag]@parallel latency test through the tunnel (fastest first)
 a@servers & selection@probe@detect which mode works (host vs vm) with corp VPN up
 c@routing lanes@escape <list|add|rm|import|clear|dump|errors>@edit the escape lane (VPN tunnel)
-o@routing lanes@corp <list|add|rm|import|clear|dump|errors>@edit the corp lane (into the corp VPN)
+o@routing lanes@corp <list|add|rm|import|clear|dump|errors|sync>@edit the corp lane; 'sync' mirrors an overlay VPN's routes (corp/Tailscale) into it
 o@routing lanes@block <list|add|rm|import|clear|dump|errors>@block lane (ad/telemetry sinkhole); 'errors' = what got blocked
 o@routing lanes@direct <errors|log>@diagnose the pass-through lane; 'errors' = what failed direct (escape candidates)
 o@proxy@proxy <status|check|on|off|env>@macOS system proxy + CLI env exports
@@ -3042,6 +3430,7 @@ $PROG server <subcommand> — manage the server pool.
   add '<link>' [more]  add manual server(s) from vless:// / vmess:// / anytls:// / hysteria2:// links
   rm <tag> [more]      remove a manual server (for a subscription node, remove the sub)
   clear                remove all manual servers
+  import --detect      list the VPN clients on this Mac you can import from
   import [--from SRC]  import servers + subs from another client. SRC is one of
                        shadowrocket (default) | clash-verge | v2box | flclash.
                        Runs in two steps: dump an editable review file, prune it,
@@ -3104,7 +3493,18 @@ $PROG $1 <subcommand> — edit the $1 lane$([ "$1" = escape ] && echo " (domains
   clear                remove every entry (keeps the file's comment header)
   dump [file]          print the lane (or write it to a file) for backup/versioning
   errors [5m|10m|1h|…|all]  domains that FAILED on this lane in the window (default 10m)
-  log                  live-tail this lane's connection-error log
+  log                  live-tail this lane's connection-error log$([ "$1" = corp ] && printf '%s' "
+  sync [--iface I|<label>] [--dry-run] [--no-reload]  mirror an overlay VPN's live
+                       routes into the corp lane, so PROXIED traffic to those IPs
+                       rides the tunnel (rowt's direct lane binds en0 and would skip
+                       it). Reads the OS routing table — works for any split-tunnel
+                       VPN (corp / Tailscale / WireGuard). Which overlays to keep
+                       mirrored is a set of labels in ~/.config/rowt/sync-ifaces.txt
+                       (default 'corp'; add 'tailscale' to reach Tailscale hosts).
+                       Each label gets its own auto-managed block; a tunnel that's
+                       DOWN keeps its last-learned CIDRs (needed in-office too). The
+                       watchdog re-syncs automatically on connect. Hand-added corp
+                       entries above the managed blocks are never touched.")
 A domain lives in AT MOST one lane: 'add'/'import' here pulls the exact entry out
 of the other lanes (block/corp/escape), since the router matches block→corp→escape
 first-match-wins and a domain in two lists would be silently shadowed.

@@ -18,6 +18,15 @@
 # Fail-closed: if the escape tunnel is down, connections to these domains
 # FAIL rather than leak onto your direct/corp path.
 
+# Whole-service categories (fetched on the first 'fetch'/'up'; each covers every
+# ccTLD + related domain of the service — e.g. geosite:google also covers YouTube,
+# geosite:meta covers Facebook/Instagram/WhatsApp/Threads). The explicit suffixes
+# below stay as a baseline / fallback for when a geosite set isn't cached yet.
+geosite:google
+geosite:x
+geosite:meta
+geosite:github
+
 google.com
 googleapis.com
 gstatic.com

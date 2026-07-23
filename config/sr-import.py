@@ -183,10 +183,20 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Shadowrocket -> rowt importer")
     ap.add_argument("--store", help="ServerManager / v2.model plist (auto-detected)")
     ap.add_argument("--conf", help="default.conf rule file (auto-detected)")
+    ap.add_argument(
+        "--detect",
+        action="store_true",
+        help="print 'shadowrocket' if importable data is present, else nothing",
+    )
     args = ap.parse_args()
 
     store = args.store or _find(STORE_CANDIDATES)
     conf = args.conf or _find_conf()
+
+    if args.detect:
+        if store or conf:
+            print("shadowrocket")
+        return 0
 
     result: dict = {
         "subscriptions": [],

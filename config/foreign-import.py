@@ -349,13 +349,31 @@ def build_review(
     }
 
 
+def detect() -> list[str]:
+    """Which foreign clients have importable data on this machine (fast path checks)."""
+    found: list[str] = []
+    cv = _first_existing(CLASH_VERGE_DIRS)
+    if cv and ((cv / "profiles.yaml").exists() or (cv / "profiles").is_dir()):
+        found.append("clash-verge")
+    if _first_existing(V2BOX_DBS):
+        found.append("v2box")
+    fc = _first_existing(FLCLASH_DIRS)
+    if fc and next(fc.rglob("*.y*ml"), None):
+        found.append("flclash")
+    return found
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="import servers from another proxy client")
     ap.add_argument(
         "--from",
         dest="source",
-        required=True,
         choices=["clash-verge", "v2box", "flclash"],
+    )
+    ap.add_argument(
+        "--detect",
+        action="store_true",
+        help="print which of clash-verge/v2box/flclash have importable data",
     )
     ap.add_argument("--path", help="override the source location (dir or DB file)")
     ap.add_argument(
@@ -373,6 +391,15 @@ def main() -> int:
         help="an existing subs list (subs.txt); URLs already saved are skipped",
     )
     args = ap.parse_args()
+
+    if args.detect:
+        for name in detect():
+            print(name)
+        return 0
+    if not args.source:
+        ap.error(
+            "--from is required (one of clash-verge/v2box/flclash), or use --detect"
+        )
 
     skipped: Counter = Counter()
     try:
