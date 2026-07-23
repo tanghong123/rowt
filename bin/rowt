@@ -50,7 +50,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.0.8"
+ROWT_VERSION="3.0.9"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -835,7 +835,9 @@ corp_sync() {
   fi
   [ -n "$dropped" ] && [ "$quiet" != 1 ] && while IFS= read -r d; do [ -n "$d" ] && err "corp sync: '$d' is DHCP-advertised but you keep it in escape/block — your rule wins"; done <<< "$dropped"
   _corp_sync_write "$desired_dom" "$body_cidr"; rm -f "$want"
-  [ "$quiet" = 1 ] || info "corp sync: updated corp lane — $nd DHCP domain(s) + $nc CIDR(s) (superset of $na live route(s))"
+  # Log the reason even under --quiet: this is a real change that triggers a reload,
+  # so the watchdog log should record WHY it reloaded (no-op ticks stay silent above).
+  info "corp sync: updated corp lane — $nd DHCP domain(s) + $nc CIDR(s) (superset of $na live route(s))"
   [ "$noreload" = 0 ] && reload_if_running || true
   return 0
 }
