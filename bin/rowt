@@ -1127,14 +1127,24 @@ _connections_show() {
 }
 
 # Detect the physical (non-tunnel) interface: an enX with an IPv4 and a router.
+# Prefer the physical NIC that carries the default route — that's the primary
+# service macOS hands apps' system-proxy queries (CFNetworkCopySystemProxySettings),
+# so on a multi-NIC machine the proxy lands where apps will actually read it.
+# Fall back to the first qualifying enX when the default route is a tunnel (a VPN
+# utun, rowt's core case) or otherwise non-physical.
+_iface_up() {  # $1=enX — has both an IPv4 address and a router (real connectivity)?
+  ipconfig getifaddr "$1" >/dev/null 2>&1 && [ -n "$(ipconfig getoption "$1" router 2>/dev/null)" ]
+}
 detect_iface() {
   [ -n "${ROWT_IFACE:-}" ] && { echo "$ROWT_IFACE"; return 0; }
+  local def
+  def="$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')"
+  case "$def" in en*) _iface_up "$def" && { echo "$def"; return 0; } ;; esac
   local i
   for i in $(networksetup -listallhardwareports 2>/dev/null \
               | awk '/Device:/{print $2}'); do
     case "$i" in en*) ;; *) continue ;; esac
-    if ipconfig getifaddr "$i" >/dev/null 2>&1 \
-       && [ -n "$(ipconfig getoption "$i" router 2>/dev/null)" ]; then
+    if _iface_up "$i"; then
       echo "$i"; return 0
     fi
   done
@@ -1577,9 +1587,14 @@ cmd_from_shadowrocket() {
 
 apply_import() {
   local j="$1"
+  have python3 || die "python3 not found"
   [ -s "$MANUAL" ] || echo '[]' > "$MANUAL"
-  # strip the review-only "_source" tag so it never reaches manual.json / sing-box
-  jq -s '.[0] + ((.[1].servers // []) | map(del(._source)))' "$MANUAL" "$j" > "$MANUAL.n" && mv "$MANUAL.n" "$MANUAL"
+  # Strip the review-only "_source" tag (never reaches manual.json / sing-box),
+  # then dedupe the manual set in place by endpoint identity — existing servers
+  # come first so they win — so re-applying a review file (or one whose entries
+  # are already in the pool) is idempotent, not just deduped in servers.json.
+  jq -s '.[0] + ((.[1].servers // []) | map(del(._source)))' "$MANUAL" "$j" \
+    | python3 "$PARSER" --combine > "$MANUAL.n" && mv "$MANUAL.n" "$MANUAL"
   chmod 600 "$MANUAL"
   jq -r '.subscriptions[]?.url // empty' "$j" >> "$SUBS_FILE"
   sort -u "$SUBS_FILE" -o "$SUBS_FILE"
@@ -2267,12 +2282,44 @@ cmd_env() {
   printf 'export HTTP_PROXY=%s HTTPS_PROXY=%s ALL_PROXY=%s\n' "$p" "$p" "socks5h://127.0.0.1:$PORT"
 }
 
+# Append `eval "$(rowt shell-init)"` to the user's rc, idempotently. The lines
+# written both contain "rowt shell-init" so 'uninstall' (_strip_shell_init)
+# removes them cleanly. Optional $1 overrides the target rc file.
+shell_init_install() {
+  local rc="${1:-}" f found=""
+  for f in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" "$HOME/.zprofile"; do
+    grep -qsE 'rowt shell integration|rowt shell-init' "$f" 2>/dev/null && { found="$f"; break; }
+  done
+  if [ -n "$found" ]; then
+    info "shell integration already enabled in $found — nothing to do (run a new shell to pick it up)"
+    return 0
+  fi
+  if [ -z "$rc" ]; then
+    case "${SHELL:-}" in
+      *zsh)  rc="$HOME/.zshrc" ;;
+      *bash) rc="$HOME/.bashrc" ;;
+      *)     rc="$HOME/.zshrc" ;;   # macOS default login shell
+    esac
+  fi
+  printf '\n# rowt shell integration — aliases + tab-completion (rowt shell-init --install)\neval "$(%s shell-init)"\n' "$PROG" >> "$rc" \
+    || die "could not write to $rc"
+  info "added shell integration to $rc"
+  info "open a new terminal (or 'source $rc') to enable rowt-proxy-on/-off + tab-completion"
+}
+
 # Shell integration to eval from your rc:  eval "$(rowt shell-init)"
 # Emits the rowt-proxy-on / rowt-proxy-off aliases. IDEMPOTENT — the guard makes
 # re-sourcing your rc a no-op, and the sentinel is NOT exported so each new
 # interactive shell (and subshell) re-applies it cleanly. Homebrew won't edit
-# your rc, so this is how brew installs enable the aliases.
+# your rc, so this is how brew installs enable the aliases.  '--install' appends
+# the eval line to your rc for you (see shell_init_install above).
 cmd_shell_init() {
+  case "${1:-}" in
+    --install) shift; shell_init_install "${1:-}"; return $? ;;
+    -h|--help) echo "usage: $PROG shell-init [--install [<rc-file>]]"; return 0 ;;
+    "") ;; # fall through: emit the block to eval
+    *) die "usage: $PROG shell-init [--install [<rc-file>]]" ;;
+  esac
   cat <<'SH'
 # >>> rowt shell integration >>>
 if [ -z "${_ROWT_SHELL_INIT:-}" ]; then
@@ -2495,10 +2542,12 @@ or add directly:  $PROG server add '<vless://|vmess://|anytls://|hysteria2://…
   if [ -f "$WATCH_PLIST" ]; then _ob 0 "auto-reload + recovery watcher installed" "$PROG watch status   ·   $PROG watch install to re-sync"
   else _ob 1 "install the auto-reload + recovery watcher" "$PROG watch install"; fi
 
-  # 7. shell integration (aliases + tab-completion)
-  if grep -qs 'rowt shell integration' "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" 2>/dev/null; then
+  # 7. shell integration (aliases + tab-completion) — match either the pasted
+  #    block (marker comment) OR the recommended bare `eval "$(rowt shell-init)"`
+  #    line, mirroring what 'uninstall' strips.
+  if grep -qsE 'rowt shell integration|rowt shell-init' "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" 2>/dev/null; then
     _ob 0 "shell aliases + tab-completion in your rc" "eval \"\$($PROG shell-init)\"   (already in your rc)"
-  else _ob 1 "add shell aliases + tab-completion" "add to ~/.zshrc:  eval \"\$($PROG shell-init)\""; fi
+  else _ob 1 "add shell aliases + tab-completion" "$PROG shell-init --install   (appends to ~/.zshrc; or add by hand: eval \"\$($PROG shell-init)\")"; fi
 
   # 8. agent skill linked (so an agent can drive setup)
   if [ -e "$HOME/.claude/skills/rowt" ] || [ -e "$HOME/.agents/skills/rowt" ]; then
@@ -3839,9 +3888,14 @@ Power-user access to the mode-vm guest (Lima + socket_vmnet).
 EOF
 ;;
     shell-init) cat <<EOF
-$PROG shell-init — shell integration to eval from your rc file.
+$PROG shell-init [--install [<rc-file>]] — shell integration.
 
-Add ONE line to your ~/.zshrc (or ~/.bashrc), after 'brew shellenv':
+Let rowt add it for you (idempotent — appends one line if not already present):
+  $PROG shell-init --install            # picks ~/.zshrc or ~/.bashrc by \$SHELL
+  $PROG shell-init --install ~/.zshrc   # or name the rc file explicitly
+'$PROG uninstall' removes it again.
+
+Or add ONE line by hand to your ~/.zshrc (or ~/.bashrc), after 'brew shellenv':
   eval "\$($PROG shell-init)"
 It defines rowt-proxy-on / rowt-proxy-off (point this shell's CLI proxy env at
 rowt / clear it), and loads tab-completion for subcommands (zsh/bash). Idempotent:
