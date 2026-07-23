@@ -50,7 +50,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.0.7"
+ROWT_VERSION="3.0.8"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -460,7 +460,11 @@ block_domains_json() { list_json "$BLOCK_DOMAINS" domain; } # block suffixes (ex
 
 # Re-render and restart the router if it is currently running.
 reload_if_running() {
-  if host_running; then info "reloading router"; cmd_render >/dev/null; cmd_router restart >/dev/null; fi
+  # Let cmd_router's output through (esp. the "✓ running (pid …)" / readiness line)
+  # so a watchdog-triggered reload is fully recorded in watch.log — not swallowed,
+  # which made a failed reload indistinguishable from a successful one. cmd_render's
+  # stdout is just the rendered paths, so keep that quiet.
+  if host_running; then info "reloading router"; cmd_render >/dev/null; cmd_router restart; fi
 }
 
 # The three editable routing lanes. A domain lives in AT MOST one of them: the
