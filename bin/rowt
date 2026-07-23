@@ -50,7 +50,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="2.5.19"
+ROWT_VERSION="2.5.20"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -2479,6 +2479,10 @@ EOF
   if grep -qs 'rowt shell integration' "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" 2>/dev/null; then
     echo "  [✓] shell aliases + tab-completion in your rc"
   else echo "  [ ] shell aliases + tab-completion:  add to ~/.zshrc:  eval \"\$($PROG shell-init)\""; fi
+  # c2) agent skill linked (so an agent can drive setup)
+  if [ -e "$HOME/.claude/skills/rowt" ] || [ -e "$HOME/.agents/skills/rowt" ]; then
+    echo "  [✓] rowt agent skill linked (an agent can help drive setup)"
+  else echo "  [ ] let an agent help set up rowt:  $PROG skill install"; fi
   # d) corp lane — escape+block ship with defaults; corp domains are DISCOVERED
   #    automatically from whatever network/VPN you're on (its DHCP search domains),
   #    and corp-VPN route CIDRs are mirrored in on connect. Nothing to configure.
@@ -3084,6 +3088,96 @@ cmd_uninstall() {
   return 0
 }
 
+# Where the shipped user-facing 'rowt' agent skill lives. Prefer the STABLE brew
+# opt path (…/opt/rowt/…) over the versioned Cellar so a link auto-refreshes on
+# `brew upgrade`; fall back to the in-tree copy for a repo/manual install.
+_skill_src() {
+  local src="$HERE/skills/rowt"
+  case "$HERE" in
+    */Cellar/rowt/*)
+      local opt; opt="$(brew --prefix rowt 2>/dev/null || true)"
+      [ -n "$opt" ] && [ -d "$opt/libexec/skills/rowt" ] && src="$opt/libexec/skills/rowt" ;;
+  esac
+  printf '%s' "$src"
+}
+# Agent skill dirs to link into: Claude Code always; ~/.agents/skills if present.
+_skill_targets() {
+  printf '%s\n' "$HOME/.claude/skills/rowt"
+  [ -d "$HOME/.agents/skills" ] && printf '%s\n' "$HOME/.agents/skills/rowt"
+  return 0
+}
+# A link we created always ends in /skills/rowt (so uninstall never touches a
+# user's own unrelated 'rowt' dir).
+_skill_ours() { [ -L "$1" ] && case "$(readlink "$1")" in */skills/rowt) return 0 ;; esac; return 1; }
+
+# rowt skill <install [--force] [--dev <repo>] | uninstall | status>
+# Links the 'rowt' agent skill into ~/.claude/skills (+ ~/.agents/skills if present)
+# so an agent can drive setup. Default source is the installed copy (brew: the
+# stable opt path, so `brew upgrade` refreshes it); --dev <repo> points at a working
+# checkout instead (…/<repo>/skills/rowt) for live-editing.
+cmd_skill() {
+  local a="${1:-status}"; [ "$#" -gt 0 ] && shift
+  local force=0 dev=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --force) force=1 ;;
+      --dev) shift; dev="${1:?--dev needs a path to the rowt repo}" ;;
+      --dev=*) dev="${1#--dev=}" ;;
+      -h|--help) echo "usage: $PROG skill <install [--force] [--dev <repo>] | uninstall | status>"; return 0 ;;
+      *) die "usage: $PROG skill <install [--force] [--dev <repo>] | uninstall | status>" ;;
+    esac; shift
+  done
+  local src
+  if [ -n "$dev" ]; then
+    dev="${dev%/}"
+    [ -d "$dev/skills/rowt" ] || die "no skill at $dev/skills/rowt — is '$dev' a rowt repo checkout?"
+    src="$(cd "$dev/skills/rowt" && pwd)"
+  else
+    src="$(_skill_src)"
+  fi
+  local t
+  case "$a" in
+    install)
+      [ -d "$src" ] || die "skill files not found at $src"
+      local did=0
+      while IFS= read -r t; do
+        [ -n "$t" ] || continue
+        if [ -L "$t" ] && [ "$(readlink "$t")" = "$src" ]; then info "already linked: $t"; did=1; continue; fi
+        if [ -e "$t" ] || [ -L "$t" ]; then
+          if [ "$force" = 1 ]; then rm -rf "$t"; else err "$t exists (not our link) — re-run with --force to replace"; continue; fi
+        fi
+        mkdir -p "$(dirname "$t")"
+        ln -sfn "$src" "$t" && { info "linked $t -> $src"; did=1; }
+      done <<EOF
+$(_skill_targets)
+EOF
+      [ "$did" = 1 ] && info "start a NEW agent session to load the 'rowt' skill." || true
+      return 0 ;;
+    uninstall)
+      while IFS= read -r t; do
+        [ -n "$t" ] || continue
+        if _skill_ours "$t"; then rm -f "$t" && info "unlinked $t"
+        elif [ -L "$t" ] || [ -e "$t" ]; then info "left $t (not a rowt-skill link)"; fi
+      done <<EOF
+$(_skill_targets)
+EOF
+      return 0 ;;
+    status)
+      echo "skill source: $src  ($([ -d "$src" ] && echo present || echo MISSING))"
+      while IFS= read -r t; do
+        [ -n "$t" ] || continue
+        if [ -L "$t" ] && [ "$(readlink "$t")" = "$src" ]; then echo "  linked:  $t"
+        elif [ -L "$t" ]; then echo "  other:   $t -> $(readlink "$t")"
+        elif [ -e "$t" ]; then echo "  dir:     $t (real, not a link)"
+        else echo "  absent:  $t"; fi
+      done <<EOF
+$(_skill_targets)
+EOF
+      return 0 ;;
+    *) die "usage: $PROG skill <install [--force] [--dev <repo>] | uninstall | status>" ;;
+  esac
+}
+
 cmd_revert() {
   # Mark intent DOWN first so the watchdog treats this as deliberate and won't
   # try to resurrect the tunnel we are about to tear down.
@@ -3215,6 +3309,7 @@ c@lifecycle@onboard@guided getting-started checklist (what to run next)
 c@lifecycle@up [host|vm] [--force]@set up & start (no arg = auto-detect the mode)
 c@lifecycle@down@tear down: proxy off + stop sing-box + vm down
 o@lifecycle@uninstall [--purge]@reverse setup for a clean re-onboard (--purge wipes config)
+o@lifecycle@skill <install|uninstall|status>@link the rowt agent skill so an agent can drive setup
 o@lifecycle@restart@bounce the tunnel in place (no re-render / proxy change)
 c@lifecycle@reload@re-apply after a network switch (re-render + restart + proxy)
 o@lifecycle@watch <install|uninstall|status>@auto-reload on net change; clears a stale proxy at login
@@ -3321,6 +3416,17 @@ Runs 'down' (proxy off + stop router), removes the watcher LaunchAgent and its
 By default it KEEPS ~/.config/rowt (servers/subs/lane rules/state); add --purge to
 delete that too. The binary is removed separately — it prints the 'brew uninstall
 rowt' command to finish. (The corp-route daemon, if any, is separate.)
+EOF
+;;
+    skill) cat <<EOF
+$PROG skill <install [--force] [--dev <repo>] | uninstall | status> — link the
+rowt agent skill so an agent (Claude Code, …) can help you set up & run rowt.
+
+Symlinks the user-facing 'rowt' skill into ~/.claude/skills (and ~/.agents/skills
+if present). Installed via brew, it links the STABLE opt path, so a later
+'brew upgrade rowt' refreshes the skill with no re-run. --dev <repo> instead
+points the link at a working checkout (<repo>/skills/rowt) for live-editing.
+--force replaces an existing (non-rowt) entry. Start a NEW agent session to load it.
 EOF
 ;;
     run) cat <<EOF
@@ -3902,6 +4008,7 @@ run_command() {
     up)         cmd_setup "$@" ;;          # up [host|vm]
     down)       cmd_revert "$@" ;;
     uninstall)  cmd_uninstall "$@" ;;
+    skill)      cmd_skill "$@" ;;
     restart)    cmd_restart "$@" ;;
     reload)     cmd_reload "$@" ;;
     watch)      cmd_watch "$@" ;;
