@@ -1,0 +1,61 @@
+---
+name: rowt
+description: Help a user set up and run rowt — a macOS command-line split-router (installed via `brew install tanghong123/tap/rowt`) that sends chosen sites through a personal VLESS/VMess/AnyTLS/hysteria2 tunnel (escape), corporate-intranet traffic into a corporate VPN (corp), and everything else straight out the physical NIC (direct), all from one local proxy on 127.0.0.1:7890. Use for FIRST-TIME SETUP (especially importing servers from an existing VPN client — Shadowrocket / Clash Verge / V2Box / FlClash — or adding vless:// links / subscriptions, then choosing which domains tunnel and running `rowt up`), for everyday operation (up/down/reload/restart/status/use/ping/monitor/metrics, editing escape|corp|block lanes and `geosite:` categories, proxy on/off, moving the setup to another machine with `config export/import`, resetting/removing with `uninstall [--purge]`), and for debugging a downed router or wrong routing. Encodes the critical operational rules (e.g. never run reload/up/restart as a killable background task). Everything lives in `~/.config/rowt/`; run `rowt help`, `rowt <cmd> --help`, and `rowt onboard` for the live, version-current reference. (For working on rowt's own code / releases, use the `rowt-dev` skill instead.)
+---
+
+# rowt (user guide)
+
+**macOS only.** rowt runs a single local mixed proxy on `127.0.0.1:7890` and classifies every connection by its sniffed domain/IP into one of four lanes, so a personal tunnel and a work VPN coexist without fighting over the default route:
+
+| lane | you list | goes | for |
+|---|---|---|---|
+| **escape** | `escape-domains.txt` | a personal **VLESS/VMess/AnyTLS/hysteria2 tunnel** (bound to the physical NIC → your VPS) | blocked/foreign sites (google, github, youtube…) |
+| **corp** | `corp-domains.txt` (domains **and** CIDRs) | **into the corporate VPN** via the OS routing table | company intranet |
+| **direct** | everything unlisted | straight out the **physical NIC**, bypassing corp+escape | the local internet (e.g. China sites) |
+| **block** | `block-domains.txt` (+ a built-in ad/tracker set) | sinkholed — no DNS, no dial | ads/telemetry |
+
+**Private/overlay IPs default to corp, not direct.** An *unlisted* IP in a private/overlay range (RFC1918 `10/172.16/192.168`, CGNAT `100.64/10`, link-local `169.254/16`) goes to the **corp** lane (unbound → OS routing table), not `direct` — so Tailscale/VPN/LAN hosts reach correctly with no config, while a bare corp IP isn't forced out en0. Only unlisted *public* IPs fall to `direct`. `rowt explain <ip>` shows the lane; `ROWT_PRIVATE_DEFAULT=direct` restores the old always-en0 behavior.
+
+Engine: a bundled `sing-box` at `~/.config/rowt/bin/sing-box` (auto-fetched on first `up`). Everything user-editable is under **`~/.config/rowt/`**.
+
+## Start here: `rowt onboard`
+
+**Run `rowt onboard` first, for any setup or "how do I…" task.** It's the authoritative, **state-aware, version-current** guide: it checks where the user is (installed? sing-box fetched? servers added? router up?), prints the exact next step, a full command reference, and the on-disk paths to the installed **README.md** (full user guide) and **DESIGN.md** (how routing works). Follow it, and read those docs when you need depth. `rowt help` and `rowt <cmd> --help` are the per-command truth. The rest of this skill is orientation + the rules `onboard` can't enforce.
+
+**Setup shape** (what `onboard` walks through — do it with the user's existing VPN ON so GitHub + the provider are reachable, then switch to the corp VPN):
+1. `brew install tanghong123/tap/rowt`.
+2. **Bring in servers — auto-detect the user's existing clients and import from each, one by one.** rowt reads each app's on-disk config (app can be closed), keeps only rowt-supported protocols (VLESS/VMess/AnyTLS/hysteria2), de-dupes by identity, and adds subscription URLs so they stay auto-updating. **Run `rowt server import --detect`** — it lists exactly the clients present on this Mac (Shadowrocket / Clash Verge / V2Box / FlClash) with the ready command for each (`onboard` also shows this). Then for **each** detected client in turn: `rowt server import --from <src>` → help the user prune `~/.config/rowt/import-review.json` (drop unwanted/dead entries) → `rowt server import --apply` (merges + de-dupes into the pool) → move to the next client. Clash sources need `brew install yq`. If none are detected (or to add extras): `rowt server add '<vless://|vmess://|anytls://|hysteria2://…>'` / `rowt sub add '<url>'`. Finish with `rowt server list`, then `rowt use <tag>|auto` and `rowt ping`.
+3. **Start it:** `rowt up` (**foreground only** — see the rules below; auto-detects host/vm, `rowt probe` if unsure). Have the user switch to the corp VPN (turn the other app off).
+4. **Round out the setup — `onboard`'s "Recommended" section lists these state-aware, so run `onboard` again to see what's still `[ ]`:**
+   - **Pick a working server:** `rowt ping` (ranks by latency) → `rowt use <tag>` (or `rowt use auto`), then confirm with `rowt status` (or a quick `rowt run curl -sI https://www.google.com`). Don't over-trust a red ERROR — verify with a real fetch.
+   - **Install the watcher:** `rowt watch install` (auto-reloads on Wi-Fi/VPN changes; recommended).
+   - **Offer shell integration:** add `eval "$(rowt shell-init)"` to `~/.zshrc` (gives `rowt-proxy-on`/`-off` + tab-completion).
+   - **Corp lane — mostly automatic now** (escape + block ship with defaults). rowt **auto-discovers** corp setup from whatever network/VPN the user is on, so usually there's nothing to configure:
+     - *Domains:* the physical NIC's **DHCP search domains** (e.g. `hz.ali.com`) are mirrored into the corp lane automatically (they only resolve via the system split-horizon resolver, which is the corp lane's behavior). If the user is **on their corp LAN or corp VPN**, run `rowt corp suggest` (or `rowt onboard`) to *show them the detected domains* and tell them rowt will route these for you. If they're **not** connected, just tell them rowt will auto-add the corp domains the moment they connect to the corp network — nothing to do now. A user's explicit escape/block entry always wins over an auto-discovered domain (a network can't de-tunnel it). They can add extras anytime with `rowt corp add <suffix>` (or, for domains not advertised — e.g. inferred from their **company name** via your own knowledge/web search — propose suffixes, confirm, then `rowt corp add`).
+     - *Corp IP ranges:* also automatic — `rowt corp sync` (run by the watchdog on connect) mirrors the corp VPN's live route CIDRs into the corp lane, so proxied by-IP access rides the tunnel instead of leaking out en0. Private/overlay ranges (RFC1918, CGNAT `100.64/10`, link-local) already default to the unbound lane, so only public-IP corp ranges need mirroring. Vendor-agnostic; the **same mechanism reaches Tailscale/overlay hosts** — add `tailscale` to `~/.config/rowt/sync-ifaces.txt`. It keeps learned domains/CIDRs when the tunnel drops (still needed in-office). `rowt corp sync --dry-run` previews.
+5. **Welcome them** — confirm it's running, then tell them to open a **new terminal and run `rowt monitor`** to watch connections/throughput/server-health live.
+
+## Everyday use
+
+- **After changing networks** (Wi-Fi ↔ ethernet, corp VPN on/off): `rowt reload`. Just restart the tunnel in place (no re-render): `rowt restart`. Stop everything (proxy off + tunnel down): `rowt down`.
+- **Switch server:** `rowt use <tag>` (pins it, no probing) or `rowt use auto`. `rowt ping` ranks them.
+- **See what's happening:** `rowt status` · `rowt connections` (live, per-lane) · **`rowt monitor`** (full TUI: connections + throughput, errors/blocked, server health; keys `v` flip view, `s` span, `f` lane filter, `/` search, `u` use server, `?` help) · `rowt metrics top` (heaviest domains over time).
+- **Edit lanes:** `rowt escape|corp|block <add|rm|list|clear|import|dump>`. A domain lives in exactly one lane (adding to one removes it from the others). `rowt escape errors` / `rowt direct errors` show what failed — good candidates to move into escape.
+- **System proxy / CLI env:** `rowt proxy <status|on|off|env>` (the `env` form exports `*_proxy` for a shell).
+- **Move to another Mac:** `rowt config export` → a chmod-600 `.tgz` of just your servers/subs/lane rules → copy it over an **encrypted** channel (it holds credentials) → `rowt config import <file>` → `rowt up`.
+- **Remove / reset:** `rowt uninstall` reverses setup (down + proxy off + remove the watcher LaunchAgent/sudoers + strip the shell-init line), **keeping** `~/.config/rowt`; add `--purge` to wipe that too. It can't remove its own binary, so it prints the final `brew uninstall rowt`. `brew uninstall` alone leaves config, the watcher, the system proxy, and the rc line behind — so use `rowt uninstall --purge && brew uninstall rowt` for a truly clean slate (e.g. to re-run onboarding from scratch).
+
+## geosite categories — a whole service in one line
+
+`geosite:google` in `escape-domains.txt` routes **every** Google domain (all ccTLDs, gstatic, youtube…) through escape without listing each; `geosite:tiktok` in `block-domains.txt` blocks all of TikTok. **Escape and block lanes only** (not corp). Add with `rowt escape add geosite:<name>` — it fetches + caches the set (`~/.config/rowt/cache/`, ~1 KB each). Names are [sing-geosite](https://github.com/SagerNet/sing-geosite) tags (google, meta, x, github, netflix, telegram, whatsapp, amazon…). It's always an explicit choice: a plain `rowt escape add <domain>` never swaps in a category — it just *shows* the categories that also cover the domain as copy-paste commands. A specific domain always wins over a `geosite:` category, so listing individual domains alongside one is safe. If a fetch fails (e.g. GitHub is blocked on your network), copy the `geosite-<name>.srs` file into `~/.config/rowt/cache/` from a machine that can reach it.
+
+## ⚠️ Rules when operating rowt for the user (important)
+
+- **Run `rowt up`, `reload`, `restart`, `down`, `router …` synchronously in the FOREGROUND — never as a polled/backgrounded task.** They launch `sing-box` as a long-lived child that inherits the launcher's output stream; under a background-task harness the task then never registers as "finished" and killing it (e.g. a poll timeout) **kills the router**. They finish in well under 30 s; if a wait seems to hang, the command already succeeded.
+- **Applying any routing change requires a `sing-box` restart** — there's no hot-reload. `rowt escape|corp|block add/rm` restart automatically. If you edit a lane file by hand, apply with `rowt reload` (or the lighter `rowt render && rowt restart`).
+- **A red `● ERROR` in status/monitor doesn't always mean the tunnel is down** — it's a synthetic reachability probe of the active server; some servers fail it while proxying real sites fine (live traffic overrides it). Confirm with `rowt connections` / actually loading a site before concluding it's broken.
+- **Secrets:** `~/.config/rowt/servers.json` / `manual.json` / `subs.txt` / `import-review.json` contain server credentials + subscription tokens — never post them anywhere; transfer only encrypted.
+
+## When the router seems down
+
+1. `rowt status` — is the router running + reachable? 2. `rowt up` (foreground) to recover. 3. Logs: `~/.config/rowt/log/host.log` (start/config errors), `lane-*.log` (per-lane connection errors — corp `NXDOMAIN` lines are normal when the corp VPN is off), `watch.log` (watchdog restarts). 4. In China, first `up` needs GitHub reachable to fetch `sing-box`/rule-sets — do it with a working VPN, or `rowt fetch host` while one is up. Always double-check the exact command against `rowt <cmd> --help`; commands/flags evolve with the version (`rowt version`).
