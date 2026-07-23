@@ -50,7 +50,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.0.2"
+ROWT_VERSION="3.0.3"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -179,6 +179,10 @@ _audit() { # $* = message
 # is what lets value-returning helpers (used in "$(...)") log safely.
 info() { echo "==> $*" >&2; }
 warn() { echo "warning: $*" >&2; }
+# Run a command with a hard timeout so a slow probe can't hang us (macOS ships no
+# `timeout`; a pending perl alarm survives exec and its default action kills the
+# exec'd process). Prints the command's output, or nothing if it exceeds N sec.
+_tmo() { local s="$1"; shift; perl -e 'alarm shift; exec @ARGV' "$s" "$@"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # state get/set — one key=value per line in $STATE
@@ -732,7 +736,7 @@ _corp_block_domains() {
 # DHCP search domains the physical NIC advertises (corp/internal by definition).
 _dhcp_search_domains() {
   [ "$AUTO_CORP_DOMAINS" = 1 ] || return 0
-  python3 "$NET_DETECT" 2>/dev/null | jq -r '.physical_search[]?' 2>/dev/null || true
+  _tmo 5 python3 "$NET_DETECT" 2>/dev/null | jq -r '.physical_search[]?' 2>/dev/null || true
 }
 
 # Domain suffixes the user has explicitly put in escape or block — their choice
@@ -1484,7 +1488,9 @@ subs_remove() {
 # Which supported VPN clients on THIS machine have importable data (one per line:
 # shadowrocket / clash-verge / v2box / flclash), via each importer's --detect.
 detect_import_sources() {
-  { python3 "$SR_IMPORT" --detect 2>/dev/null; python3 "$FOREIGN_IMPORT" --detect 2>/dev/null; } | grep -vE '^[[:space:]]*$' || true
+  # Time-boxed: these scan client config dirs (incl. iCloud paths that can stall
+  # on a dataless volume), so cap them so `onboard` can never hang.
+  { _tmo 6 python3 "$SR_IMPORT" --detect 2>/dev/null; _tmo 6 python3 "$FOREIGN_IMPORT" --detect 2>/dev/null; } | grep -vE '^[[:space:]]*$' || true
 }
 
 # Import servers from another client in two steps: dump an editable, source-
@@ -2411,8 +2417,13 @@ cmd_setup() {
 }
 
 # ---------- onboarding ------------------------------------------------------
-_ob_ok()   { echo "  [✓] $1"; }
-_ob_todo() { echo "  [ ] $1"; echo "      → $2"; }
+# One checklist row: done-flag (0=done/1=todo), label, and the command(s) for it.
+# The command is ALWAYS shown (indented) so every step says exactly what to run;
+# $3 may be multi-line.
+_ob() {
+  if [ "$1" = 0 ]; then printf '  [✓] %s\n' "$2"; else printf '  [ ] %s\n' "$2"; fi
+  [ -n "${3:-}" ] && printf '%s\n' "$3" | sed 's/^/        /'
+}
 
 # A state-aware getting-started checklist: shows how far you are and the exact
 # next command. Safe to run anytime — reads state, changes nothing.
@@ -2425,81 +2436,77 @@ cmd_onboard() {
   echo "rowt onboarding — a macOS split-router: chosen sites via a personal tunnel"
   echo "(escape), corp intranet via the corp VPN (corp), everything else direct."
   echo
-  echo "Where you are and what to do next:"
+  echo "Setup checklist — each line shows the command; do the first [ ], then re-run '$PROG onboard':"
   echo
   local pending=0 mode; mode="$(sget mode)"; mode="${mode:-?}"
 
   # 1. installed on PATH
-  if command -v "$PROG" >/dev/null 2>&1; then _ob_ok "installed on PATH"
-  else _ob_todo "install" "brew install tanghong123/tap/rowt   (or, from the repo: ./install.sh)"; pending=$((pending+1)); fi
+  if command -v "$PROG" >/dev/null 2>&1; then _ob 0 "installed on PATH" "brew install tanghong123/tap/rowt"
+  else _ob 1 "install rowt" "brew install tanghong123/tap/rowt   (or from the repo: ./install.sh)"; pending=$((pending+1)); fi
 
   # 2. sing-box present (host binary) — auto-fetched, but needs GitHub reachable
-  if sb_ok "$SB" 2>/dev/null; then _ob_ok "sing-box ready ($("$SB" version 2>/dev/null | awk 'NR==1{print $3}'))"
-  else _ob_todo "fetch sing-box" "with a working VPN ON (so GitHub is reachable):  $PROG fetch host   ('up' also fetches it)"; pending=$((pending+1)); fi
+  if sb_ok "$SB" 2>/dev/null; then _ob 0 "sing-box ready ($("$SB" version 2>/dev/null | awk 'NR==1{print $3}'))" "$PROG fetch host   (re-fetch)"
+  else _ob 1 "fetch sing-box (needs GitHub reachable — have a VPN ON)" "$PROG fetch host   ('$PROG up' also fetches it)"; pending=$((pending+1)); fi
 
   # 3. at least one server configured — importing from an existing client is easiest
   local nsrv; nsrv="$(jq length "$SERVERS" 2>/dev/null || echo 0)"
-  if [ "${nsrv:-0}" -gt 0 ]; then _ob_ok "$nsrv server(s) configured (selected: $(sget selected))"
+  if [ "${nsrv:-0}" -gt 0 ]; then
+    _ob 0 "$nsrv server(s) configured" "$PROG server list   ·   add more: $PROG server import --from <src> / $PROG server add '<url>'"
   else
-    # Auto-detect VPN clients already on this Mac and offer to import from each.
-    local det; det="$(detect_import_sources)"
-    local msg
+    local det cmds
+    det="$(detect_import_sources)"
     if [ -n "$det" ]; then
-      msg="found these VPN clients — import from each (rowt reads their config; the apps can be closed):"
-      while IFS= read -r s; do [ -n "$s" ] && msg="$msg
-        $PROG server import --from $s"; done <<EOF
+      cmds="detected clients — import from each, prune $IMPORT_REVIEW, then '$PROG server import --apply':"
+      while IFS= read -r s; do [ -n "$s" ] && cmds="$cmds
+$PROG server import --from $s"; done <<EOF
 $det
 EOF
-      msg="$msg
-      …then prune $IMPORT_REVIEW and:  $PROG server import --apply
-      (or add directly: $PROG server add '<vless://…>'  /  $PROG sub add '<url>')"
     else
-      msg="import from a client (Shadowrocket / Clash Verge / V2Box / FlClash):  $PROG server import [--from <src>]
-      or add directly:  $PROG server add '<vless://|vmess://|anytls://|hysteria2://…>'  /  $PROG sub add '<url>'"
+      cmds="$PROG server import --from <shadowrocket|clash-verge|v2box|flclash>
+or add directly:  $PROG server add '<vless://|vmess://|anytls://|hysteria2://…>'  /  $PROG sub add '<url>'"
     fi
-    _ob_todo "add servers" "$msg"; pending=$((pending+1))
+    _ob 1 "add servers" "$cmds"; pending=$((pending+1))
   fi
 
   # 4. router up
-  if host_running; then _ob_ok "router running (mode $mode) — details: '$PROG status'"
-  else _ob_todo "start" "connect the CORP VPN (turn the other VPN app OFF), then:  $PROG up"; pending=$((pending+1)); fi
+  if host_running; then _ob 0 "router running (mode $mode)" "$PROG status   ·   $PROG down to stop"
+  else _ob 1 "start the router (connect the CORP VPN first, other VPN app OFF)" "$PROG up"; pending=$((pending+1)); fi
 
-  echo
-  if [ "$pending" -eq 0 ]; then echo "✓ All set — the checks above pass."
-  else echo "→ do the first unchecked [ ] step above, then re-run '$PROG onboard'."; fi
+  # 5. an escape server selected
+  local sel; sel="$(sget selected)"
+  if [ -n "$sel" ] && [ "$sel" != none ]; then _ob 0 "escape server selected ($sel)" "$PROG ping   (rank by latency)   ·   $PROG use <tag>|auto"
+  else _ob 1 "pick an escape server" "$PROG ping   →   $PROG use <tag>   (or $PROG use auto)"; fi
 
-  # ---- recommended next steps (state-aware; these don't gate "All set") ----
-  echo
-  echo "Recommended (round out the setup):"
-  # b) confirm a fast, working server
-  echo "  [ ] confirm a fast, working server:  $PROG ping  →  $PROG use <tag>  (or '$PROG use auto'), then re-check '$PROG status'"
-  # a) auto-reload watcher
-  if [ -f "$WATCH_PLIST" ]; then echo "  [✓] auto-reload watcher installed"
-  else echo "  [ ] auto-reload on Wi-Fi / VPN changes:  $PROG watch install"; fi
-  # c) shell integration (aliases + tab-completion)
+  # 6. auto-reload / recovery watcher
+  if [ -f "$WATCH_PLIST" ]; then _ob 0 "auto-reload + recovery watcher installed" "$PROG watch status   ·   $PROG watch install to re-sync"
+  else _ob 1 "install the auto-reload + recovery watcher" "$PROG watch install"; fi
+
+  # 7. shell integration (aliases + tab-completion)
   if grep -qs 'rowt shell integration' "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" 2>/dev/null; then
-    echo "  [✓] shell aliases + tab-completion in your rc"
-  else echo "  [ ] shell aliases + tab-completion:  add to ~/.zshrc:  eval \"\$($PROG shell-init)\""; fi
-  # c2) agent skill linked (so an agent can drive setup)
+    _ob 0 "shell aliases + tab-completion in your rc" "eval \"\$($PROG shell-init)\"   (already in your rc)"
+  else _ob 1 "add shell aliases + tab-completion" "add to ~/.zshrc:  eval \"\$($PROG shell-init)\""; fi
+
+  # 8. agent skill linked (so an agent can drive setup)
   if [ -e "$HOME/.claude/skills/rowt" ] || [ -e "$HOME/.agents/skills/rowt" ]; then
-    echo "  [✓] rowt agent skill linked (an agent can help drive setup)"
-  else echo "  [ ] let an agent help set up rowt:  $PROG skill install"; fi
-  # d) corp lane — escape+block ship with defaults; corp domains are DISCOVERED
-  #    automatically from whatever network/VPN you're on (its DHCP search domains),
-  #    and corp-VPN route CIDRs are mirrored in on connect. Nothing to configure.
+    _ob 0 "rowt agent skill linked (an agent can drive setup)" "$PROG skill status   ·   $PROG skill install to re-link"
+  else _ob 1 "link the rowt agent skill (let an agent drive setup)" "$PROG skill install"; fi
+
+  # 9. corp lane — auto-discovered from the network's DHCP search domains + VPN routes
   local auto_dom; auto_dom="$(_dhcp_search_domains 2>/dev/null | paste -sd', ' - 2>/dev/null)"
   if [ -n "$auto_dom" ]; then
-    echo "  [✓] corp auto-setup: this network advertises  $auto_dom  — rowt routes these through the corp lane for you (applied on the next reload / watcher tick)."
+    _ob 0 "corp auto-setup active (this network advertises $auto_dom)" "$PROG corp suggest   ·   add extras: $PROG corp add '*.corp.example.com' 10.0.0.0/8"
   else
-    echo "  [ ] corp auto-setup: nothing to do — connect your work network / corp VPN and rowt auto-adds its internal domains (+ VPN route CIDRs) to the corp lane."
+    _ob 1 "corp lane — auto-fills when you connect your work network/VPN" "$PROG corp suggest   (on corp LAN/VPN)   ·   $PROG corp add '*.corp.example.com' 10.0.0.0/8"
   fi
-  echo "      Add extra intranet domains/CIDRs yourself anytime:  $PROG corp add '*.corp.example.com' 10.0.0.0/8   ·   see everything detected:  $PROG corp suggest"
 
-  # e) running → welcome + point at the live monitor
+  echo
   if host_running; then
-    echo
-    echo "🎉 rowt is running — your chosen sites tunnel through escape, corp intranet rides the corp VPN, the rest goes direct."
-    echo "   Open a NEW terminal and run  '$PROG monitor'  to watch connections, throughput and server health live."
+    echo "🎉 rowt is running — chosen sites via escape, corp intranet via the corp VPN, the rest direct."
+    echo "   Open a NEW terminal and run  '$PROG monitor'  to watch connections/throughput/health live."
+  elif [ "$pending" -eq 0 ]; then
+    echo "✓ Core setup complete — run  '$PROG up'  to start."
+  else
+    echo "→ do the first unchecked [ ] above, then re-run '$PROG onboard'."
   fi
 
   # ---- always-on reference (so this doubles as the guide) ----
