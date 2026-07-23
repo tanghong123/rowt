@@ -50,7 +50,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.0.6"
+ROWT_VERSION="3.0.7"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -2963,6 +2963,11 @@ cmd_watch() {
   <dict>
 $envxml
   </dict>
+  <!-- CRITICAL: a watchdog tick that reloads launches sing-box as its child.
+       Without this, launchd SIGKILLs the tick's whole process group when the tick
+       exits — killing the router the reload just started (network switch / corp
+       VPN up → router silently down). Abandon the group so sing-box outlives the tick. -->
+  <key>AbandonProcessGroup</key><true/>
   <key>RunAtLoad</key><true/>  <!-- also fire once at login: clear a stale proxy rowt left set -->
   <key>StartInterval</key><integer>$WATCH_INTERVAL</integer>  <!-- periodic liveness poll (network changes come via WatchPaths, instantly) -->
 
