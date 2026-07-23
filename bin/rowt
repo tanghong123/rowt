@@ -50,7 +50,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.0.1"
+ROWT_VERSION="3.0.2"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -2841,7 +2841,12 @@ EOF
 cmd_watch() {
   local action="${1:-status}"; [ "$#" -gt 0 ] && shift || true
   case "$action" in
-    install)
+    install|refresh)
+      # 'refresh' re-renders the plist + reloads the agent WITHOUT touching the
+      # sudoers (no sudo) — used after `brew upgrade` to pick up this version and
+      # clear any launchd backoff from the binary swap. No-op if never installed.
+      local refresh=0; [ "$action" = refresh ] && refresh=1
+      if [ "$refresh" = 1 ] && [ ! -f "$WATCH_PLIST" ]; then info "watch not installed — nothing to refresh"; return 0; fi
       local self; self="$(_watch_self)"
       [ -x "$self" ] || die "cannot resolve the rowt binary path ($self)"
       # LaunchAgents don't inherit your shell PATH/env, so bake in a PATH that
@@ -2889,25 +2894,32 @@ $envxml
 </dict>
 </plist>
 PLIST
-      # scoped passwordless sudo for the proxy toggles (validated before install)
-      local tmp; tmp="$(mktemp)"; _watch_sudoers_body > "$tmp"
-      if sudo visudo -cf "$tmp" >/dev/null 2>&1; then
-        info "installing scoped passwordless-sudo rule ($WATCH_SUDOERS; needs admin once)"
-        sudo install -m 440 -o root -g wheel "$tmp" "$WATCH_SUDOERS" \
-          || err "could not install $WATCH_SUDOERS — a Wi-Fi<->Ethernet switch may prompt for a password"
-      else
-        err "generated sudoers failed validation — skipping it (service-change reloads may prompt)"
+      # scoped passwordless sudo for the proxy toggles (validated before install);
+      # skipped on 'refresh' so a post-upgrade reload never needs a password.
+      if [ "$refresh" = 0 ]; then
+        local tmp; tmp="$(mktemp)"; _watch_sudoers_body > "$tmp"
+        if sudo visudo -cf "$tmp" >/dev/null 2>&1; then
+          info "installing scoped passwordless-sudo rule ($WATCH_SUDOERS; needs admin once)"
+          sudo install -m 440 -o root -g wheel "$tmp" "$WATCH_SUDOERS" \
+            || err "could not install $WATCH_SUDOERS — a Wi-Fi<->Ethernet switch may prompt for a password"
+        else
+          err "generated sudoers failed validation — skipping it (service-change reloads may prompt)"
+        fi
+        rm -f "$tmp"
       fi
-      rm -f "$tmp"
       launchctl bootout "gui/$(id -u)/$WATCH_LABEL" 2>/dev/null || true
       launchctl bootstrap "gui/$(id -u)" "$WATCH_PLIST" 2>/dev/null \
         || launchctl load -w "$WATCH_PLIST" 2>/dev/null \
         || die "could not load the LaunchAgent — try: launchctl bootstrap gui/$(id -u) $WATCH_PLIST"
-      info "watch installed — auto-reload on network changes + liveness watchdog (recovers a wedged OR crashed tunnel)."
-      echo "  agent:  $WATCH_PLIST"
-      echo "  probe:  escape delay-test every ${WATCH_INTERVAL}s; auto-recover after $HEALTH_FAILS failures (>= ${HEALTH_COOLDOWN}s apart)"
-      echo "  log:    $WATCH_LOG"
-      echo "  status: $PROG watch status   ·   remove: $PROG watch uninstall"
+      if [ "$refresh" = 1 ]; then
+        info "watch refreshed for rowt $ROWT_VERSION (agent reloaded)."
+      else
+        info "watch installed — auto-reload on network changes + liveness watchdog (recovers a wedged OR crashed tunnel)."
+        echo "  agent:  $WATCH_PLIST"
+        echo "  probe:  escape delay-test every ${WATCH_INTERVAL}s; auto-recover after $HEALTH_FAILS failures (>= ${HEALTH_COOLDOWN}s apart)"
+        echo "  log:    $WATCH_LOG"
+        echo "  status: $PROG watch status   ·   remove: $PROG watch uninstall"
+      fi
       ;;
     uninstall)
       launchctl bootout "gui/$(id -u)/$WATCH_LABEL" 2>/dev/null \
@@ -3318,7 +3330,7 @@ o@lifecycle@uninstall [--purge]@reverse setup for a clean re-onboard (--purge wi
 o@lifecycle@skill <install|uninstall|status>@link the rowt agent skill so an agent can drive setup
 o@lifecycle@restart@bounce the tunnel in place (no re-render / proxy change)
 c@lifecycle@reload@re-apply after a network switch (re-render + restart + proxy)
-o@lifecycle@watch <install|uninstall|status>@auto-reload on net change; clears a stale proxy at login
+o@lifecycle@watch <install|uninstall|status|refresh>@auto-reload on net change; clears a stale proxy at login
 c@lifecycle@status@state + config validity + reachability
 o@lifecycle@explain <domain|ip>@explain a destination's lane (escape / corp / direct)
 o@lifecycle@connections [lane|-w]@live view: active connections + which lane each is on
@@ -3505,6 +3517,8 @@ un-strands the network (no proxy pointing at a dead port).
 
   install     write + load the LaunchAgent and the scoped sudoers rule (admin once)
   uninstall   unload + remove both
+  refresh     re-render the plist + reload the agent, no sudo (run after an upgrade;
+              done automatically by 'brew upgrade'). No-op if not installed.
   status      is the agent loaded? sudoers present? recent reload log  [default]
 Log: $WATCH_LOG   ·   agent: ~/Library/LaunchAgents/$WATCH_LABEL.plist
 EOF
@@ -3871,7 +3885,7 @@ _is_readonly() { # $1=cmd  $2=first arg
     proxy)  case "${2:-status}" in on|off) return 1 ;; *) return 0 ;; esac ;;
     router) case "${2:-status}" in up|down|restart) return 1 ;; *) return 0 ;; esac ;;
     vm)     case "${2:-status}" in up|down|restart|delete) return 1 ;; *) return 0 ;; esac ;;
-    watch)  case "${2:-status}" in install|uninstall) return 1 ;; *) return 0 ;; esac ;;
+    watch)  case "${2:-status}" in install|uninstall|refresh) return 1 ;; *) return 0 ;; esac ;;
     config) case "${2:-list}" in import) return 1 ;; *) return 0 ;; esac ;;
     escape|corp|block|direct) case "${2:-}" in ''|errors|stats|list|log) return 0 ;; *) return 1 ;; esac ;;
     server) case "${2:-}" in ''|list|ls|show) return 0 ;; *) return 1 ;; esac ;;
