@@ -1361,16 +1361,24 @@ cmd_render() {
   ensure_singbox_host
   local mode; mode="$(sget mode)"; mode="${mode:-host}"
   info "rendering configs (mode=$mode, port=$PORT, servers=$(jq length "$SERVERS"))"
+  # Render to temp files, validate, then atomically mv into place. A plain
+  # '> host.json' truncates the file to 0 bytes before writing, so a concurrent
+  # reader — sing-box starting up on a restart while the watchdog re-renders —
+  # can read an empty file and die with "decode config EOF". mv is atomic on the
+  # same filesystem, so readers only ever see a complete old-or-new file.
+  local th tv; th="$(mktemp "$HOST_CFG.XXXXXX")"; tv="$(mktemp "$VM_CFG.XXXXXX")"
   if [ "$mode" = "vm" ]; then
     # host forwards escape traffic to the VM over SOCKS; selector lives in the VM
-    assemble_host "$(build_escape_outbounds vm-host)" "127.0.0.1" "" > "$HOST_CFG"
+    assemble_host "$(build_escape_outbounds vm-host)" "127.0.0.1" "" > "$th"
   else
-    assemble_host "$(build_escape_outbounds host)" "127.0.0.1" "127.0.0.1:$CLASH_PORT" > "$HOST_CFG"
+    assemble_host "$(build_escape_outbounds host)" "127.0.0.1" "127.0.0.1:$CLASH_PORT" > "$th"
   fi
   # VM guest config (used only in mode vm): selector + clash API bound to the LAN
-  assemble_vm "$(build_escape_outbounds vm-guest)" "0.0.0.0" "0.0.0.0:$VM_CLASH" > "$VM_CFG"
-  "$SB" check -c "$HOST_CFG" || die "generated host config failed validation"
-  "$SB" check -c "$VM_CFG"   || die "generated vm config failed validation"
+  assemble_vm "$(build_escape_outbounds vm-guest)" "0.0.0.0" "0.0.0.0:$VM_CLASH" > "$tv"
+  "$SB" check -c "$th" || { rm -f "$th" "$tv"; die "generated host config failed validation"; }
+  "$SB" check -c "$tv" || { rm -f "$th" "$tv"; die "generated vm config failed validation"; }
+  mv -f "$th" "$HOST_CFG"
+  mv -f "$tv" "$VM_CFG"
   echo "  host: $HOST_CFG"
   echo "  vm:   $VM_CFG"
 }
