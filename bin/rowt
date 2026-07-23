@@ -50,7 +50,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.0.0"
+ROWT_VERSION="3.0.1"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -178,6 +178,7 @@ _audit() { # $* = message
 # Progress/diagnostics go to stderr so a function's stdout stays pure data — this
 # is what lets value-returning helpers (used in "$(...)") log safely.
 info() { echo "==> $*" >&2; }
+warn() { echo "warning: $*" >&2; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # state get/set — one key=value per line in $STATE
@@ -3144,7 +3145,12 @@ cmd_skill() {
         [ -n "$t" ] || continue
         if [ -L "$t" ] && [ "$(readlink "$t")" = "$src" ]; then info "already linked: $t"; did=1; continue; fi
         if [ -e "$t" ] || [ -L "$t" ]; then
-          if [ "$force" = 1 ]; then rm -rf "$t"; else err "$t exists (not our link) — re-run with --force to replace"; continue; fi
+          if _skill_ours "$t"; then
+            warn "$t already links another rowt skill ($(readlink "$t")) — switching it to $src"
+          elif [ "$force" != 1 ]; then
+            err "$t exists and isn't a rowt skill — re-run with --force to replace"; continue
+          fi
+          rm -rf "$t"
         fi
         mkdir -p "$(dirname "$t")"
         ln -sfn "$src" "$t" && { info "linked $t -> $src"; did=1; }
@@ -3423,10 +3429,11 @@ $PROG skill <install [--force] [--dev <repo>] | uninstall | status> — link the
 rowt agent skill so an agent (Claude Code, …) can help you set up & run rowt.
 
 Symlinks the user-facing 'rowt' skill into ~/.claude/skills (and ~/.agents/skills
-if present). Installed via brew, it links the STABLE opt path, so a later
-'brew upgrade rowt' refreshes the skill with no re-run. --dev <repo> instead
-points the link at a working checkout (<repo>/skills/rowt) for live-editing.
---force replaces an existing (non-rowt) entry. Start a NEW agent session to load it.
+if present). Run from a brew install it links the STABLE opt path (so a later
+'brew upgrade rowt' refreshes the skill); run from a repo checkout it links that
+checkout's skills/rowt. --dev <repo> forces a specific checkout. Switching from
+another rowt skill (e.g. a brew-linked one) just warns and re-points; --force is
+only needed to replace an unrelated (non-rowt) entry. New agent session to load it.
 EOF
 ;;
     run) cat <<EOF
