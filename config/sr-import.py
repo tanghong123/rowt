@@ -191,12 +191,17 @@ def main() -> int:
     args = ap.parse_args()
 
     store = args.store or _find(STORE_CANDIDATES)
-    conf = args.conf or _find_conf()
 
     if args.detect:
-        if store or conf:
+        # The store is an instant os.path.isfile check; _find_conf() does a
+        # recursive glob over the whole iCloud Drive (com~apple~CloudDocs/**)
+        # that can take many seconds and stall on dataless files. Only pay for
+        # it when there's no store, so detection stays inside its time box.
+        if store or args.conf or _find_conf():
             print("shadowrocket")
         return 0
+
+    conf = args.conf or _find_conf()
 
     result: dict = {
         "subscriptions": [],
