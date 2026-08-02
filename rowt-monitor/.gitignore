@@ -1,1 +1,5 @@
 /target
+# Hand-staged release artifacts (the prebuilt binaries + the tarball the tap's
+# `resource "rowt-monitor"` points at). The documented release flow tars straight
+# from target/release into /tmp, so nothing needs these to be kept.
+/dist
