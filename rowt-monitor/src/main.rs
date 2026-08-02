@@ -5,6 +5,7 @@
 //!   rowt-monitor --render WxH   print one fixture frame as plain text (for
 //!                               diffing against the golden renders) and exit
 //!   rowt-monitor --fixtures     force the fixture source (offline demo)
+//!   rowt-monitor --theme T      dark | light | auto (default auto)
 //!   rowt-monitor --version / --help
 
 use std::io::{stdout, Write};
@@ -20,6 +21,7 @@ use ratatui::Terminal;
 
 use rowt_monitor::app::App;
 use rowt_monitor::source::{FixtureSource, LiveSource, Source};
+use rowt_monitor::theme::{self, ThemeArg};
 use rowt_monitor::{input, render_text, ui};
 
 const DATA_TICK: Duration = Duration::from_secs(2);
@@ -32,6 +34,15 @@ fn main() -> Result<()> {
     let mut force_fixtures = false;
     let mut render: Option<String> = None;
     let mut render_ansi_spec: Option<String> = None;
+    // `--theme` wins over `ROWT_MONITOR_THEME` (set it in a profile to pin a
+    // terminal that answers OSC 11 wrongly); both default to auto-detect.
+    let mut theme_arg = match std::env::var("ROWT_MONITOR_THEME") {
+        Ok(v) => ThemeArg::parse(&v).unwrap_or_else(|| {
+            eprintln!("rowt-monitor: ignoring ROWT_MONITOR_THEME='{v}' (want dark|light|auto)");
+            ThemeArg::Auto
+        }),
+        Err(_) => ThemeArg::Auto,
+    };
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -44,6 +55,17 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             "--fixtures" | "--demo" => force_fixtures = true,
+            "--theme" => {
+                i += 1;
+                let v = args.get(i).cloned().unwrap_or_default();
+                match ThemeArg::parse(&v) {
+                    Some(t) => theme_arg = t,
+                    None => {
+                        eprintln!("rowt-monitor: bad --theme '{v}', want dark|light|auto");
+                        std::process::exit(2);
+                    }
+                }
+            }
             "--render" => {
                 i += 1;
                 render = Some(args.get(i).cloned().unwrap_or_default());
@@ -61,6 +83,15 @@ fn main() -> Result<()> {
         i += 1;
     }
 
+    // Headless renders go through a pipe, where there's no terminal to ask and
+    // nothing to be legible on: `auto` keeps the frozen dark palette so golden
+    // diffs are stable. An explicit `--theme` still applies, so the light palette
+    // can be rendered and diffed too. The live path resolves inside `run`, once
+    // raw mode is on — an OSC 11 reply is line-buffered and echoed without it.
+    let headless = render.is_some() || render_ansi_spec.is_some();
+    if headless && theme_arg != ThemeArg::Auto {
+        theme::set(theme::resolve(theme_arg));
+    }
     if let Some(spec) = render {
         return render_frame(&spec);
     }
@@ -75,13 +106,16 @@ fn main() -> Result<()> {
     } else {
         Box::new(LiveSource::new())
     };
-    run(App::new(source))
+    run(App::new(source), theme_arg)
 }
 
 fn print_help() {
     println!(
         "rowt monitor — read-only proxy observer\n\n\
-         USAGE:\n  rowt-monitor [--fixtures] [--render WxH] [--render-ansi WxH] [--version]\n\n\
+         USAGE:\n  rowt-monitor [--theme dark|light|auto] [--fixtures] [--render WxH] [--render-ansi WxH] [--version]\n\n\
+         THEME: --theme auto (default) reads the terminal's background — COLORFGBG, then an\n\
+         OSC 11 query — and picks the light palette only for a near-paper background, else dark.\n\
+         Pin it with --theme dark|light, or ROWT_MONITOR_THEME.\n\n\
          KEYS: ↑↓/jk move · ←→/hl pane · Tab focus · v flip · s span · f lane · / search · w window · y copy · p pause · ? help · q quit"
     );
 }
@@ -98,8 +132,13 @@ fn parse_wh(spec: &str) -> Option<(u16, u16)> {
     Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
 }
 
-fn run(mut app: App) -> Result<()> {
+fn run(mut app: App, theme_arg: ThemeArg) -> Result<()> {
     enable_raw_mode()?;
+    // Resolve the palette here, not in `main`: `auto` may query the terminal's
+    // background over /dev/tty, and that reply only comes back unbuffered and
+    // unechoed in raw mode. Still before the alternate screen, so nothing drawn
+    // can be disturbed if the terminal echoes something unexpected.
+    theme::set(theme::resolve(theme_arg));
     let mut out = stdout();
     execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
     // crossterm's mouse capture only reports motion while a button is held; also
@@ -158,8 +197,7 @@ fn event_loop<B: Backend>(term: &mut Terminal<B>, app: &mut App) -> Result<()> {
         app.conn_h = hit.conn_h.max(1);
         app.err_h = hit.err_h.max(1);
         app.side_by_side = hit.side_by_side;
-        app.strip_w = hit.strip_w;
-        app.strip_render_off = hit.strip_render_off;
+        app.feed_strip(&hit);
 
         if event::poll(ANIM_TICK)? {
             match event::read()? {

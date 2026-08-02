@@ -872,6 +872,7 @@ dependencies = [
  "anyhow",
  "arboard",
  "crossterm",
+ "libc",
  "ratatui",
  "regex",
  "rusqlite",

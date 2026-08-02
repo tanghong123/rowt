@@ -44,7 +44,9 @@ to toggle it (hover-highlights).
 - **Identity band** (neofetch-style logo + session facts) on top.
 - **`live connections`** and **`errors & blocked`** panes — side by side,
   split by a center rule (tab labels shorten on narrow terminals).
-- Full-width **`server health`** strip, merged onto the closing `┴` rule.
+- Full-width **`server health`** strip, merged onto the closing `┴` rule. When the
+  pool overflows the row it marquees, with the active `▶` server pinned at the left
+  edge (` │ ` seam) so it never scrolls out of view.
 
 ## Data sources
 
@@ -66,3 +68,20 @@ Everything is derived on a 2-second tick from: the clash API
 The layout, colors, and 130-column reflow reproduce those captures byte-for-byte
 in width. `tests/golden.rs` renders each geometry via ratatui's `TestBackend` and
 diffs against them; `--render WxH` is the same path exposed on the CLI.
+
+## Themes
+
+Two palettes — dark and light — with the same layout, glyphs, and keys; only the
+colors change. **[COLORS.md](COLORS.md)** is the full palette: every token in both
+columns, its contrast, and where it renders (a test keeps it matching `theme.rs`).
+
+```
+rowt monitor                       # auto-detect (default)
+rowt monitor --theme light         # pin it; also ROWT_MONITOR_THEME=light
+```
+
+`--theme auto` reads the terminal's *actual* background — `COLORFGBG` first, then
+an OSC 11 query with a 100 ms budget — and picks light only for a near-paper
+background (relative luminance ≥ 0.75); anything dimmer, or no answer at all,
+stays dark. `$TERM` is never consulted. Pin the theme if your terminal reports its
+background wrongly, or if you switch light/dark mid-session.

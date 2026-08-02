@@ -23,8 +23,9 @@ pub struct Hit {
     pub err_h: usize,
     pub lanes: Vec<(Rect, Option<Lane>)>, // header rate rows (None = `all`)
     pub windows: Vec<(Rect, Window)>,     // errors window tabs
-    pub strip_w: u16,                     // server-strip viewport width (§5.4)
+    pub strip_w: u16,                     // server-strip viewport width — the *ring* width when pinned (§5.4)
     pub strip_render_off: usize,          // marquee cell offset actually drawn (freeze to it → no jump)
+    pub strip_pin: Option<usize>,         // chip held fixed at the strip's left edge (the active one), if any
     pub chips: Vec<(Rect, usize)>,        // server chips as drawn this frame (click to select)
     pub sysproxy: Rect,                   // the "sys proxy on/off" cell region (click to toggle)
 }
@@ -49,7 +50,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, present: bool) -> Hit {
     if w < 8 || h < 12 {
         return Hit::default();
     }
-    let border = theme::fg(theme::BORDER);
+    let border = theme::fg(theme::border());
 
     // Single outer frame. The two panes and the server strip are NOT inset boxes;
     // they connect straight into this frame with ├ ┤ rules (┬ ┼ ┴ at the column
@@ -135,7 +136,8 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, present: bool) -> Hit {
     put(buf, xr, bottom, "╯", border);
 
     // Chips render at xl+2 with width (xr-xl-3); feed it back so App can
-    // freeze/scroll the ring to keep the selection visible.
+    // freeze/scroll the ring to keep the selection visible. `draw_chips` narrows
+    // this to the *scrolling* width when it pins the active chip at the left edge.
     hit.strip_w = (xr.saturating_sub(xl)).saturating_sub(3);
     draw_health(buf, xl, xr, div, merge_y, stats_y, chips_y, app, present, border, &mut hit);
 
@@ -161,13 +163,18 @@ fn split_err_width(interior: u16) -> u16 {
 }
 
 fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, xr: u16, app: &App, present: bool, hit: &mut Hit) {
-    let logo_st = theme::bold(theme::ESCAPE);
+    let logo_st = theme::bold(theme::escape());
     for (i, line) in LOGO.iter().enumerate() {
         put(buf, x0 + 2, y0 + 1 + i as u16, line, logo_st);
     }
-    let dimmer = theme::fg(theme::DIMMER);
-    let bright = theme::fg(theme::BRIGHT);
+    let dimmer = theme::fg(theme::dimmer());
+    let bright = theme::fg(theme::bright());
     let id = &app.snap.identity;
+    // The band is three tiers and no more: every *label* is `dimmer`; every value
+    // that carries a working/failed/warning state is semantic (green/orange/red,
+    // dim when there's no reading); everything else is plain `bright`. The one
+    // exception is the active server's name, which is `escape` because it marks
+    // *which* server, not how it's doing.
 
     // Grid: left column labels @37 / values @47, right column labels @70 /
     // values @78. Rows 2–4 carry (mode·server) (sys proxy·router) (collector·
@@ -190,20 +197,24 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, xr: u16, app: &App, present
     //   ERROR (orange) — router up but the active server (or, in auto mode, the
     //                    whole pool) is failing its probe
     //   LIVE  (green)  — healthy; breathes to show sampling is live
-    // Present/golden mode is always the neutral LIVE dot.
-    let (dot_c, label, label_c, breathe) = if present {
-        (theme::DIRECT, "LIVE", theme::BRIGHT, false)
+    // The label always takes the dot's own color, healthy included — the status
+    // *is* the state, so it reads as one signal in two glyphs rather than a
+    // colored dot next to a plain word only when something is wrong.
+    // Present/golden mode is always the neutral (non-breathing) LIVE dot.
+    let (dot_c, label, breathe) = if present {
+        (theme::direct(), "LIVE", false)
     } else if !id.router_up {
-        (theme::PERSISTENT, "DOWN", theme::PERSISTENT, false)
+        (theme::persistent(), "DOWN", false)
     } else if app.paused {
-        (theme::DIM, "PAUSED", theme::DIM, false)
+        (theme::dim(), "PAUSED", false)
     } else if id.active_ok == Some(false) {
-        (theme::UP, "ERROR", theme::UP, false)
+        (theme::up(), "ERROR", false)
     } else {
-        (theme::DIRECT, "LIVE", theme::BRIGHT, true)
+        (theme::direct(), "LIVE", true)
     };
+    let label_c = dot_c;
     let dot_c = if breathe {
-        theme::scale(dot_c, theme::pulse(app.started.elapsed().as_secs_f32()))
+        theme::fade(dot_c, theme::pulse(app.started.elapsed().as_secs_f32()))
     } else {
         dot_c
     };
@@ -223,14 +234,14 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, xr: u16, app: &App, present
     // bounded (<=15). 8 reproduces the golden (JP-Tokyo).
     let reserve = id.name_reserve.clamp(6, 15);
     let name_st = if present || id.active_ok == Some(true) {
-        theme::bold(theme::ESCAPE)
+        theme::bold(theme::escape())
     } else {
-        theme::fg(theme::DIM)
+        theme::fg(theme::dim())
     };
     put(buf, rv, y0 + 2, &truncate(&id.server_name, reserve), name_st);
     let (ms, ms_st) = match id.server_ms {
         Some(v) => (format!("{} ms", v), theme::bold(theme::latency_color(v))),
-        None => ("—".to_string(), theme::fg(theme::DIM)),
+        None => ("—".to_string(), theme::fg(theme::dim())),
     };
     put(buf, rv + 1 + reserve, y0 + 2, &ms, ms_st);
 
@@ -244,13 +255,13 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, xr: u16, app: &App, present
     hit.sysproxy = proxy_rect;
     let hovered = !present && app.hover.is_some_and(|(cx, cy)| rect_has(proxy_rect, cx, cy));
     let base = match proxy.as_str() {
-        "on" => theme::DIRECT,
-        "off" => theme::PERSISTENT,
-        _ => theme::UP,
+        "on" => theme::direct(),
+        "off" => theme::persistent(),
+        _ => theme::up(),
     };
     let (label_st, proxy_st) = if hovered {
-        let u = |c: Color| Style::default().fg(theme::brighten(c, 0.25)).add_modifier(Modifier::UNDERLINED);
-        (u(theme::DIMMER), u(base))
+        let u = |c: Color| Style::default().fg(theme::emphasize(c, 0.25)).add_modifier(Modifier::UNDERLINED);
+        (u(theme::dimmer()), u(base))
     } else {
         (dimmer, theme::fg(base))
     };
@@ -259,16 +270,17 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, xr: u16, app: &App, present
 
     // Row 3 right: "running · N%" (CPU colored — orange/red flags a spin/wedge)
     // or, when down, "down · <reason>" in red so a glance says what to fix.
+    // "running" itself carries no state — the CPU beside it does — so it's plain.
     put(buf, rl, y0 + 3, "router", dimmer);
     if id.router_up {
         put(buf, rv, y0 + 3, &id.router, bright);
         if let Some(cpu) = id.router_cpu {
             let cpu_c = if cpu >= 120.0 {
-                theme::PERSISTENT
+                theme::persistent()
             } else if cpu >= 50.0 {
-                theme::UP
+                theme::up()
             } else {
-                theme::DIRECT
+                theme::direct()
             };
             put(buf, rv + dw(&id.router) + 1, y0 + 3, "·", dimmer);
             put(buf, rv + dw(&id.router) + 3, y0 + 3, &format!("{cpu:.0}%"), theme::fg(cpu_c));
@@ -279,7 +291,7 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, xr: u16, app: &App, present
         } else {
             format!("down · {}", id.router_reason)
         };
-        put(buf, rv, y0 + 3, &down, theme::fg(theme::PERSISTENT));
+        put(buf, rv, y0 + 3, &down, theme::fg(theme::persistent()));
     }
 
     // Row 4: collector · watch — both 9-char labels, so the left one aligns under
@@ -294,9 +306,9 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, xr: u16, app: &App, present
 /// active, orange = installed-but-stopped, dim = absent.
 fn status_color(v: &str) -> Style {
     match v {
-        "on" => theme::fg(theme::DIRECT),
-        "off" => theme::fg(theme::UP),
-        _ => theme::fg(theme::DIM),
+        "on" => theme::fg(theme::direct()),
+        "off" => theme::fg(theme::up()),
+        _ => theme::fg(theme::dim()),
     }
 }
 
@@ -328,11 +340,11 @@ fn draw_caption(buf: &mut Buffer, corner: u16, y: u16, label: &str, app: &App, p
             _ => false,
         };
     let cstyle = if locked {
-        theme::bold(theme::ARMED)
+        theme::bold(theme::armed())
     } else if focused {
-        theme::bold(theme::BRIGHT)
+        theme::bold(theme::bright())
     } else {
-        theme::fg(theme::DIMMER)
+        theme::fg(theme::dimmer())
     };
     let mut x = corner + 1;
     put(buf, x, y, "─┤ ", border);
@@ -365,10 +377,10 @@ fn draw_conn_pane(
     present: bool,
     hit: &mut Hit,
 ) {
-    let dimmer = theme::fg(theme::DIMMER);
-    let dim = theme::fg(theme::DIM);
-    let up = theme::fg(theme::UP);
-    let down = theme::fg(theme::DOWN);
+    let dimmer = theme::fg(theme::dimmer());
+    let dim = theme::fg(theme::dim());
+    let up = theme::fg(theme::up());
+    let down = theme::fg(theme::down());
 
     // Header rows = a per-lane aggregate (all + escape/corp/direct) of the detail
     // rows below, matching whichever columns the current view shows: Live sums
@@ -423,7 +435,7 @@ fn draw_conn_pane(
         }
         let strong = lane.is_none();
         let name_st = match lane {
-            None => theme::bold(theme::BRIGHT),
+            None => theme::bold(theme::bright()),
             Some(l) => theme::bold(l.color()),
         };
         put(buf, x0 + 1, y, lane.map_or("all", |l| l.label()), name_st);
@@ -435,7 +447,7 @@ fn draw_conn_pane(
                 Some(l) => app.snap.lanes.iter().find(|a| a.lane == *l).map(|a| (a.up, a.down)).unwrap_or((0.0, 0.0)),
             };
             let idle = agg.conns == 0;
-            let rate_st = if strong { theme::bold(theme::BRIGHT) } else { dim };
+            let rate_st = if strong { theme::bold(theme::bright()) } else { dim };
             if w >= 72 {
                 put(buf, x0 + 8, y, "↑", up);
                 if idle {
@@ -453,20 +465,20 @@ fn draw_conn_pane(
                 }
             }
             // #conns / ↑bytes / ↓bytes aligned under the data columns.
-            put_right(buf, x0 + w - 38, y, &agg.conns.to_string(), if strong { theme::bold(theme::BRIGHT) } else { dimmer });
+            put_right(buf, x0 + w - 38, y, &agg.conns.to_string(), if strong { theme::bold(theme::bright()) } else { dimmer });
             let (ust, dst) = if strong {
-                (theme::bold(theme::BRIGHT), theme::bold(theme::BRIGHT))
+                (theme::bold(theme::bright()), theme::bold(theme::bright()))
             } else {
-                (theme::fg(theme::UP_TABLE), theme::fg(theme::DOWN_TABLE))
+                (theme::fg(theme::up_table()), theme::fg(theme::down_table()))
             };
             put_right(buf, x0 + w - 27, y, &format::bytes_total(agg.lup), ust);
             put_right(buf, x0 + w - 17, y, &format::bytes_total(agg.ldn), dst);
         } else {
             let series = if dir_up { &agg.hu } else { &agg.hd };
-            let dir_c = if dir_up { theme::UP_TABLE } else { theme::DOWN_TABLE };
+            let dir_c = if dir_up { theme::up_table() } else { theme::down_table() };
             for k in 0..4u16 {
                 let (_, span, is_rate) = bcols[(3 - k) as usize];
-                let st = if strong { theme::bold(theme::BRIGHT) } else { theme::fg(dir_c) };
+                let st = if strong { theme::bold(theme::bright()) } else { theme::fg(dir_c) };
                 put_right(buf, hcol_x(k), y, &hfmt(series[(3 - k) as usize], span, is_rate), st);
             }
         }
@@ -498,8 +510,8 @@ fn draw_conn_pane(
 /// Both render the shared `app.rows`.
 #[allow(clippy::too_many_arguments)]
 fn draw_conn_live_cols(buf: &mut Buffer, x0: u16, w: u16, col_y: u16, list_y: u16, list_h: usize, scroll: usize, rows: &[&crate::model::ConnRow], app: &App, present: bool) {
-    let dimmer = theme::fg(theme::DIMMER);
-    let dim = theme::fg(theme::DIM);
+    let dimmer = theme::fg(theme::dimmer());
+    let dim = theme::fg(theme::dim());
     put(buf, x0 + 1, col_y, "LANE", dimmer);
     put(buf, x0 + 8, col_y, "HOST:PORT", dimmer);
     put_right(buf, x0 + w - 38, col_y, "#", dimmer);
@@ -519,9 +531,9 @@ fn draw_conn_live_cols(buf: &mut Buffer, x0: u16, w: u16, col_y: u16, list_y: u1
         let hostport = host_label(c);
         let selected = !present && app.focus == Focus::Conn && app.conn_active() && idx == app.conn_sel;
         let shown = if selected { marquee(&hostport, host_max, app.started.elapsed().as_secs_f32()) } else { truncate(&hostport, host_max) };
-        put(buf, x0 + 8, y, &shown, if dormant { dim } else { theme::fg(theme::BRIGHT) });
+        put(buf, x0 + 8, y, &shown, if dormant { dim } else { theme::fg(theme::bright()) });
         put_right(buf, x0 + w - 38, y, &c.conns.to_string(), dimmer);
-        let (up_st, down_st) = if dormant { (dim, dim) } else { (theme::fg(theme::UP_TABLE), theme::fg(theme::DOWN_TABLE)) };
+        let (up_st, down_st) = if dormant { (dim, dim) } else { (theme::fg(theme::up_table()), theme::fg(theme::down_table())) };
         put_right(buf, x0 + w - 27, y, &format::bytes_total(c.live_up), up_st);
         put_right(buf, x0 + w - 17, y, &format::bytes_total(c.live_down), down_st);
         put(buf, x0 + w - 14, y, &truncate(&c.rule, 13), dimmer);
@@ -536,11 +548,11 @@ fn draw_conn_live_cols(buf: &mut Buffer, x0: u16, w: u16, col_y: u16, list_y: u1
 /// hosts (not currently connected) render greyed. See METRICS.md §5.
 #[allow(clippy::too_many_arguments)]
 fn draw_conn_metric_cols(buf: &mut Buffer, x0: u16, w: u16, col_y: u16, list_y: u16, list_h: usize, scroll: usize, rows: &[&crate::model::ConnRow], app: &App, present: bool) {
-    let dimmer = theme::fg(theme::DIMMER);
-    let dim = theme::fg(theme::DIM);
+    let dimmer = theme::fg(theme::dimmer());
+    let dim = theme::fg(theme::dim());
     let up = app.conn_view.is_up();
     let arrow = if up { "↑" } else { "↓" };
-    let dir_c = if up { theme::UP_TABLE } else { theme::DOWN_TABLE };
+    let dir_c = if up { theme::up_table() } else { theme::down_table() };
     let cols = app.band.cols(); // [(label, span_secs, is_rate); 4], index 0 = leftmost
     const COLW: u16 = 8;
     let col_x = |k: u16| x0 + w - 2 - k * COLW; // k=0 rightmost = band col index 3
@@ -570,7 +582,7 @@ fn draw_conn_metric_cols(buf: &mut Buffer, x0: u16, w: u16, col_y: u16, list_y: 
         let selected = !present && app.focus == Focus::Conn && app.conn_active() && idx == app.conn_sel;
         let host = host_label(c);
         let shown = if selected { marquee(&host, host_max, app.started.elapsed().as_secs_f32()) } else { truncate(&host, host_max) };
-        put(buf, x0 + 8, y, &shown, if dormant { dim } else { theme::fg(theme::BRIGHT) });
+        put(buf, x0 + 8, y, &shown, if dormant { dim } else { theme::fg(theme::bright()) });
         let series = if up { &c.hist_up } else { &c.hist_down };
         for k in 0..4u16 {
             let (_, span, is_rate) = cols[(3 - k) as usize];
@@ -590,7 +602,7 @@ fn draw_conn_metric_cols(buf: &mut Buffer, x0: u16, w: u16, col_y: u16, list_y: 
 fn draw_empty_match(buf: &mut Buffer, x0: u16, list_y: u16, w: u16, app: &App) {
     if let Some(pat) = app.search_pattern() {
         let msg = truncate(&format!("no hosts match /{pat}/"), w.saturating_sub(2));
-        put(buf, x0 + 1, list_y, &msg, theme::fg(theme::DIM));
+        put(buf, x0 + 1, list_y, &msg, theme::fg(theme::dim()));
     }
 }
 
@@ -619,8 +631,8 @@ fn draw_err_pane(
     present: bool,
     hit: &mut Hit,
 ) {
-    let dimmer = theme::fg(theme::DIMMER);
-    let dim = theme::fg(theme::DIM);
+    let dimmer = theme::fg(theme::dimmer());
+    let dim = theme::fg(theme::dim());
 
     // Header row 0: "aggregated over" + window tabs.
     put(buf, x0 + 1, hdr_y, "aggregated over", dimmer);
@@ -628,9 +640,9 @@ fn draw_err_pane(
 
     // Category rows.
     let cats = [
-        ("transient", theme::TRANSIENT, app.snap.transient),
-        ("persistent", theme::PERSISTENT, app.snap.persistent),
-        ("blocked", theme::BLOCKED, app.snap.blocked),
+        ("transient", theme::transient(), app.snap.transient),
+        ("persistent", theme::persistent(), app.snap.persistent),
+        ("blocked", theme::blocked(), app.snap.blocked),
     ];
     for (i, (label, color, cat)) in cats.iter().enumerate() {
         let y = hdr_y + 1 + i as u16;
@@ -638,7 +650,7 @@ fn draw_err_pane(
             break;
         }
         put(buf, x0 + 1, y, label, theme::bold(*color));
-        put_right(buf, x0 + 15, y, &cat.count.to_string(), theme::bold(theme::BRIGHT));
+        put_right(buf, x0 + 15, y, &cat.count.to_string(), theme::bold(theme::bright()));
         put(buf, x0 + 16, y, &fmt_dom(cat), dimmer);
     }
 
@@ -664,7 +676,7 @@ fn draw_err_pane(
         }
         let e = &errs[idx];
         let y = list_y + row as u16;
-        put_right(buf, x0 + 5, y, &e.count.to_string(), theme::bold(theme::BRIGHT));
+        put_right(buf, x0 + 5, y, &e.count.to_string(), theme::bold(theme::bright()));
         // TYPE carries the category by color: dns=transient orange,
         // timeout/reset/refused=persistent red, blocked=purple.
         put(buf, x0 + 9, y, e.kind.label(), theme::fg(e.kind.color()));
@@ -702,12 +714,12 @@ fn draw_windows(buf: &mut Buffer, x0: u16, w: u16, y: u16, app: &App, hit: &mut 
     }
     let total: u16 = parts.iter().map(|(s, _, _)| dw(s)).sum::<u16>() + (parts.len() as u16 - 1);
     let mut x = (x0 + w - 2).saturating_sub(total.saturating_sub(1));
-    let dimmer = theme::fg(theme::DIMMER);
+    let dimmer = theme::fg(theme::dimmer());
     for (i, (s, win, sel)) in parts.iter().enumerate() {
         if i > 0 {
             x += 1; // separating space
         }
-        let st = if *sel { theme::bold(theme::BRIGHT) } else { dimmer };
+        let st = if *sel { theme::bold(theme::bright()) } else { dimmer };
         put(buf, x, y, s, st);
         hit.windows.push((Rect::new(x, y, dw(s), 1), *win));
         x += dw(s);
@@ -740,11 +752,11 @@ fn draw_health(
     // amber once a chip is selected (frozen strip).
     let focused = !present && app.focus == Focus::Health;
     let cap = if focused && app.strip_sel.is_some() {
-        theme::bold(theme::ARMED)
+        theme::bold(theme::armed())
     } else if focused {
-        theme::bold(theme::BRIGHT)
+        theme::bold(theme::bright())
     } else {
-        theme::fg(theme::DIMMER)
+        theme::fg(theme::dimmer())
     };
     put(buf, div + 1, merge_y, "─┤ ", border);
     put(buf, div + 4, merge_y, "server health", cap);
@@ -756,13 +768,13 @@ fn draw_health(
     // Stats: the active server is named in the header identity band and marked
     // in the strip below, so it is not repeated here.
     let stats = format!("{} servers · {} up · {} down", s.servers_total, s.servers_up, s.servers_down);
-    put(buf, x0 + 1, stats_y, &stats, theme::fg(theme::DIM));
+    put(buf, x0 + 1, stats_y, &stats, theme::fg(theme::dim()));
 
     // chips row — or a "probing…" hint while the first round is still running
     // (router up, pool known, but nothing has come back yet), so an empty strip
     // never looks broken.
     if !present && s.identity.router_up && s.servers_total > 0 && s.servers_up == 0 && s.servers_down == 0 {
-        put(buf, x0 + 1, chips_y, "probing…", theme::fg(theme::DIM));
+        put(buf, x0 + 1, chips_y, "probing…", theme::fg(theme::dim()));
     } else {
         draw_chips(buf, x0 + 1, chips_y, w.saturating_sub(2), app, present, hit);
     }
@@ -771,10 +783,12 @@ fn draw_health(
 /// Draw the server strip. When a chip is selected the marquee is frozen: the ring
 /// is rendered at `app.strip_off` (the exact cell offset it had when frozen, so it
 /// doesn't jump — a partial chip may sit at the left edge) and scrolls only to
-/// keep the selection visible (`App::reveal_strip`); otherwise it marquees.
+/// keep the selection visible (`App::reveal_strip`); otherwise it marquees. In
+/// marquee mode the **active `▶` chip is pinned** at the strip's left edge and only
+/// the rest of the pool scrolls past it (see `PIN_SEP` / `MIN_RING_W`).
 fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: bool, hit: &mut Hit) {
-    let bright = theme::fg(theme::BRIGHT);
-    let escape = theme::fg(theme::ESCAPE);
+    let bright = theme::fg(theme::bright());
+    let escape = theme::fg(theme::escape());
     let sel = if !present && app.focus == Focus::Health { app.strip_sel } else { None };
     // Each chip is a run of styled segments. The active server leads with a ▶;
     // the *selected* chip (frozen strip) is tinted amber + selection background.
@@ -785,12 +799,12 @@ fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: boo
         .enumerate()
         .map(|(i, c)| {
             let picked = sel == Some(i);
-            let bg = |st: Style| if picked { st.bg(theme::SELECTION_BG) } else { st };
+            let bg = |st: Style| if picked { st.bg(theme::selection_bg()) } else { st };
             let lat = bg(theme::fg(theme::latency_color(c.ms)));
             let name_st = if picked {
-                bg(theme::bold(theme::ARMED))
+                bg(theme::bold(theme::armed()))
             } else if c.active {
-                theme::bold(theme::ESCAPE)
+                theme::bold(theme::escape())
             } else {
                 bright
             };
@@ -811,6 +825,7 @@ fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: boo
     // Whole pool fits (static left-to-right layout, whether or not selected).
     if present || total <= w {
         hit.strip_render_off = 0; // static: everything starts at column 0
+        hit.strip_pin = None; // nothing scrolls, so nothing needs pinning
         let mut col = x0;
         for (i, segs) in chips.iter().enumerate() {
             let sep = if i > 0 { 3 } else { 0 };
@@ -828,15 +843,43 @@ fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: boo
         return;
     }
 
+    // The pool overflows, so it scrolls — pin the active `▶` chip at the left edge
+    // (it's the one you most want in view) and marquee only the rest past it, in
+    // whatever width is left over. Skipped when that would leave too little room to
+    // scroll in (narrow terminal / long active name), which keeps the old behaviour.
+    let pin = app
+        .snap
+        .chips
+        .iter()
+        .position(|c| c.active)
+        .filter(|&i| widths[i] + PIN_SEP + MIN_RING_W <= w);
+    hit.strip_pin = pin;
+    let pin_w = pin.map_or(0, |i| widths[i] + PIN_SEP);
+    let rx = x0 + pin_w; // ring viewport origin
+    let rw = w - pin_w; // ring viewport width — what App freezes/scrolls against
+    hit.strip_w = rw;
+    if let Some(i) = pin {
+        let mut col = x0;
+        for (s, st) in &chips[i] {
+            put(buf, col, y, s, *st);
+            col += dw(s);
+        }
+        hit.chips.push((Rect::new(x0, y, widths[i], 1), i));
+        put(buf, col + 1, y, "│", theme::fg(theme::border())); // ` │ ` seam: the pin doesn't move
+    }
+
     // Ring: one cell buffer (chips + 3-cell separators), rendered at a cell offset.
     // Frozen at `app.strip_off` when a chip is selected, else the time-based marquee.
     let mut cells: Vec<(char, Style)> = Vec::new();
-    let mut starts: Vec<usize> = Vec::with_capacity(chips.len());
+    let mut ring: Vec<(usize, usize)> = Vec::with_capacity(chips.len()); // (chip index, start cell)
     for (i, segs) in chips.iter().enumerate() {
-        if i > 0 {
+        if pin == Some(i) {
+            continue; // pinned: drawn above, outside the ring
+        }
+        if !cells.is_empty() {
             cells.extend([(' ', Style::default()); 3]);
         }
-        starts.push(cells.len());
+        ring.push((i, cells.len()));
         for (s, st) in segs {
             cells.extend(s.chars().map(|c| (c, *st)));
         }
@@ -849,18 +892,18 @@ fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: boo
         None => (app.marquee_off0 + (app.marquee_t0.elapsed().as_secs_f32() * MARQUEE_CPS) as usize) % span,
     };
     hit.strip_render_off = off; // freezing captures exactly this, so the view can't jump
-    for k in 0..w as usize {
+    for k in 0..rw as usize {
         let ci = (off + k) % span;
         let (ch, st) = if ci < cells.len() { cells[ci] } else { (' ', Style::default()) };
         let mut b = [0u8; 4];
-        put(buf, x0 + k as u16, y, ch.encode_utf8(&mut b), st);
+        put(buf, rx + k as u16, y, ch.encode_utf8(&mut b), st);
     }
     // Record each on-screen chip's rect so a click can select it — including the
     // two edge chips that are only *partially* visible: the last one (clipped on
     // the right) and the first one (clipped on the left, its left edge scrolled
-    // off, so its right portion shows from column 0).
-    let wu = w as usize;
-    for (i, &st) in starts.iter().enumerate() {
+    // off, so its right portion shows from the ring's column 0).
+    let wu = rw as usize;
+    for &(i, st) in &ring {
         let wd = widths[i] as usize;
         let kl = (st + span - off % span) % span; // display col of the chip's left edge
         let (cx, cw) = if kl < wu {
@@ -871,11 +914,18 @@ fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: boo
             continue;
         };
         if cw > 0 {
-            hit.chips.push((Rect::new(x0 + cx as u16, y, cw as u16, 1), i));
+            hit.chips.push((Rect::new(rx + cx as u16, y, cw as u16, 1), i));
         }
     }
     hover_chip(buf, app, present, hit);
 }
+
+/// Cells between the pinned active chip and the scrolling ring — the same 3-cell
+/// gap chips use between themselves, drawn as ` │ ` so the seam reads as fixed.
+const PIN_SEP: u16 = 3;
+/// Don't pin unless at least this much width is left for the ring to scroll in;
+/// below it the pin would swallow the strip, so the whole pool marquees instead.
+const MIN_RING_W: u16 = 12;
 
 /// Hover feedback for the server strip: brighten + underline the chip under the
 /// pointer (mirrors the `sys proxy` hover). A post-pass over `hit.chips`, so it
@@ -889,7 +939,7 @@ fn hover_chip(buf: &mut Buffer, app: &App, present: bool, hit: &Hit) {
         for x in r.left()..r.right() {
             if let Some(c) = buf.cell_mut((x, r.top())) {
                 let f = c.fg;
-                c.set_fg(theme::brighten(f, 0.25));
+                c.set_fg(theme::emphasize(f, 0.25));
                 c.modifier.insert(Modifier::UNDERLINED);
             }
         }
@@ -908,15 +958,15 @@ fn rect_has(r: Rect, col: u16, row: u16) -> bool {
 fn highlight_row(buf: &mut Buffer, x0: u16, y: u16, w: u16, accent: Color) {
     for x in x0..x0 + w {
         if let Some(c) = buf.cell_mut((x, y)) {
-            c.set_bg(theme::SELECTION_BG);
+            c.set_bg(theme::selection_bg());
             let f = c.fg;
-            c.set_fg(theme::brighten(f, 0.30));
+            c.set_fg(theme::emphasize(f, 0.30));
         }
     }
     if let Some(c) = buf.cell_mut((x0, y)) {
         c.set_symbol("▎");
         c.set_fg(accent);
-        c.set_bg(theme::SELECTION_BG);
+        c.set_bg(theme::selection_bg());
     }
 }
 
@@ -936,7 +986,7 @@ fn draw_scrollbar(buf: &mut Buffer, x: u16, y0: u16, h: usize, total: usize, scr
     let track = h;
     let pos = (scroll * (track.saturating_sub(1))) / total.saturating_sub(1).max(1);
     let y = y0 + pos.min(track - 1) as u16;
-    put(buf, x, y, "▐", theme::fg(theme::DIM));
+    put(buf, x, y, "▐", theme::fg(theme::dim()));
 }
 
 /// Cells-per-second for horizontal auto-scroll (time-based, so the speed is
@@ -992,15 +1042,15 @@ fn draw_help(buf: &mut Buffer, area: Rect) {
     let bh = lines.len() as u16 + 2;
     let bx = area.left() + (area.width.saturating_sub(bw + 2)) / 2;
     let by = area.top() + (area.height.saturating_sub(bh)) / 2;
-    let border = theme::fg(theme::BORDER_FOCUS);
+    let border = theme::fg(theme::border_focus());
     put(buf, bx, by, "╭", border);
     hfill(buf, bx + 1, bx + bw, by, '─', border);
     put(buf, bx + bw + 1, by, "╮", border);
     for (i, l) in lines.iter().enumerate() {
         let y = by + 1 + i as u16;
         put(buf, bx, y, "│", border);
-        hfill(buf, bx + 1, bx + bw, y, ' ', theme::fg(theme::BRIGHT)); // opaque row
-        put(buf, bx + 1, y, l, theme::fg(theme::BRIGHT));
+        hfill(buf, bx + 1, bx + bw, y, ' ', theme::fg(theme::bright())); // opaque row
+        put(buf, bx + 1, y, l, theme::fg(theme::bright()));
         put(buf, bx + bw + 1, y, "│", border);
     }
     let yb = by + bh - 1;
@@ -1013,7 +1063,7 @@ fn draw_help(buf: &mut Buffer, area: Rect) {
 /// states (CONTROLS.md §6): the amber confirm bar when an edit is armed, else a
 /// global key group plus a contextual group for the current selection/strip.
 pub fn draw_footer(buf: &mut Buffer, area: Rect, app: &App) {
-    let dimmer = theme::fg(theme::DIMMER);
+    let dimmer = theme::fg(theme::dimmer());
     let y = area.bottom().saturating_sub(1);
     let left = area.left();
 
@@ -1028,7 +1078,7 @@ pub fn draw_footer(buf: &mut Buffer, area: Rect, app: &App) {
     if let Some(a) = &app.armed {
         let bar = format!(" CONFIRM  {}  · press {} again or ↵ to apply · esc cancel ", a.label(), a.key);
         let shown = truncate(&bar, area.width);
-        put(buf, left, y, &shown, theme::bold(theme::ARMED));
+        put(buf, left, y, &shown, theme::bold(theme::armed()));
         return;
     }
 
@@ -1072,9 +1122,9 @@ pub fn draw_footer(buf: &mut Buffer, area: Rect, app: &App) {
     if let Some(t) = app.pending_reload {
         let secs = t.saturating_duration_since(std::time::Instant::now()).as_secs() + 1;
         let chip = format!(" ◍ lane edits queued · reload in ~{secs}s ");
-        put_right(buf, area.right().saturating_sub(1), y, &truncate(&chip, area.width), theme::fg(theme::ARMED));
+        put_right(buf, area.right().saturating_sub(1), y, &truncate(&chip, area.width), theme::fg(theme::armed()));
     } else if let Some((msg, _)) = toast_fresh {
-        let color = if msg.starts_with('⚠') { theme::PERSISTENT } else { theme::DIRECT };
+        let color = if msg.starts_with('⚠') { theme::persistent() } else { theme::direct() };
         let m = truncate(&format!(" {msg} "), area.width);
         put_right(buf, area.right().saturating_sub(1), y, &m, theme::fg(color));
     } else if app.search_committed() {
@@ -1086,9 +1136,9 @@ pub fn draw_footer(buf: &mut Buffer, area: Rect, app: &App) {
 /// cell), and a right-aligned key hint. Full mid-string editing lives in `app`.
 fn draw_search_editor(buf: &mut Buffer, area: Rect, y: u16, app: &App) {
     let left = area.left();
-    let base = theme::fg(theme::BRIGHT);
+    let base = theme::fg(theme::bright());
     let cursor_st = base.add_modifier(Modifier::REVERSED);
-    put(buf, left, y, "/", theme::bold(theme::BRIGHT));
+    put(buf, left, y, "/", theme::bold(theme::bright()));
     let chars: Vec<char> = app.search.buf.chars().collect();
     let cur = app.search.cursor.min(chars.len());
     let mut x = left + 1;
@@ -1105,7 +1155,7 @@ fn draw_search_editor(buf: &mut Buffer, area: Rect, y: u16, app: &App) {
     let hint = " regex · ↵ apply · esc cancel ";
     let start = area.right().saturating_sub(dw(hint));
     if start > x + 1 {
-        put_right(buf, area.right().saturating_sub(1), y, hint, theme::fg(theme::DIMMER));
+        put_right(buf, area.right().saturating_sub(1), y, hint, theme::fg(theme::dimmer()));
     }
 }
 
@@ -1123,7 +1173,7 @@ fn draw_search_indicator(buf: &mut Buffer, area: Rect, y: u16, hints_end: u16, a
     // start column if right-aligned; fits when it clears the hints by ≥1 cell.
     let fits = |s: &str| right.saturating_sub(dw(s).saturating_sub(1)) > hints_end;
     let within10 = app.search.changed_at.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(10));
-    let st = theme::fg(theme::BRIGHT);
+    let st = theme::fg(theme::bright());
     if fits(&full) || within10 {
         // Blocks the hint tail during the 10 s echo window when it doesn't fit.
         put_right(buf, right, y, &truncate(&full, area.width), st);

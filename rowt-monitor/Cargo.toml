@@ -33,6 +33,10 @@ tungstenite = { version = "0.24", default-features = false, features = ["handsha
 # Host-name search filter (`/`). Compiled once per pattern change; matched
 # unanchored + case-insensitive over a few hundred rows/keystroke.
 regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-case"] }
+# `--theme auto`: poll /dev/tty for the OSC 11 background reply with a deadline,
+# so an unanswering terminal costs 100 ms and never a wedged reader thread.
+# Already in the tree via crossterm; named here because theme.rs uses it directly.
+libc = "0.2"
 
 [profile.release]
 opt-level = 2

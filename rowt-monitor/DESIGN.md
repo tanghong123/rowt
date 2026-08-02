@@ -76,7 +76,7 @@ src/
   input.rs     crossterm KeyEvent/MouseEvent -> Action
   ui.rs        the renderer: paints the whole frame into a ratatui Buffer
   paint.rs     small cell-painting helpers (put, put_right, hfill, truncate)
-  theme.rs     truecolor design tokens + helpers (pulse, latency_color, …)
+  theme.rs     truecolor design tokens (dark + light) + theme selection/detection
   format.rs    byte-rate formatters (rate_parts, compact)
   clipboard.rs OSC 52 + arboard fallback
   model.rs     data model (Snapshot, Conn, ErrRow, Server, Identity, Lane, …)
@@ -150,12 +150,81 @@ Column offsets in `ui.rs` were measured from the ground-truth renders.
   no marquee, full-brightness dot) — this is what `--render` and the golden
   tests use, so they match the frozen capture. `present=false` layers on the
   live affordances.
-- **Selection** is a subtle background + brightened text + a `▎` accent bar in
+- **Selection** is a subtle background + emphasized text + a `▎` accent bar in
   the row's semantic color (not reverse-video).
 - **Overflow:** long values truncate with `…`; only the *selected* row's
   overflowing field marquees. A thin scroll tick marks overflowing lists.
 
-### 4.1 Golden-render verification
+### 4.1 Themes (dark + light)
+
+Two palettes, one contract. **[COLORS.md](COLORS.md) is the shipped palette** —
+every token, both columns, its contrast, and where it renders; a test parses that
+table and diffs it against `theme::{DARK,LIGHT}`, and the token list is checked
+for exhaustiveness at compile time, so the doc cannot drift from the code. (It
+supersedes the design handoff's own `COLORS.md`, which describes an older model of
+the UX.) Same layout, same glyphs, same control behaviour between themes; only the
+color values change, and a golden test asserts a light frame is cell-for-cell
+identical to a dark one.
+
+- **A terminal owns its background.** The TUI paints **foregrounds only**, plus
+  the one small selection cell background — the handoff's three "mock-only
+  surfaces" exist so the HTML prototype can render and must never reach a cell (a
+  golden test asserts none of the six values does, as fg or bg). The palette
+  therefore stores no surface color at all: `emphasize` (selection, hover) pushes
+  text *away* from the background — brighter on dark, **darker on light**, since
+  the brightening that lifts text off a dark terminal washes it out on paper —
+  and `fade` (the `● LIVE` pulse) sinks it toward black on dark, toward white on
+  light. White, not the mock's screen color: we never assume a specific paper.
+- **Selection.** The handoff's `rgba(20,25,50,.05)` overlay is composited into a
+  flat `selection_bg`, since a terminal can't blend cell backgrounds.
+- **The focus ring** is the one place light diverges behaviourally. `border_focus`
+  draws the help overlay's frame (the panes signal focus in their captions
+  instead — the single split frame can't carry a per-pane ring). Dark slams it to
+  `bright`: maximum lift, which reads as emitted light. On paper the same
+  treatment reads as a smear — a heavy black slab around the box — so light takes
+  a single-weight step to `dim` instead: unmistakable against `border`'s 2.0:1,
+  without the slab. That's the terminal form of the handoff's "1px accent + soft
+  halo, not 2px + inset glow": a cell has exactly one weight, so the softening
+  has to land in the color step.
+- **Theme selection.** `--theme dark|light|auto` (or `ROWT_MONITOR_THEME`),
+  default `auto`. `auto` reads the terminal's *actual* background: `COLORFGBG`
+  first — last field only; a non-numeric `default` is *no answer*, not a guess —
+  then an OSC 11 query, else dark. `$TERM` is never consulted; it says which
+  escape codes a terminal understands, not what color it's painted.
+- **Near-paper guard.** The light tokens are tuned for relative luminance ≥ 0.75
+  (`#eaeaea`–`#ffffff`, warm paper included). A dimmer background stays on dark
+  rather than washing out, so a mid-gray terminal never gets the light palette.
+- **The OSC 11 probe** goes to `/dev/tty` (not stdin/stdout, so a pipe can neither
+  swallow the query nor block the read), on a non-blocking fd polled to a 100 ms
+  deadline — an unanswering terminal costs 100 ms once at startup and never a
+  wedged reader thread. It runs after raw mode is on (the reply is line-buffered
+  and echoed otherwise) and before the alternate screen. Headless `--render` /
+  `--render-ansi` never probe: `auto` there keeps the frozen dark palette so
+  golden diffs stay stable, while an explicit `--theme` still applies.
+- **No spare tokens.** Every `Palette` field has at least one render site, and
+  `ui.rs` contains no literal color — a call site names a token or nothing. Five
+  tokens from the handoff are deliberately absent, folded into a survivor because
+  a terminal cell is not a CSS box: `rule`→`border` (a 1.2:1 hairline is a CSS
+  affordance; a terminal draws a rule as a full `─` cell row, which at 1.2:1 on
+  light reads as a rendering fault), `dimmest`→`dimmer` (three grey steps is one
+  too many at a single font size, and it sat under AA at 3.4:1),
+  `body`→`dim` (only the help overlay wanted it), `refused`→`persistent`
+  (mislabeled upstream — `#d3788c` was never an error kind; **one red** now means
+  "this is failing": persistent errors, DOWN servers, and `≥140 ms` alike), and
+  `value`→`bright` (see the band's three tiers, next).
+- **The session-facts band is three tiers, and only three.** Every **label**
+  (`mode`, `sys proxy`, `collector`, `server`, `router`, `watch`, `uptime`,
+  `MONITOR`) is `dimmer`. Every value that carries a **working/failed/warning
+  state** — the `on`/`off` switches, CPU%, latency, `down · <reason>` — is
+  semantic green/orange/red, or `dim` when there's no reading. **Everything else**
+  (`LIVE`'s row-mates `host · en0`, `running`, the uptime) is plain `bright`;
+  there is no fourth text weight. The one exception is the **active server's
+  name**, which is `escape` purple because it marks *which* server, not how it's
+  doing. The status **label takes its dot's color in every state**, healthy
+  included — the status *is* the state, so `● LIVE` reads as one signal in two
+  glyphs rather than a colored dot beside a plain word only when something breaks.
+
+### 4.2 Golden-render verification
 
 `tests/golden.rs` renders the still fixture at each geometry via
 `ratatui::backend::TestBackend`, extracts the plain-text grid, and asserts it
@@ -164,6 +233,20 @@ width. A `mask()` blanks the few regions that intentionally diverge from the
 frozen capture (see §10) so the rest stays exact. A separate `colors_spot_check`
 asserts key cells carry the expected fg/bold. `--render WxH` on the CLI is the
 same path, for eyeballing.
+
+The `.txt` captures are **glyphs only, and therefore theme-invariant** — there is
+one set, not one per theme, and `tests/theme.rs` asserts a light frame is
+cell-for-cell identical to a dark one. Color lives in the `.ansi` renders, which
+*are* per-theme and are regenerated from the implementation:
+
+```
+rowt-monitor --render-ansi 96x41  --theme dark  > …/renders/rowt-monitor-96x30.ansi
+rowt-monitor --render-ansi 96x41  --theme light > …/renders/rowt-monitor-96x30-light.ansi
+# likewise 150x30 -> …-150x38{,-light}.ansi and 212x30 -> …-212x52{,-light}.ansi
+```
+
+(The filenames carry the *design capture's* geometry, which is not the geometry
+they're rendered at — check an existing file's line count before regenerating.)
 
 ---
 
@@ -290,9 +373,9 @@ shared map; the UI reads the latest.
   90s, which emptied the strip between 10-min probes.)
 - **Display.** `up` = last probe succeeded, `down` = tested and failed, pending =
   not yet probed (shown as `probing…` while the first round runs). All up servers
-  appear in the strip, the active one marked `▶` and sorted first; it's not
-  repeated in the stats line (it's already in the identity band). Latency is
-  colored by threshold.
+  appear in the strip, the active one marked `▶` and sorted first (and pinned at
+  the left edge once the strip marquees, §6); it's not repeated in the stats line
+  (it's already in the identity band). Latency is colored by threshold.
 
 ### 5.5 system facts
 
@@ -319,15 +402,26 @@ interface, the system-proxy state, and router liveness/port.
   inactivity** (`SELECTION_IDLE_TIMEOUT`, checked in `on_frame`; any key/click
   resets the timer, hover doesn't) so a held selection / frozen strip doesn't
   stay stuck if the operator walks away — the panes then resume live scrolling.
-- **Server strip:** focusing keeps the marquee running; the first `←/→` (or a
-  click) **freezes it at the exact offset the renderer last drew** — the renderer
-  feeds its marquee offset back each frame as `Hit::strip_render_off`, and App
-  freezes to that value, so the frozen view is precisely the snapshot on screen
-  (no jump; a partial chip may sit before the selection). It then selects the
-  first fully-visible chip. Moves wrap at the ends and scroll the frozen ring one
-  cell at a time to keep the selection visible; the frozen ring renders circularly
-  (wraps past the last chip to fill the row). Strip viewport width also comes back
-  via `Hit`. The marquee runs off a **resettable baseline** (`marquee_off0` at
+- **Server strip:** when the pool overflows the row, the **active `▶` chip is
+  pinned** at the strip's left edge and only the rest marquees past it, in the
+  width left over (a ` │ ` seam marks the join) — so the server you're actually on
+  never scrolls out of view. The pinned chip sits *outside* the ring: it's excluded
+  from the ring's cell buffer, and the viewport width fed back is the **ring's**,
+  not the whole strip's. Pinning is skipped when it would leave less than
+  `MIN_RING_W` to scroll in (narrow terminal / long active name), and when the pool
+  fits (static layout) there's nothing to pin. Focusing keeps the marquee running;
+  the first `←/→` (or a click) **freezes it at the exact offset the renderer last
+  drew** — the renderer feeds its marquee offset back each frame as
+  `Hit::strip_render_off`, and App freezes to that value, so the frozen view is
+  precisely the snapshot on screen (no jump; a partial chip may sit before the
+  selection). It then selects the first fully-visible chip — the pinned one when
+  there is one, since it's held at the left edge. Moves wrap at the ends and scroll
+  the frozen ring one cell at a time to keep the selection visible (a no-op on the
+  pinned chip, which is always visible); the frozen ring renders circularly (wraps
+  past the last chip to fill the row). Ring viewport width and the pinned index
+  also come back via `Hit` — `App::feed_strip` takes all three together, since
+  feeding one without the others desyncs App's mirror of the layout. The marquee
+  runs off a **resettable baseline** (`marquee_off0` at
   `marquee_t0`), not raw elapsed time: on **unfreeze** (Esc / focus-leave / idle
   timeout) the baseline is set to the frozen offset and the clock restarted, so it
   **resumes scrolling from where it stopped** rather than jumping to where a
@@ -429,7 +523,10 @@ a dedicated assertion):
 - **Connections table** drops the per-row `↑`/`↓` (redundant with the UP/DOWN
   column headers; header rate rows keep theirs), and shows cumulative bytes
   (§5.1). Header/lane rows show `—` when a row has no connections.
-- **Status dot** distinguishes LIVE/DOWN/ERROR/PAUSED (the capture only had LIVE).
+- **Status dot** distinguishes LIVE/DOWN/ERROR/PAUSED (the capture only had LIVE),
+  and its **label carries the dot's color in every state** — the capture drew a
+  green dot beside a white `LIVE`, which made the healthy case the odd one out
+  (§4.1). Only the dot breathes; the label holds the un-pulsed color.
 
 ---
 
@@ -439,7 +536,5 @@ a dedicated assertion):
   a full install compiles the crate under Homebrew's build sandbox, which may
   block crates.io. If so, vendor the crates (`cargo vendor` + committed vendor
   dir / resources).
-- **Pin the active server** in the chip strip so it stays visible when the strip
-  marquees, instead of scrolling out of view.
 - **Domain interning** for the block buckets, if a block lane ever has dozens of
   always-on domains (would cut the per-bucket string duplication ~6×).

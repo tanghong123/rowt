@@ -25,10 +25,10 @@ impl Lane {
     }
     pub fn color(self) -> Color {
         match self {
-            Lane::Escape => theme::ESCAPE,
-            Lane::Corp => theme::CORP,
-            Lane::Direct => theme::DIRECT,
-            Lane::Block => theme::BLOCK,
+            Lane::Escape => theme::escape(),
+            Lane::Corp => theme::corp(),
+            Lane::Direct => theme::direct(),
+            Lane::Block => theme::block(),
         }
     }
     /// The three lanes shown in the connections rate table (block is excluded).
@@ -164,9 +164,9 @@ impl ErrKind {
     }
     pub fn color(self) -> Color {
         match self {
-            ErrKind::Dns => theme::TRANSIENT,
-            ErrKind::Timeout | ErrKind::Reset | ErrKind::Refused => theme::PERSISTENT,
-            ErrKind::Blocked => theme::BLOCKED,
+            ErrKind::Dns => theme::transient(),
+            ErrKind::Timeout | ErrKind::Reset | ErrKind::Refused => theme::persistent(),
+            ErrKind::Blocked => theme::blocked(),
         }
     }
 }

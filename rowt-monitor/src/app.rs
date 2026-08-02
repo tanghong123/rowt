@@ -191,8 +191,12 @@ pub struct App {
     // — so the display doesn't jump; a partial chip may sit before the selection —
     // then nudged just enough to keep the selection visible as it moves.
     pub strip_off: usize,
-    pub strip_w: u16,          // server-strip viewport width, fed back from the renderer
+    pub strip_w: u16,          // the ring's viewport width, fed back from the renderer
     pub strip_render_off: usize, // the marquee offset the renderer last drew (freeze to it → no jump)
+    // The chip the renderer pinned at the strip's left edge (the active server) —
+    // it sits *outside* the scrolling ring, so it's always visible and never needs
+    // revealing. `None` = nothing pinned (pool fits, or too narrow to pin).
+    pub strip_pin: Option<usize>,
     // Server-strip marquee runs off a resettable baseline (offset at t0), not raw
     // elapsed time, so unfreezing resumes from the frozen offset instead of jumping
     // to where a free-running clock would be.
@@ -260,6 +264,7 @@ impl App {
             strip_off: 0,
             strip_w: 0,
             strip_render_off: 0,
+            strip_pin: None,
             marquee_off0: 0,
             marquee_t0: Instant::now(),
             armed: None,
@@ -784,6 +789,17 @@ impl App {
         self.notify(format!("system proxy → {target}"));
     }
 
+    /// Take the server strip's geometry back from the renderer after a draw. All
+    /// three values describe what was *actually* drawn — the ring's viewport width,
+    /// the marquee offset it was drawn at, and which chip (if any) was pinned
+    /// outside the ring — so freezing and scrolling mirror the screen exactly.
+    /// Always feed them together; feeding one without the others desyncs the mirror.
+    pub fn feed_strip(&mut self, hit: &crate::ui::Hit) {
+        self.strip_w = hit.strip_w;
+        self.strip_render_off = hit.strip_render_off;
+        self.strip_pin = hit.strip_pin;
+    }
+
     fn strip_move(&mut self, d: i32) {
         let n = self.snap.chips.len();
         if n == 0 {
@@ -820,35 +836,46 @@ impl App {
 
     /// The strip's ring layout: each chip's start cell, its width, and the total
     /// ring span (chips + 3-cell separators + a 3-cell trailing gap), mirroring the
-    /// marquee cell buffer in `draw_chips`.
-    fn strip_layout(&self) -> (Vec<usize>, Vec<u16>, usize) {
+    /// marquee cell buffer in `draw_chips`. The **pinned** chip is held outside the
+    /// ring by the renderer, so its start is `None` and it contributes no cells.
+    fn strip_layout(&self) -> (Vec<Option<usize>>, Vec<u16>, usize) {
         let n = self.snap.chips.len();
         let mut starts = Vec::with_capacity(n);
         let mut widths = Vec::with_capacity(n);
         let mut cells = 0usize;
         for i in 0..n {
-            if i > 0 {
-                cells += 3;
-            }
-            starts.push(cells);
             let w = self.chip_w(i);
             widths.push(w);
+            if self.strip_pin == Some(i) {
+                starts.push(None);
+                continue;
+            }
+            if cells > 0 {
+                cells += 3;
+            }
+            starts.push(Some(cells));
             cells += w as usize;
         }
         (starts, widths, cells + 3)
     }
 
-    /// Display column of chip `i`'s left edge within the window at offset `off`.
-    fn chip_col(&self, starts: &[usize], span: usize, off: usize, i: usize) -> usize {
-        (starts[i] + span - off % span) % span
+    /// Display column of chip `i`'s left edge within the ring window at offset
+    /// `off`; `None` for the pinned chip, which isn't in the ring at all.
+    fn chip_col(&self, starts: &[Option<usize>], span: usize, off: usize, i: usize) -> Option<usize> {
+        starts[i].map(|st| (st + span - off % span) % span)
     }
 
     /// The first chip fully inside the viewport at offset `off` (what the first
-    /// ←/→ selects); falls back to chip 0 if none fits.
-    fn first_fully_visible(&self, starts: &[usize], widths: &[u16], span: usize, off: usize) -> usize {
+    /// ←/→ selects); falls back to chip 0 if none fits. The pinned chip wins
+    /// outright — it's held at the strip's left edge, so it's both always fully
+    /// visible and the leftmost one on screen.
+    fn first_fully_visible(&self, starts: &[Option<usize>], widths: &[u16], span: usize, off: usize) -> usize {
+        if let Some(p) = self.strip_pin.filter(|&p| p < widths.len()) {
+            return p;
+        }
         let mut best: Option<(usize, usize)> = None; // (left column, index)
         for (i, &wd) in widths.iter().enumerate() {
-            let col = self.chip_col(starts, span, off, i);
+            let Some(col) = self.chip_col(starts, span, off, i) else { continue };
             if col + wd as usize <= self.strip_w as usize && best.is_none_or(|(c, _)| col < c) {
                 best = Some((col, i));
             }
@@ -857,16 +884,17 @@ impl App {
     }
 
     /// Scroll the frozen ring one cell at a time in the move direction `d` until
-    /// the selected chip is fully visible (bounded by the ring span).
+    /// the selected chip is fully visible (bounded by the ring span). The pinned
+    /// chip never scrolls — it's already on screen — so it's a no-op there.
     fn reveal_strip(&mut self, si: usize, d: i32) {
         let (starts, widths, span) = self.strip_layout();
-        if span == 0 || self.strip_w == 0 {
+        if span == 0 || self.strip_w == 0 || starts[si].is_none() {
             return;
         }
         for _ in 0..span {
-            let col = self.chip_col(&starts, span, self.strip_off, si);
-            if col + widths[si] as usize <= self.strip_w as usize {
-                return;
+            match self.chip_col(&starts, span, self.strip_off, si) {
+                Some(col) if col + widths[si] as usize <= self.strip_w as usize => return,
+                _ => {}
             }
             self.strip_off = if d >= 0 { (self.strip_off + 1) % span } else { (self.strip_off + span - 1) % span };
         }

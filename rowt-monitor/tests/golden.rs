@@ -219,16 +219,17 @@ fn selected_server_strip_fills_row_circularly() {
     app.err_h = 6;
     let (w, h) = (96u16, 41u16);
     let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
-    // First draw feeds back the strip viewport width (needed for circular paging).
-    let mut sw = 0u16;
+    // First draw feeds back the strip geometry (needed for circular paging).
+    let mut hit = ui::Hit::default();
     term.draw(|f| {
         let a = f.area();
-        sw = ui::draw(f.buffer_mut(), a, &app, false).strip_w;
+        hit = ui::draw(f.buffer_mut(), a, &app, false);
     })
     .unwrap();
-    app.strip_w = sw;
+    app.feed_strip(&hit);
     app.side_by_side = false;
-    // Focus the strip and select a chip partway down the (overflowing) pool.
+    // Focus the strip and select a chip partway down the (overflowing) pool. The
+    // first ←/→ lands on the pinned (active) chip, so 6 presses reach index 5.
     app.focus = Focus::Health;
     for _ in 0..6 {
         app.update(Action::FocusRight);
@@ -260,17 +261,18 @@ fn both_partial_edge_chips_are_clickable() {
     app.err_h = 6;
     let (w, h) = (96u16, 41u16);
     let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
-    let mut sw = 0u16;
+    let mut hit = ui::Hit::default();
     term.draw(|f| {
         let a = f.area();
-        sw = ui::draw(f.buffer_mut(), a, &app, false).strip_w;
+        hit = ui::draw(f.buffer_mut(), a, &app, false);
     })
     .unwrap();
-    app.strip_w = sw;
+    app.feed_strip(&hit);
     app.side_by_side = false;
     app.focus = Focus::Health;
-    // Freeze the ring scrolled a few cells in, so the FIRST chip is clipped on its
-    // left edge and the last visible chip is clipped on its right edge.
+    // Freeze the ring scrolled a few cells in, so the first *ring* chip (index 1 —
+    // index 0 is pinned outside the ring) is clipped on its left edge and the last
+    // visible chip is clipped on its right edge.
     app.strip_sel = Some(2);
     app.strip_off = 4;
     let mut chips = Vec::new();
@@ -279,11 +281,48 @@ fn both_partial_edge_chips_are_clickable() {
         chips = ui::draw(f.buffer_mut(), a, &app, false).chips;
     })
     .unwrap();
-    assert!(chips.iter().any(|(_, i)| *i == 0), "the left-clipped first chip is clickable: {chips:?}");
-    // its rect starts at the strip's left edge (right portion shown from col 0)
-    let (r0, _) = chips.iter().find(|(_, i)| *i == 0).unwrap();
-    let strip_left = w - 3 - sw; // xr-1-width ≈ strip start; just assert it's near the left
-    assert!(r0.x <= strip_left + 3, "left-clipped chip anchored at the strip's left edge");
+    assert!(chips.iter().any(|(_, i)| *i == 1), "the left-clipped first ring chip is clickable: {chips:?}");
+    // The pinned chip sits at the strip's left edge; the left-clipped ring chip
+    // starts right after it (pin + the 3-cell ` │ ` seam), showing its right portion.
+    let (r0, _) = chips.iter().find(|(_, i)| *i == 0).expect("the pinned chip is clickable");
+    let (r1, _) = chips.iter().find(|(_, i)| *i == 1).unwrap();
+    assert_eq!(r1.x, r0.x + r0.width + 3, "left-clipped chip anchored at the ring's left edge");
+}
+
+#[test]
+fn active_chip_is_pinned_while_the_ring_scrolls() {
+    std::env::set_var("ROWT_MONITOR_NO_CLIPBOARD", "1");
+    let mut app = App::new(Box::new(FixtureSource::still()));
+    app.conn_h = 6;
+    app.err_h = 6;
+    let (w, h) = (96u16, 41u16);
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    app.focus = Focus::Health;
+    app.strip_sel = Some(1); // freeze the ring so the offset is ours, not the clock's
+    // Snapshot the strip's left edge at two very different frozen ring offsets.
+    let shot = |term: &mut Terminal<TestBackend>, app: &App| -> (String, String, ui::Hit) {
+        let mut hit = ui::Hit::default();
+        term.draw(|f| {
+            let a = f.area();
+            hit = ui::draw(f.buffer_mut(), a, app, false);
+        })
+        .unwrap();
+        let buf = term.backend().buffer();
+        let stats = (0..h).find(|&yy| row_text(buf, w, yy).contains("servers ·")).expect("stats row");
+        // The strip starts at column 2; `▶ JP-Tokyo  42 ms` is 17 cells, then the
+        // 3-cell ` │ ` seam, then the ring runs to the frame.
+        let row: Vec<char> = row_text(buf, w, stats + 1).chars().collect();
+        (row[2..19].iter().collect(), row[22..(w - 2) as usize].iter().collect(), hit)
+    };
+    app.strip_off = 0;
+    let (pin_a, ring_a, hit_a) = shot(&mut term, &app);
+    app.strip_off = 37;
+    let (pin_b, ring_b, _) = shot(&mut term, &app);
+    assert_eq!(hit_a.strip_pin, Some(0), "the active server is the pinned chip");
+    assert_eq!(hit_a.strip_w, 92 - 17 - 3, "the fed-back viewport is the *ring* width (strip − pin − seam)");
+    assert_eq!(pin_a, "▶ JP-Tokyo  42 ms", "the active chip is drawn at the strip's left edge: {pin_a:?}");
+    assert_eq!(pin_a, pin_b, "the pinned chip holds its cells while the ring scrolls under it");
+    assert_ne!(ring_a, ring_b, "…and the rest of the pool really did scroll between the two offsets");
 }
 
 #[test]
@@ -349,6 +388,35 @@ fn colors_spot_check() {
     assert_eq!(sym, "e");
     assert_eq!(fg, Color::Rgb(124, 157, 240));
     assert!(m.contains(Modifier::BOLD));
+
+    // The session-facts band is exactly three tiers: labels are `dimmer`, values
+    // that carry a working/failed/warning state are semantic, and everything else
+    // is plain `bright` — there is no fourth text weight. `mode` and `router` are
+    // both in that last group; beside `router` it's the CPU% that carries state,
+    // not the word "running".
+    let (sym, fg, _) = at(47, 2);
+    assert_eq!(sym, "h"); // "host · en0" — mode
+    assert_eq!(fg, Color::Rgb(233, 236, 243), "mode carries no state — plain bright");
+    let (sym, fg, _) = at(70, 3);
+    assert_eq!(sym, "r"); // "running" — router
+    assert_eq!(fg, Color::Rgb(233, 236, 243), "router carries no state — plain bright");
+    let (sym, fg, _) = at(62, 3);
+    assert_eq!(sym, "r"); // the "router" label
+    assert_eq!(fg, Color::Rgb(101, 106, 130), "labels are dimmer");
+
+    // The status label takes the dot's own color in every state, healthy
+    // included — one signal in two glyphs, not a colored dot beside a plain word.
+    let (sym, fg, m) = at(31, 2);
+    assert_eq!(sym, "L"); // "LIVE"
+    assert_eq!(fg, Color::Rgb(134, 192, 122), "the LIVE label is green, like its dot");
+    assert!(m.contains(Modifier::BOLD));
+
+    // The block lane is purple wherever it appears — both the errors header's
+    // `blocked` bucket (row 10) and the connections header's `block` lane row.
+    // (The HTML prototype's `_laneCol` had it rose; that was a stale pass.)
+    let (sym, fg, _) = at(57, 10);
+    assert_eq!(sym, "b"); // "blocked"
+    assert_eq!(fg, Color::Rgb(169, 138, 214), "blocked = lane_block purple");
 
     // Errors TYPE is colored by category. Errors is now the right column; its
     // data rows begin at row 13: row 13 is `timeout` (persistent red), row 16 is
