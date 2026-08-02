@@ -44,7 +44,7 @@ Engine: a bundled `sing-box` at `~/.config/rowt/bin/sing-box` (auto-fetched on f
 
 - **After changing networks** (Wi-Fi ↔ ethernet, corp VPN on/off): `rowt reload`. Just restart the tunnel in place (no re-render): `rowt restart`. Stop everything (proxy off + tunnel down): `rowt down`.
 - **Switch server:** `rowt use <tag>` (pins it, no probing) or `rowt use auto`. `rowt ping` ranks them.
-- **See what's happening:** `rowt status` · `rowt connections` (live, per-lane) · **`rowt monitor`** (full TUI: connections + throughput, errors/blocked, server health; keys `v` flip view, `s` span, `f` lane filter, `/` search, `u` use server, `?` help) · `rowt metrics top` (heaviest domains over time).
+- **See what's happening:** `rowt status` · `rowt connections` (live, per-lane) · **`rowt monitor`** (full TUI: connections + throughput, errors/blocked, server health; keys `v` flip view, `s` span, `f` lane filter, `/` search, `u` use server, `?` help; `--theme dark|light|auto` — auto-detects the terminal background, pin it if that guesses wrong) · `rowt metrics top` (heaviest domains over time).
 - **Edit lanes:** `rowt escape|corp|block <add|rm|list|clear|import|dump>`. A domain lives in exactly one lane (adding to one removes it from the others). `rowt escape errors` / `rowt direct errors` show what failed — good candidates to move into escape.
 - **System proxy / CLI env:** `rowt proxy <status|on|off|env>` (the `env` form exports `*_proxy` for a shell).
 - **Move to another Mac:** `rowt config export` → a chmod-600 `.tgz` of just your servers/subs/lane rules → copy it over an **encrypted** channel (it holds credentials) → `rowt config import <file>` → `rowt up`.

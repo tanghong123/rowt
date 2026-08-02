@@ -50,7 +50,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.0.10"
+ROWT_VERSION="3.1.0"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -2601,7 +2601,7 @@ Choose what goes where (edit anytime; lane 'add' auto-renders + restarts):
 Everyday:
     $PROG status            is it working (state + reachability)?
     $PROG reload            re-apply after switching Wi-Fi / wired / corp VPN on-off
-    $PROG monitor           live TUI    ·    $PROG proxy on | off    macOS system proxy
+    $PROG monitor           live TUI (--theme dark|light|auto)   ·   $PROG proxy on | off    macOS system proxy
     $PROG config export     move the whole setup to another Mac (holds secrets — send encrypted)
     $PROG down              stop everything
 EOF
@@ -3423,7 +3423,7 @@ o@lifecycle@watch <install|uninstall|status|refresh>@auto-reload on net change; 
 c@lifecycle@status@state + config validity + reachability
 o@lifecycle@explain <domain|ip>@explain a destination's lane (escape / corp / direct)
 o@lifecycle@connections [lane|-w]@live view: active connections + which lane each is on
-o@lifecycle@monitor@read-only TUI: live connections, errors/blocked, server health
+o@lifecycle@monitor [--theme dark|light|auto]@read-only TUI: live connections, errors/blocked, server health
 o@lifecycle@run <command> [args...]@auto-pick a proxy env that reaches the net, then run the command
 a@lifecycle@report@full diagnostic report to a file (masked; shareable)
 o@lifecycle@audit [-n N|all|path|clear]@who changed what, when (CLI + watchdog mutations)

@@ -555,9 +555,17 @@ and the system-proxy toggle — each just a front-end to the same `rowt` command
 you could type. Everything else stays observe-only.
 
 ```sh
-rowt monitor            # live view (falls back to a demo fixture if nothing is running)
-rowt monitor --fixtures # force the offline demo
+rowt monitor              # live view (falls back to a demo fixture if nothing is running)
+rowt monitor --fixtures   # force the offline demo
+rowt monitor --theme light  # pin the palette; also --theme dark|auto, or ROWT_MONITOR_THEME
 ```
+
+**Themes.** The TUI ships a dark and a light palette — same layout, same glyphs,
+same keys, only the colors change. `--theme auto` (the default) reads the
+terminal's *actual* background (`COLORFGBG`, then an OSC 11 query with a 100 ms
+budget) and picks light only for a near-paper background; anything dimmer, or no
+answer at all, stays dark. Pin it with `--theme dark|light` if your terminal
+reports its background wrongly, or if you switch light/dark mid-session.
 
 **Layout** (reflows at 130 columns — side-by-side above, stacked below):
 
