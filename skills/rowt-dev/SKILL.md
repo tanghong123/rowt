@@ -24,7 +24,7 @@ Development + release for the **rowt** repo. For the tool's runtime behavior, la
 ## Versioning & commits
 
 - The pre-commit hook **auto-bumps the PATCH** version in `bin/rowt` on any commit that touches `bin/|config/|lima/|install.sh|README.md|DESIGN.md`, **unless** a `ROWT_VERSION=` change is already staged (a manual minor/major, or the initial add). **`rowt-monitor/`-only changes do NOT bump** — a monitor fix commits at the current version; to release it, bump `ROWT_VERSION` in `bin/rowt` yourself in the same commit.
-- Commit only when the user asks. On the default branch, branch first. End commit messages with `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`; end PR bodies with the Claude Code footer.
+- Commit only when the user asks. On the default branch, branch first. End commit messages with `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>`; end PR bodies with the Claude Code footer.
 - Testing a change against the **live** `~/.config/rowt`: run the repo `bin/rowt`, but remember a later `rowt up`/`reload` from the *installed* binary re-renders `host.json`, so features must land in the installed version too — after releasing, have the user `brew upgrade rowt`. And per the `rowt` skill, run any reload/restart **in the foreground**.
 
 ## Cut a release (only when the user says to)
