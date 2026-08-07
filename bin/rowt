@@ -50,7 +50,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.1.0"
+ROWT_VERSION="3.1.1"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -1347,7 +1347,12 @@ assemble_host() {
       dns:{servers:$dns_servers, rules:$dns_rules, final:"dns-direct"},
       inbounds:[{type:"mixed", tag:"in", listen:$listen, listen_port:$port}],
       outbounds:($escs + [
-        {type:"direct", tag:"corp"},                       # OS routing -> corp VPN
+        # corp: OS routing -> corp VPN. The domain_resolver matters: sing-box
+        # >=1.12 resolves CONNECTION domains via the outbound domain_resolver
+        # (else route.default_domain_resolver) — dns.rules do NOT apply to them.
+        # So corp names must name the system resolver here, or they fall to the
+        # default (DoH to AliDNS), which SERVFAILs internal-only zones.
+        {type:"direct", tag:"corp", domain_resolver:{server:"local", strategy:"prefer_ipv4"}},
         {type:"direct", tag:"direct", bind_interface:$ifc}, # forced onto physical NIC
         {type:"block",  tag:"block"}
       ]),
