@@ -59,6 +59,7 @@ walks the rules **top to bottom, first match wins**:
 | `domain_suffix` in `escape-domains.txt` | **escape** | VLESS socket **bound to en0** → home router → VPS → the VPS reaches Google |
 | `geosite:<name>` in `escape-domains.txt` / `block-domains.txt` (e.g. `geosite:google`) | that lane | a maintained sing-geosite category, pulled as a `rule_set` — covers a whole service (all ccTLDs) without enumerating suffixes; runs after the hand lists, before the ad set. Escape + block only (corp is domains/CIDRs); a specific suffix always wins over it |
 | `geosite-category-ads-all` rule-set | **block** | broad ad/tracker blocklist (opaque, so it runs *after* the hand lists) |
+| unlisted IP in a **private/overlay range** (RFC1918, CGNAT `100.64/10`, link-local) | **corp** | unbound → routing table. Overlay hosts (Tailscale peers), LAN devices, and bare intranet IPs reach correctly with no config — some tunnel routed that range, and forcing it out `en0` would break it. `ROWT_PRIVATE_DEFAULT=direct` restores the old always-en0 behavior |
 | no match → `final` (default `direct`) | **direct** | direct socket **bound to en0** → home router → the public internet, corp untouched |
 
 **Longest suffix wins, not lane order.** rowt does *not* emit one rule per lane
@@ -89,11 +90,15 @@ keeps each bucket's *name resolution* on the same path as its *traffic*:
 ```
 dns:
   servers:
-    - local        (address: "local"  → the macOS system resolver)
+    - local        (type: "local"  → the macOS system resolver)
     - dns-direct   (DoH https://223.5.5.5, detour: "direct" → queried over en0)
   rules:
     - domain_suffix in corp-domains.txt → server: local
   final: dns-direct
+outbounds:
+  - corp: domain_resolver: local        # connection-time lookups — see below
+route:
+  default_domain_resolver: dns-direct
 ```
 
 - **`escape` names are never resolved locally.** The route rule matches on the
@@ -101,10 +106,13 @@ dns:
   resolves it at the exit. So `google.com` is **not** looked up by Chinese DNS
   (no poisoning) nor by corp DNS (no leak of what you browse). This is why
   domain-based rules + sniffing matter.
-- **`corp` names → `local`.** `address: "local"` means sing-box calls the macOS
-  system resolver, which — with the corp VPN up — is corp DNS (plus any
-  `/etc/resolver/<domain>` entries the `networking/` tool installs). So intranet
-  names resolve to intranet IPs, and rule #1/#4 send them into the corp tunnel.
+- **`corp` names → `local`.** `"local"` means sing-box uses the macOS system
+  resolver configuration, which — on the corp LAN or with the corp VPN up — is
+  corp DNS (from DHCP / the VPN). So intranet names resolve to intranet IPs, and
+  rule #1/#4 send them into the corp tunnel. Off corp, `local` is simply
+  whatever resolver the current network provides. (Avoid `/etc/resolver/<suffix>`
+  pins for corp suffixes: `getaddrinfo` honours them *over* this arrangement, and
+  a pin to a public resolver breaks internal-only zones for every app.)
 - **Everything else → `dns-direct`** (AliDNS `223.5.5.5` over **DoH**), and
   crucially the query is sent through the **`direct`** outbound, i.e. **over
   `en0`**. So Baidu is resolved by a Chinese resolver on your home line —
@@ -118,11 +126,103 @@ dns:
   with `ROWT_DNS_DIRECT` (e.g. `1.1.1.1`); it also feeds `resolve_ip` and the
   doctor DNS check, and is forwarded to the `watch` reload agent.
 
+**Connection-time lookups follow the same map — by explicit arrangement.** In
+sing-box ≥ 1.12, the domain of a proxied *connection* is resolved via the
+outbound's `domain_resolver` (falling back to `route.default_domain_resolver`) —
+the `dns.rules` above govern only DNS *queries*. That's why the corp outbound
+carries `domain_resolver: local` itself: without it, corp names were resolved by
+the public DoH resolver at connect time, which returns SERVFAIL for
+internal-only split-horizon zones. (This was the rowt < 3.1.1 bug: proxied
+corp names failed with `lookup …: SERVFAIL` in `host.log` while plain
+`ping`/`dig` — which use the system resolver — worked fine.)
+
 Net effect with corp ON: intranet lookups use corp DNS over the corp tunnel;
 your personal/Chinese lookups use AliDNS over your home line; escaped sites are
 resolved remotely by the VPS. Three worlds, no cross-contamination.
 
-## 5. Two ways the escape uplink bypasses corp (modes)
+## 5. The corp lane fills itself (corp sync)
+
+The corp lane would be tedious to maintain by hand — every employer has its own
+suffixes, and a VPN's routed ranges change under you. `rowt corp sync` (run
+automatically by the `watch` agent on every tick, and on demand) mirrors two
+live signals into the lane, so on a fresh machine the corp lane mostly
+configures itself:
+
+- **DHCP search domains → corp domains.** A domain the physical NIC's network
+  advertises (an office LAN's search domain) only resolves via the system's
+  split-horizon resolver — which is exactly the corp lane's DNS behavior (§4) —
+  so it belongs in corp. Persist-union across networks: a domain learned in the
+  office is still internal later, reached over the VPN from home. Your explicit
+  escape/block entry always wins over an auto-learned domain (a network must not
+  be able to de-tunnel a site you chose to tunnel).
+- **Live VPN route CIDRs → corp CIDRs.** A split-tunnel VPN installs routes for
+  its ranges; `corp sync` reads them from the routing table (vendor-agnostic)
+  and mirrors them into the lane, so proxied **by-IP** access rides the tunnel
+  instead of leaking out `en0`. Which tunnels to mirror is a label list in
+  `sync-ifaces.txt` — default the corp VPN (auto-detected: the busiest
+  non-Tailscale tunnel); add `tailscale` to reach tailnet hosts through the
+  proxy too.
+
+Two properties keep it cheap and safe:
+
+- **Superset reconcile, minimal reloads** (`config/corp-sync-reconcile.py`): the
+  lane only has to *contain* every live route. While it does, nothing is
+  rewritten and nothing reloads. When a live route is uncovered, the minimal
+  edit restores the superset: add what's missing, drop kept CIDRs that overlap a
+  live route (whole, never shrunk), and keep stale CIDRs from a now-down tunnel —
+  they're still needed in-office, where the same ranges are on the LAN and no
+  tunnel is up. Hand-added entries are never touched.
+- **Private/overlay ranges are excluded from tracking.** Live routes inside
+  RFC1918 / CGNAT / link-local are filtered out of the reconcile entirely: the
+  private-range fall-through (§3) already sends that whole class to the corp
+  lane, so tracking individual slices would be redundant data that can only
+  drift. Only public-looking corp ranges — the kind corp clouds route
+  privately — need mirroring.
+
+## 6. Who does what: lanes vs DNS vs OS routes
+
+Three planes decide a connection's fate. rowt owns the first two; the third is
+deliberately out of scope:
+
+| plane | question | owner | mechanism |
+|---|---|---|---|
+| **lane** | which egress a *proxied* connection takes | rowt | the §3 rules; corp lane auto-filled by §5 |
+| **DNS** | which resolver answers a name | rowt | §4 — corp → system resolver, escape → VPS-side, rest → DoH over `en0` |
+| **OS routes** | which *interface* unbound traffic leaves by | **not rowt** | the OS + the VPN clients — and, when an overlay claims a range your corp also uses, a small root daemon |
+
+rowt refuses the third plane on purpose. Mutating the route table needs a
+persistent **root** daemon, and a root daemon must never execute user-writable
+code — rowt is brew-installed, user-writable, and frequently updated: exactly
+the wrong shape for root. The route table also matters most for traffic rowt
+never sees (raw `ping`/`ssh`, overlay peer traffic, anything that ignores the
+proxy — §8). rowt's corp lane *consumes* the table (an unbound socket, §2); it
+never writes it.
+
+The one case that needs plane three actively managed: an overlay like
+**Tailscale claims all of CGNAT `100.64.0.0/10`**, while a corp intranet hands
+out service addresses from the same range. On the corp LAN with the VPN off,
+nothing out-specifics the overlay's route and those services silently die into
+the tailnet. That's a route-table problem, so it's solved by a route-table tool:
+[`corp-route`](https://github.com/tanghong123/claude-toolbox/tree/main/corp-route),
+a ~350-line self-learning root daemon that snapshots the CGNAT routes the corp
+VPN installs (fingerprinting the corp by its DNS) and replays them onto the
+physical NIC exactly when needed. The division is airtight by construction: the
+two tools share **no files** and coordinate through nothing but the OS — rowt
+tracks the VPN's *non-overlay* ranges for lane choice and filters the overlay
+space out (§5); corp-route learns exactly the *overlay-shadowed* slices. One
+dataset each, no overlap, nothing to drift.
+
+Walkthrough — `gitlab.corp.example` → `100.64.75.10`, corp VPN off, on the corp LAN:
+
+1. **A browser (proxied):** rowt matches the corp suffix → corp lane; the name
+   resolves via the system resolver (§4) → `100.64.75.10`; the unbound socket
+   consults the route table → corp-route's replayed `/16` beats Tailscale's
+   `/10` → out `en0` into the corp LAN. ✓
+2. **`ssh` (not proxied):** `getaddrinfo` → same system resolver → same route
+   table → same wire. ✓ — planes two and three serve even the traffic rowt
+   never touches, which is exactly why they don't live inside rowt.
+
+## 7. Two ways the escape uplink bypasses corp (modes)
 
 Rules #3 (escape) and #4 (direct) both rely on the *bound-socket* trick. That
 works only if the corp client enforces its tunnel with **routes**. Some
@@ -141,7 +241,7 @@ detects this by testing a VPS both via the default route and via `en0`:
 In both modes the app-facing proxy is still `127.0.0.1:7890`; only the `escape`
 outbound's implementation differs.
 
-## 6. What the proxy catches — and what it doesn't
+## 8. What the proxy catches — and what it doesn't
 
 `rowt` routes traffic that reaches its **SOCKS/HTTP proxy**. That covers
 the large majority of everyday apps, but **not** everything. A full packet
@@ -174,7 +274,7 @@ run alongside the corp client.** A middle path is mode `vm` — you can point a
 whole app or device at the VM and get tunnel-like coverage for it without
 touching the host's corp setup.
 
-## 7. Mapping a Shadowrocket config onto escape
+## 9. Mapping a Shadowrocket config onto escape
 
 Shadowrocket uses the Surge-style config format. The pieces map like this:
 
@@ -199,7 +299,7 @@ as the only VPN, "direct" just meant "off my tunnel". escape splits that
 `DIRECT` pile in two — **corp** (intranet, must traverse the corp VPN) vs
 **direct** (physical NIC) — which is the whole point of the three-way design.
 
-## 8. Failure modes
+## 10. Failure modes
 
 - **Escape tunnel down.** Escape-listed sites use the `escape` outbound only;
   there is no fallback to `direct`, so they **fail closed** rather than leak onto
@@ -238,32 +338,19 @@ as the only VPN, "direct" just meant "off my tunnel". escape splits that
   is written before the work, so a command that *hangs* (e.g. proxy teardown
   stalling on a dead network) still leaves a trace. Read-only commands and the
   high-frequency `watch tick` no-op aren't recorded. Included in `rowt report`.
-```
 
-## 9. Ideas / TODO (not built yet — need design)
-
-- **TUI monitoring view.** A live terminal UI, launchable from the CLI (e.g.
-  `rowt monitor` / `rowt top`), that shows real-time state in one screen: active
-  connections per lane (escape/corp/direct/block) with throughput, the selected
-  server + latency, recent per-lane errors, router/proxy/mode status, and CPU.
-  Would build on the data we already have — the clash API (`/connections`,
-  `/traffic`) that `rowt connections` reads, the per-lane `lane-*.log` files that
-  `rowt <lane> errors` summarizes, and `rowt status`. Design questions: refresh
-  model + dependency footprint (pure-bash/ANSI redraw vs. a dep like a Go/Rust
-  TUI or Python `textual`/`rich` — rowt currently only needs `jq`/`python3`);
-  keyboard actions (switch server, toggle proxy, pause a lane); and whether it's
-  a subcommand vs. a separate small binary the CLI launches.
+## 11. Ideas / TODO (not built yet — need design)
 
 - **Desktop app / menu-bar widget.** A native-feeling GUI (menu-bar item or small
   window) to see status at a glance and drive the common operations without the
   terminal: current mode (host/vm) + selected server + latency, router/proxy
   on-off with a toggle, per-lane connection counts + throughput, and quick actions
   (proxy on/off, switch server, restart, add a domain to a lane). Same data
-  sources as the TUI idea above (clash API, `lane-*.log`, `rowt status`). Design
+  sources as `rowt monitor` (clash API, `lane-*.log`, `rowt status`). Design
   questions: framework + dependency footprint (SwiftUI menu-bar app vs. a
   cross-toolkit like Tauri/Electron vs. something lightweight like `xbar`/SwiftBar
   plugins that just shell out to `rowt`); how it talks to rowt (shell out to the
   CLI vs. read the clash API directly vs. a small local rowt daemon/socket); how
   it handles the sudo-gated `networksetup` calls (helper tool vs. reuse the
   existing scoped sudoers); packaging/signing/notarization and auto-start; and
-  whether it replaces or complements the TUI view.
+  whether it replaces or complements `rowt monitor`.
