@@ -22,7 +22,7 @@ FIXTURE = """DNS configuration
 
 resolver #1
   search domain[0] : hz.corp.example
-  nameserver[0] : 30.30.30.30
+  nameserver[0] : 30.1.2.3
   nameserver[1] : fd00:1::1
   if_index : 14 (en0)
   flags    : Request A records, Request AAAA records
@@ -72,9 +72,9 @@ def main() -> int:
     )
     # physical search domain resolved despite appearing before if_index.
     check("physical_search", r["physical_search"], ["hz.corp.example"])
-    # 30.30.30.30 (30/8 corp-cloud) and 10.0.0.53 (RFC1918) are internal; 223.5.5.5
+    # 30.1.2.3 (30/8 corp-cloud) and 10.0.0.53 (RFC1918) are internal; 223.5.5.5
     # (public) and the IPv6 are not.
-    check("corp_nameservers", r["corp_nameservers"], ["30.30.30.30", "10.0.0.53"])
+    check("corp_nameservers", r["corp_nameservers"], ["30.1.2.3", "10.0.0.53"])
 
     # Empty / no-signal input yields empty lists, no crash.
     empty = nd.parse("")

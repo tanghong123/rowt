@@ -80,7 +80,7 @@ impl Source for FixtureSource {
             ("api.anthropic.com", Lane::Escape, 1_240_000_000),
             ("www.youtube.com", Lane::Escape, 980_000_000),
             ("netflix.com", Lane::Escape, 1_500_000_000), // dormant-only
-            ("mirrors.aliyun.com", Lane::Direct, 128_000_000),
+            ("mirrors.debian.org", Lane::Direct, 128_000_000),
             ("backups.corp.example.com", Lane::Corp, 340_000_000), // dormant-only
             ("mail.google.com", Lane::Escape, 96_000_000),
         ];
@@ -111,7 +111,7 @@ impl Source for FixtureSource {
             conn(Lane::Escape, "api.anthropic.com", 443, self.walk_conn(2, 1, 4), self.jitter(376.1 * MB, 0.12), self.jitter(414.4 * MB, 0.1), "domain_suffix"),
             conn(Lane::Escape, "en.wikipedia.org", 443, self.walk_conn(1, 1, 3), self.jitter(1.4 * MB, 0.2), self.jitter(1.8 * MB, 0.2), "domain_suffix"),
             conn(Lane::Corp, "jira.corp.example.com", 443, self.walk_conn(5, 3, 7), self.jitter(8.1 * MB, 0.15), self.jitter(414.6 * MB, 0.1), "domain_suffix"),
-            conn(Lane::Direct, "mirrors.aliyun.com", 443, self.walk_conn(1, 1, 3), self.jitter(509.0 * KB, 0.2), self.jitter(128.6 * MB, 0.12), "final"),
+            conn(Lane::Direct, "mirrors.debian.org", 443, self.walk_conn(1, 1, 3), self.jitter(509.0 * KB, 0.2), self.jitter(128.6 * MB, 0.12), "final"),
             conn(Lane::Direct, "dl.google.com", 443, self.walk_conn(1, 1, 3), self.jitter(104.0 * KB, 0.2), self.jitter(47.8 * MB, 0.12), "final"),
             conn(Lane::Direct, "gateway.icloud.com", 443, self.walk_conn(2, 1, 4), self.jitter(610.0 * KB, 0.2), self.jitter(519.0 * KB, 0.2), "final"),
         ];

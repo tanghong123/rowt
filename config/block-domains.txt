@@ -20,7 +20,7 @@ googleadservices.com
 eskimi.com
 iqzone.com
 disqus.com
-# NOTE: NOT blocking aliyuncs.com — Alibaba Cloud's general domain (OSS/CDN/APIs,
+# NOTE: NOT blocking aliyuncs.com — a major cloud's general domain (OSS/CDN/APIs,
 # heavily used by legit sites in China). The offender was a *-log.* telemetry
 # subdomain; add a narrow entry yourself if it recurs (e.g. 'rowt block add
 # <exact-subdomain>') rather than sinkholing the whole cloud.

@@ -18,7 +18,7 @@
 │ escape api.anthropic.com:443                         2     376.1M    414.4M  domain_suffix │    11   timeout     dl.google.com                     │
 │ escape en.wikipedia.org:443                          1       1.4M      1.8M  domain_suffix │    11   blocked     criteo.com                        │
 │ corp   jira.corp.example.com:443                     5       8.1M    414.6M  domain_suffix │    10   blocked     adnxs.com                         │
-│ direct mirrors.aliyun.com:443                        1       509K    128.6M  final         │    10   blocked     google-analytics.com              │
+│ direct mirrors.debian.org:443                        1       509K    128.6M  final         │    10   blocked     google-analytics.com              │
 │ direct dl.google.com:443                             1       104K     47.8M  final         │    10   reset       x.com                             │
 │ direct gateway.icloud.com:443                        2       610K      519K  final         │     8   timeout     rr5.googlevideo.com               │
 │ escape netflix.com                                   0         0B        0B                │                                                       │

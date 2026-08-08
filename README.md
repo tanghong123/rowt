@@ -22,7 +22,7 @@ $EDITOR ~/.config/rowt/import-review.json  # delete stale servers/subs
 rowt server import --apply    # (or: rowt server add '<vless://…>' / rowt sub add '<url>')
 
 # 3. set up & start (auto-fetches sing-box if missing, then renders/starts/proxies)
-rowt up host                  # host mode (the common one); 'rowt up' auto-detects, 'up vm' forces vm
+rowt up host                  # host mode (the common one); 'rowt up' auto-detects, 'up vm' forces vm, 'up local' runs with no tunnel
 
 # --- now switch networks ---
 # 4. quit Shadowrocket, connect the CORP VPN, then verify:
@@ -474,7 +474,7 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 | command | what it does |
 | --- | --- |
 | `onboard` | guided getting-started checklist — shows how far you are and the exact next command. `rowt` with no args shows it too. |
-| `up [host\|vm] [--force]` | ensure sing-box → probe (if no mode) → render → start router → proxy on. Idempotent (no-op if already up), except vm mode re-detects the VM's DHCP IP and re-wires if it moved; `--force` does a full rebuild. Switching to host mode powers the VM down. |
+| `up [host\|vm\|local] [--force]` | ensure sing-box → probe (if no mode) → render → start router → proxy on. `local` = no tunnel at all, for when you are already outside the censored network: the escape lane's rules retarget to `direct` (keeping their precedence over broader block entries), block/corp/direct are unchanged, and no server is needed. A bare `up` chooses it when the `ROWT_GFW_CANARIES` answer over the physical NIC. Idempotent (no-op if already up), except vm mode re-detects the VM's DHCP IP and re-wires if it moved; `--force` does a full rebuild. Switching to host mode powers the VM down. |
 | `down` | tear everything down: system proxy off, **kill sing-box** (incl. strays), VM down. |
 | `restart` | bounce the tunnel in place (host or vm, whichever is active) — no re-render, no proxy change. Use if sing-box is stuck/high-CPU. |
 | `reload` | re-detect the network interface, re-render, restart, re-apply the proxy — run after switching Wi-Fi ↔ wired ↔ hotspot. |

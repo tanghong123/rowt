@@ -16,9 +16,9 @@ per-corp store is for).
 
 Emits JSON on stdout:
   {
-    "internal_domains":  ["alibaba-inc.com", "hz.ali.com", ...],  # de-duped
-    "physical_search":   ["hz.ali.com"],        # search domains on the primary NIC
-    "corp_nameservers":  ["30.30.30.30"]        # nameservers in private/corp space
+    "internal_domains":  ["corp.example.com", "hq.corp.example", ...],  # de-duped
+    "physical_search":   ["hq.corp.example"],   # search domains on the primary NIC
+    "corp_nameservers":  ["30.1.2.3"]           # nameservers in private/corp space
   }
 Stdlib only; reads nothing but the DNS config; writes nothing.
 """
@@ -33,7 +33,7 @@ import subprocess
 import sys
 
 # Nameserver IPs that indicate an internal resolver: RFC1918 + CGNAT + link-local,
-# plus the public-looking ranges corp clouds route privately (Alibaba 11/30/6).
+# plus the public-looking /8s that some corporate clouds route privately (11/30/6).
 _INTERNAL_NS = [
     ipaddress.ip_network(c)
     for c in (

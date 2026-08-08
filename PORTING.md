@@ -153,7 +153,7 @@ fn watch_tick(obs: &Observation, st: &State) -> (Vec<Action>, State);
      print env exports), mainly for unprivileged setups.
 2. **Tun must coexist with other VPN clients — by exclusion, never by
    fighting.** On macOS this problem doesn't exist: system proxy is opt-in
-   per app, so AliLang's outer tunnel and tailscaled never touch rowt, and
+   per app, so a corp VPN client's outer tunnel and tailscaled never touch rowt, and
    rowt is route-inert (DESIGN.md §6). Naive tun breaks that on three fronts:
    `auto_route`'s policy rules outrank the VPN's routes (and `strict_route`
    is documented to break Tailscale's fwmark routing); DNS hijack collides
@@ -174,7 +174,7 @@ fn watch_tick(obs: &Observation, st: &State) -> (Vec<Action>, State);
      journals the event and fails open (traffic flows un-laned) — same
      philosophy as the captive handler stepping aside. Route arbitration
      stays corp-route's job if that daemon ever comes to Linux.
-   - Whether AliLang ships a Linux client is open, but Tailscale does and
+   - Whether a given corp VPN client ships a Linux build is open, but Tailscale does and
      has a documented sing-box interaction — coexistence is mandatory
      regardless.
 3. **Discovery via systemd-resolved** (`resolvectl` or D-Bus): per-link
@@ -212,7 +212,7 @@ each needs a different instrument:
 |---|---|---|
 | (a) known behavior, implemented wrong | render emits the corp outbound without `domain_resolver` | differential testing (§6.2–6.4) |
 | (b) behavior nobody wrote down | `sort` order of a lane list; `\|\| true` swallowing a failure; what an empty list file does | harvested corpus (§6.1) + shadow mode (§6.5) |
-| (c) behavior only visible in environments we can't stage | corp net with AliLang up; a hotel portal; the plane | shadow mode in production (§6.5) |
+| (c) behavior only visible in environments we can't stage | corp net with the VPN up; a hotel portal; the plane | shadow mode in production (§6.5) |
 
 Class (b) is the real risk. It cannot be closed by reading the bash carefully,
 because the thing you fail to notice is exactly the thing you fail to

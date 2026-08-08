@@ -53,7 +53,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.2.3"
+ROWT_VERSION="3.2.4"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -633,7 +633,7 @@ cmd_escape() {
   esac
 }
 # --- corp sync: mirror an overlay VPN's split-tunnel routes into the corp lane ---
-# Any split-tunnel overlay (a corp VPN — AliLang/AnyConnect/GlobalProtect… — OR
+# Any split-tunnel overlay (a corp VPN — AnyConnect/GlobalProtect/Zscaler… — OR
 # Tailscale/WireGuard) installs routes for its CIDRs into the OS routing table,
 # pointing at its tunnel interface. rowt's `direct` lane BINDS the socket to the
 # physical NIC, which OVERRIDES the routing table — so a proxied connection to one
