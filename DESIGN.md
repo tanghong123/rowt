@@ -179,6 +179,22 @@ Two properties keep it cheap and safe:
   drift. Only public-looking corp ranges — the kind corp clouds route
   privately — need mirroring.
 
+### The discovery journal — data for future policy
+
+Every watchdog tick also journals what the current network and VPN *advertise*
+into `~/.config/rowt/log/discovery.log` — one JSON line per **change** (a
+`discovery_sig` state key dedupes; steady state writes nothing): the network id,
+the corp-VPN iface if up, the captive state at that moment, the physical NIC's
+DHCP search domains, the scoped/VPN-registered domains beyond them, and the
+internal nameservers. Portal episodes and the domains the venue advertised land
+in the same line.
+
+This is the longitudinal record behind corp-lane policy decisions — e.g. *does
+the corp VPN register a superset of the office DHCP domains?* (decides whether
+DHCP-learned domains still need persistence), *which venues advertise portal
+domains?* — questions that are otherwise only answerable in the moment, on
+networks we rarely revisit. `ROWT_DISCOVERY_LOG=0` disables.
+
 ## 6. Who does what: lanes vs DNS vs OS routes
 
 Three planes decide a connection's fate. rowt owns the first two; the third is

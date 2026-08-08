@@ -45,6 +45,7 @@
 #      ROWT_WATCH_INTERVAL  watchdog liveness-probe cadence, seconds (default 120)
 #      ROWT_CAPTIVE_CHECK  watchdog captive-portal handling: 1=on (default), 0=off
 #      ROWT_CAPTIVE_URL  captive probe (default http://captive.apple.com/hotspot-detect.html)
+#      ROWT_DISCOVERY_LOG  journal advertised domains/resolvers per network: 1=on, 0=off
 #      ROWT_HEALTH_FAILS  consecutive probe failures before auto-recover (default 3)
 #      ROWT_HEALTH_COOLDOWN  min seconds between auto-recoveries (default 600)
 #      ROWT_HEALTH_TIMEOUT  per-probe delay-test timeout, seconds (default 8)
@@ -52,7 +53,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.2.0"
+ROWT_VERSION="3.2.1"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -2242,6 +2243,34 @@ _captive_proxy_on() { # $1 = network service
   sudo -n /usr/sbin/networksetup -setsecurewebproxystate "$1" on 2>/dev/null || true
 }
 
+# ---- discovery journal (watchdog; DESIGN.md §5) ------------------------------
+# One JSONL line in log/discovery.log each time what the network/VPN advertises
+# CHANGES (state key discovery_sig dedupes; steady state writes nothing): the
+# network id, the corp-VPN iface if up, the captive state at that moment, the
+# physical NIC's DHCP search domains, the scoped/VPN-registered domains beyond
+# them, and the internal nameservers. This is the longitudinal record behind
+# future corp-lane policy decisions (e.g. does the VPN register a superset of
+# the office DHCP domains? which venues advertise portal domains?) — data that
+# is otherwise only observable in the moment, on networks we rarely revisit.
+_discovery_journal() { # $1 = captive state (clear|captive|unknown|"")
+  [ "${ROWT_DISCOVERY_LOG:-1}" = 1 ] || return 0
+  local j nid vpn line sig
+  j="$(_tmo 5 python3 "$NET_DETECT" 2>/dev/null || echo '{}')"
+  nid="$(net_id "$(detect_iface 2>/dev/null || true)" 2>/dev/null || true)"
+  vpn="$(_vpn_iface 2>/dev/null || true)"
+  line="$(printf '%s' "$j" | jq -c --arg net "$nid" --arg vpn "$vpn" --arg cap "${1:-}" \
+    '{net:$net, vpn_iface:$vpn, captive:$cap,
+      dhcp:(.physical_search // []),
+      scoped:(((.internal_domains // []) - (.physical_search // []))),
+      ns:(.corp_nameservers // [])}' 2>/dev/null)" || return 0
+  [ -n "$line" ] || return 0
+  sig="$(printf '%s' "$line" | cksum | awk '{print $1}')"
+  [ "$(sget discovery_sig)" = "$sig" ] && return 0
+  sset discovery_sig "$sig"
+  mkdir -p "$CFG/log" 2>/dev/null || true
+  printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$line" >> "$CFG/log/discovery.log"
+}
+
 # rowt proxy [status | check | on [--force] | off | env [--off]]
 # All -get* reads are sudo-free, so 'on'/'off' only invoke sudo when a change is
 # actually needed — re-running (or install.sh) won't prompt if already correct.
@@ -3130,6 +3159,10 @@ PLIST
       # and fall through to a normal tick. The WatchPaths trigger fires this on
       # network join, so the drop typically lands seconds after connecting.
       local cap; cap="$(_captive_state)"
+      # Journal what this network/VPN advertises whenever it CHANGES (no-op in
+      # steady state) — includes the captive state, so portal episodes and their
+      # advertised domains land in the same line (log/discovery.log).
+      _discovery_journal "$cap" || true
       if [ "$cap" = captive ]; then
         if [ "$(sget captive)" != 1 ]; then
           sset captive 1
