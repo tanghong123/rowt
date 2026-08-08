@@ -11,6 +11,7 @@ pub mod classify;
 pub mod lanes;
 pub mod reconcile;
 pub mod render;
+pub mod watch;
 
 pub use classify::{classify, Classification, ClassifyInput, Lane};
 pub use render::{

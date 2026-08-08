@@ -13,6 +13,7 @@
 #   5/6. drop the corp domain_resolver  -> render-diff and the shadow must fire
 #   7.   reword a classifier reason     -> classify-diff must fire (lane-only misses it)
 #   8.   disable the single-lane rule   -> lanes-diff must fire
+#   9.   reword a captive log line      -> watch-diff must fire
 #
 # Everything happens in a throwaway copy of the repo; the real tree is never
 # touched. Run it after changing the harness itself.
@@ -189,6 +190,29 @@ else
       bad "lanes-diff passed with the single-lane invariant disabled"
     else
       ok "lanes-diff caught the broken single-lane invariant"
+    fi
+  fi
+fi
+
+echo "9. reword a captive log line in the shell"
+# The watchdog gate reads bash's decisions back out of watch.log, so a changed
+# message must surface. Two of its cases compare short action lists, which is
+# exactly when a gate can look green without comparing anything.
+rwatch="$ROOT/target/release/rowt-watch-tick"
+if [ ! -x "$rwatch" ]; then
+  echo "  skip — no release build (cargo build --release -p rowt-core)"
+else
+  export PARITY_RUST_WATCH="$rwatch"
+  if ! "$P" watch-diff >/dev/null 2>&1; then
+    bad "watch-diff already fails before the mutation"
+  else
+    sed -i.bak 's/captive portal detected — proxy already off; waiting for login/captive portal detected — proxy already off; awaiting login/' "$tmp/bin/rowt"
+    if ! grep -q 'awaiting login' "$tmp/bin/rowt"; then
+      bad "could not reword the captive log line (it moved?)"
+    elif "$P" watch-diff >/dev/null 2>&1; then
+      bad "watch-diff passed with a captive log line reworded"
+    else
+      ok "watch-diff caught the reworded captive decision"
     fi
   fi
 fi

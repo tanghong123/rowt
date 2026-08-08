@@ -1,0 +1,7 @@
+{
+  "_run": "ROWT_CAPTIVE_URL=http://127.0.0.1:8099/portal watch tick",
+  "obs": {"proxy_intent":"on","captive":"captive","active_service":"Wi-Fi","proxy_any_on":false,
+          "host_running":false,"intent":"","boot_matches":false,"iface":"en0",
+          "proxy_pointing_ok":false,"proxy_bypass_ok":false,"net_id":"ParityNet 192.0.2.15/192.0.2.1","mode":"host"},
+  "state": {"captive_flag": false}
+}

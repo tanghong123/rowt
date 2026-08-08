@@ -24,3 +24,7 @@ path = "src/bin/rowt-lanes.rs"
 [[bin]]
 name = "rowt-reconcile"
 path = "src/bin/rowt-reconcile.rs"
+
+[[bin]]
+name = "rowt-watch-tick"
+path = "src/bin/rowt-watch-tick.rs"

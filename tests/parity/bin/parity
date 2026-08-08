@@ -24,6 +24,7 @@
 #   parity classify-matrix   every classifier case (the Phase 2 gate)
 #   parity lanes-diff        lane-list edits, bash vs Rust: files + messages
 #   parity reconcile-diff    corp reconcile, Python vs Rust, over generated cases
+#   parity watch-diff        watchdog tick: bash's effects vs the FSM's plan
 #   parity ledger            regenerate LEDGER.md from bin/rowt
 #
 # `mask` compares bash against itself — it characterizes, it does not compare
@@ -459,6 +460,51 @@ cmd_lanes_diff() {
   [ "$fails" -eq 0 ]
 }
 
+# Phase 3's gate: the watchdog tick, bash's EFFECTS vs Rust's PLAN.
+#
+# The shell does not emit a plan, so its decisions are read back from what it
+# actually did — the lines it wrote to watch.log and the proxy calls in the argv
+# trace — and compared with the action list the FSM says it would produce for the
+# same world. Each case pairs the parity invocation with the observation
+# describing that same world; if the two ever drift apart the case is meaningless,
+# so the observation is checked against the sandbox's own captive verdict first.
+cmd_watch_diff() {
+  local rust="${PARITY_RUST_WATCH:-$ROOT/target/release/rowt-watch-tick}"
+  [ -x "$rust" ] || die "no rust planner at $rust — cargo build --release -p rowt-core"
+  local fails=0 total=0 case
+  for case in "$DIR"/watch-cases/*.json; do
+    total=$((total + 1))
+    local name; name="$(basename "$case" .json)"
+    local run; run="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["_run"])' "$case")"
+    local out; out="$(mktemp -d "${TMPDIR:-/tmp}/parity-watch.XXXXXX")"
+    # shellcheck disable=SC2086 — the recorded invocation is intentionally split
+    run_one "$out" $run
+
+    # bash's decisions, as effects
+    sed -e 's/^[0-9-]* [0-9:]*  //' "$out/home/rowt/log/watch.log" 2>/dev/null | sed 's/^/log /' > "$out/bash.acts" || : > "$out/bash.acts"
+    grep -qE 'setsocksfirewallproxystate .* off' "$out/trace" 2>/dev/null \
+      && echo "captive-proxy-off $(awk '/setsocksfirewallproxystate/{print $(NF-1)}' "$out/trace" | head -1)" >> "$out/bash.acts"
+    grep -qE 'setsocksfirewallproxystate .* on' "$out/trace" 2>/dev/null \
+      && echo "captive-proxy-on $(awk '/setsocksfirewallproxystate/{print $(NF-1)}' "$out/trace" | head -1)" >> "$out/bash.acts"
+
+    # rust's decisions, as a plan — same vocabulary, minus what the shell does
+    # not record (journal/audit go to other files, next is internal)
+    "$rust" --obs "$case" 2>/dev/null | grep -E '^(log|captive-proxy-off|captive-proxy-on|clear-stale-proxy) ' > "$out/rust.acts" || : > "$out/rust.acts"
+
+    if diff -u "$out/bash.acts" "$out/rust.acts" > "$out/diff" 2>&1; then
+      echo "[$name] identical ($(grep -c . "$out/bash.acts" | tr -d ' ') actions)"
+      rm -rf "$out"
+    else
+      fails=$((fails + 1))
+      echo "[$name] DIFFERS"; sed 's/^/    /' "$out/diff" | head -14
+      echo "    artifacts: $out"
+    fi
+  done
+  echo
+  echo "watchdog tick: $((total - fails))/$total cases identical"
+  [ "$fails" -eq 0 ]
+}
+
 # The committed classifier baseline. `parity golden` fails if today's verdicts
 # drift from it; `parity golden --update` re-records them (review the diff — a
 # changed verdict is a routing change).
@@ -548,6 +594,7 @@ case "${1:-}" in
   classify-matrix) shift; cmd_classify_matrix "$@" ;;
   reconcile-diff)  shift; cmd_reconcile_diff "$@" ;;
   lanes-diff)      shift; cmd_lanes_diff "$@" ;;
+  watch-diff)      shift; cmd_watch_diff "$@" ;;
   render-matrix)   shift; cmd_render_matrix "$@" ;;
   run)    shift; cmd_run "$@" ;;
   mask)   shift; cmd_mask "$@" ;;
