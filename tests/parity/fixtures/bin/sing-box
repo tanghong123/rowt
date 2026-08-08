@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Fake sing-box for the parity sandbox: enough to satisfy sb_ok()'s version
+# gate and to accept `check`/`format` without touching the network.
+case "${1:-}" in
+  version) echo "sing-box version 1.13.14" ;;
+  check|format) exit 0 ;;
+  run) exit 0 ;;
+  *) exit 0 ;;
+esac

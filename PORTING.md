@@ -192,7 +192,7 @@ revertible and gated.
 
 | Phase | Scope | Parity gate (mechanisms in §6) |
 |---|---|---|
-| **0** | Characterization: generate + harvest the corpus (§6.1), build the differential harness (§6.2) and platform shims (§6.4), write the coverage ledger (§6.8), commit synthetic fixtures | a bash-vs-bash run produces the deliverable: the **nondeterministic-field mask** (uptime, cpu%, latency, live HTTP in `status`/`report`/`metrics`/`explain`) — without it every read-only diff cries wolf. Ledger reviewed |
+| **0** ✅ | Characterization: generate + harvest the corpus (§6.1), build the differential harness (§6.2) and platform shims (§6.4), write the coverage ledger (§6.8), commit synthetic fixtures | **done** — `tests/parity/`. Mask makes all 38 read-only commands byte-stable across runs; 92-verdict classifier golden; ledger green on all 37 command arms; containment verified (sandboxed `proxy on` / `up` / `down` leave the live system untouched) |
 | **1** | `rowt-core::render` — replace the giant jq program. bash calls `rowt-rs render` internally. | **canonical-JSON equality blocks** (§6.3) + `sing-box check` on both + throwaway-port outbound-selection diff; shadow window |
 | **2** | classify/explain, lane set logic, absorb `corp-sync-reconcile.py` | generated corpus + 311 real domains → identical `(lane, reason)`; property tests on list parsing |
 | **3** | watchdog: FSM into core, effects via `PlatformMac`; `cmd_watch` execs the Rust tick | FSM unit suite replays DESIGN.md §11's decision table + fake-portal.py end-to-end; **shadow mode across real networks** (§6.5) — the longest window |

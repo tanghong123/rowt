@@ -1,0 +1,73 @@
+# The parity command matrix.
+#
+#   id      flags     args…
+#
+# flags:  ro    read-only — safe to diff live on both implementations
+#         mut   mutating — meaningful only through the recorder shims
+#         skip  excluded, with the reason in the trailing comment
+#
+# Coverage against bin/rowt's actual command surface is tracked in LEDGER.md,
+# which is generated from run_command() — never hand-maintained.
+
+version           ro     version
+version_flag      ro     --version
+help              ro     help
+help_topic        ro     help proxy
+usage             ro     --help
+status            ro     status
+report            ro     report
+onboard           ro     onboard
+audit             ro     audit
+metrics           ro     metrics
+config_list       ro     config
+shell_init        ro     shell-init
+completion        ro     completion
+complete_root     ro     _complete rowt ""
+explain_escape    ro     explain example.com
+explain_corp      ro     explain intranet.corp.example
+explain_block     ro     explain ads.example
+explain_direct    ro     explain unlisted.example
+explain_cidr      ro     explain 198.51.100.7
+explain_private   ro     explain 10.99.4.4
+explain_public_ip ro     explain 203.0.113.99
+escape_list       ro     escape list
+corp_list         ro     corp list
+block_list        ro     block list
+direct_list       ro     direct list
+escape_errors     ro     escape errors
+server_list       ro     server list
+sub_list          ro     sub list
+proxy_status      ro     proxy status
+proxy_check       ro     proxy check
+proxy_env         ro     proxy env
+router_status     ro     router status
+watch_status      ro     watch status
+vm_status         ro     vm status
+render            ro     render
+connections       ro     connections
+conns_alias       ro     conns
+route_alias       ro     route example.com
+
+# Mutating: run only through the shims. Phase 0 records their argv traces and
+# config-dir effects; they become cross-implementation gates in Phase 4.
+proxy_on          mut    proxy on --force
+proxy_off         mut    proxy off
+escape_add        mut    escape add added.example
+escape_rm         mut    escape rm example.com
+corp_sync         mut    corp sync
+use_server        mut    use beta
+skill_status      mut    skill status
+fetch             mut    fetch
+up                mut    up
+reload            mut    reload
+restart           mut    restart
+down              mut    down
+
+# Excluded, with cause.
+lane_log          skip   escape log        # tail -f — never terminates
+monitor           skip   monitor           # execs the TUI
+mon_alias         skip   mon               # same, via the alias
+uninstall         skip   uninstall         # prompts for confirmation; needs a stdin fixture
+run_wrapper       skip   run               # exec wrapper, needs a wrapped command
+ping              skip   ping              # dials real servers; belongs to a network-marked suite
+probe             skip   probe             # same

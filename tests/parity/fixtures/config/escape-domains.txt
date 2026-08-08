@@ -1,0 +1,10 @@
+# Synthetic parity fixture — never real destinations.
+# Shapes here exist to exercise the parser, not to route anything:
+# a bare suffix, a deeper suffix, leading/trailing space, a geosite meta line,
+# a duplicate, and a blank line.
+example.com
+sub.example.net
+   spaced.example.org
+geosite:google
+
+example.com

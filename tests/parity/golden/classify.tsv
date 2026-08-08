@@ -1,0 +1,92 @@
+example.com	ESCAPE	escape: exact suffix
+sub.example.com	ESCAPE	escape: subdomain of the suffix
+deep.sub.example.com	ESCAPE	escape: deep subdomain
+xexample.com	ESCAPE	no match: no dot boundary before the suffix
+example.com.example	DIRECT	no match: suffix appears as a prefix
+example.co	DIRECT	no match: truncated suffix
+example.example	DIRECT	no match: first label only
+sub.example.net	ESCAPE	escape: exact suffix
+sub.sub.example.net	ESCAPE	escape: subdomain of the suffix
+deep.sub.sub.example.net	ESCAPE	escape: deep subdomain
+xsub.example.net	ESCAPE	no match: no dot boundary before the suffix
+sub.example.net.example	DIRECT	no match: suffix appears as a prefix
+sub.example.ne	DIRECT	no match: truncated suffix
+sub.example	DIRECT	no match: first label only
+spaced.example.org	ESCAPE	escape: exact suffix
+sub.spaced.example.org	ESCAPE	escape: subdomain of the suffix
+deep.sub.spaced.example.org	ESCAPE	escape: deep subdomain
+xspaced.example.org	ESCAPE	no match: no dot boundary before the suffix
+spaced.example.org.example	DIRECT	no match: suffix appears as a prefix
+spaced.example.or	DIRECT	no match: truncated suffix
+spaced.example	DIRECT	no match: first label only
+corp.example	CORP	corp: exact suffix
+sub.corp.example	CORP	corp: subdomain of the suffix
+deep.sub.corp.example	CORP	corp: deep subdomain
+xcorp.example	CORP	no match: no dot boundary before the suffix
+corp.example.example	DIRECT	no match: suffix appears as a prefix
+corp.exampl	DIRECT	no match: truncated suffix
+intranet.corp.example	CORP	corp: exact suffix
+sub.intranet.corp.example	CORP	corp: subdomain of the suffix
+deep.sub.intranet.corp.example	CORP	corp: deep subdomain
+xintranet.corp.example	CORP	no match: no dot boundary before the suffix
+intranet.corp.example.example	DIRECT	no match: suffix appears as a prefix
+intranet.corp.exampl	DIRECT	no match: truncated suffix
+intranet.example	DIRECT	no match: first label only
+198.51.99.255	DIRECT	no match: one below 198.51.100.0/24
+198.51.100.0	CORP	corp: network address of 198.51.100.0/24
+198.51.100.1	CORP	corp: first host of 198.51.100.0/24
+198.51.100.254	CORP	corp: last host of 198.51.100.0/24
+198.51.100.255	CORP	corp: broadcast address of 198.51.100.0/24
+198.51.101.0	DIRECT	no match: one above 198.51.100.0/24
+10.98.255.255	CORP	no match: one below 10.99.0.0/16 (still corp: inside the private fall-through)
+10.99.0.0	CORP	corp: network address of 10.99.0.0/16
+10.99.0.1	CORP	corp: first host of 10.99.0.0/16
+10.99.255.254	CORP	corp: last host of 10.99.0.0/16
+10.99.255.255	CORP	corp: broadcast address of 10.99.0.0/16
+10.100.0.0	CORP	no match: one above 10.99.0.0/16 (still corp: inside the private fall-through)
+ads.example	BLOCK	block: exact suffix
+sub.ads.example	BLOCK	block: subdomain of the suffix
+deep.sub.ads.example	BLOCK	block: deep subdomain
+xads.example	BLOCK	no match: no dot boundary before the suffix
+ads.example.example	DIRECT	no match: suffix appears as a prefix
+ads.exampl	DIRECT	no match: truncated suffix
+tracker.example.net	BLOCK	block: exact suffix
+sub.tracker.example.net	BLOCK	block: subdomain of the suffix
+deep.sub.tracker.example.net	BLOCK	block: deep subdomain
+xtracker.example.net	BLOCK	no match: no dot boundary before the suffix
+tracker.example.net.example	DIRECT	no match: suffix appears as a prefix
+tracker.example.ne	DIRECT	no match: truncated suffix
+tracker.example	DIRECT	no match: first label only
+9.255.255.255	DIRECT	no match: one below 10.0.0.0/8
+10.0.0.0	CORP	corp (private fall-through): network address of 10.0.0.0/8
+10.0.0.1	CORP	corp (private fall-through): first host of 10.0.0.0/8
+10.255.255.254	CORP	corp (private fall-through): last host of 10.0.0.0/8
+10.255.255.255	CORP	corp (private fall-through): broadcast address of 10.0.0.0/8
+11.0.0.0	DIRECT	no match: one above 10.0.0.0/8
+172.15.255.255	DIRECT	no match: one below 172.16.0.0/12
+172.16.0.0	CORP	corp (private fall-through): network address of 172.16.0.0/12
+172.16.0.1	CORP	corp (private fall-through): first host of 172.16.0.0/12
+172.31.255.254	CORP	corp (private fall-through): last host of 172.16.0.0/12
+172.31.255.255	CORP	corp (private fall-through): broadcast address of 172.16.0.0/12
+172.32.0.0	DIRECT	no match: one above 172.16.0.0/12
+192.167.255.255	DIRECT	no match: one below 192.168.0.0/16
+192.168.0.0	CORP	corp (private fall-through): network address of 192.168.0.0/16
+192.168.0.1	CORP	corp (private fall-through): first host of 192.168.0.0/16
+192.168.255.254	CORP	corp (private fall-through): last host of 192.168.0.0/16
+192.168.255.255	CORP	corp (private fall-through): broadcast address of 192.168.0.0/16
+192.169.0.0	DIRECT	no match: one above 192.168.0.0/16
+100.63.255.255	DIRECT	no match: one below 100.64.0.0/10
+100.64.0.0	CORP	corp (private fall-through): network address of 100.64.0.0/10
+100.64.0.1	CORP	corp (private fall-through): first host of 100.64.0.0/10
+100.127.255.254	CORP	corp (private fall-through): last host of 100.64.0.0/10
+100.127.255.255	CORP	corp (private fall-through): broadcast address of 100.64.0.0/10
+100.128.0.0	DIRECT	no match: one above 100.64.0.0/10
+169.253.255.255	DIRECT	no match: one below 169.254.0.0/16
+169.254.0.0	CORP	corp (private fall-through): network address of 169.254.0.0/16
+169.254.0.1	CORP	corp (private fall-through): first host of 169.254.0.0/16
+169.254.255.254	CORP	corp (private fall-through): last host of 169.254.0.0/16
+169.254.255.255	CORP	corp (private fall-through): broadcast address of 169.254.0.0/16
+169.255.0.0	DIRECT	no match: one above 169.254.0.0/16
+unlisted.example	DIRECT	no match: not in any list
+203.0.113.7	DIRECT	no match: public address in no CIDR
+xn--80ak6aa92e.example	DIRECT	no match: IDN punycode, not listed

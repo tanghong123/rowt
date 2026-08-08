@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+#
+# The recorder shim. Symlinked under every effectful or environment-reading
+# command name rowt calls (see SHIMS in bin/parity), and placed first on PATH
+# so the sandbox never touches the real machine.
+#
+# It does two jobs:
+#   1. append its own argv to $PARITY_TRACE — this is what turns a side effect
+#      into diffable data (PORTING.md §6.4)
+#   2. print a canned response from $PARITY_ENV, so the sandbox sees the same
+#      network and system state on every run
+#
+# A command with no canned response prints nothing and exits 0 (override with
+# PARITY_MISSING_RC). That is deliberate: a missing response shows up as a
+# behavior difference in the harness rather than as a hang or a real syscall.
+set -uo pipefail
+
+name="$(basename "$0")"
+trace="${PARITY_TRACE:-/dev/null}"
+envdir="${PARITY_ENV:-}"
+
+# %q-quote so an argument containing spaces stays one field in the trace.
+{ printf '%s' "$name"; for a in "$@"; do printf ' %q' "$a"; done; printf '\n'; } >> "$trace"
+
+# sudo is recorded and then delegates to the shim for the command it wraps, so
+# `sudo -n /usr/sbin/networksetup -setwebproxystate X off` behaves like the
+# networksetup shim. If the wrapped command has no shim, exec fails loudly —
+# fail-closed is the point: an unshimmed effectful command must never run.
+if [ "$name" = sudo ]; then
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -v)                   exit 0 ;;
+      -u|-g|-p|-C|-U|-r|-t) shift 2 ;;
+      --)                   shift; break ;;
+      -*)                   shift ;;
+      *)                    break ;;
+    esac
+  done
+  [ "$#" -gt 0 ] || exit 0
+  inner="$(basename "$1")"; shift
+  exec "$(dirname "$0")/$inner" "$@"
+fi
+
+# Canned-response lookup, most specific first: the whole argv, then the first
+# two arguments, then the first, then the bare command name.
+slug() { printf '%s' "$*" | tr -c 'A-Za-z0-9' '_' | sed -e 's/__*/_/g' -e 's/^_//' -e 's/_$//'; }
+
+if [ -n "$envdir" ]; then
+  for key in \
+    "$(slug "$name" "$@")" \
+    "$(slug "$name" "${1:-}" "${2:-}")" \
+    "$(slug "$name" "${1:-}")" \
+    "$name"
+  do
+    [ -n "$key" ] || continue
+    if [ -f "$envdir/$key" ]; then
+      cat "$envdir/$key"
+      exit "$(cat "$envdir/$key.rc" 2>/dev/null || echo 0)"
+    fi
+  done
+fi
+
+exit "${PARITY_MISSING_RC:-0}"

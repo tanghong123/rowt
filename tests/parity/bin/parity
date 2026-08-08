@@ -1,0 +1,274 @@
+#!/usr/bin/env bash
+#
+# parity — the differential harness (PORTING.md §6.2).
+#
+# Runs rowt inside a sandbox that cannot touch this machine: XDG_CONFIG_HOME and
+# HOME point at a scratch tree, and every effectful or environment-reading
+# command is a recorder shim on PATH. Each run captures four artifacts:
+#
+#   stdout / stderr / rc     what the user sees
+#   trace                    every shimmed command, with its argv (§6.4)
+#   fsstate                  the config dir afterwards — proves the on-disk
+#                            formats invariant instead of asserting it (§6.4)
+#
+#   parity list              show the command matrix
+#   parity run <id>          run one matrix entry, keep the artifacts
+#   parity run -- <args…>    run an ad-hoc rowt command line
+#   parity mask              bash-vs-bash over the matrix; report what still
+#                            differs after normalize.sed (the Phase 0 gate)
+#   parity ledger            regenerate LEDGER.md from bin/rowt
+#
+# Phase 0 has one implementation, so `mask` compares bash against itself. Once
+# a Rust implementation exists, ROWT_IMPL selects it and the same machinery
+# becomes the cross-implementation gate.
+set -euo pipefail
+
+SELF="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DIR="$(cd -P "$SELF/.." && pwd)"                 # tests/parity
+ROOT="$(cd -P "$DIR/../.." && pwd)"              # repo root
+ROWT="${PARITY_ROWT:-$ROOT/bin/rowt}"
+MATRIX="$DIR/commands.txt"
+NORMALIZE="$DIR/normalize.sed"
+TIMEOUT="${PARITY_TIMEOUT:-25}"
+
+# Every command that reads or changes machine state. Anything not listed runs
+# for real — fine for jq/awk/python3, which are deterministic given their input.
+SHIMS="sudo networksetup launchctl limactl scutil ipconfig ifconfig route netstat
+sysctl dscacheutil dig curl open brew tailscale pkill killall softwareupdate
+system_profiler security osascript defaults sing-box"
+
+die() { echo "parity: $*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# ---------------------------------------------------------------- matrix
+
+matrix_rows() {  # id<TAB>flags<TAB>args…
+  sed -e 's/#.*//' -e '/^[[:space:]]*$/d' "$MATRIX" \
+    | while read -r id flags args; do printf '%s\t%s\t%s\n' "$id" "$flags" "$args"; done
+}
+
+matrix_get() {   # $1=id -> flags<TAB>args
+  matrix_rows | awk -F'\t' -v i="$1" '$1==i {print $2 "\t" $3; found=1} END{exit !found}'
+}
+
+# ---------------------------------------------------------------- sandbox
+
+make_sandbox() { # $1=outdir
+  local out="$1" cfg
+  mkdir -p "$out"
+  cfg="$out/home/rowt"                       # XDG_CONFIG_HOME=$out/home
+  mkdir -p "$cfg" "$out/home" "$out/shims"
+  cp -R "$DIR/fixtures/config/." "$cfg/"
+  mkdir -p "$cfg/bin" "$cfg/log" "$cfg/cache"
+  cp "$DIR/fixtures/bin/sing-box" "$cfg/bin/sing-box"
+  chmod +x "$cfg/bin/sing-box"
+  local s
+  for s in $SHIMS; do ln -sf "$DIR/shims/_recorder" "$out/shims/$s"; done
+}
+
+run_in() {       # $1=outdir (sandbox already built)  rest=rowt args — stdout only
+  local out="$1"; shift
+  env -i \
+    HOME="$out/home" \
+    XDG_CONFIG_HOME="$out/home" \
+    PATH="$out/shims:/usr/bin:/bin:/usr/sbin:/sbin" \
+    TERM=dumb LC_ALL=C TZ=UTC \
+    PARITY_TRACE="$out/trace" \
+    PARITY_ENV="$DIR/fixtures/env" \
+    ROWT_IMPL="${ROWT_IMPL:-bash}" \
+    perl -e 'alarm shift; exec @ARGV' "$TIMEOUT" \
+    bash "$ROWT" "$@" 2>/dev/null || true
+}
+
+run_one() {      # $1=outdir  rest=rowt args
+  local out="$1"; shift
+  make_sandbox "$out"
+  local rc=0
+  # perl's alarm is the same timeout trick rowt itself uses (_tmo) — it keeps a
+  # `tail -f`-style command from wedging the harness.
+  env -i \
+    HOME="$out/home" \
+    XDG_CONFIG_HOME="$out/home" \
+    PATH="$out/shims:/usr/bin:/bin:/usr/sbin:/sbin" \
+    TERM=dumb LC_ALL=C TZ=UTC \
+    PARITY_TRACE="$out/trace" \
+    PARITY_ENV="$DIR/fixtures/env" \
+    ROWT_IMPL="${ROWT_IMPL:-bash}" \
+    perl -e 'alarm shift; exec @ARGV' "$TIMEOUT" \
+    bash "$ROWT" "$@" >"$out/stdout" 2>"$out/stderr" || rc=$?
+  echo "$rc" > "$out/rc"
+  [ -f "$out/trace" ] || : > "$out/trace"   # exists even when nothing was shimmed
+  snapshot_fs "$out"
+}
+
+snapshot_fs() {  # $1=outdir — the config tree, minus what is volatile by design
+  local out="$1" cfg="$1/home/rowt"
+  ( cd "$cfg" 2>/dev/null || exit 0
+    find . -type f \
+      ! -path './log/*' ! -name '*.pid' ! -path './cache/*' ! -path './bin/*' \
+      | sort | while read -r f; do
+          # Checksum the NORMALIZED content: a file whose body carries a
+          # timestamp (rowt report's saved diag) would otherwise differ on every
+          # run and drown out the real on-disk-format signal.
+          printf '%s  %s\n' "$(normalize "$f" "$out" | cksum | awk '{print $1}')" "$f"
+        done
+  ) > "$out/fsstate"
+}
+
+# ---------------------------------------------------------------- normalize
+
+normalize() {    # $1=file $2=outdir — strip everything that legitimately varies
+  [ -f "$1" ] || { : ; return 0; }
+  sed -e "s#$2#<RUN>#g" \
+      -e "s#$ROOT#<REPO>#g" \
+      -f "$NORMALIZE" "$1"
+}
+
+# ---------------------------------------------------------------- commands
+
+cmd_list() {
+  printf '%-22s %-10s %s\n' ID FLAGS ARGS
+  matrix_rows | while IFS=$'\t' read -r id flags args; do
+    printf '%-22s %-10s %s\n' "$id" "$flags" "$args"
+  done
+}
+
+cmd_run() {
+  local id args out
+  if [ "${1:-}" = "--" ]; then
+    shift; args="$*"; id="adhoc"
+  else
+    id="${1:?usage: parity run <id> | parity run -- <args…>}"
+    local row; row="$(matrix_get "$id")" || die "no such matrix id: $id"
+    args="$(printf '%s' "$row" | cut -f2)"
+  fi
+  out="$(mktemp -d "${TMPDIR:-/tmp}/parity-$id.XXXXXX")"
+  # shellcheck disable=SC2086 — matrix args are intentionally word-split
+  run_one "$out" $args
+  echo "$out"
+  echo "--- rc: $(cat "$out/rc")"
+  echo "--- stdout:"; normalize "$out/stdout" "$out" | sed 's/^/  /'
+  echo "--- stderr:"; normalize "$out/stderr" "$out" | sed 's/^/  /'
+  echo "--- trace:";  normalize "$out/trace"  "$out" | sed 's/^/  /'
+}
+
+# The Phase 0 deliverable: run every terminating read-only command twice and
+# report what still differs after normalize.sed. Residual output IS the work
+# list — each line is a nondeterministic field that needs a rule, without which
+# every future read-only diff cries wolf.
+cmd_mask() {
+  local work only="${1:-}"
+  work="$(mktemp -d "${TMPDIR:-/tmp}/parity-mask.XXXXXX")"
+  matrix_rows | while IFS=$'\t' read -r id flags args; do
+    [ -n "$only" ] && [ "$id" != "$only" ] && continue
+    case " $flags " in *" skip "*) continue ;; esac
+    case " $flags " in *" ro "*) ;; *) continue ;; esac
+    printf '%-22s ' "$id"
+    local a="$work/$id.a" b="$work/$id.b"
+    # shellcheck disable=SC2086
+    run_one "$a" $args
+    # shellcheck disable=SC2086
+    run_one "$b" $args
+    local d=""
+    for part in rc stdout stderr fsstate; do
+      if ! diff -q <(normalize "$a/$part" "$a") <(normalize "$b/$part" "$b") >/dev/null 2>&1; then
+        d="$d $part"
+      fi
+    done
+    if [ -n "$d" ]; then
+      echo "DIFF:$d"
+      for part in $d; do
+        # `|| true`: diff exits 1 on difference, which is the expected case here
+        # and must not trip pipefail + set -e and abort the sweep.
+        { diff <(normalize "$a/$part" "$a") <(normalize "$b/$part" "$b") || true; } \
+          | sed -e 's/^/    /' -e "s#^#[$id/$part] #" | head -12 || true
+      done
+    else
+      echo "stable"
+    fi
+  done
+  echo
+  echo "work dir: $work"
+}
+
+# LEDGER.md is generated so it cannot drift: the command surface comes out of
+# bin/rowt itself (run_command's case arms), not out of memory (§6.8).
+cmd_ledger() {
+  local arms ro
+  arms="$(sed -n '/^run_command()/,/^}/p' "$ROWT" \
+          | sed -n 's/^ *\([a-z_|-]*\)) *cmd_.*/\1/p' | tr '|' '\n' | sort -u)"
+  ro="$(sed -n '/^_is_readonly()/,/^}/p' "$ROWT" | grep -c 'return 0' || true)"
+  {
+    echo "# Coverage ledger"
+    echo
+    echo "Generated by \`tests/parity/bin/parity ledger\` — do not hand-edit."
+    echo "Source of truth: \`run_command()\` in bin/rowt ($(printf '%s\n' "$arms" | grep -c . | tr -d ' ') command arms),"
+    echo "split by \`_is_readonly()\` ($ro read-only outcomes)."
+    echo
+    echo "A phase cannot be declared complete while a row in its scope is unchecked."
+    echo
+    echo '| command | in matrix | covered by |'
+    echo '|---|---|---|'
+    local c hits
+    for c in $arms; do
+      hits="$(matrix_rows | awk -F'\t' -v c="$c" '{split($3,a," "); if (a[1]==c) printf "%s ", $1}')"
+      if [ -n "$hits" ]; then
+        printf '| `%s` | yes | %s|\n' "$c" "$hits"
+      else
+        printf '| `%s` | **no** | — |\n' "$c"
+      fi
+    done
+  } > "$DIR/LEDGER.md"
+  echo "wrote $DIR/LEDGER.md"
+}
+
+# Replay the generated corpus through the classifier and emit one verdict per
+# destination. In Phase 2 this runs against both implementations and the two
+# outputs must be identical; today it produces the bash baseline. One sandbox is
+# reused for all of it — building 90-odd sandboxes to ask 90-odd questions would
+# make the gate too slow to run often, and a gate you skip is not a gate.
+cmd_corpus() {
+  local out corpus
+  corpus="$(mktemp "${TMPDIR:-/tmp}/parity-corpus.XXXXXX")"
+  python3 "$SELF/gen-corpus.py" --lists "$DIR/fixtures/config" > "$corpus"
+  out="$(mktemp -d "${TMPDIR:-/tmp}/parity-corpus-run.XXXXXX")"
+  make_sandbox "$out"
+  while IFS=$'\t' read -r dest why; do
+    [ -n "$dest" ] || continue
+    # First line of `explain` is 'dest (ip)  ->  LANE   (prose)'; the lane is
+    # the verdict, the prose is commentary that Phase 2 compares separately.
+    local lane
+    lane="$(run_in "$out" explain "$dest" | sed -n '1s/.*->  *\([A-Z]*\).*/\1/p')"
+    printf '%s\t%s\t%s\n' "$dest" "${lane:-?}" "$why"
+  done < "$corpus"
+  rm -rf "$out" "$corpus"
+}
+
+# The committed classifier baseline. `parity golden` fails if today's verdicts
+# drift from it; `parity golden --update` re-records them (review the diff — a
+# changed verdict is a routing change).
+cmd_golden() {
+  local g="$DIR/golden/classify.tsv" now
+  now="$(mktemp "${TMPDIR:-/tmp}/parity-golden.XXXXXX")"
+  cmd_corpus > "$now"
+  if [ "${1:-}" = "--update" ]; then
+    mkdir -p "$DIR/golden"; mv "$now" "$g"; echo "recorded $(wc -l < "$g" | tr -d ' ') verdicts to $g"; return 0
+  fi
+  [ -f "$g" ] || die "no golden yet — run: parity golden --update"
+  if diff -u "$g" "$now"; then
+    echo "classifier golden: $(wc -l < "$g" | tr -d ' ') verdicts, no drift"
+    rm -f "$now"
+  else
+    rm -f "$now"; die "classifier verdicts drifted from the golden (above)"
+  fi
+}
+
+case "${1:-}" in
+  list)   shift; cmd_list "$@" ;;
+  corpus) shift; cmd_corpus "$@" ;;
+  golden) shift; cmd_golden "$@" ;;
+  run)    shift; cmd_run "$@" ;;
+  mask)   shift; cmd_mask "$@" ;;
+  ledger) shift; cmd_ledger "$@" ;;
+  *) sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 1 ;;
+esac
