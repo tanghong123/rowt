@@ -43,6 +43,8 @@
 #      ROWT_IFACE  force the physical interface (default: auto-detect)
 #      ROWT_DNS_DIRECT  DoH resolver for direct-lane names (default 223.5.5.5)
 #      ROWT_WATCH_INTERVAL  watchdog liveness-probe cadence, seconds (default 120)
+#      ROWT_CAPTIVE_CHECK  watchdog captive-portal handling: 1=on (default), 0=off
+#      ROWT_CAPTIVE_URL  captive probe (default http://captive.apple.com/hotspot-detect.html)
 #      ROWT_HEALTH_FAILS  consecutive probe failures before auto-recover (default 3)
 #      ROWT_HEALTH_COOLDOWN  min seconds between auto-recoveries (default 600)
 #      ROWT_HEALTH_TIMEOUT  per-probe delay-test timeout, seconds (default 8)
@@ -50,7 +52,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.1.2"
+ROWT_VERSION="3.2.0"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -2177,8 +2179,17 @@ active_service() {
     $0 ~ ("Device: " d ")") { print svc; exit }'
 }
 
-# desired local/mDNS/private-range bypass (quoted so globs don't expand)
-_proxy_bypass_want() { printf '%s\n' '*.local' '169.254/16' '127.0.0.1' 'localhost' '*.arpa' '10.0.0.0/8' '172.16.0.0/12' '192.168.0.0/16'; }
+# Desired proxy bypass (quoted so globs don't expand): local/mDNS/private ranges,
+# plus the OS/browser captive-portal probe hosts. Those probes must go DIRECT so
+# a hotspot's DNS hijack can reach them — the hijacked redirect is what makes
+# macOS pop the login window. Through the proxy the probe instead dies on the
+# walled-off DoH resolver (an error, not a redirect) and the popup never shows.
+# The probes carry nothing but "am I online", so bypassing them costs no privacy.
+_proxy_bypass_want() {
+  printf '%s\n' '*.local' '169.254/16' '127.0.0.1' 'localhost' '*.arpa' \
+    '10.0.0.0/8' '172.16.0.0/12' '192.168.0.0/16' \
+    'captive.apple.com' 'connectivitycheck.gstatic.com' 'detectportal.firefox.com' 'www.msftconnecttest.com'
+}
 # is one proxy type enabled AND pointing at 127.0.0.1:$PORT ?  ($2 = getter flag)
 _proxy_type_ok() {
   networksetup "$2" "$1" 2>/dev/null | awk -v p="$PORT" '
@@ -2191,6 +2202,44 @@ _proxy_any_on() {
   networksetup -getsocksfirewallproxy "$1" 2>/dev/null | grep -q '^Enabled: Yes' \
     || networksetup -getwebproxy "$1" 2>/dev/null | grep -q '^Enabled: Yes' \
     || networksetup -getsecurewebproxy "$1" 2>/dev/null | grep -q '^Enabled: Yes'
+}
+
+# ---- captive-portal awareness (used by the watchdog; DESIGN.md §10) ----------
+# Pre-login a hotspot blocks the DoH resolver and hijacks plain HTTP. Through
+# the proxy that turns the portal redirect into a plain error, so macOS never
+# pops the login window and the portal page itself cannot load. The watchdog
+# probes DIRECTLY (no proxy, the network resolver) and, while a portal is in
+# the way, drops the system proxy — WITHOUT touching proxy_intent: intent stays
+# what the user chose; the state key 'captive' records why reality differs.
+
+# Prints clear | captive | unknown. Only definite portal evidence counts as
+# captive: an HTTP redirect, or a 200 whose body is not the expected Success
+# page. Timeouts/offline are 'unknown' so a flaky network never drops the proxy.
+_captive_state() {
+  [ "${ROWT_CAPTIVE_CHECK:-1}" = 1 ] || { echo unknown; return 0; }
+  local url="${ROWT_CAPTIVE_URL:-http://captive.apple.com/hotspot-detect.html}"
+  local out code body
+  out="$(curl -s --noproxy '*' --max-time "${ROWT_CAPTIVE_TIMEOUT:-3}" -w '\n%{http_code}' "$url" 2>/dev/null)" || { echo unknown; return 0; }
+  code="${out##*$'\n'}"; body="${out%$'\n'*}"
+  case "$code" in
+    200) case "$body" in *Success*) echo clear ;; *) echo captive ;; esac ;;
+    30[0-9]) echo captive ;;
+    *) echo unknown ;;
+  esac
+}
+
+# Flip only the enable state (server/port/bypass config persists in macOS), via
+# sudo -n under the watch sudoers, and never touch proxy_intent. After restore
+# the normal tick reconciles anything else that drifted while walled off.
+_captive_proxy_off() { # $1 = network service
+  sudo -n /usr/sbin/networksetup -setsocksfirewallproxystate "$1" off 2>/dev/null || return 1
+  sudo -n /usr/sbin/networksetup -setwebproxystate "$1" off 2>/dev/null || true
+  sudo -n /usr/sbin/networksetup -setsecurewebproxystate "$1" off 2>/dev/null || true
+}
+_captive_proxy_on() { # $1 = network service
+  sudo -n /usr/sbin/networksetup -setsocksfirewallproxystate "$1" on 2>/dev/null || return 1
+  sudo -n /usr/sbin/networksetup -setwebproxystate "$1" on 2>/dev/null || true
+  sudo -n /usr/sbin/networksetup -setsecurewebproxystate "$1" on 2>/dev/null || true
 }
 
 # rowt proxy [status | check | on [--force] | off | env [--off]]
@@ -2265,11 +2314,13 @@ cmd_proxy() {
         if [ "$set_bypass" = 1 ]; then
           # Never proxy local/mDNS/link-local names & private ranges — otherwise
           # Bonjour (*.local) traffic hits the proxy, fails to resolve, and the apps
-          # retry in a tight loop that pegs the CPU.
-          sudo networksetup -setproxybypassdomains "$svc" \
-            "*.local" "169.254/16" "127.0.0.1" "localhost" "*.arpa" \
-            "10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16" >/dev/null 2>&1 || true
-          echo "  ✓ local/mDNS bypass set (*.local / private ranges)"
+          # retry in a tight loop that pegs the CPU. The captive-probe hosts ride
+          # along so hotspot login popups appear even with the proxy on (see
+          # _proxy_bypass_want for the why). One source of truth: that function.
+          local -a _bp=(); local _b
+          while IFS= read -r _b; do _bp+=("$_b"); done < <(_proxy_bypass_want)
+          sudo networksetup -setproxybypassdomains "$svc" "${_bp[@]}" >/dev/null 2>&1 || true
+          echo "  ✓ proxy bypass set (*.local / private ranges / captive-probe hosts)"
         else
           echo "  ✓ local/mDNS bypass already set — left as is"
         fi
@@ -2744,6 +2795,7 @@ cmd_status() {
   echo "router:       $(host_running && echo "running (pid $(cat "$(host_pidfile)"))" || echo stopped) on 127.0.0.1:$PORT"
   local svc; svc="$(active_service 2>/dev/null || true)"
   [ -n "$svc" ] && printf 'system proxy: %s (%s)\n' "$(networksetup -getsecurewebproxy "$svc" 2>/dev/null | awk '/Enabled/{print $2}' | head -1)" "$svc"
+  [ "$(sget captive)" = 1 ] && echo "captive:      portal detected — proxy dropped until login clears (watchdog auto-restores)"
   echo "buckets:      escape=$(domains_json | jq length) corp=$(( $(corp_domains_json | jq length) + $(corp_cidrs_json | jq length) )) block=$(block_domains_json | jq length)$([ -f "$ADS_SRS" ] && echo '+ads')$(g="$(all_geosites | paste -sd, - 2>/dev/null)"; [ -n "$g" ] && echo " +geosite:$g") final=$FINAL_ROUTE"
   if [ -x "$SB" ] && [ -f "$HOST_CFG" ]; then
     "$SB" check -c "$HOST_CFG" >/dev/null 2>&1 && echo "config:       host.json OK" || echo "config:       host.json INVALID (run '$PROG render')"
@@ -3069,6 +3121,42 @@ PLIST
       # and it never re-enables a proxy the user turned off. Nothing to clear
       # either (the proxy is already off), so a full early-out is correct.
       if [ "$proxy_intent" = off ]; then exit 0; fi
+      # Captive portal (_captive_state; DESIGN.md §10): while a hotspot login
+      # page is in the way, everything this tick would normally do — recover,
+      # reload, re-assert the proxy — is wrong: the walled garden blocks it all,
+      # and a re-asserted proxy hides the login page. Drop the proxy once on
+      # entry (proxy_intent untouched — that is the user's wish, not ours to
+      # change), stay completely hands-off until the portal clears, then restore
+      # and fall through to a normal tick. The WatchPaths trigger fires this on
+      # network join, so the drop typically lands seconds after connecting.
+      local cap; cap="$(_captive_state)"
+      if [ "$cap" = captive ]; then
+        if [ "$(sget captive)" != 1 ]; then
+          sset captive 1
+          local csvc; csvc="$(active_service 2>/dev/null || true)"
+          if [ -n "$csvc" ] && _proxy_any_on "$csvc"; then
+            _watch_log "captive portal detected — dropping system proxy on '$csvc' so the login page can load (auto-restores after login)"
+            _audit "watchdog: captive portal — system proxy off on '$csvc' (intent stays on; auto-restore on clear)"
+            _captive_proxy_off "$csvc" \
+              || _watch_log "captive: could not drop the proxy (sudoers missing?) — log in after a manual '$PROG proxy off'"
+          else
+            _watch_log "captive portal detected — proxy already off; waiting for login"
+          fi
+        fi
+        exit 0
+      fi
+      if [ "$(sget captive)" = 1 ]; then
+        [ "$cap" = clear ] || exit 0    # not provably clear yet — stay hands-off
+        sset captive ""
+        local csvc2; csvc2="$(active_service 2>/dev/null || true)"
+        if [ -n "$csvc2" ] && host_running; then
+          _watch_log "captive portal cleared — restoring system proxy on '$csvc2'"
+          _audit "watchdog: captive portal cleared — system proxy restored on '$csvc2'"
+          _captive_proxy_on "$csvc2" || true
+        elif [ -n "$csvc2" ]; then
+          _watch_log "captive portal cleared but the router is down — leaving the proxy off for recovery to handle"
+        fi
+      fi
       # rowt is a user tool with no auto-start, so after a reboot/login it won't be
       # running — but the macOS system proxy it set PERSISTS across reboots.
       if ! host_running; then
@@ -3424,7 +3512,7 @@ o@lifecycle@uninstall [--purge]@reverse setup for a clean re-onboard (--purge wi
 o@lifecycle@skill <install|uninstall|status>@link the rowt agent skill so an agent can drive setup
 o@lifecycle@restart@bounce the tunnel in place (no re-render / proxy change)
 c@lifecycle@reload@re-apply after a network switch (re-render + restart + proxy)
-o@lifecycle@watch <install|uninstall|status|refresh>@auto-reload on net change; clears a stale proxy at login
+o@lifecycle@watch <install|uninstall|status|refresh>@auto-reload on net change; captive-portal handling; clears a stale proxy at login
 c@lifecycle@status@state + config validity + reachability
 o@lifecycle@explain <domain|ip>@explain a destination's lane (escape / corp / direct)
 o@lifecycle@connections [lane|-w]@live view: active connections + which lane each is on
