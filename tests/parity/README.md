@@ -1,11 +1,11 @@
 # The parity harness
 
-Phase 0 of the port described in [PORTING.md](../../PORTING.md): characterize
-what the bash actually does, so a Rust implementation can be held to it.
+The differential harness for the port described in [PORTING.md](../../PORTING.md).
+It characterizes what the bash actually does, and holds `crates/rowt-core` to
+that behavior rather than to anyone's reading of the shell.
 
-Nothing here tests the Rust (there isn't any yet). What it does today is
-capture bash's behavior as artifacts a second implementation must reproduce —
-and, as a side effect, give `bin/rowt` its first behavioral test suite.
+It also gave `bin/rowt` its first behavioral test suite, which is worth having
+whether or not the port ever finishes.
 
 ## Running it
 
@@ -16,25 +16,35 @@ tests/parity/bin/parity run -- explain example.com
 tests/parity/bin/parity mask            # every read-only command, twice, diffed
 tests/parity/bin/parity golden          # classifier verdicts vs the committed golden
 tests/parity/bin/parity ledger          # regenerate LEDGER.md from bin/rowt
-tests/parity/bin/selftest               # break the system 3 ways; every gate must fire
+
+# cross-implementation gates (bash/Python vs Rust)
+tests/parity/bin/parity render-matrix    # the rendered config, canonically
+tests/parity/bin/parity classify-matrix  # lane AND matched reason
+tests/parity/bin/parity lanes-diff       # lane-list edits: files + messages
+tests/parity/bin/parity reconcile-diff   # corp reconcile, over generated cases
+tests/parity/bin/parity watch-diff       # watchdog decisions
+
+tests/parity/bin/selftest                # break each gate; every one must fire
 ```
 
 ## Proving the gates can fail
 
 Everything above is pass-side evidence, and a suite that has only ever agreed
 with itself has not been shown to detect anything. `bin/selftest` breaks a
-throwaway copy of the repo three ways and fails if a gate stays quiet: a domain
-moved between lanes (the golden must fail), normalization neutered (`mask` must
-go loud), and a captive-probe host changed in `_proxy_bypass_want` (the
-`proxy_on` argv trace must differ). It asserts each mutation actually landed
-first — a pattern that matched nothing looks exactly like a gate that failed to
-fire.
+throwaway copy of the repo once per gate and fails if any of them stays quiet —
+a domain moved between lanes, normalization neutered, a captive-probe host
+changed, the corp `domain_resolver` dropped, a classifier reason reworded, the
+single-lane invariant disabled, a captive log line reworded. It asserts each
+mutation actually landed first: a pattern that matched nothing looks exactly
+like a gate that failed to fire.
 
-Writing it caught two bugs in the gates themselves: `normalize.sed`'s temp-path
-rule was greedy to end-of-token, so it swallowed the whole path and would have
-hidden a file written to the wrong place; and `set -o pipefail` combined with
-`cmd | grep -q` inverts the result — grep exits on the first match, the
-producer dies of SIGPIPE, and a detected difference reads as no difference.
+This has repeatedly earned its keep. It caught `normalize.sed`'s temp-path rule
+running greedy to end-of-token, so it swallowed whole paths and would have
+hidden a file written to the wrong place. It caught `cmd | grep -q` under
+`set -o pipefail` inverting its own result — grep exits on the first match, the
+producer dies of SIGPIPE, and a detected difference reads as no difference. And
+the lane gate once reported 12/12 identical purely because both sides were being
+handed a malformed command and rejecting it in the same way.
 
 ## The sandbox
 
@@ -97,10 +107,22 @@ plus the drop and restore branches. A scenario overlay
 describe, since the drop only fires when the proxy is actually on. Verified: the
 drop emits the full `sudo networksetup …` sequence and logs the §11 line.
 
-## Phase 1: the render gate
+## The cross-implementation gates
 
-`crates/rowt-render` reimplements the jq program. `parity render-matrix` runs
-every case in `render-cases.txt` — 18 of them, covering the selector branches
+`crates/rowt-core` holds the render, the classifier, lane edits, the corp
+reconcile and the watchdog's decision table. Each has a gate:
+
+| gate | compares | scale |
+|---|---|---|
+| `render-matrix` | rendered config, canonical JSON | 21 shapes × host + vm |
+| `classify-matrix` | `(lane, reason)` per destination | 9 shapes × 92 destinations |
+| `lanes-diff` | all three lane files + messages | 12 edits |
+| `reconcile-diff` | stdout contract vs the Python | 210 cases, 200 randomized |
+| `watch-diff` | decisions, read back from watch.log + trace | 5 cases |
+
+### The render gate
+
+`parity render-matrix` runs every case in `render-cases.txt`, covering the selector branches
 (auto / pinned / unknown / no servers), cached and uncached `geosite:`
 categories, the ad set, an empty corp lane, vm mode, unicode and tie-breaking
 suffixes, and the `ROWT_*` knobs — and requires canonical-JSON equality on both
