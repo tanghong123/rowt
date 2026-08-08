@@ -77,7 +77,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { port: 7890, health_fails: 3, health_cooldown: 300 }
+        Config { port: 7890, health_fails: 3, health_cooldown: 600 }
     }
 }
 
@@ -135,6 +135,10 @@ fn recover_or_hold(
     }
     st.last_recovery = obs.now;
     st.health_fails = 0;
+    // `_watch_recover` logs before it acts, so the decision is visible even if
+    // the reload then fails. Without this the shell writes a line the plan does
+    // not, and every real recovery would read as a divergence.
+    actions.push(Action::Log(format!("{reason} — recovering (cmd_reload)")));
     actions.push(Action::Recover(reason.to_string()));
 }
 
@@ -513,6 +517,40 @@ mod tests {
         let r = netcheck(&o, &st, &Config::default());
         assert_eq!(r.state.health_fails, 0);
         assert!(!r.actions.iter().any(|a| matches!(a, Action::Recover(_))));
+    }
+
+    #[test]
+    fn a_real_cooldown_episode_from_the_watchdog_log() {
+        // Replayed from watch.log, 2026-08-08 13:35:50 → 13:45:51: a recovery,
+        // then a wedge 459s later that must hold off, then one at 601s that must
+        // act. Real timestamps, so the arithmetic and the threshold are checked
+        // against what actually happened rather than against a guess.
+        let cfg = Config::default();
+        let recovered_at = 1_000_000i64;
+        let mut o = running();
+        o.health_ok = false;
+        o.now = recovered_at + 459;
+        let st = State {
+            health_fails: 2,
+            last_recovery: recovered_at,
+            last_net_id: Some(o.net_id.clone()),
+            ..Default::default()
+        };
+        let held = netcheck(&o, &st, &cfg);
+        let l = logs(&held);
+        assert_eq!(
+            l[0],
+            "tunnel wedged (3 consecutive probe failures) — last recovery 459s ago (< 600s cooldown), holding off"
+        );
+        // holding off must NOT reset the streak — the next failure is the fourth
+        assert_eq!(held.state.health_fails, 3);
+        assert!(!held.actions.iter().any(|a| matches!(a, Action::Recover(_))));
+
+        o.now = recovered_at + 601;
+        let acted = netcheck(&o, &held.state, &cfg);
+        assert!(logs(&acted)[0].starts_with("tunnel wedged (4 consecutive probe failures) — recovering"));
+        assert!(acted.actions.iter().any(|a| matches!(a, Action::Recover(_))));
+        assert_eq!(acted.state.health_fails, 0, "a recovery clears the streak");
     }
 
     #[test]
