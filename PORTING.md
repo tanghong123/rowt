@@ -1,0 +1,386 @@
+# Porting rowt: bash → Rust, macOS → macOS + Linux
+
+*Investigation and design, 2026-08-08. Status: proposed — nothing here is built.*
+
+The question asked: rowt is mostly bash — does it make sense to refactor it
+into a systems language, modularized, so that (a) it can run on both macOS and
+Linux, and (b) maintenance and verification get easier?
+
+**Verdict: yes — Rust, one Cargo workspace, strangler migration in six phases.**
+Portability is the deciding factor: supporting Linux from bash means threading
+`case $(uname)` through every platform call site of a 4.3k-line monolith, which
+is strictly worse than both the status quo and a rewrite. A typed platform
+layer is the cheaper path to the stated goal, and the testability gains come
+along for free.
+
+---
+
+## 1. What exists today (measured 2026-08-08)
+
+| Component | Language | Size | Role |
+|---|---|---|---|
+| `bin/rowt` | bash | 4,332 lines, 181 functions | everything: CLI, render, lanes, watchdog, captive, proxy, VM |
+| `config/*.py` | Python | 2,529 lines (734 of them tests) | import pipeline, net-detect, reconcile, fake portal |
+| `rowt-monitor/` | Rust | 4,344 lines + tests | TUI + collector sidecar; golden-test culture already in place |
+| `install.sh` | bash | 148 lines | copy + symlink + zshrc wiring (no platform calls) |
+| `lima/` | YAML/bash | — | VM escape variant (Lima + socket_vmnet) |
+| sing-box | Go (external) | — | the actual router engine; **already cross-platform** |
+| corp-route | bash (separate repo) | — | root route daemon; stays separate by design (DESIGN.md §6) |
+
+`bin/rowt` breaks down into these subsystems (by line range):
+
+| Subsystem | ~lines | Portable? |
+|---|---|---|
+| prelude, state (`sget`/`sset`), audit, utils | 330 | yes |
+| artifact fetch (geosites, rulesets, guest images) | 100 | yes |
+| lane lists: edit/add/rm, `corp_sync`, `corp_suggest` | 480 | yes (pure set logic) |
+| lane logs, monitor launch, connections view | 250 | yes |
+| **config render** (`assemble_host`, `group_jq`) | 235 | yes (pure: lists+state → JSON) |
+| import / servers / sub / use / ping / probe | 420 | yes (heavy lifting already in Python) |
+| host router + collector lifecycle | 175 | mostly (pid/exec) |
+| **VM subsystem** (Lima, socket_vmnet) | ~280 | **no — macOS-only by purpose** |
+| system proxy + captive + discovery journal | 200 | **no — networksetup ×37** |
+| env / shell-init / completion | 130 | yes |
+| setup / onboard | 195 | mixed |
+| classify / explain / status | 135 | yes (pure) |
+| **watchdog** (tick, recover, health, sudoers) | 365 | logic yes; effects no |
+| uninstall / skill / revert / diag | 305 | mixed |
+| help text | 525 | yes |
+| audit / metrics / config / dispatch | 230 | yes |
+
+The pattern is stark: **the logic is portable; the ~15% that touches the OS is
+concentrated in three seams** (plus one macOS-only feature). `net-detect.py`
+already demonstrates the target shape — a pure parser with `--input FILE` for
+tests and exactly one platform subprocess (`scutil --dns`) behind it.
+
+## 2. The platform seams
+
+| Plane | macOS today | Linux equivalent | Notes |
+|---|---|---|---|
+| System proxy | `networksetup -set{socksfirewall,web,secureweb}proxy*` (37 call sites, sudoers-whitelisted) | fragmented: GNOME `gsettings`, KDE, env vars | **the hard seam — see §4.1** |
+| Watchdog schedule | `launchctl` + LaunchAgent plist (7 sites) | systemd user service/timer | mechanical |
+| Discovery | `scutil --dns`, `ipconfig getpacket` (8 sites) | `resolvectl status` / NetworkManager | net-detect.py parser split already isolates this |
+| Route reading | `netstat -rn` (3 sites; rowt never *writes* routes) | `ip route` | trivial |
+| Boot id | `sysctl kern.boottime` | `/proc/sys/kernel/random/boot_id` | trivial |
+| Socket binding | `bind_interface` in sing-box config | same — sing-box maps to IP_BOUND_IF / SO_BINDTODEVICE itself | **free** |
+| Captive probe | `curl --noproxy` | identical | free |
+| VM escape variant | Lima + socket_vmnet | n/a — its purpose is "run the engine in a Linux guest"; moot on Linux | gate `cfg(target_os = "macos")`, do not port |
+
+## 3. Why Rust (and not Go, and not modular bash)
+
+- **Rust**: the repo already carries 4.3k lines of it with a working test
+  culture (golden renders, doc-enforcement tests) and a proven brew
+  prebuilt-asset release lane for Rust binaries. One workspace lets the
+  monitor/collector consume `rowt-core` types instead of re-parsing state
+  files. No new toolchain.
+- **Go**: sing-box being Go is irrelevant — rowt *execs* it, never links it.
+  Choosing Go adds a second toolchain and orphans the monitor. No advantage.
+- **Modular bash**: splitting the monolith into sourced files fixes file size
+  and nothing else. The pains that motivated this — the jq render as one giant
+  single-quoted string (an apostrophe in a comment broke `bash -n`), captive
+  tests requiring live system-proxy toggles, zsh quoting traps, stringly
+  state — all survive. And Linux support would still fork every call site.
+
+## 4. Target architecture
+
+```
+rowt/                       (Cargo workspace root)
+├── crates/
+│   ├── rowt-core/          # PURE: render, lanes, classify/explain, captive FSM,
+│   │                       #       state, discovery journal, metrics
+│   ├── rowt-platform/      # trait Platform + PlatformMac / PlatformLinux
+│   ├── rowt-cli/           # clap dispatch + help → the `rowt` binary
+│   └── rowt-import/        # (last/optional) port of the Python import pipeline
+├── rowt-monitor/           # existing crate, joins the workspace; uses rowt-core
+├── config/*.py             # shrink over time; import pipeline may stay Python
+└── bin/rowt                # shrinks each phase, deleted in Phase 4
+```
+
+The trait is deliberately small — everything the bash calls out for, nothing
+more:
+
+```rust
+trait Platform {
+    // proxy plane
+    fn proxy_set(&self, cfg: &ProxyConfig) -> Result<()>;   // 3 protos + bypass list
+    fn proxy_clear(&self) -> Result<()>;
+    fn proxy_read(&self) -> Result<ProxyStatus>;
+    // service plane
+    fn watchdog_install(&self) -> Result<()>;
+    fn watchdog_uninstall(&self) -> Result<()>;
+    // discovery plane
+    fn dns_snapshot(&self) -> Result<DnsSnapshot>;          // per-iface domains + ns
+    fn dhcp_search_domains(&self, iface: &str) -> Result<Vec<String>>;
+    fn default_route(&self) -> Result<Option<GatewayInfo>>;
+    fn vpn_ifaces(&self) -> Result<Vec<String>>;
+    fn boot_id(&self) -> Result<String>;
+}
+```
+
+And the watchdog becomes a pure function — the payoff seam:
+
+```rust
+// No side effects. The captive state machine (DESIGN.md §11), recovery,
+// health checks and journal decisions all live here, unit-testable with a
+// fabricated Observation instead of a live proxy toggle.
+fn watch_tick(obs: &Observation, st: &State) -> (Vec<Action>, State);
+```
+
+**Invariants — what does NOT change:**
+- On-disk formats: `state` key=value file, lane list files, log formats,
+  `~/.config/rowt` layout. The monitor and collector keep working mid-migration
+  and `brew upgrade` stays seamless.
+- CLI surface: every documented subcommand, flag and output shape (the rowt
+  skill and muscle memory depend on them).
+- sing-box stays the engine; corp-route stays a separate root daemon (its
+  lifecycle, privileges and multi-corp scope are different — a rewrite does
+  not absorb it, though it could later borrow `rowt-platform` as a library).
+
+### 4.1 Linux design decisions
+
+1. **Prefer tun mode over system proxy on Linux.** There is no
+   `networksetup` equivalent — desktop proxy settings are fragmented
+   (gsettings / KDE / env vars) and CLI apps ignore them anyway. sing-box tun
+   mode removes the whole proxy plane: all traffic enters the lanes without
+   any per-desktop wiring. Consequences:
+   - needs `CAP_NET_ADMIN` → run the engine as a systemd system service with
+     `AmbientCapabilities=CAP_NET_ADMIN` (analogous role to today's sudoers
+     entry, and tighter).
+   - captive handling changes shape: "drop the proxy" becomes "pause the tun
+     route" — same FSM, different Action emitted, which is exactly what the
+     pure-tick design accommodates.
+   - explicit-proxy mode remains as fallback (gsettings on GNOME; otherwise
+     print env exports), mainly for unprivileged setups.
+2. **Tun must coexist with other VPN clients — by exclusion, never by
+   fighting.** On macOS this problem doesn't exist: system proxy is opt-in
+   per app, so AliLang's outer tunnel and tailscaled never touch rowt, and
+   rowt is route-inert (DESIGN.md §6). Naive tun breaks that on three fronts:
+   `auto_route`'s policy rules outrank the VPN's routes (and `strict_route`
+   is documented to break Tailscale's fwmark routing); DNS hijack collides
+   with VPN-pushed per-link DNS; and tun captures the VPN client's *own*
+   tunnel traffic — worst case the corp gateway endpoint lands in the escape
+   lane and the corp VPN rides the VLESS proxy. The design therefore is:
+   - `route_exclude_address` = PRIVATE_CIDRS (RFC1918 + 100.64/10 +
+     169.254/16) + learned corp CIDRs (sing-box accepts rule-sets here, so
+     `corp_sync` can feed it). Corp/overlay traffic never enters rowt's tun;
+     the kernel hands it to the VPN's tun directly — the Linux analog of
+     "corp lane = direct, unbound", one layer down. Accepted loss: corp-lane
+     logs/metrics don't see that traffic on Linux.
+   - `strict_route: false`; exclude the VPN clients' own traffic via
+     sing-box's CIDR/interface/UID primitives (leave `tailscale0` and the
+     corp tun alone; pin the corp gateway endpoint direct).
+   - **No-fighting rule:** rowt never re-asserts routing rules against
+     another daemon. If the watchdog sees its capture rule shadowed, it
+     journals the event and fails open (traffic flows un-laned) — same
+     philosophy as the captive handler stepping aside. Route arbitration
+     stays corp-route's job if that daemon ever comes to Linux.
+   - Whether AliLang ships a Linux client is open, but Tailscale does and
+     has a documented sing-box interaction — coexistence is mandatory
+     regardless.
+3. **Discovery via systemd-resolved** (`resolvectl` or D-Bus): per-link
+   domains ≈ `scutil --dns` scoped resolvers; DHCP search domains from
+   NetworkManager when present. Same `DnsSnapshot` shape out.
+4. **Watchdog as a long-running systemd service** with an internal tick
+   (closest to launchd KeepAlive semantics), not a timer firing oneshots.
+5. **VM subsystem is not ported** — compiled out on Linux.
+
+## 5. Migration plan — strangler, every phase ships alone
+
+Ordering rule: highest testability × lowest platform risk first. The bash
+monolith stays the daily driver until Phase 4; each phase is individually
+revertible and gated.
+
+| Phase | Scope | Parity gate (mechanisms in §6) |
+|---|---|---|
+| **0** | Characterization: generate + harvest the corpus (§6.1), build the differential harness (§6.2) and platform shims (§6.4), write the coverage ledger (§6.8), commit synthetic fixtures | a bash-vs-bash run produces the deliverable: the **nondeterministic-field mask** (uptime, cpu%, latency, live HTTP in `status`/`report`/`metrics`/`explain`) — without it every read-only diff cries wolf. Ledger reviewed |
+| **1** | `rowt-core::render` — replace the giant jq program. bash calls `rowt-rs render` internally. | **canonical-JSON equality blocks** (§6.3) + `sing-box check` on both + throwaway-port outbound-selection diff; shadow window |
+| **2** | classify/explain, lane set logic, absorb `corp-sync-reconcile.py` | generated corpus + 311 real domains → identical `(lane, reason)`; property tests on list parsing |
+| **3** | watchdog: FSM into core, effects via `PlatformMac`; `cmd_watch` execs the Rust tick | FSM unit suite replays DESIGN.md §11's decision table + fake-portal.py end-to-end; **shadow mode across real networks** (§6.5) — the longest window |
+| **4** | clap CLI takes dispatch + help; bash reduces to a wrapper, then deleted. Formula ships the prebuilt binary (monitor-asset pattern). | full coverage ledger green (§6.8) + argv-trace diffs on every mutating command; `ROWT_IMPL` escape hatch live (§6.6) |
+| **5** | `PlatformLinux` + tun mode + systemd units; CI matrix (macOS + ubuntu — core tests run on both, platform tests feature-gated); linux tar assets | fresh-VM install → onboard → probe → captive drill; VPN-coexistence drill with Tailscale up |
+| 6 (opt) | port the import pipeline (1,484 lines of parsing Python). Already portable and tested — lowest ROI, may stay Python indefinitely. | existing py test suite as fixtures |
+
+Rough effort at this repo's session cadence: P0 ≈ a day, P1 2–3 d, P2 2 d,
+P3 3–4 d, P4 2–3 d, P5 4–5 d — order of three focused weeks total, spreadable.
+
+## 6. Parity: proving the rewrite leaves no gaps
+
+A rewrite of daily-driver infrastructure fails in three distinct ways, and
+each needs a different instrument:
+
+| Gap class | Example | Instrument |
+|---|---|---|
+| (a) known behavior, implemented wrong | render emits the corp outbound without `domain_resolver` | differential testing (§6.2–6.4) |
+| (b) behavior nobody wrote down | `sort` order of a lane list; `\|\| true` swallowing a failure; what an empty list file does | harvested corpus (§6.1) + shadow mode (§6.5) |
+| (c) behavior only visible in environments we can't stage | corp net with AliLang up; a hotel portal; the plane | shadow mode in production (§6.5) |
+
+Class (b) is the real risk. It cannot be closed by reading the bash carefully,
+because the thing you fail to notice is exactly the thing you fail to
+reimplement. So the plan leans on *harvesting* observed behavior and on
+*running both implementations against reality* rather than on inspection.
+
+### 6.1 The corpus is generated and harvested, not invented
+
+rowt has been recording its own behavior for months. Measured on this machine
+2026-08-08:
+
+| Artifact | Content | Serves as |
+|---|---|---|
+| **generated from the lane lists** | every suffix plus its near-misses (`sub.suffix`, `suffixsuffix`, partial prefixes), every CIDR at network / broadcast / ±1, the PRIVATE_CIDRS boundaries, IDN, malformed lines | **the primary classifier corpus** — exhaustive by construction, and committable when generated from synthetic lists |
+| `log/lane-*.log` | 311 distinct domains seen in the un-rotated logs (7 rotations each behind them) | a source of *real* domain strings only. **Not an oracle**: these are error logs — the third field is a failure string (`NXDOMAIN`, `network is unreachable`, `operation not permitted`), not a match rationale, so the sample is biased toward what broke (one corp domain is 24k of 25k corp lines; 48k block lines span 9 domains) |
+| `log/audit.log` | 104 mutating invocations, **23 distinct command shapes** (`proxy on` ×17, `corp sync` ×7, `server import` ×5, …) | which commands actually matter, ranked by real use — the priority order for transcript tests |
+| `log/discovery.log` | real network signatures (office, home, plane, hotspot, VPN-up) | the watchdog `Observation` corpus |
+| `~/.config/rowt/` live tree | real lists, state, servers | render input (sanitized) |
+| `rowt report` | wide-surface snapshot | a single-command regression canary |
+
+**Security constraint:** this corpus contains employer-internal hostnames. It
+stays **local** — a gate run on this machine, never committed. Fixtures that
+go into the public repo are synthetic domains plus hand-written edge cases
+(empty file, comments, duplicates, IDN, CIDR, malformed line, missing file).
+
+### 6.2 The differential harness
+
+A `parity` script runs both implementations against the *same* sandboxed
+`XDG_CONFIG_HOME`, captures stdout / stderr / exit code, and diffs all three.
+
+`_is_readonly()` in the bash is already a machine-readable manifest of the
+command surface, split exactly where the harness needs it: read-only commands
+(24 families) run live and unshimmed on both sides — roughly half the surface
+covered for free — while mutating ones go through §6.4's shims.
+
+### 6.3 Gating the render — and why `explain` cannot do it
+
+**`explain` is not a view of the rendered config.** `cmd_explain` walks the
+list files itself (`_list_hit`, `_longest_domain_hit`, `_private_hit`) and
+says so in its own output ("a geosite rule-set may still match this — not
+shown"). It is a *parallel model* of routing. A Rust render that dropped the
+corp outbound's `domain_resolver`, reordered rules, or lost a geosite would
+produce byte-identical `explain` output on both sides — the gate cannot fail
+for the bug class Phase 1 introduces. So:
+
+- **Canonical-JSON equality is the Phase 1 blocking gate** (`jq -S`, so key
+  order is not noise). It is the only gate that inspects the artifact being
+  rewritten. An intentional difference is rare enough to deserve a per-instance
+  allow-list entry with a reason. `sing-box check` must also pass on both.
+- **End-to-end decision oracle:** boot each rendered config on its own
+  throwaway port (the technique proven in the 3.1.1 `domain_resolver`
+  investigation) and dial the destination corpus through both, comparing the
+  outbound actually selected via the Clash API / lane logs. This is derived
+  from the artifact rather than from a second model of it.
+- **`explain` parity moves to Phase 2**, where classify/explain *is* the code
+  under test and it is exactly the right oracle.
+
+Note: `explain` runs a live HTTP probe when the router is up, so the harness
+needs the router down or a `--no-live` flag added for determinism.
+
+### 6.4 Side effects become diffable data
+
+Mutating commands can't be run live twice. Put a recorder shim directory first
+on `PATH` — `networksetup`, `launchctl`, `sudo`, `scutil`, `ipconfig`,
+`netstat`, `curl`, `sing-box` — where each shim appends its argv to a trace
+file and returns canned fixture output. Run both implementations, diff the
+traces. "Did the Rust version set all three proxy protocols with the same
+bypass list, in the same order, and skip the sudo when already off?" becomes a
+text diff.
+
+Argv traces alone are not enough — also **diff the sandboxed config directory
+itself** after each mutating command (state file, lane lists, servers, modulo
+timestamps). That is what proves the "on-disk formats unchanged" invariant of
+§4 instead of merely asserting it, and it is the failure that would break the
+monitor and collector mid-migration.
+
+One pure function deserves its own golden by name: `_watch_sudoers_body()`
+emits a sudoers file whitelisting *exact* command strings. Get it subtly wrong
+and the watchdog silently loses the ability to flip the proxy — captive
+handling then fails in precisely the environment that cannot be staged.
+
+This also gives `bin/rowt` its first real behavioral test suite — worth having
+even if the port stalled after Phase 2.
+
+### 6.5 Shadow mode — the centerpiece
+
+For each ported subsystem, before cutover: **bash stays authoritative, and
+also runs the Rust implementation and diffs the result**, journaling
+divergences to `log/parity.log` using the discovery journal's change-only
+signature trick so the file stays small. Shadow output is never applied, so
+the risk is zero.
+
+**Bash captures the `Observation` once and hands it to the Rust tick** — the
+shadow must never run its own captive probe or net-detect. Otherwise the two
+implementations observe different instants, probe traffic to the four captive
+hosts doubles, and `parity.log` fills with divergences that are timing
+artifacts; a log you have learned to ignore is worse than no log. The
+`watch_tick(obs, st) -> (actions, st)` signature exists for exactly this.
+
+The coverage is real: the watchdog ticks continuously
+across office, home, foreign networks, captive portals and VPN-up states —
+class (c) environments that no fixture can stage, and exactly where the §4.1
+coexistence questions live.
+
+**Promotion rule per phase:** flip only after a real-use window with zero
+unexplained divergences — suggest 14 days including at least one corp-network
+day and one foreign-network day.
+
+### 6.6 Cutover keeps a live escape hatch
+
+`ROWT_IMPL=bash|rust` selects the implementation at runtime; the bash ships
+alongside as `rowt-legacy` for one full release cycle and the Formula carries
+both. Rollback is an env var, not a reinstall. Phase 4 deletes the bash only
+after a release cycle in which the fallback was never needed.
+
+### 6.7 Bash bugs are behavior until deliberately retired
+
+If the Rust version "fixes" something the bash did wrong, that is still a
+divergence. Parity lands first; the fix lands as a **separate** commit
+afterward, with the golden update in that commit. Otherwise "it's a fix"
+becomes the channel through which accidental regressions get laundered.
+
+### 6.8 Coverage ledger
+
+Every arm of `run_command`'s `case` plus every entry in `_is_readonly` becomes
+a checklist row (command × representative args). A phase cannot be declared
+complete while rows in its scope are unchecked — this is what stops "the
+commands I remembered to test" from masquerading as the command surface.
+
+### 6.9 What parity deliberately does not cover
+
+- **Help-text prose.** Command names, subcommands and flags are gated; the
+  wording around them is free to change (the skill depends on the names).
+- **Error-message wording**, except the specific strings quoted in the rowt
+  skill's debugging section — those are gated, the rest may drift.
+- **Timing and performance.** Rust will be faster; that is fine. But the
+  watchdog's timeout constants must be carried over as *data*, not re-derived
+  by judgement.
+- **Interactive flows** (`onboard` prompts) — manual checklist, not automated.
+- **Environments never visited during the shadow window.** Mitigated by
+  fail-open design (§4.1.2) and the journal, not by tests.
+
+## 7. Risks
+
+- **sudoers coupling (macOS):** the watchdog's sudoers line whitelists exact
+  commands. Cutover to a compiled binary must update it in lockstep — and a
+  root-invoked compiled binary in the brew prefix is a *better* posture than
+  a user-writable script (per the existing "root must not exec user-writable
+  scripts" rule).
+- **Render drift:** any silent divergence changes routing. Mitigated by
+  canonical-JSON equality plus the throwaway-port outbound oracle (§6.3) —
+  note that `explain` looks like a gate here and is not one.
+- **Dual implementations mid-migration:** bounded by strangler order — each
+  subsystem cuts over atomically behind a single call site; no dual-write.
+- **Linux tun privileges:** cap-granting via systemd is standard but is a new
+  operational surface; documented as part of Phase 5's install story.
+- **VPN coexistence on Linux:** an aggressive VPN client can shadow rowt's
+  capture rules. Mitigated by design (§4.1.2): capture exclusions + fail-open,
+  never re-assertion. Residual risk is degraded coverage (un-laned traffic),
+  which the journal records — not breakage of the VPN.
+
+## 8. What this buys beyond Linux
+
+- The render becomes typed serde builders — the quoting-trap class of bug
+  (the `bash -n` apostrophe incident) is structurally gone.
+- The captive/recovery machine gets a real unit-test suite instead of
+  live-fire system-proxy toggles.
+- State keys become an enum instead of stringly `sget`/`sset`.
+- The monitor and collector read state through shared `rowt-core` types
+  instead of re-parsing files.
+- `cargo clippy` + tests replace `bash -n` as the strongest static gate.
