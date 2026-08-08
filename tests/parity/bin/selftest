@@ -14,6 +14,7 @@
 #   7.   reword a classifier reason     -> classify-diff must fire (lane-only misses it)
 #   8.   disable the single-lane rule   -> lanes-diff must fire
 #   9.   reword a captive log line      -> watch-diff must fire
+#   10.  …and the watchdog shadow must record it too
 #
 # Everything happens in a throwaway copy of the repo; the real tree is never
 # touched. Run it after changing the harness itself.
@@ -213,6 +214,28 @@ else
       bad "watch-diff passed with a captive log line reworded"
     else
       ok "watch-diff caught the reworded captive decision"
+    fi
+  fi
+fi
+
+echo "10. the watchdog shadow must notice step 9's mutation"
+# Reuses the reworded captive line. _watch_bin looks in $HERE/bin first, so the
+# planner is linked there — otherwise the shadow finds nothing, returns quietly,
+# and that reads as a pass.
+if [ ! -x "$rwatch" ]; then
+  echo "  skip — no release build"
+else
+  ln -sf "$rwatch" "$tmp/bin/rowt-watch-tick"
+  if ! grep -q 'awaiting login' "$tmp/bin/rowt"; then
+    bad "step 9's mutation is not in place — cannot test the shadow"
+  else
+    out="$("$P" run -- ROWT_WATCH_SHADOW=1 ROWT_CAPTIVE_URL=http://127.0.0.1:8099/portal watch tick 2>/dev/null || true)"
+    out="${out%%$'\n'*}"
+    log="$out/home/rowt/log/parity.log"
+    if [ -s "$log" ] && grep -q DIVERGED "$log"; then
+      ok "the watchdog shadow recorded a divergence"
+    else
+      bad "the shadow stayed silent on a diverging tick ($(cat "$log" 2>/dev/null || echo 'no log'))"
     fi
   fi
 fi

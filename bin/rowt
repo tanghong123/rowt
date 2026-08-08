@@ -53,7 +53,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.2.4"
+ROWT_VERSION="3.2.5"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -3074,6 +3074,62 @@ _watch_probe() {
 # genuinely dead server (nothing local can fix) can't cause a restart storm.
 # Crucially it re-probes AFTER acting: a sing-box that starts then crashes would
 # otherwise log a false 'ok'. Resets the failure streak.
+_watch_bin() { # the Rust tick planner, located like the other companions
+  local b
+  for b in "$HERE/bin/rowt-watch-tick" \
+           "$HERE/target/release/rowt-watch-tick" \
+           "$HERE/target/debug/rowt-watch-tick"; do
+    [ -x "$b" ] && { echo "$b"; return 0; }
+  done
+  command -v rowt-watch-tick 2>/dev/null
+}
+
+# Shadow the tick's DECISIONS (PORTING.md §6.5). Off unless ROWT_WATCH_SHADOW=1.
+# The shell stays authoritative and has already acted by the time this runs; a
+# divergence is recorded and nothing else.
+#
+# Critically it does NOT re-probe the portal: it is handed the same captive
+# verdict this tick used. A shadow that probed for itself would observe a
+# different instant, double the traffic to the four probe hosts, and fill the log
+# with divergences that are timing artifacts — a log you learn to ignore is worse
+# than no log.
+_watch_shadow() {
+  local wb; wb="$(_watch_bin)" || return 0
+  [ -n "$wb" ] || return 0
+  have jq || return 0
+  local svc ifc obs plan actual
+  svc="$(active_service 2>/dev/null || true)"
+  ifc="$(detect_iface 2>/dev/null || true)"
+  obs="$(mktemp)"; plan="$(mktemp)"; actual="$(mktemp)"
+  jq -n \
+    --arg pi "$_SH_PROXY_INTENT" --arg cap "$_SH_CAP" --arg svc "$svc" \
+    --arg intent "$_SH_INTENT" --arg ifc "$ifc" \
+    --argjson any "$( { [ -n "$svc" ] && _proxy_any_on "$svc"; } && echo true || echo false)" \
+    --argjson running "$(host_running && echo true || echo false)" \
+    --argjson boot "$([ "$(sget boot)" = "$(_boot_id)" ] && echo true || echo false)" \
+    --argjson pointing "$( { [ -n "$svc" ] && _proxy_pointing_ok "$svc"; } && echo true || echo false)" \
+    --argjson flag "$([ "$_SH_CAPTIVE0" = 1 ] && echo true || echo false)" \
+    '{obs:{proxy_intent:$pi, captive:$cap, active_service:$svc, proxy_any_on:$any,
+           host_running:$running, intent:$intent, boot_matches:$boot, iface:$ifc,
+           proxy_pointing_ok:$pointing, mode:"host"},
+      state:{captive_flag:$flag}}' > "$obs" 2>/dev/null
+  "$wb" --obs "$obs" 2>/dev/null | sed -n 's/^log //p' > "$plan" || true
+  # what the shell actually decided this tick, timestamps stripped
+  tail -n "+$(( _SH_LOG0 + 1 ))" "$WATCH_LOG" 2>/dev/null \
+    | sed -e 's/^[0-9-]* [0-9:]*  //' > "$actual" || true
+  local verdict sig
+  if diff -q "$plan" "$actual" >/dev/null 2>&1; then verdict="identical"; else verdict="DIVERGED"; fi
+  sig="$(printf '%s %s' "$_SH_CAP" "$verdict" | cksum | awk '{print $1}')"
+  if [ "$(sget watch_shadow_sig)" != "$sig" ]; then
+    sset watch_shadow_sig "$sig"
+    { printf '%s  tick captive=%s verdict=%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$_SH_CAP" "$verdict"
+      [ "$verdict" = DIVERGED ] && { echo "  shell:"; sed 's/^/    /' "$actual"; echo "  plan:"; sed 's/^/    /' "$plan"; }
+    } >> "$LOGDIR/parity.log" 2>/dev/null || true
+  fi
+  rm -f "$obs" "$plan" "$actual"
+  return 0
+}
+
 _watch_recover() {
   local reason="$1"; shift
   local now last; now="$(date +%s)"; last="$(cat "$WATCH_RESTART" 2>/dev/null || echo 0)"
@@ -3259,7 +3315,13 @@ PLIST
       fi
       # Clean the lock by its absolute path, not the local $lock, so the trap
       # still resolves if it fires at top-level scope after a fall-through path.
-      trap 'rmdir "$CFG/watch.lock" 2>/dev/null || true' EXIT
+      # Snapshot what the shadow needs BEFORE the tick changes any of it, and
+      # compare on the way out. No-op unless ROWT_WATCH_SHADOW=1.
+      _SH_CAPTIVE0="$(sget captive 2>/dev/null || true)"
+      _SH_LOG0="$(wc -l < "$WATCH_LOG" 2>/dev/null || echo 0)"; _SH_LOG0="${_SH_LOG0// /}"
+      _SH_CAP=""
+      trap 'rmdir "$CFG/watch.lock" 2>/dev/null || true
+            [ "${ROWT_WATCH_SHADOW:-0}" = 1 ] && [ -n "$_SH_CAP" ] && _watch_shadow || true' EXIT
 
       local intent proxy_intent
       intent="$(sget intent 2>/dev/null || true)"
@@ -3278,6 +3340,7 @@ PLIST
       # and fall through to a normal tick. The WatchPaths trigger fires this on
       # network join, so the drop typically lands seconds after connecting.
       local cap; cap="$(_captive_state)"
+      _SH_CAP="$cap"; _SH_INTENT="$intent"; _SH_PROXY_INTENT="$proxy_intent"
       # Journal what this network/VPN advertises whenever it CHANGES (no-op in
       # steady state) — includes the captive state, so portal episodes and their
       # advertised domains land in the same line (log/discovery.log).

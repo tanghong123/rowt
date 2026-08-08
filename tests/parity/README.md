@@ -118,6 +118,25 @@ geosites — canonically identical. That is a **local-only** check: the rendered
 config carries credentials, so compare it in place and never copy or paste the
 output.
 
+## Shadow mode
+
+Two shadows exist, both off unless switched on, and neither ever authoritative:
+
+    ROWT_RENDER_SHADOW=1    every `rowt render` also renders in Rust and
+                            compares canonically
+    ROWT_WATCH_SHADOW=1     every watchdog tick compares the shell's decisions
+                            against the FSM's planned actions
+
+Divergences land in `~/.config/rowt/log/parity.log`, recorded only when the
+verdict changes so steady state stays quiet. The watch shadow is handed the
+captive verdict the tick already computed rather than probing for itself — a
+shadow that probed separately would observe a different instant, double the
+traffic to the probe hosts, and fill the log with timing artifacts.
+
+This is what accumulates evidence from networks no fixture can stage: offices,
+hotels, planes, VPN-up states. `selftest` steps 6 and 10 verify both shadows
+actually record a divergence rather than failing quietly.
+
 ## Characterized behavior worth knowing
 
 Facts the golden pins down, none of which are bugs introduced here. Under
