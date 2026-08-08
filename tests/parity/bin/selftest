@@ -15,6 +15,7 @@
 #   8.   disable the single-lane rule   -> lanes-diff must fire
 #   9.   reword a captive log line      -> watch-diff must fire
 #   10.  …and the watchdog shadow must record it too
+#   11.  drop a proxy protocol           -> platform-diff must fire
 #
 # Everything happens in a throwaway copy of the repo; the real tree is never
 # touched. Run it after changing the harness itself.
@@ -236,6 +237,34 @@ else
       ok "the watchdog shadow recorded a divergence"
     else
       bad "the shadow stayed silent on a diverging tick ($(cat "$log" 2>/dev/null || echo 'no log'))"
+    fi
+  fi
+fi
+
+echo "11. drop one protocol from the shell's captive proxy-off"
+# The platform gate compares argv as a SEQUENCE, so losing a protocol — which
+# would leave HTTPS still proxied behind a portal — has to surface.
+rprobe="$ROOT/target/release/rowt-probe"
+if [ ! -x "$rprobe" ]; then
+  echo "  skip — no release build (cargo build --release -p rowt-platform)"
+else
+  export PARITY_RUST_PROBE="$rprobe"
+  if ! "$P" platform-diff >/dev/null 2>&1; then
+    bad "platform-diff already fails before the mutation"
+  else
+    perl -0pi -e 's/^  sudo -n \/usr\/sbin\/networksetup -setsecurewebproxystate "\$1" off.*\n//m' "$tmp/bin/rowt"
+    # Counted into a variable, not piped: `grep -c` exits 1 when the count is
+    # zero, and under pipefail that turns "the mutation worked" into "it failed".
+    # Fourth appearance of this trap in this harness.
+    left="$(grep -c 'setsecurewebproxystate "\$1" off' "$tmp/bin/rowt" || true)"
+    if [ "$left" = 0 ]; then
+      if "$P" platform-diff >/dev/null 2>&1; then
+        bad "platform-diff passed with a protocol dropped from the captive path"
+      else
+        ok "platform-diff caught the missing protocol"
+      fi
+    else
+      bad "could not drop the protocol (the captive path moved?)"
     fi
   fi
 fi

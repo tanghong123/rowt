@@ -1,0 +1,12 @@
+[package]
+name = "rowt-platform"
+version = "0.1.0"
+edition = "2021"
+description = "Everything rowt asks the operating system — the seam between pure logic and the machine"
+license = "MIT"
+
+[dependencies]
+
+[[bin]]
+name = "rowt-probe"
+path = "src/bin/rowt-probe.rs"

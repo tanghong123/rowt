@@ -1,0 +1,16 @@
+# The platform layer, compared by the argv it produces.
+#
+#   id | shell helper (called with rowt sourced) | rowt-probe arguments
+#
+# The shell side sources bin/rowt with `version` so main() is a cheap no-op,
+# truncates the trace, then calls the helper itself. Running it through
+# `rowt run` would exec a NEW shell without rowt's functions — which silently
+# compared two unrelated traces the first time this gate was written.
+
+detect-iface       | detect_iface                | iface
+active-service     | active_service              | service
+boot-id            | _boot_id                    | boot-id
+proxy-any-on       | _proxy_any_on Wi-Fi         | proxy-any-on Wi-Fi
+proxy-pointing-ok  | _proxy_pointing_ok Wi-Fi    | proxy-pointing-ok Wi-Fi
+captive-drop       | _captive_proxy_off Wi-Fi    | captive-off Wi-Fi
+captive-restore    | _captive_proxy_on Wi-Fi     | captive-on Wi-Fi

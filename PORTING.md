@@ -88,7 +88,7 @@ rowt/                       (Cargo workspace root)
 ├── crates/
 │   ├── rowt-core/          # PURE: render + classify today; lanes, captive FSM,
 │   │                       #       state, discovery journal, metrics to come
-│   ├── rowt-platform/      # trait Platform + PlatformMac / PlatformLinux
+│   ├── rowt-platform/      # trait Platform + Mac (built); Linux in Phase 5
 │   ├── rowt-cli/           # clap dispatch + help → the `rowt` binary
 │   └── rowt-import/        # (last/optional) port of the Python import pipeline
 ├── rowt-monitor/           # existing crate, joins the workspace; uses rowt-core

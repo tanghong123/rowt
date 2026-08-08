@@ -25,6 +25,7 @@
 #   parity lanes-diff        lane-list edits, bash vs Rust: files + messages
 #   parity reconcile-diff    corp reconcile, Python vs Rust, over generated cases
 #   parity watch-diff        watchdog tick: bash's effects vs the FSM's plan
+#   parity platform-diff     the platform layer, compared by the argv it produces
 #   parity ledger            regenerate LEDGER.md from bin/rowt
 #
 # `mask` compares bash against itself — it characterizes, it does not compare
@@ -505,6 +506,54 @@ cmd_watch_diff() {
   [ "$fails" -eq 0 ]
 }
 
+# The platform layer, compared by ARGV. A cutover that changed what gets executed
+# would be a behavior change wearing a refactor's clothes, so both sides run
+# under the same recorder shims and the traces must match as sequences.
+cmd_platform_diff() {
+  local probe="${PARITY_RUST_PROBE:-$ROOT/target/release/rowt-probe}"
+  [ -x "$probe" ] || die "no rust probe at $probe — cargo build --release -p rowt-platform"
+  local fails=0 total=0 line
+  while IFS= read -r line; do
+    case "$line" in ''|'#'*) continue ;; esac
+    local id rest shell_expr probe_args
+    id="$(printf '%s' "${line%%|*}" | sed -e 's/ *$//')"
+    rest="${line#*|}"
+    shell_expr="$(printf '%s' "${rest%%|*}" | sed -e 's/^ *//' -e 's/ *$//')"
+    probe_args="$(printf '%s' "${rest#*|}" | sed -e 's/^ *//' -e 's/ *$//')"
+    total=$((total + 1))
+    local A B
+    A="$(mktemp -d "${TMPDIR:-/tmp}/parity-plat-a.XXXXXX")"
+    B="$(mktemp -d "${TMPDIR:-/tmp}/parity-plat-b.XXXXXX")"
+    make_sandbox "$A"; make_sandbox "$B"
+    # Source rowt with `version` so main() is a cheap no-op, truncate the trace,
+    # then call the helper itself. Running it through `rowt run` would exec a NEW
+    # shell where rowt's functions do not exist — which silently compared two
+    # unrelated traces the first time this was written.
+    env -i HOME="$A/home" XDG_CONFIG_HOME="$A/home" \
+        PATH="$A/shims:/usr/bin:/bin:/usr/sbin:/sbin" TERM=dumb LC_ALL=C TZ=UTC \
+        PARITY_TRACE="$A/trace" PARITY_ENV="$A/env" \
+        bash -c 'source "$0" version >/dev/null 2>&1; : > "$PARITY_TRACE"; '"$shell_expr"' >/dev/null 2>&1 || true' \
+        "$ROWT" || true
+    # shellcheck disable=SC2086
+    env -i HOME="$B/home" XDG_CONFIG_HOME="$B/home" \
+        PATH="$B/shims:/usr/bin:/bin:/usr/sbin:/sbin" TERM=dumb LC_ALL=C TZ=UTC \
+        PARITY_TRACE="$B/trace" PARITY_ENV="$B/env" \
+        "$probe" $probe_args >/dev/null 2>&1 || true
+    [ -f "$A/trace" ] || : > "$A/trace"; [ -f "$B/trace" ] || : > "$B/trace"
+    if diff -u "$A/trace" "$B/trace" > "$A/diff" 2>&1; then
+      echo "[$id] identical ($(grep -c . "$A/trace" | tr -d ' ') calls)"
+      rm -rf "$A" "$B"
+    else
+      fails=$((fails + 1))
+      echo "[$id] DIFFERS"; sed 's/^/    /' "$A/diff" | head -16
+      echo "    artifacts: $A $B"
+    fi
+  done < "$DIR/platform-cases.txt"
+  echo
+  echo "platform argv: $((total - fails))/$total cases identical"
+  [ "$fails" -eq 0 ]
+}
+
 # The committed classifier baseline. `parity golden` fails if today's verdicts
 # drift from it; `parity golden --update` re-records them (review the diff — a
 # changed verdict is a routing change).
@@ -595,6 +644,7 @@ case "${1:-}" in
   reconcile-diff)  shift; cmd_reconcile_diff "$@" ;;
   lanes-diff)      shift; cmd_lanes_diff "$@" ;;
   watch-diff)      shift; cmd_watch_diff "$@" ;;
+  platform-diff)   shift; cmd_platform_diff "$@" ;;
   render-matrix)   shift; cmd_render_matrix "$@" ;;
   run)    shift; cmd_run "$@" ;;
   mask)   shift; cmd_mask "$@" ;;

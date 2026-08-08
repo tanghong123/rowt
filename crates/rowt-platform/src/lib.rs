@@ -1,0 +1,235 @@
+//! The platform layer: everything rowt asks the operating system.
+//!
+//! `rowt-core` is pure by construction — the values that require the network,
+//! the clock or the OS arrive as inputs. This crate is where those inputs come
+//! from, and where the FSM's `Action`s are carried out.
+//!
+//! The macOS implementation is held to the shell not by inspection but by argv:
+//! `parity platform-diff` runs both under the same recorder shims and requires
+//! the invocations to match exactly. A cutover that changed *what* gets executed
+//! would be a behavior change wearing a refactor's clothes.
+
+use std::process::{Command, Stdio};
+
+/// What rowt needs from the operating system.
+pub trait Platform {
+    /// The network service the physical interface belongs to ("Wi-Fi").
+    fn active_service(&self) -> Option<String>;
+    /// The physical interface with both an address and a gateway; None = offline.
+    fn detect_iface(&self) -> Option<String>;
+    /// Is any proxy protocol currently enabled for this service?
+    fn proxy_any_on(&self, service: &str) -> bool;
+    /// Are all three protocols pointed at 127.0.0.1:port?
+    fn proxy_pointing_ok(&self, service: &str, port: u16) -> bool;
+    /// Point all three protocols at 127.0.0.1:port and enable them.
+    fn proxy_set(&self, service: &str, port: u16) -> Result<(), String>;
+    /// Replace the bypass list.
+    fn proxy_set_bypass(&self, service: &str, entries: &[String]) -> Result<(), String>;
+    /// Turn the three protocols off. `passwordless` uses `sudo -n`, which is what
+    /// the watchdog's captive and stale-proxy paths do.
+    fn proxy_states_off(&self, service: &str, passwordless: bool) -> Result<(), String>;
+    fn proxy_states_on(&self, service: &str, passwordless: bool) -> Result<(), String>;
+    /// Monotonic-ish boot identity: a reboot changes it.
+    fn boot_id(&self) -> Option<String>;
+}
+
+fn out(cmd: &str, args: &[&str]) -> Option<String> {
+    let o = Command::new(cmd).args(args).stderr(Stdio::null()).output().ok()?;
+    Some(String::from_utf8_lossy(&o.stdout).into_owned())
+}
+
+fn run(cmd: &str, args: &[&str]) -> Result<(), String> {
+    let st = Command::new(cmd)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("{cmd}: {e}"))?;
+    if st.success() {
+        Ok(())
+    } else {
+        Err(format!("{cmd} {}: exit {:?}", args.join(" "), st.code()))
+    }
+}
+
+pub struct Mac;
+
+/// The three protocols, in the order the shell touches them. Order is part of
+/// the observable behavior: the argv trace is compared as a sequence.
+const PROTOS: [(&str, &str); 3] = [
+    ("-setsocksfirewallproxy", "-setsocksfirewallproxystate"),
+    ("-setwebproxy", "-setwebproxystate"),
+    ("-setsecurewebproxy", "-setsecurewebproxystate"),
+];
+const GETTERS: [&str; 3] = ["-getsocksfirewallproxy", "-getwebproxy", "-getsecurewebproxy"];
+
+impl Mac {
+    /// `sudo -n /usr/sbin/networksetup …` for the watchdog's paths, plain
+    /// `sudo networksetup …` for the interactive ones — the shell distinguishes
+    /// them and so must this, because the argv differs.
+    fn sudo_networksetup(&self, passwordless: bool, args: &[&str]) -> Result<(), String> {
+        let mut a: Vec<&str> = Vec::new();
+        if passwordless {
+            a.push("-n");
+            a.push("/usr/sbin/networksetup");
+        } else {
+            a.push("networksetup");
+        }
+        a.extend_from_slice(args);
+        run("sudo", &a)
+    }
+
+    /// `_iface_up`: an address AND a gateway.
+    fn iface_up(&self, ifc: &str) -> bool {
+        let addr = out("ipconfig", &["getifaddr", ifc]).unwrap_or_default();
+        if addr.trim().is_empty() {
+            return false;
+        }
+        let router = out("ipconfig", &["getoption", ifc, "router"]).unwrap_or_default();
+        !router.trim().is_empty()
+    }
+}
+
+impl Platform for Mac {
+    fn active_service(&self) -> Option<String> {
+        let dev = self.detect_iface()?;
+        let body = out("networksetup", &["-listnetworkserviceorder"])?;
+        // The shell's awk: remember the most recent "Hardware Port: X, Device: Y"
+        // header, and print X when Y matches.
+        let mut svc = String::new();
+        for line in body.lines() {
+            if let Some(i) = line.find("Hardware Port: ") {
+                svc = line[i + "Hardware Port: ".len()..]
+                    .split(',')
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+            }
+            if line.contains(&format!("Device: {dev})")) {
+                return Some(svc);
+            }
+        }
+        None
+    }
+
+    fn detect_iface(&self) -> Option<String> {
+        if let Ok(forced) = std::env::var("ROWT_IFACE") {
+            if !forced.is_empty() {
+                return Some(forced);
+            }
+        }
+        // The default route's interface first, if it is an `en*` that is really up.
+        if let Some(body) = out("route", &["-n", "get", "default"]) {
+            for line in body.lines() {
+                if let Some(rest) = line.trim().strip_prefix("interface:") {
+                    let ifc = rest.trim().to_string();
+                    if ifc.starts_with("en") && self.iface_up(&ifc) {
+                        return Some(ifc);
+                    }
+                }
+            }
+        }
+        // Otherwise the first `en*` hardware port that is up.
+        let ports = out("networksetup", &["-listallhardwareports"])?;
+        for line in ports.lines() {
+            if let Some(rest) = line.trim().strip_prefix("Device:") {
+                let ifc = rest.trim().to_string();
+                if ifc.starts_with("en") && self.iface_up(&ifc) {
+                    return Some(ifc);
+                }
+            }
+        }
+        None
+    }
+
+    fn proxy_any_on(&self, service: &str) -> bool {
+        // Short-circuits exactly like the shell's `||` chain, so an already-on
+        // socks proxy means the other two are never queried.
+        for g in GETTERS {
+            let body = out("networksetup", &[g, service]).unwrap_or_default();
+            if body.lines().any(|l| l.starts_with("Enabled: Yes")) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn proxy_pointing_ok(&self, service: &str, port: u16) -> bool {
+        for g in GETTERS {
+            let body = out("networksetup", &[g, service]).unwrap_or_default();
+            let (mut e, mut s, mut p) = (String::new(), String::new(), String::new());
+            for l in body.lines() {
+                if let Some(v) = l.strip_prefix("Enabled:") {
+                    e = v.trim().to_string();
+                } else if let Some(v) = l.strip_prefix("Server:") {
+                    s = v.trim().to_string();
+                } else if let Some(v) = l.strip_prefix("Port:") {
+                    p = v.trim().to_string();
+                }
+            }
+            if !(e == "Yes" && s == "127.0.0.1" && p == port.to_string()) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn proxy_set(&self, service: &str, port: u16) -> Result<(), String> {
+        let p = port.to_string();
+        for (set, state) in PROTOS {
+            self.sudo_networksetup(false, &[set, service, "127.0.0.1", &p])?;
+            self.sudo_networksetup(false, &[state, service, "on"])?;
+        }
+        Ok(())
+    }
+
+    fn proxy_set_bypass(&self, service: &str, entries: &[String]) -> Result<(), String> {
+        let mut args: Vec<&str> = vec!["-setproxybypassdomains", service];
+        args.extend(entries.iter().map(|s| s.as_str()));
+        self.sudo_networksetup(false, &args)
+    }
+
+    fn proxy_states_off(&self, service: &str, passwordless: bool) -> Result<(), String> {
+        for (_, state) in PROTOS {
+            // The shell tolerates failures on the second and third here, so a
+            // partial result is not an error.
+            let _ = self.sudo_networksetup(passwordless, &[state, service, "off"]);
+        }
+        Ok(())
+    }
+
+    fn proxy_states_on(&self, service: &str, passwordless: bool) -> Result<(), String> {
+        for (_, state) in PROTOS {
+            let _ = self.sudo_networksetup(passwordless, &[state, service, "on"]);
+        }
+        Ok(())
+    }
+
+    fn boot_id(&self) -> Option<String> {
+        let body = out("sysctl", &["-n", "kern.boottime"])?;
+        // `sed -n 's/[^0-9]*\([0-9][0-9]*\).*/\1/p'` — the first run of digits.
+        let digits: String = body
+            .chars()
+            .skip_while(|c| !c.is_ascii_digit())
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if digits.is_empty() {
+            None
+        } else {
+            Some(digits)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_protocol_order_is_part_of_the_behavior() {
+        // The argv trace is compared as a sequence, so this order is load-bearing.
+        assert_eq!(PROTOS[0].1, "-setsocksfirewallproxystate");
+        assert_eq!(PROTOS[2].0, "-setsecurewebproxy");
+        assert_eq!(GETTERS[1], "-getwebproxy");
+    }
+}
