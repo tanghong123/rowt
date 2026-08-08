@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+# rowt-monitor keeps its own manifest and target directory on purpose: the
+# release flow packages its binaries from rowt-monitor/target/release, and
+# folding it in here would move that path. It joins the workspace in Phase 4,
+# when the CLI cutover changes the release layout anyway (PORTING.md §5).
+exclude = ["rowt-monitor"]
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true

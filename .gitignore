@@ -8,3 +8,6 @@ bin/sing-box
 # macOS junk
 .DS_Store
 ._*
+
+# Cargo build output for the workspace crates (rowt-monitor keeps its own).
+/target/

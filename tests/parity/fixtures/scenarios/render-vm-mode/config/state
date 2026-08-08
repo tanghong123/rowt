@@ -1,0 +1,4 @@
+mode=vm
+selected=auto
+vm_ip=192.0.2.50
+clash_secret=PARITYFIXTURESECRET00000

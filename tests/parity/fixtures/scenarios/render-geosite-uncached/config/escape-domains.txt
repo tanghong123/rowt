@@ -1,0 +1,3 @@
+# fixture
+example.com
+geosite:nowhere

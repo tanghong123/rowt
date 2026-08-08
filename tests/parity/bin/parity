@@ -16,11 +16,15 @@
 #   parity run -- <args…>    run an ad-hoc rowt command line
 #   parity mask              bash-vs-bash over the matrix; report what still
 #                            differs after normalize.sed (the Phase 0 gate)
+#   parity golden            classifier verdicts vs the committed golden
+#   parity corpus            replay the generated corpus through the classifier
+#   parity render-diff       one render case, bash vs Rust, compared canonically
+#   parity render-matrix     every render case (the Phase 1 gate)
 #   parity ledger            regenerate LEDGER.md from bin/rowt
 #
-# Phase 0 has one implementation, so `mask` compares bash against itself. Once
-# a Rust implementation exists, ROWT_IMPL selects it and the same machinery
-# becomes the cross-implementation gate.
+# `mask` compares bash against itself — it characterizes, it does not compare
+# implementations. The cross-implementation gates are `render-diff`/`render-matrix`
+# today, and grow to the whole command surface as later phases port it.
 set -euo pipefail
 
 SELF="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -335,10 +339,73 @@ cmd_golden() {
   fi
 }
 
+# Phase 1's gate: the rendered config, bash vs Rust, compared canonically.
+#
+# Canonical rather than byte-exact because key order is not meaning — but it is
+# BLOCKING, because this is the only gate that inspects the artifact being
+# rewritten. `explain` cannot stand in for it: it walks the list files and never
+# reads the rendered config, so a render that dropped the corp outbound's
+# domain_resolver would diff perfectly clean (PORTING.md §6.3).
+cmd_render_diff() {   # [VAR=VALUE …]
+  local rust="${PARITY_RUST_RENDER:-$ROOT/target/release/rowt-render}"
+  [ -x "$rust" ] || die "no rust render at $rust — cargo build --release -p rowt-render"
+  local -a ENVS=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in [A-Z_]*=*) ENVS+=("$1"); shift ;; *) break ;; esac
+  done
+  local out rc=0
+  out="$(mktemp -d "${TMPDIR:-/tmp}/parity-render.XXXXXX")"
+  make_sandbox "$out" "$(scenario_of ${ENVS[@]+"${ENVS[@]}"})"
+  local cfg="$out/home/rowt"
+
+  # bash writes host.json + vm.json as a side effect of `render`
+  run_in "$out" ${ENVS[@]+"${ENVS[@]}"} render >/dev/null 2>&1 || true
+  [ -s "$cfg/host.json" ] || die "bash render produced no host.json"
+
+  local mode
+  for mode in host vm; do
+    local bash_json="$cfg/host.json"
+    [ "$mode" = vm ] && bash_json="$cfg/vm.json"
+    # Both sides see the same knobs. The interface is bash's to discover
+    # (platform seam), so the Rust side is handed the one the fixtures answer
+    # with rather than left to guess.
+    env ${ENVS[@]+"${ENVS[@]}"} "$rust" "$mode" --config-dir "$cfg" --iface en0 \
+      > "$out/rust-$mode.json" 2>"$out/rust-$mode.err" || {
+      echo "  rust render ($mode) failed:"; sed 's/^/    /' "$out/rust-$mode.err"; rc=1; continue
+    }
+    if diff -u <(jq -S . "$bash_json") <(jq -S . "$out/rust-$mode.json") > "$out/diff-$mode" 2>&1; then
+      echo "  $mode: identical"
+    else
+      echo "  $mode: DIFFERS"
+      sed 's/^/    /' "$out/diff-$mode" | head -30
+      rc=1
+    fi
+  done
+  [ "$rc" = 0 ] && rm -rf "$out" || echo "  artifacts: $out"
+  return "$rc"
+}
+
+# Every render case, so one green run means the whole matrix agreed.
+cmd_render_matrix() {
+  local fails=0 total=0 id rest
+  while read -r id rest; do
+    case "$id" in ''|'#'*) continue ;; esac
+    total=$((total + 1))
+    echo "[$id] ${rest:-(defaults)}"
+    # shellcheck disable=SC2086
+    cmd_render_diff $rest || fails=$((fails + 1))
+  done < "$DIR/render-cases.txt"
+  echo
+  echo "render matrix: $((total - fails))/$total cases identical"
+  [ "$fails" -eq 0 ]
+}
+
 case "${1:-}" in
   list)   shift; cmd_list "$@" ;;
   corpus) shift; cmd_corpus "$@" ;;
   golden) shift; cmd_golden "$@" ;;
+  render-diff)   shift; cmd_render_diff "$@" ;;
+  render-matrix) shift; cmd_render_matrix "$@" ;;
   run)    shift; cmd_run "$@" ;;
   mask)   shift; cmd_mask "$@" ;;
   ledger) shift; cmd_ledger "$@" ;;

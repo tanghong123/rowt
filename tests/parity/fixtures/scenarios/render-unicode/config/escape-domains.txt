@@ -1,0 +1,5 @@
+# fixture
+例え.example
+aaa.com
+api.foo.com
+xn--r8jz45g.example

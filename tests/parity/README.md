@@ -97,6 +97,27 @@ plus the drop and restore branches. A scenario overlay
 describe, since the drop only fires when the proxy is actually on. Verified: the
 drop emits the full `sudo networksetup …` sequence and logs the §11 line.
 
+## Phase 1: the render gate
+
+`crates/rowt-render` reimplements the jq program. `parity render-matrix` runs
+every case in `render-cases.txt` — 18 of them, covering the selector branches
+(auto / pinned / unknown / no servers), cached and uncached `geosite:`
+categories, the ad set, an empty corp lane, vm mode, unicode and tie-breaking
+suffixes, and the `ROWT_*` knobs — and requires canonical-JSON equality on both
+`host.json` and `vm.json`.
+
+Canonical rather than byte-exact, because key order is not meaning. But
+**blocking**, because this is the only gate that inspects the artifact being
+rewritten: `explain` walks the list files and never reads the rendered config,
+so a render that lost the corp outbound's `domain_resolver` would diff
+perfectly clean through it. `selftest` step 5 drops exactly that field and
+requires the gate to go red.
+
+Validated against the real config too — 22 servers, real lane lists, cached
+geosites — canonically identical. That is a **local-only** check: the rendered
+config carries credentials, so compare it in place and never copy or paste the
+output.
+
 ## Characterized behavior worth knowing
 
 Facts the golden pins down, none of which are bugs introduced here. Under

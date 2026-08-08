@@ -1,0 +1,4 @@
+mode=host
+selected=ghost-server
+proxy_intent=on
+clash_secret=PARITYFIXTURESECRET00000

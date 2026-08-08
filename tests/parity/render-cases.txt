@@ -1,0 +1,26 @@
+# Phase 1's render matrix: each case is a config or environment shape whose
+# rendered output the Rust implementation must reproduce canonically.
+#
+#   id      [VAR=VALUE …]
+#
+# Scenarios overlay the fixture config (fixtures/scenarios/<name>/config);
+# ROWT_* variables reach both implementations identically.
+
+default
+pinned            PARITY_SCENARIO=render-pinned
+ghost-selection   PARITY_SCENARIO=render-ghost
+empty-servers     PARITY_SCENARIO=render-empty-servers
+geosites          PARITY_SCENARIO=render-geosites
+geosite-uncached  PARITY_SCENARIO=render-geosite-uncached
+ads-only          PARITY_SCENARIO=render-ads
+no-corp           PARITY_SCENARIO=render-no-corp
+vm-mode           PARITY_SCENARIO=render-vm-mode
+unicode-and-ties  PARITY_SCENARIO=render-unicode
+private-direct    ROWT_PRIVATE_DEFAULT=direct
+final-escape      ROWT_FINAL=escape
+final-block       ROWT_FINAL=block
+log-info          ROWT_LOG_LEVEL=info
+dns-elsewhere     ROWT_DNS_DIRECT=198.51.100.53
+ports-shifted     ROWT_PORT=17890 ROWT_CLASH_PORT=19090
+interval-short    ROWT_AUTO_INTERVAL=5m
+geosites-pinned   PARITY_SCENARIO=render-geosites ROWT_PRIVATE_DEFAULT=direct

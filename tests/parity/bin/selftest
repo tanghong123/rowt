@@ -97,6 +97,29 @@ else
   else ok "argv trace caught the bypass-list change"; fi
 fi
 
+echo "5. drop domain_resolver from the corp outbound in the jq render"
+# The bug class §6.3 was written for: a render that silently loses the corp
+# outbound's resolver still classifies every domain to the same lane, so an
+# explain-based gate cannot see it. Only comparing the artifact can.
+rust="$ROOT/target/release/rowt-render"
+if [ ! -x "$rust" ]; then
+  echo "  skip — no release build (cargo build --release -p rowt-render)"
+else
+  export PARITY_RUST_RENDER="$rust"
+  if ! "$P" render-diff >/dev/null 2>&1; then
+    bad "render-diff already fails before the mutation"
+  else
+    perl -0pi -e 's/\{type:"direct", tag:"corp", domain_resolver:\{server:"local", strategy:"prefer_ipv4"\}\}/{type:"direct", tag:"corp"}/' "$tmp/bin/rowt"
+    if grep -q 'tag:"corp", domain_resolver' "$tmp/bin/rowt"; then
+      bad "could not drop domain_resolver (the render moved?)"
+    elif "$P" render-diff >/dev/null 2>&1; then
+      bad "render-diff passed with the corp resolver dropped — it does not gate the config"
+    else
+      ok "render-diff caught the dropped corp resolver"
+    fi
+  fi
+fi
+
 echo
 echo "selftest: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

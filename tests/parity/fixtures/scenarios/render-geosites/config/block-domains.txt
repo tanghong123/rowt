@@ -1,0 +1,3 @@
+# fixture
+ads.example
+geosite:category-ads-all
