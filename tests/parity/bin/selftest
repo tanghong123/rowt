@@ -16,6 +16,7 @@
 #   9.   reword a captive log line      -> watch-diff must fire
 #   10.  …and the watchdog shadow must record it too
 #   11.  drop a proxy protocol           -> platform-diff must fire
+#   12.  reword an explain description  -> cli-diff must fire
 #
 # Everything happens in a throwaway copy of the repo; the real tree is never
 # touched. Run it after changing the harness itself.
@@ -265,6 +266,31 @@ else
       fi
     else
       bad "could not drop the protocol (the captive path moved?)"
+    fi
+  fi
+fi
+
+echo "12. reword an explain lane description in the shell"
+# Reset the copy first: the mutations above accumulate, and step 8's disabled
+# _lane_dedupe alone is enough to make this step's baseline fail for reasons
+# that have nothing to do with what it is testing.
+cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+rcli="$ROOT/target/release/rowt-rs"
+if [ ! -x "$rcli" ]; then
+  echo "  skip — no release build (cargo build --release -p rowt-cli)"
+else
+  export PARITY_RUST_CLI="$rcli"
+  if ! "$P" cli-diff >/dev/null 2>&1; then
+    bad "cli-diff already fails before the mutation"
+  else
+    sed -i.bak 's/straight out the physical NIC — pass-through/straight out the physical NIC — passthrough/' "$tmp/bin/rowt"
+    left="$(grep -c 'NIC — passthrough' "$tmp/bin/rowt" || true)"
+    if [ "$left" = 0 ]; then
+      bad "could not reword the lane description (it moved?)"
+    elif "$P" cli-diff >/dev/null 2>&1; then
+      bad "cli-diff passed with an explain description reworded"
+    else
+      ok "cli-diff caught the reworded lane description"
     fi
   fi
 fi

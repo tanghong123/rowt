@@ -1,0 +1,19 @@
+# Commands rowt-rs claims. Each must produce byte-identical stdout and leave the
+# lane files identical to what the shell leaves.
+
+explain example.com
+explain intranet.corp.example
+explain ads.example
+explain unlisted.example
+explain 198.51.100.7
+explain 10.99.4.4
+explain https://Example.COM:8443/a/b
+escape list
+corp list
+block list
+escape dump
+escape add new.example
+corp add example.com
+escape rm example.com
+escape rm absent.example
+block clear

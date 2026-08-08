@@ -39,6 +39,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rowt-cli"
+version = "0.1.0"
+dependencies = [
+ "rowt-core",
+]
+
+[[package]]
 name = "rowt-core"
 version = "0.1.0"
 dependencies = [

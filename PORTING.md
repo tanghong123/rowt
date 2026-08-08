@@ -89,7 +89,7 @@ rowt/                       (Cargo workspace root)
 │   ├── rowt-core/          # PURE: render + classify today; lanes, captive FSM,
 │   │                       #       state, discovery journal, metrics to come
 │   ├── rowt-platform/      # trait Platform + Mac (built); Linux in Phase 5
-│   ├── rowt-cli/           # clap dispatch + help → the `rowt` binary
+│   ├── rowt-cli/           # `rowt-rs` — built ALONGSIDE the shell, not replacing it
 │   └── rowt-import/        # (last/optional) port of the Python import pipeline
 ├── rowt-monitor/           # existing crate, joins the workspace; uses rowt-core
 ├── config/*.py             # shrink over time; import pipeline may stay Python
@@ -196,7 +196,7 @@ revertible and gated.
 | **1** ◑ | `rowt-core::render` — replace the giant jq program. bash calls `rowt-rs render` internally. | **render done** — `crates/rowt-render`, 18/18 cases canonically identical on host + vm (`parity render-matrix`), and identical against the real 22-server config. Remaining: throwaway-port outbound oracle, bash cutover, shadow window |
 | **2** ✅ | classify/explain, lane set logic, absorb `corp-sync-reconcile.py` | **done** — classify: 9/9 cases × 92 destinations identical on `(lane, reason)`; lane edits: 12/12 cases identical across all three files + messages; reconcile: 210 generated cases identical to the Python. `selftest` 9/9 |
 | **3** ◑ | watchdog: FSM into core, effects via `PlatformMac`; `cmd_watch` execs the Rust tick | **FSM + shadow done** — `rowt-core::watch`, 17 unit tests replaying §11's decision table; `parity watch-diff` 5/5; `ROWT_WATCH_SHADOW=1` compares the shell's decisions against the FSM's plan on every real tick, feeding it the tick's own captive verdict rather than re-probing. Remaining: `PlatformMac` effects, the `cmd_watch` cutover, and **time** — the shadow window itself |
-| **4** | clap CLI takes dispatch + help; bash reduces to a wrapper, then deleted. Formula ships the prebuilt binary (monitor-asset pattern). | full coverage ledger green (§6.8) + argv-trace diffs on every mutating command; `ROWT_IMPL` escape hatch live (§6.6) |
+| **4** ◑ | CLI. Built as `rowt-rs` alongside the shell first, so each command lands with evidence; only then does bash reduce to a wrapper and get deleted. Formula ships the prebuilt binary (monitor-asset pattern). | `parity cli-diff` — identical stdout, exit status and lane files, command for command (16 today); then the full ledger green + `ROWT_IMPL` escape hatch (§6.6) |
 | **5** | `PlatformLinux` + tun mode + systemd units; CI matrix (macOS + ubuntu — core tests run on both, platform tests feature-gated); linux tar assets | fresh-VM install → onboard → probe → captive drill; VPN-coexistence drill with Tailscale up |
 | 6 (opt) | port the import pipeline (1,484 lines of parsing Python). Already portable and tested — lowest ROI, may stay Python indefinitely. | existing py test suite as fixtures |
 

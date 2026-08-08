@@ -1,0 +1,13 @@
+[package]
+name = "rowt-cli"
+version = "0.1.0"
+edition = "2021"
+description = "rowt-rs — the Rust CLI, built alongside the shell rather than replacing it"
+license = "MIT"
+
+[dependencies]
+rowt-core = { path = "../rowt-core" }
+
+[[bin]]
+name = "rowt-rs"
+path = "src/main.rs"

@@ -26,6 +26,7 @@
 #   parity reconcile-diff    corp reconcile, Python vs Rust, over generated cases
 #   parity watch-diff        watchdog tick: bash's effects vs the FSM's plan
 #   parity platform-diff     the platform layer, compared by the argv it produces
+#   parity cli-diff          whole commands through rowt-rs vs the shell
 #   parity ledger            regenerate LEDGER.md from bin/rowt
 #
 # `mask` compares bash against itself — it characterizes, it does not compare
@@ -554,6 +555,49 @@ cmd_platform_diff() {
   [ "$fails" -eq 0 ]
 }
 
+# The CLI surface, command for command. rowt-rs is built alongside the shell,
+# not in place of it, so every command it claims can be proven before anything
+# is cut over. Compares stdout and exit status — the whole user-visible result,
+# not a projection of it.
+cmd_cli_diff() {
+  local rs="${PARITY_RUST_CLI:-$ROOT/target/release/rowt-rs}"
+  [ -x "$rs" ] || die "no rust cli at $rs — cargo build --release -p rowt-cli"
+  local fails=0 total=0 line
+  while IFS= read -r line; do
+    case "$line" in ''|'#'*) continue ;; esac
+    total=$((total + 1))
+    local A B
+    A="$(mktemp -d "${TMPDIR:-/tmp}/parity-cli-a.XXXXXX")"
+    B="$(mktemp -d "${TMPDIR:-/tmp}/parity-cli-b.XXXXXX")"
+    make_sandbox "$A"; make_sandbox "$B"
+    # shellcheck disable=SC2086 — the case line is intentionally word-split
+    run_in "$A" $line > "$A/out" 2>/dev/null || true
+    echo "$?" > "$A/rc"
+    # shellcheck disable=SC2086
+    env -i HOME="$B/home" XDG_CONFIG_HOME="$B/home" \
+        PATH="$B/shims:/usr/bin:/bin:/usr/sbin:/sbin" TERM=dumb LC_ALL=C TZ=UTC \
+        PARITY_TRACE="$B/trace" PARITY_ENV="$B/env" \
+        "$rs" $line > "$B/out" 2>/dev/null; echo "$?" > "$B/rc"
+    local bad="" f
+    diff -q "$A/out" "$B/out" >/dev/null 2>&1 || bad="$bad stdout"
+    for f in escape-domains.txt corp-domains.txt block-domains.txt; do
+      diff -q "$A/home/rowt/$f" "$B/home/rowt/$f" >/dev/null 2>&1 || bad="$bad $f"
+    done
+    if [ -n "$bad" ]; then
+      fails=$((fails + 1))
+      echo "[$line] DIFFERS:$bad"
+      diff "$A/out" "$B/out" 2>/dev/null | sed 's/^/    /' | head -10
+      echo "    artifacts: $A $B"
+    else
+      echo "[$line] identical"
+      rm -rf "$A" "$B"
+    fi
+  done < "$DIR/cli-cases.txt"
+  echo
+  echo "cli surface: $((total - fails))/$total commands identical"
+  [ "$fails" -eq 0 ]
+}
+
 # The committed classifier baseline. `parity golden` fails if today's verdicts
 # drift from it; `parity golden --update` re-records them (review the diff — a
 # changed verdict is a routing change).
@@ -645,6 +689,7 @@ case "${1:-}" in
   lanes-diff)      shift; cmd_lanes_diff "$@" ;;
   watch-diff)      shift; cmd_watch_diff "$@" ;;
   platform-diff)   shift; cmd_platform_diff "$@" ;;
+  cli-diff)        shift; cmd_cli_diff "$@" ;;
   render-matrix)   shift; cmd_render_matrix "$@" ;;
   run)    shift; cmd_run "$@" ;;
   mask)   shift; cmd_mask "$@" ;;
