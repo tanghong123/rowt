@@ -1,0 +1,16 @@
+//! `rowt-core` — the parts of rowt that are pure.
+//!
+//! Nothing here touches the network, the clock, or the OS. Values that require
+//! any of those (the physical interface, the clash secret, a DNS answer) are
+//! inputs, so the platform seam stays in the shell until Phase 5 of PORTING.md.
+//!
+//! Each module is held to the bash it replaces by a differential gate in
+//! `tests/parity` rather than by inspection.
+
+pub mod classify;
+pub mod render;
+
+pub use classify::{classify, Classification, ClassifyInput, Lane};
+pub use render::{
+    geosites_of, group, parse_list, render_host, render_vm, Filter, Geo, HostInput, Lists,
+};

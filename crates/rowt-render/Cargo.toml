@@ -1,9 +1,0 @@
-[package]
-name = "rowt-render"
-version = "0.1.0"
-edition = "2021"
-description = "Renders rowt's sing-box configuration — the Rust replacement for the jq program in bin/rowt"
-license = "MIT"
-
-[dependencies]
-serde_json = "1"

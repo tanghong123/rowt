@@ -145,6 +145,29 @@ else
   fi
 fi
 
+echo "7. reword the classifier's reason without changing any lane"
+# Proves the classifier gate compares the REASON and not merely the lane. Every
+# destination still routes exactly where it did, so a lane-only comparison would
+# sail straight past this.
+rexp="$ROOT/target/release/rowt-explain"
+if [ ! -x "$rexp" ]; then
+  echo "  skip — no release build (cargo build --release -p rowt-core)"
+else
+  export PARITY_RUST_EXPLAIN="$rexp"
+  if ! "$P" classify-diff >/dev/null 2>&1; then
+    bad "classify-diff already fails before the mutation"
+  else
+    sed -i.bak 's/longest-match \${lane}-domains suffix/longest-matching \${lane}-domains suffix/' "$tmp/bin/rowt"
+    if ! grep -q 'longest-matching' "$tmp/bin/rowt"; then
+      bad "could not reword the reason (the string moved?)"
+    elif "$P" classify-diff >/dev/null 2>&1; then
+      bad "classify-diff passed with the reason reworded — it only compares lanes"
+    else
+      ok "classify-diff caught a reason-only change"
+    fi
+  fi
+fi
+
 echo
 echo "selftest: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

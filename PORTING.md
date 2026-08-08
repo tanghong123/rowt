@@ -86,8 +86,8 @@ tests and exactly one platform subprocess (`scutil --dns`) behind it.
 ```
 rowt/                       (Cargo workspace root)
 ├── crates/
-│   ├── rowt-core/          # PURE: render, lanes, classify/explain, captive FSM,
-│   │                       #       state, discovery journal, metrics
+│   ├── rowt-core/          # PURE: render + classify today; lanes, captive FSM,
+│   │                       #       state, discovery journal, metrics to come
 │   ├── rowt-platform/      # trait Platform + PlatformMac / PlatformLinux
 │   ├── rowt-cli/           # clap dispatch + help → the `rowt` binary
 │   └── rowt-import/        # (last/optional) port of the Python import pipeline
@@ -194,7 +194,7 @@ revertible and gated.
 |---|---|---|
 | **0** ✅ | Characterization: generate + harvest the corpus (§6.1), build the differential harness (§6.2) and platform shims (§6.4), write the coverage ledger (§6.8), commit synthetic fixtures | **done** — `tests/parity/`. Mask makes all 38 read-only commands byte-stable across runs; 92-verdict classifier golden; ledger green on all 37 command arms; containment verified (sandboxed `proxy on` / `up` / `down` leave the live system untouched) |
 | **1** ◑ | `rowt-core::render` — replace the giant jq program. bash calls `rowt-rs render` internally. | **render done** — `crates/rowt-render`, 18/18 cases canonically identical on host + vm (`parity render-matrix`), and identical against the real 22-server config. Remaining: throwaway-port outbound oracle, bash cutover, shadow window |
-| **2** | classify/explain, lane set logic, absorb `corp-sync-reconcile.py` | generated corpus + 311 real domains → identical `(lane, reason)`; property tests on list parsing |
+| **2** ◑ | classify/explain, lane set logic, absorb `corp-sync-reconcile.py` | **classify done** — `rowt-core::classify`, 9/9 cases × 92 destinations identical on `(lane, reason)` (`parity classify-matrix`). Remaining: lane set logic + the reconcile port |
 | **3** | watchdog: FSM into core, effects via `PlatformMac`; `cmd_watch` execs the Rust tick | FSM unit suite replays DESIGN.md §11's decision table + fake-portal.py end-to-end; **shadow mode across real networks** (§6.5) — the longest window |
 | **4** | clap CLI takes dispatch + help; bash reduces to a wrapper, then deleted. Formula ships the prebuilt binary (monitor-asset pattern). | full coverage ledger green (§6.8) + argv-trace diffs on every mutating command; `ROWT_IMPL` escape hatch live (§6.6) |
 | **5** | `PlatformLinux` + tun mode + systemd units; CI matrix (macOS + ubuntu — core tests run on both, platform tests feature-gated); linux tar assets | fresh-VM install → onboard → probe → captive drill; VPN-coexistence drill with Tailscale up |

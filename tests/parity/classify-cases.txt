@@ -1,0 +1,13 @@
+# Phase 2's classifier matrix. Each case is a list/mode/knob shape whose
+# (lane, reason) verdicts the Rust classifier must reproduce for every
+# destination the corpus generator derives from those same lists.
+
+default
+local-mode        PARITY_SCENARIO=render-local
+local-precedence  PARITY_SCENARIO=render-local-precedence
+no-corp           PARITY_SCENARIO=render-no-corp
+unicode-and-ties  PARITY_SCENARIO=render-unicode
+geosites          PARITY_SCENARIO=render-geosites
+private-direct    ROWT_PRIVATE_DEFAULT=direct
+final-escape      ROWT_FINAL=escape
+final-block       ROWT_FINAL=block

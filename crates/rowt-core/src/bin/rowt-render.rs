@@ -10,7 +10,7 @@
 //! is read exactly where the shell reads it, so the two implementations can be
 //! run against one sandbox and diffed.
 
-use rowt_render::{geosites_of, group, parse_list, render_host, render_vm, Filter, Geo, HostInput, Lists};
+use rowt_core::render::{geosites_of, group, parse_list, render_host, render_vm, Filter, Geo, HostInput, Lists};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};

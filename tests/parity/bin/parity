@@ -20,6 +20,8 @@
 #   parity corpus            replay the generated corpus through the classifier
 #   parity render-diff       one render case, bash vs Rust, compared canonically
 #   parity render-matrix     every render case (the Phase 1 gate)
+#   parity classify-diff     one classifier case, bash vs Rust: lane AND reason
+#   parity classify-matrix   every classifier case (the Phase 2 gate)
 #   parity ledger            regenerate LEDGER.md from bin/rowt
 #
 # `mask` compares bash against itself — it characterizes, it does not compare
@@ -320,6 +322,60 @@ cmd_corpus() {
   rm -rf "$out" "$corpus"
 }
 
+# Phase 2's gate: the classifier, bash vs Rust, over the generated corpus.
+#
+# Compares (lane, reason) and not just the lane. With four lanes over ~90 cases
+# a wrong-suffix match still lands on the right lane most of the time, so the
+# lane alone would pass a classifier that is right by accident.
+cmd_classify_diff() {   # [VAR=VALUE …]
+  local rust="${PARITY_RUST_EXPLAIN:-$ROOT/target/release/rowt-explain}"
+  [ -x "$rust" ] || die "no rust explain at $rust — cargo build --release -p rowt-core"
+  local -a ENVS=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in [A-Z_]*=*) ENVS+=("$1"); shift ;; *) break ;; esac
+  done
+  local out corpus
+  out="$(mktemp -d "${TMPDIR:-/tmp}/parity-classify.XXXXXX")"
+  make_sandbox "$out" "$(scenario_of ${ENVS[@]+"${ENVS[@]}"})"
+  corpus="$out/corpus.tsv"
+  python3 "$SELF/gen-corpus.py" --lists "$out/home/rowt" > "$corpus"
+
+  # bash: one explain per destination, reusing the sandbox
+  : > "$out/bash.tsv"
+  local dest lane reason verdict
+  while IFS=$'\t' read -r dest _; do
+    [ -n "$dest" ] || continue
+    verdict="$(run_in "$out" ${ENVS[@]+"${ENVS[@]}"} explain "$dest")"
+    lane="$(printf '%s' "$verdict" | sed -n '1s/.*->  *\([A-Z]*\).*/\1/p')"
+    reason="$(printf '%s' "$verdict" | sed -n 's/^ *matched: *//p' | head -1)"
+    printf '%s\t%s\t%s\n' "$dest" "${lane:-?}" "${reason:-?}" >> "$out/bash.tsv"
+  done < "$corpus"
+
+  env ${ENVS[@]+"${ENVS[@]}"} "$rust" --config-dir "$out/home/rowt" --corpus "$corpus" \
+    > "$out/rust.tsv" 2>"$out/rust.err" || { echo "  rust explain failed:"; sed 's/^/    /' "$out/rust.err"; return 1; }
+
+  if diff -u "$out/bash.tsv" "$out/rust.tsv" > "$out/diff"; then
+    echo "  $(wc -l < "$out/bash.tsv" | tr -d ' ') verdicts: identical (lane + reason)"
+    rm -rf "$out"; return 0
+  fi
+  echo "  DIFFERS:"; sed 's/^/    /' "$out/diff" | head -30
+  echo "  artifacts: $out"; return 1
+}
+
+cmd_classify_matrix() {
+  local fails=0 total=0 id rest
+  while read -r id rest; do
+    case "$id" in ''|'#'*) continue ;; esac
+    total=$((total + 1))
+    echo "[$id] ${rest:-(defaults)}"
+    # shellcheck disable=SC2086
+    cmd_classify_diff $rest || fails=$((fails + 1))
+  done < "$DIR/classify-cases.txt"
+  echo
+  echo "classifier matrix: $((total - fails))/$total cases identical"
+  [ "$fails" -eq 0 ]
+}
+
 # The committed classifier baseline. `parity golden` fails if today's verdicts
 # drift from it; `parity golden --update` re-records them (review the diff — a
 # changed verdict is a routing change).
@@ -404,8 +460,10 @@ case "${1:-}" in
   list)   shift; cmd_list "$@" ;;
   corpus) shift; cmd_corpus "$@" ;;
   golden) shift; cmd_golden "$@" ;;
-  render-diff)   shift; cmd_render_diff "$@" ;;
-  render-matrix) shift; cmd_render_matrix "$@" ;;
+  render-diff)     shift; cmd_render_diff "$@" ;;
+  classify-diff)   shift; cmd_classify_diff "$@" ;;
+  classify-matrix) shift; cmd_classify_matrix "$@" ;;
+  render-matrix)   shift; cmd_render_matrix "$@" ;;
   run)    shift; cmd_run "$@" ;;
   mask)   shift; cmd_mask "$@" ;;
   ledger) shift; cmd_ledger "$@" ;;
