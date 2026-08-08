@@ -1,0 +1,15 @@
+# Phase 2's lane-edit matrix. Each line is a rowt lane command; bash and Rust
+# must leave all three lane files byte-identical and say the same thing.
+
+escape add new.example
+escape add example.com
+corp add example.com
+block add example.com
+escape add a.example b.example
+escape rm example.com
+escape rm absent.example
+escape add geosite:google
+corp add geosite:google
+block clear
+escape clear
+escape dump

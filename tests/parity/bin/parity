@@ -22,6 +22,8 @@
 #   parity render-matrix     every render case (the Phase 1 gate)
 #   parity classify-diff     one classifier case, bash vs Rust: lane AND reason
 #   parity classify-matrix   every classifier case (the Phase 2 gate)
+#   parity lanes-diff        lane-list edits, bash vs Rust: files + messages
+#   parity reconcile-diff    corp reconcile, Python vs Rust, over generated cases
 #   parity ledger            regenerate LEDGER.md from bin/rowt
 #
 # `mask` compares bash against itself — it characterizes, it does not compare
@@ -376,6 +378,87 @@ cmd_classify_matrix() {
   [ "$fails" -eq 0 ]
 }
 
+# The corp-lane reconcile, Python vs Rust, over generated CIDR cases. This one
+# is worth randomizing: it is containment/overlap/collapse arithmetic, which is
+# where a reimplementation goes wrong on inputs nobody thought to write down.
+cmd_reconcile_diff() { # [count]
+  local rust="${PARITY_RUST_RECONCILE:-$ROOT/target/release/rowt-reconcile}"
+  local py="$ROOT/config/corp-sync-reconcile.py"
+  [ -x "$rust" ] || die "no rust reconcile at $rust — cargo build --release -p rowt-core"
+  local work n fails=0 d
+  work="$(mktemp -d "${TMPDIR:-/tmp}/parity-reconcile.XXXXXX")"
+  n="$(python3 "$SELF/gen-reconcile-cases.py" "$work" "${1:-200}")"
+  for d in "$work"/case*; do
+    local a="$d/active" h="$d/handadded" b="$d/block" p="$d/private"
+    python3 "$py" --active "$a" --handadded "$h" --block "$b" --private "$p" > "$d/py.out" 2>"$d/py.err" || true
+    "$rust"       --active "$a" --handadded "$h" --block "$b" --private "$p" > "$d/rs.out" 2>"$d/rs.err" || true
+    if ! diff -q "$d/py.out" "$d/rs.out" >/dev/null 2>&1; then
+      fails=$((fails + 1))
+      if [ "$fails" -le 3 ]; then
+        echo "  DIFFERS: $d"
+        echo "    active:    $(tr '\n' ' ' < "$a")"
+        echo "    handadded: $(tr '\n' ' ' < "$h")"
+        echo "    block:     $(tr '\n' ' ' < "$b")"
+        diff "$d/py.out" "$d/rs.out" | sed 's/^/    /' | head -12
+      fi
+    fi
+  done
+  if [ "$fails" -eq 0 ]; then
+    echo "  $n reconcile cases: identical"
+    rm -rf "$work"; return 0
+  fi
+  echo "  $fails/$n cases differ — artifacts: $work"; return 1
+}
+
+# Lane-list edits, bash vs Rust: the three files afterwards, and the lines the
+# user is told. The shell's surrounding effects (geosite fetch, the coverage
+# hint, the router reload) are filtered out — they are not set logic.
+cmd_lanes_diff() {
+  local rust="${PARITY_RUST_LANES:-$ROOT/target/release/rowt-lanes}"
+  [ -x "$rust" ] || die "no rust lanes at $rust — cargo build --release -p rowt-core"
+  local core='^  (added|already present|removed|not found|skipped|moved out of)|list cleared| \+= '
+  local fails=0 total=0 line
+  # Read the WHOLE line: the lane name is the first word of the command, not a
+  # separate field. Splitting it off sent both sides `rowt add …`, which both
+  # rejected identically — a false pass that looked like agreement.
+  while IFS= read -r line; do
+    case "$line" in ''|'#'*) continue ;; esac
+    total=$((total + 1))
+    local A B
+    A="$(mktemp -d "${TMPDIR:-/tmp}/parity-lanes-a.XXXXXX")"
+    B="$(mktemp -d "${TMPDIR:-/tmp}/parity-lanes-b.XXXXXX")"
+    make_sandbox "$A"; make_sandbox "$B"
+    # shellcheck disable=SC2086 — the case line is intentionally word-split
+    run_in "$A" $line > "$A/out.raw" 2>/dev/null || true
+    grep -iE "$core" "$A/out.raw" > "$A/out" 2>/dev/null || : > "$A/out"
+    # shellcheck disable=SC2086
+    "$rust" --config-dir "$B/home/rowt" $line > "$B/out.raw" 2>/dev/null || true
+    grep -iE "$core" "$B/out.raw" > "$B/out" 2>/dev/null || : > "$B/out"
+    local bad="" f
+    for f in escape-domains.txt corp-domains.txt block-domains.txt; do
+      diff -q "$A/home/rowt/$f" "$B/home/rowt/$f" >/dev/null 2>&1 || bad="$bad $f"
+    done
+    diff -q "$A/out" "$B/out" >/dev/null 2>&1 || bad="$bad messages"
+    if [ -n "$bad" ]; then
+      fails=$((fails + 1))
+      echo "[$line] DIFFERS:$bad"
+      for f in $bad; do
+        case "$f" in
+          messages) diff "$A/out" "$B/out" | sed 's/^/    /' | head -8 ;;
+          *)        diff "$A/home/rowt/$f" "$B/home/rowt/$f" | sed 's/^/    /' | head -8 ;;
+        esac
+      done
+      echo "    artifacts: $A $B"
+    else
+      echo "[$line] identical"
+      rm -rf "$A" "$B"
+    fi
+  done < "$DIR/lanes-cases.txt"
+  echo
+  echo "lane edits: $((total - fails))/$total cases identical"
+  [ "$fails" -eq 0 ]
+}
+
 # The committed classifier baseline. `parity golden` fails if today's verdicts
 # drift from it; `parity golden --update` re-records them (review the diff — a
 # changed verdict is a routing change).
@@ -463,6 +546,8 @@ case "${1:-}" in
   render-diff)     shift; cmd_render_diff "$@" ;;
   classify-diff)   shift; cmd_classify_diff "$@" ;;
   classify-matrix) shift; cmd_classify_matrix "$@" ;;
+  reconcile-diff)  shift; cmd_reconcile_diff "$@" ;;
+  lanes-diff)      shift; cmd_lanes_diff "$@" ;;
   render-matrix)   shift; cmd_render_matrix "$@" ;;
   run)    shift; cmd_run "$@" ;;
   mask)   shift; cmd_mask "$@" ;;

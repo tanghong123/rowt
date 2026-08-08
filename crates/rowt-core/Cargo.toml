@@ -7,6 +7,7 @@ license = "MIT"
 
 [dependencies]
 serde_json = "1"
+ipnet = "2"
 
 [[bin]]
 name = "rowt-render"
@@ -15,3 +16,11 @@ path = "src/bin/rowt-render.rs"
 [[bin]]
 name = "rowt-explain"
 path = "src/bin/rowt-explain.rs"
+
+[[bin]]
+name = "rowt-lanes"
+path = "src/bin/rowt-lanes.rs"
+
+[[bin]]
+name = "rowt-reconcile"
+path = "src/bin/rowt-reconcile.rs"

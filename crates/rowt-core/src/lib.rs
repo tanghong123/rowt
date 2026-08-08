@@ -8,6 +8,8 @@
 //! `tests/parity` rather than by inspection.
 
 pub mod classify;
+pub mod lanes;
+pub mod reconcile;
 pub mod render;
 
 pub use classify::{classify, Classification, ClassifyInput, Lane};

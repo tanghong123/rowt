@@ -2,14 +2,17 @@
 #
 # selftest — prove the gates can fail.
 #
-# Every other check in this directory is pass-side: 38 commands stable, golden
-# matches, ledger green. A characterization suite whose only evidence is that it
-# agreed with itself has not been shown to detect anything. So this breaks the
-# system three ways, one per gate, and fails if a gate stays quiet:
+# Every other check in this directory is pass-side: commands stable, goldens
+# matching, matrices green. A characterization suite whose only evidence is that
+# it agreed with itself has not been shown to detect anything. So this breaks the
+# system one way per gate, and fails if a gate stays quiet:
 #
-#   1. move a domain between lanes      -> the classifier golden must fail
-#   2. delete a rule from normalize.sed -> `mask` must report a diff
-#   3. change the proxy bypass list     -> the proxy_on argv trace must differ
+#   1/2. move a domain between lanes    -> the classifier golden must fail
+#   3.   neuter normalization           -> `mask` must report a diff
+#   4.   change the proxy bypass list   -> the proxy_on argv trace must differ
+#   5/6. drop the corp domain_resolver  -> render-diff and the shadow must fire
+#   7.   reword a classifier reason     -> classify-diff must fire (lane-only misses it)
+#   8.   disable the single-lane rule   -> lanes-diff must fire
 #
 # Everything happens in a throwaway copy of the repo; the real tree is never
 # touched. Run it after changing the harness itself.
@@ -164,6 +167,28 @@ else
       bad "classify-diff passed with the reason reworded — it only compares lanes"
     else
       ok "classify-diff caught a reason-only change"
+    fi
+  fi
+fi
+
+echo "8. break the single-lane invariant in the shell"
+# Adding to one lane must pull the entry out of the others. Disable that and the
+# lane files diverge — which is the whole point of comparing files, not messages.
+rlanes="$ROOT/target/release/rowt-lanes"
+if [ ! -x "$rlanes" ]; then
+  echo "  skip — no release build (cargo build --release -p rowt-core)"
+else
+  export PARITY_RUST_LANES="$rlanes"
+  if ! "$P" lanes-diff >/dev/null 2>&1; then
+    bad "lanes-diff already fails before the mutation"
+  else
+    perl -0pi -e 's/^_lane_dedupe\(\) \{/_lane_dedupe() { return 0;/m' "$tmp/bin/rowt"
+    if ! grep -q '_lane_dedupe() { return 0;' "$tmp/bin/rowt"; then
+      bad "could not disable _lane_dedupe (it moved?)"
+    elif "$P" lanes-diff >/dev/null 2>&1; then
+      bad "lanes-diff passed with the single-lane invariant disabled"
+    else
+      ok "lanes-diff caught the broken single-lane invariant"
     fi
   fi
 fi
