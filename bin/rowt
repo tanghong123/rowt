@@ -53,7 +53,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.2.5"
+ROWT_VERSION="3.2.6"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -1481,7 +1481,7 @@ cmd_render() {
   "$SB" check -c "$tv" || { rm -f "$th" "$tv"; die "generated vm config failed validation"; }
   mv -f "$th" "$HOST_CFG"
   mv -f "$tv" "$VM_CFG"
-  [ "${ROWT_RENDER_SHADOW:-0}" = 1 ] && _render_shadow "$mode" || true
+  [ "${ROWT_RENDER_SHADOW:-$(sget shadow_render)}" = 1 ] && _render_shadow "$mode" || true
   echo "  host: $HOST_CFG"
   echo "  vm:   $VM_CFG"
 }
@@ -3191,6 +3191,11 @@ cmd_watch() {
       # sudoers (no sudo) — used after `brew upgrade` to pick up this version and
       # clear any launchd backoff from the binary swap. No-op if never installed.
       local refresh=0; [ "$action" = refresh ] && refresh=1
+      # Remember an explicitly-set shadow choice in state. The post-upgrade
+      # 'watch refresh' runs with no environment, so an env-only flag would
+      # quietly end a shadow window at the next brew upgrade.
+      [ -n "${ROWT_WATCH_SHADOW:-}" ]  && sset shadow_watch  "$ROWT_WATCH_SHADOW"
+      [ -n "${ROWT_RENDER_SHADOW:-}" ] && sset shadow_render "$ROWT_RENDER_SHADOW"
       if [ "$refresh" = 1 ] && [ ! -f "$WATCH_PLIST" ]; then info "watch not installed — nothing to refresh"; return 0; fi
       local self; self="$(_watch_self)"
       [ -x "$self" ] || die "cannot resolve the rowt binary path ($self)"
@@ -3204,7 +3209,7 @@ cmd_watch() {
       done
       local envxml v val
       envxml="    <key>PATH</key><string>$agent_path</string>"
-      for v in XDG_CONFIG_HOME ROWT_PORT ROWT_CLASH_PORT ROWT_FINAL ROWT_IFACE ROWT_DNS_DIRECT SINGBOX_VERSION ROWT_LOG_LEVEL ROWT_WATCH_INTERVAL ROWT_HEALTH_FAILS ROWT_HEALTH_COOLDOWN ROWT_HEALTH_TIMEOUT ROWT_HEALTH_URL; do
+      for v in XDG_CONFIG_HOME ROWT_PORT ROWT_CLASH_PORT ROWT_FINAL ROWT_IFACE ROWT_DNS_DIRECT ROWT_DNS_LOCAL ROWT_GFW_CANARIES ROWT_GFW_TIMEOUT SINGBOX_VERSION ROWT_LOG_LEVEL ROWT_WATCH_INTERVAL ROWT_HEALTH_FAILS ROWT_HEALTH_COOLDOWN ROWT_HEALTH_TIMEOUT ROWT_HEALTH_URL ROWT_WATCH_SHADOW ROWT_RENDER_SHADOW; do
         val="${!v:-}"; [ -n "$val" ] && envxml="$envxml
     <key>$v</key><string>$val</string>"
       done
@@ -3321,7 +3326,7 @@ PLIST
       _SH_LOG0="$(wc -l < "$WATCH_LOG" 2>/dev/null || echo 0)"; _SH_LOG0="${_SH_LOG0// /}"
       _SH_CAP=""
       trap 'rmdir "$CFG/watch.lock" 2>/dev/null || true
-            [ "${ROWT_WATCH_SHADOW:-0}" = 1 ] && [ -n "$_SH_CAP" ] && _watch_shadow || true' EXIT
+            [ "${ROWT_WATCH_SHADOW:-$(sget shadow_watch)}" = 1 ] && [ -n "$_SH_CAP" ] && _watch_shadow || true' EXIT
 
       local intent proxy_intent
       intent="$(sget intent 2>/dev/null || true)"
