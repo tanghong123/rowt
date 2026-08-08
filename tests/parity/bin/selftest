@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+#
+# selftest — prove the gates can fail.
+#
+# Every other check in this directory is pass-side: 38 commands stable, golden
+# matches, ledger green. A characterization suite whose only evidence is that it
+# agreed with itself has not been shown to detect anything. So this breaks the
+# system three ways, one per gate, and fails if a gate stays quiet:
+#
+#   1. move a domain between lanes      -> the classifier golden must fail
+#   2. delete a rule from normalize.sed -> `mask` must report a diff
+#   3. change the proxy bypass list     -> the proxy_on argv trace must differ
+#
+# Everything happens in a throwaway copy of the repo; the real tree is never
+# touched. Run it after changing the harness itself.
+set -euo pipefail
+
+SELF="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DIR="$(cd -P "$SELF/.." && pwd)"
+ROOT="$(cd -P "$DIR/../.." && pwd)"
+
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/parity-selftest.XXXXXX")"
+trap 'rm -rf "$tmp"' EXIT
+mkdir -p "$tmp/bin" "$tmp/tests"
+cp -R "$DIR" "$tmp/tests/parity"
+cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+P="$tmp/tests/parity/bin/parity"
+
+pass=0 fail=0
+ok()   { echo "  ok   — $*"; pass=$((pass + 1)); }
+bad()  { echo "  FAIL — $*"; fail=$((fail + 1)); }
+
+echo "1. baseline (the gates must be quiet before anything is broken)"
+if "$P" golden >/dev/null 2>&1; then ok "classifier golden passes unmutated"
+else bad "golden already fails before any mutation"; fi
+
+echo "2. move example.com from the escape lane to the corp lane"
+cfg="$tmp/tests/parity/fixtures/config"
+grep -v '^example\.com$' "$cfg/escape-domains.txt" > "$cfg/e.tmp" && mv "$cfg/e.tmp" "$cfg/escape-domains.txt"
+echo 'example.com' >> "$cfg/corp-domains.txt"
+if "$P" golden >/dev/null 2>&1; then bad "golden passed after a lane change — it does not gate routing"
+else ok "golden caught the lane change"; fi
+cp "$DIR/fixtures/config/escape-domains.txt" "$cfg/escape-domains.txt"
+cp "$DIR/fixtures/config/corp-domains.txt"   "$cfg/corp-domains.txt"
+
+echo "3a. the diag-filename rule actually collapses two different filenames"
+# Tested directly rather than through `mask`: everything volatile here moves on
+# a one-second clock, so two fast runs can legitimately land in the same second
+# and a timing-dependent probe would flap. The rule itself is deterministic.
+n="$tmp/tests/parity/normalize.sed"
+sample="diag-20260808-010101.txt
+diag-20260808-020202.txt"
+uniq_with="$(printf '%s\n' "$sample" | sed -f "$n" | sort -u | wc -l | tr -d ' ')"
+grep -v '^s/diag-' "$n" > "$n.tmp" && mv "$n.tmp" "$n"
+uniq_without="$(printf '%s\n' "$sample" | sed -f "$n" | sort -u | wc -l | tr -d ' ')"
+if [ "$uniq_with" = 1 ] && [ "$uniq_without" = 2 ]; then
+  ok "the rule collapses volatile filenames, and its absence is visible"
+else
+  bad "diag rule is inert (with=$uniq_with without=$uniq_without, want 1 and 2)"
+fi
+cp "$DIR/normalize.sed" "$n"
+
+echo "3b. neuter the per-run path substitution — mask must go loud"
+# Deterministic where the clock is not: two sandboxes never share a mktemp path.
+# The substitution is turned into an identity (s#$2#$2#g) rather than deleted —
+# deleting the line takes its line-continuation with it, which breaks normalize()
+# into a syntax error, and a tool that errors on both sides produces two empty
+# outputs that compare equal. That failure mode looks exactly like a silent gate,
+# so `bash -n` guards it.
+sed -i.bak 's|<RUN>|$2|' "$tmp/tests/parity/bin/parity"
+if grep -q '<RUN>' "$tmp/tests/parity/bin/parity"; then
+  bad "could not neuter the path substitution (pattern moved?)"
+elif ! bash -n "$tmp/tests/parity/bin/parity" 2>/dev/null; then
+  bad "the mutation broke parity's syntax — the result would be meaningless"
+else
+  # Captured, not piped into `grep -q`: grep exits on the first match, the
+  # producer dies of SIGPIPE, and `set -o pipefail` then reports the pipeline as
+  # failed — so a diff that WAS detected reads as "no diff". This exact trap
+  # already ate a sweep in cmd_mask; it is easy to write and invisible once
+  # written.
+  masked="$("$P" mask report 2>&1 || true)"
+  case "$masked" in
+    *DIFF*) ok "mask caught output that normalization no longer neutralizes" ;;
+    *)      bad "mask stayed quiet with normalization removed — it is not load-bearing" ;;
+  esac
+fi
+cp "$DIR/bin/parity" "$tmp/tests/parity/bin/parity"
+
+echo "4. point a captive-probe host in _proxy_bypass_want somewhere else"
+before="$("$P" run proxy_on 2>/dev/null | sed -n '/--- trace:/,$p')"
+sed -i.bak 's/detectportal\.firefox\.com/detectportal.example.invalid/' "$tmp/bin/rowt"
+if ! grep -q 'detectportal\.example\.invalid' "$tmp/bin/rowt"; then
+  bad "could not apply the bypass-list mutation (pattern moved?)"
+else
+  after="$("$P" run proxy_on 2>/dev/null | sed -n '/--- trace:/,$p')"
+  if [ "$before" = "$after" ]; then bad "argv trace identical after changing the bypass list"
+  else ok "argv trace caught the bypass-list change"; fi
+fi
+
+echo
+echo "selftest: $pass passed, $fail failed"
+[ "$fail" -eq 0 ]

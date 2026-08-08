@@ -57,6 +57,20 @@ escape_rm         mut    escape rm example.com
 corp_sync         mut    corp sync
 use_server        mut    use beta
 skill_status      mut    skill status
+
+# The watchdog's captive classifier (DESIGN.md §11). These pick the portal the
+# tick sees through the environment rather than argv, which is why the matrix
+# accepts leading VAR=VALUE tokens. Together they walk the decision table:
+# clear / captive-by-body / captive-by-redirect / unknown-on-failure.
+watch_tick_clear    mut  ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
+watch_tick_portal   mut  ROWT_CAPTIVE_URL=http://127.0.0.1:8099/portal watch tick
+watch_tick_redirect mut  ROWT_CAPTIVE_URL=http://127.0.0.1:8099/redirect watch tick
+watch_tick_unknown  mut  ROWT_CAPTIVE_URL=http://127.0.0.1:9/x watch tick
+# …and the same portal with the proxy actually on, which is what makes the tick
+# take the drop branch rather than logging 'proxy already off'.
+watch_tick_drop     mut  PARITY_SCENARIO=proxy-on ROWT_CAPTIVE_URL=http://127.0.0.1:8099/portal watch tick
+# Mid-episode: state says captive, the portal now answers clear -> restore.
+watch_tick_restore  mut  PARITY_SCENARIO=captive-episode ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
 fetch             mut    fetch
 up                mut    up
 reload            mut    reload
@@ -71,3 +85,37 @@ uninstall         skip   uninstall         # prompts for confirmation; needs a s
 run_wrapper       skip   run               # exec wrapper, needs a wrapped command
 ping              skip   ping              # dials real servers; belongs to a network-marked suite
 probe             skip   probe             # same
+
+# Second-level coverage, from LEDGER.md's subcommand dimension.
+audit_all         ro     audit all
+audit_path        ro     audit path
+escape_stats      ro     escape stats
+corp_errors       ro     corp errors
+corp_stats        ro     corp stats
+block_errors      ro     block errors
+block_stats       ro     block stats
+direct_errors     ro     direct errors
+direct_stats      ro     direct stats
+completion_zsh    ro     completion zsh
+server_dump       ro     server dump
+corp_suggest      mut    corp suggest
+audit_clear       mut    audit clear
+server_clear      mut    server clear
+sub_clear         mut    sub clear
+router_restart    mut    router restart
+fetch_host        mut    fetch host
+fetch_vm          mut    fetch vm
+
+# Lane log tails never terminate (tail -f), same as escape log.
+corp_log          skip   corp log          # tail -f
+block_log         skip   block log         # tail -f
+direct_log        skip   direct log        # tail -f
+router_log        skip   router log        # tail -f
+# These take a payload (a URL, a server name) that belongs in an import fixture;
+# Phase 2 adds them with the import pipeline.
+server_add        skip   server add        # needs a share-link fixture
+server_rm         skip   server rm         # needs a named server + confirmation
+server_remove     skip   server remove     # alias of the above
+server_import     skip   server import     # needs an import-source fixture
+sub_rm            skip   sub rm            # needs a subscription fixture
+sub_remove        skip   sub remove        # alias of the above

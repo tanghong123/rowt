@@ -45,11 +45,16 @@ fi
 # two arguments, then the first, then the bare command name.
 slug() { printf '%s' "$*" | tr -c 'A-Za-z0-9' '_' | sed -e 's/__*/_/g' -e 's/^_//' -e 's/_$//'; }
 
+# The last argument is keyed too: curl's URL is what identifies the call, and it
+# sits behind a pile of flags that would make a whole-argv key useless.
+last=""; [ "$#" -gt 0 ] && last="${!#}"
+
 if [ -n "$envdir" ]; then
   for key in \
     "$(slug "$name" "$@")" \
     "$(slug "$name" "${1:-}" "${2:-}")" \
     "$(slug "$name" "${1:-}")" \
+    "$(slug "$name" "$last")" \
     "$name"
   do
     [ -n "$key" ] || continue

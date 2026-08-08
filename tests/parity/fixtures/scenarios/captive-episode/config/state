@@ -1,0 +1,5 @@
+mode=host
+selected=auto
+proxy_intent=on
+clash_secret=PARITYFIXTURESECRET00000
+captive=1

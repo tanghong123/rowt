@@ -16,7 +16,25 @@ tests/parity/bin/parity run -- explain example.com
 tests/parity/bin/parity mask            # every read-only command, twice, diffed
 tests/parity/bin/parity golden          # classifier verdicts vs the committed golden
 tests/parity/bin/parity ledger          # regenerate LEDGER.md from bin/rowt
+tests/parity/bin/selftest               # break the system 3 ways; every gate must fire
 ```
+
+## Proving the gates can fail
+
+Everything above is pass-side evidence, and a suite that has only ever agreed
+with itself has not been shown to detect anything. `bin/selftest` breaks a
+throwaway copy of the repo three ways and fails if a gate stays quiet: a domain
+moved between lanes (the golden must fail), normalization neutered (`mask` must
+go loud), and a captive-probe host changed in `_proxy_bypass_want` (the
+`proxy_on` argv trace must differ). It asserts each mutation actually landed
+first — a pattern that matched nothing looks exactly like a gate that failed to
+fire.
+
+Writing it caught two bugs in the gates themselves: `normalize.sed`'s temp-path
+rule was greedy to end-of-token, so it swallowed the whole path and would have
+hidden a file written to the wrong place; and `set -o pipefail` combined with
+`cmd | grep -q` inverts the result — grep exits on the first match, the
+producer dies of SIGPIPE, and a detected difference reads as no difference.
 
 ## The sandbox
 
@@ -39,7 +57,7 @@ checksummed over *normalized* content).
 
 ## What Phase 0 established
 
-**The nondeterministic-field mask** — `normalize.sed`. With it, all 38
+**The nondeterministic-field mask** — `normalize.sed`. With it, all 49
 terminating read-only commands are byte-identical across two runs. Each rule
 was earned by a `parity mask` failure, never added speculatively:
 
@@ -58,10 +76,26 @@ CIDR at its boundaries, the RFC1918 fall-through edges, and controls. This is
 the corpus the design calls for, and it is deliberately *not* the lane logs —
 those are error logs, so their domains are whatever happened to fail.
 
-**The coverage ledger** — `LEDGER.md`, generated from `run_command()` in
-bin/rowt so it cannot drift. All 37 command arms are in the matrix; four are
-excluded with a stated cause (`tail -f`, the TUI, and `uninstall`'s
-confirmation prompt).
+It records rowt's own `matched:` reason next to the lane. The lane alone is a
+weak gate: with four lanes over 92 cases, a classifier that matched the wrong
+suffix — or matched by resolved IP instead of by suffix — still lands on the
+right lane and passes.
+
+**The coverage ledger** — `LEDGER.md`, generated from `run_command()` and
+expanded by each `cmd_*` function's first-argument `case`, so subcommands are
+measured too. Counting only first-level commands would let `watch install` hide
+behind `watch status`. 63 rows, all covered; entries that cannot run
+unattended (`tail -f`, the TUI, `uninstall`'s prompt, and the ones needing an
+import fixture) are skipped with a stated cause. Subcommands reachable only
+through a `*` catch-all cannot be enumerated from the source and are not
+listed.
+
+**Watchdog coverage** — the captive decision table of DESIGN.md §11 runs from
+the matrix: clear, captive-by-body, captive-by-redirect, unknown-on-failure,
+plus the drop and restore branches. A scenario overlay
+(`PARITY_SCENARIO=proxy-on`) supplies machine states the base fixtures don't
+describe, since the drop only fires when the proxy is actually on. Verified: the
+drop emits the full `sudo networksetup …` sequence and logs the §11 line.
 
 ## Characterized behavior worth knowing
 

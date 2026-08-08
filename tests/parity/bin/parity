@@ -53,12 +53,22 @@ matrix_get() {   # $1=id -> flags<TAB>args
 
 # ---------------------------------------------------------------- sandbox
 
-make_sandbox() { # $1=outdir
-  local out="$1" cfg
+# A scenario is a machine state the base fixtures do not describe — the proxy
+# already on, a portal episode in progress, a VPN up. It overlays both halves of
+# the sandbox: `config/` (what rowt has recorded) and `env/` (what the machine
+# answers). Selected from the matrix with PARITY_SCENARIO=<name>.
+make_sandbox() { # $1=outdir  [$2=scenario]
+  local out="$1" scenario="${2:-}" cfg
   mkdir -p "$out"
   cfg="$out/home/rowt"                       # XDG_CONFIG_HOME=$out/home
-  mkdir -p "$cfg" "$out/home" "$out/shims"
+  mkdir -p "$cfg" "$out/home" "$out/shims" "$out/env"
   cp -R "$DIR/fixtures/config/." "$cfg/"
+  cp -R "$DIR/fixtures/env/." "$out/env/"
+  if [ -n "$scenario" ]; then
+    [ -d "$DIR/fixtures/scenarios/$scenario" ] || die "no such scenario: $scenario"
+    [ -d "$DIR/fixtures/scenarios/$scenario/config" ] && cp -R "$DIR/fixtures/scenarios/$scenario/config/." "$cfg/"
+    [ -d "$DIR/fixtures/scenarios/$scenario/env" ]    && cp -R "$DIR/fixtures/scenarios/$scenario/env/." "$out/env/"
+  fi
   mkdir -p "$cfg/bin" "$cfg/log" "$cfg/cache"
   cp "$DIR/fixtures/bin/sing-box" "$cfg/bin/sing-box"
   chmod +x "$cfg/bin/sing-box"
@@ -66,15 +76,30 @@ make_sandbox() { # $1=outdir
   for s in $SHIMS; do ln -sf "$DIR/shims/_recorder" "$out/shims/$s"; done
 }
 
+scenario_of() { # echo the PARITY_SCENARIO value out of a VAR=VALUE list
+  local e
+  for e in "$@"; do case "$e" in PARITY_SCENARIO=*) printf '%s' "${e#PARITY_SCENARIO=}"; return 0 ;; esac; done
+}
+
+# A matrix entry may lead with VAR=VALUE tokens: some behavior is selected by
+# environment rather than argv (ROWT_CAPTIVE_URL picks which portal the watchdog
+# sees), and that dimension has to be reachable from the matrix. Parsed inline
+# on purpose — a helper would have to return the array through a subshell, which
+# silently drops it.
 run_in() {       # $1=outdir (sandbox already built)  rest=rowt args — stdout only
   local out="$1"; shift
+  local -a ENVS=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in [A-Z_]*=*) ENVS+=("$1"); shift ;; *) break ;; esac
+  done
   env -i \
+    ${ENVS[@]+"${ENVS[@]}"} \
     HOME="$out/home" \
     XDG_CONFIG_HOME="$out/home" \
     PATH="$out/shims:/usr/bin:/bin:/usr/sbin:/sbin" \
     TERM=dumb LC_ALL=C TZ=UTC \
     PARITY_TRACE="$out/trace" \
-    PARITY_ENV="$DIR/fixtures/env" \
+    PARITY_ENV="$out/env" \
     ROWT_IMPL="${ROWT_IMPL:-bash}" \
     perl -e 'alarm shift; exec @ARGV' "$TIMEOUT" \
     bash "$ROWT" "$@" 2>/dev/null || true
@@ -82,17 +107,22 @@ run_in() {       # $1=outdir (sandbox already built)  rest=rowt args — stdout 
 
 run_one() {      # $1=outdir  rest=rowt args
   local out="$1"; shift
-  make_sandbox "$out"
   local rc=0
+  local -a ENVS=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in [A-Z_]*=*) ENVS+=("$1"); shift ;; *) break ;; esac
+  done
+  make_sandbox "$out" "$(scenario_of ${ENVS[@]+"${ENVS[@]}"})"
   # perl's alarm is the same timeout trick rowt itself uses (_tmo) — it keeps a
   # `tail -f`-style command from wedging the harness.
   env -i \
+    ${ENVS[@]+"${ENVS[@]}"} \
     HOME="$out/home" \
     XDG_CONFIG_HOME="$out/home" \
     PATH="$out/shims:/usr/bin:/bin:/usr/sbin:/sbin" \
     TERM=dumb LC_ALL=C TZ=UTC \
     PARITY_TRACE="$out/trace" \
-    PARITY_ENV="$DIR/fixtures/env" \
+    PARITY_ENV="$out/env" \
     ROWT_IMPL="${ROWT_IMPL:-bash}" \
     perl -e 'alarm shift; exec @ARGV' "$TIMEOUT" \
     bash "$ROWT" "$@" >"$out/stdout" 2>"$out/stderr" || rc=$?
@@ -193,33 +223,69 @@ cmd_mask() {
 
 # LEDGER.md is generated so it cannot drift: the command surface comes out of
 # bin/rowt itself (run_command's case arms), not out of memory (§6.8).
+# Subcommands of one cmd_* function: the arms of the case block that dispatches
+# on the first argument. Finding that block matters — taking merely the FIRST
+# case picks up cmd_explain's `case "$lane"`, which would invent subcommands
+# ("explain block") that do not exist. So: match a case on $1 directly, or on
+# the local that was assigned from $1 (cmd_proxy's `action="${1:-status}"`).
+subs_of() {      # $1=function name
+  local body var
+  body="$(sed -n "/^$1()/,/^}/p" "$ROWT")"
+  var="$(printf '%s' "$body" \
+         | sed -n 's/.*[^a-zA-Z_]\([a-zA-Z_][a-zA-Z0-9_]*\)="\${\{0,1\}1[:}-].*/\1/p' | head -1)"
+  printf '%s' "$body" \
+    | awk -v v="$var" '
+        !seen && /case / && ($0 ~ /case +"?\$\{?1[:}"]/ || (v != "" && $0 ~ "case +\"?\\$" v "\"?")) { seen=1; next }
+        seen && /esac/ { exit }
+        seen
+      ' \
+    | sed -n 's/^ *\([a-z"$][a-z0-9|_${}:-]*\)) .*/\1/p' \
+    | tr '|' '\n' \
+    | grep -Ev '^\*$|^\$|^"|\{|^$' | sort -u
+}
+
+# Coverage is two-dimensional: the command, and the subcommand that decides
+# whether it mutates. Measuring only the first level would let `watch install`
+# and `router down` hide behind `watch status` and `router status` — precisely
+# the "commands I remembered to test" failure the ledger exists to prevent.
 cmd_ledger() {
-  local arms ro
-  arms="$(sed -n '/^run_command()/,/^}/p' "$ROWT" \
-          | sed -n 's/^ *\([a-z_|-]*\)) *cmd_.*/\1/p' | tr '|' '\n' | sort -u)"
-  ro="$(sed -n '/^_is_readonly()/,/^}/p' "$ROWT" | grep -c 'return 0' || true)"
+  local pairs rows=0 miss=0
+  pairs="$(sed -n '/^run_command()/,/^}/p' "$ROWT" \
+           | sed -n 's/^ *\([a-z_|-]*\)) *\(cmd_[a-z_]*\).*/\1 \2/p')"
   {
     echo "# Coverage ledger"
     echo
     echo "Generated by \`tests/parity/bin/parity ledger\` — do not hand-edit."
-    echo "Source of truth: \`run_command()\` in bin/rowt ($(printf '%s\n' "$arms" | grep -c . | tr -d ' ') command arms),"
-    echo "split by \`_is_readonly()\` ($ro read-only outcomes)."
+    echo "Source of truth: \`run_command()\` in bin/rowt, expanded by the first"
+    echo "\`case\` block of each \`cmd_*\` function so subcommands are measured too."
     echo
     echo "A phase cannot be declared complete while a row in its scope is unchecked."
+    echo "Subcommands reached only through a \`*\` catch-all cannot be enumerated"
+    echo "from the source and are not listed."
     echo
     echo '| command | in matrix | covered by |'
     echo '|---|---|---|'
-    local c hits
-    for c in $arms; do
-      hits="$(matrix_rows | awk -F'\t' -v c="$c" '{split($3,a," "); if (a[1]==c) printf "%s ", $1}')"
-      if [ -n "$hits" ]; then
-        printf '| `%s` | yes | %s|\n' "$c" "$hits"
-      else
-        printf '| `%s` | **no** | — |\n' "$c"
-      fi
+    local line arm func c sub hits target
+    printf '%s\n' "$pairs" | while read -r arm func; do
+      [ -n "$arm" ] || continue
+      for c in $(printf '%s' "$arm" | tr '|' ' '); do
+        local subs; subs="$(subs_of "$func" || true)"
+        if [ -z "$subs" ]; then
+          hits="$(matrix_rows | awk -F'\t' -v c="$c" '{n=split($3,a," "); for(i=1;i<=n;i++) if (a[i]!~/=/) {if (a[i]==c) printf "%s ", $1; break}}')"
+          [ -n "$hits" ] && printf '| `%s` | yes | %s|\n' "$c" "$hits" || printf '| `%s` | **no** | — |\n' "$c"
+        else
+          for sub in $subs; do
+            target="$c $sub"
+            hits="$(matrix_rows | awk -F'\t' -v t="$target" '{n=split($3,a," "); s=""; for(i=1;i<=n;i++) if (a[i]!~/=/) {s=a[i] " " a[i+1]; break} if (s==t) printf "%s ", $1}')"
+            [ -n "$hits" ] && printf '| `%s %s` | yes | %s|\n' "$c" "$sub" "$hits" || printf '| `%s %s` | **no** | — |\n' "$c" "$sub"
+          done
+        fi
+      done
     done
   } > "$DIR/LEDGER.md"
-  echo "wrote $DIR/LEDGER.md"
+  rows="$(grep -c '^| `' "$DIR/LEDGER.md" || true)"
+  miss="$(grep -c '| \*\*no\*\* |' "$DIR/LEDGER.md" || true)"
+  echo "wrote $DIR/LEDGER.md — $rows rows, $miss uncovered"
 }
 
 # Replay the generated corpus through the classifier and emit one verdict per
@@ -237,9 +303,15 @@ cmd_corpus() {
     [ -n "$dest" ] || continue
     # First line of `explain` is 'dest (ip)  ->  LANE   (prose)'; the lane is
     # the verdict, the prose is commentary that Phase 2 compares separately.
-    local lane
-    lane="$(run_in "$out" explain "$dest" | sed -n '1s/.*->  *\([A-Z]*\).*/\1/p')"
-    printf '%s\t%s\t%s\n' "$dest" "${lane:-?}" "$why"
+    local verdict lane reason
+    verdict="$(run_in "$out" explain "$dest")"
+    lane="$(printf '%s' "$verdict"   | sed -n '1s/.*->  *\([A-Z]*\).*/\1/p')"
+    # The lane alone is a weak gate: four lanes over 92 cases means a classifier
+    # that matched the wrong suffix, or matched by resolved IP instead of by
+    # suffix, still lands on the right lane. rowt's own 'matched:' line is what
+    # distinguishes those, so the golden records it (PORTING.md §6.3).
+    reason="$(printf '%s' "$verdict"  | sed -n 's/^ *matched: *//p' | head -1)"
+    printf '%s\t%s\t%s\t%s\n' "$dest" "${lane:-?}" "${reason:-?}" "$why"
   done < "$corpus"
   rm -rf "$out" "$corpus"
 }

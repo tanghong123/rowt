@@ -26,6 +26,8 @@ s/rc=\([0-9-]*\) ([0-9][0-9]*s)/rc=\1 (<DUR>s)/g
 # fsstate listing too, which is why it matches the bare name anywhere.
 s/diag-[0-9]\{8\}-[0-9]\{6\}\.txt/diag-<TS>.txt/g
 
-# Temp files created per run.
+# Temp files created per run. Only the volatile PREFIX is masked — matching
+# through to the end of the token would swallow the rest of the path too, and
+# a file written to the wrong place inside the sandbox would then be invisible.
 s#/tmp/[A-Za-z0-9_.-]*\.[A-Za-z0-9]\{6,\}#<TMP>#g
-s#/var/folders/[^ ]*#<TMP>#g
+s#/var/folders/[^ ]*/T/*[A-Za-z0-9._-]*#<TMP>#g
