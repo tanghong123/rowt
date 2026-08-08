@@ -24,3 +24,6 @@ dns-elsewhere     ROWT_DNS_DIRECT=198.51.100.53
 ports-shifted     ROWT_PORT=17890 ROWT_CLASH_PORT=19090
 interval-short    ROWT_AUTO_INTERVAL=5m
 geosites-pinned   PARITY_SCENARIO=render-geosites ROWT_PRIVATE_DEFAULT=direct
+local-mode        PARITY_SCENARIO=render-local
+local-precedence  PARITY_SCENARIO=render-local-precedence
+local-dns-override PARITY_SCENARIO=render-local ROWT_DNS_LOCAL=9.9.9.9

@@ -11,21 +11,21 @@ from the source and are not listed.
 | command | in matrix | covered by |
 |---|---|---|
 | `onboard` | yes | onboard |
-| `up` | yes | up |
+| `up` | yes | up up_local |
 | `down` | yes | down |
 | `uninstall` | yes | uninstall |
 | `skill` | yes | skill_status |
 | `restart` | yes | restart |
 | `reload` | yes | reload |
-| `watch` | yes | watch_status watch_tick_clear watch_tick_portal watch_tick_redirect watch_tick_unknown watch_tick_drop watch_tick_restore |
-| `status` | yes | status |
+| `watch` | yes | watch_status watch_tick_clear watch_tick_portal watch_tick_redirect watch_tick_unknown watch_tick_drop watch_tick_restore watch_tick_local |
+| `status` | yes | status status_local |
 | `report` | yes | report |
 | `audit all` | yes | audit_all |
 | `audit clear` | yes | audit_clear |
 | `audit path` | yes | audit_path |
 | `metrics` | yes | metrics |
 | `config` | yes | config_list |
-| `explain` | yes | explain_escape explain_corp explain_block explain_direct explain_cidr explain_private explain_public_ip |
+| `explain` | yes | explain_escape explain_corp explain_block explain_direct explain_cidr explain_private explain_public_ip explain_local |
 | `route` | yes | route_alias |
 | `connections` | yes | connections |
 | `conns` | yes | conns_alias |

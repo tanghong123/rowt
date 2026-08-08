@@ -1,0 +1,3 @@
+# fixture
+foo.com
+ads.example

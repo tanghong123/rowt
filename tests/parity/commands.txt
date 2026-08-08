@@ -119,3 +119,9 @@ server_remove     skip   server remove     # alias of the above
 server_import     skip   server import     # needs an import-source fixture
 sub_rm            skip   sub rm            # needs a subscription fixture
 sub_remove        skip   sub remove        # alias of the above
+
+# Local mode (no tunnel): the escape lane's rules retarget to direct.
+up_local          mut    up local
+status_local      ro     PARITY_SCENARIO=render-local status
+explain_local     ro     PARITY_SCENARIO=render-local explain example.com
+watch_tick_local  mut    PARITY_SCENARIO=render-local ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick

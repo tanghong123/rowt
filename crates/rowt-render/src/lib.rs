@@ -48,6 +48,10 @@ pub struct HostInput {
     pub private_cidrs: Vec<String>,
     pub lists: Lists,
     pub geo: Geo,
+    /// Where the escape lane's rules point. "escape" normally; "direct" in
+    /// local mode, where no tunnel exists. The rules are still emitted either
+    /// way — they carry precedence over broader block entries and the ad set.
+    pub escape_outbound: String,
 }
 
 /// Parse one lane list exactly as `list_json` does.
@@ -162,11 +166,11 @@ pub fn group(servers: &[Value], iface: &str, selected: &str, interval: &str) -> 
 /// WHOLE array. jq's sort is stable, so equal keys keep block/corp/escape order
 /// — and the reverse then flips that to escape/corp/block. Rust's `sort_by` is
 /// stable too, so the same two steps reproduce it exactly, ties included.
-fn suffix_rules(lists: &Lists) -> Vec<Value> {
+fn suffix_rules(lists: &Lists, escape_outbound: &str) -> Vec<Value> {
     let mut pairs: Vec<(&str, &str)> = Vec::new();
     pairs.extend(lists.block_domains.iter().map(|s| (s.as_str(), "block")));
     pairs.extend(lists.corp_domains.iter().map(|s| (s.as_str(), "corp")));
-    pairs.extend(lists.escape_domains.iter().map(|s| (s.as_str(), "escape")));
+    pairs.extend(lists.escape_domains.iter().map(|s| (s.as_str(), escape_outbound)));
 
     // jq's `length` on a string counts codepoints, not bytes.
     pairs.sort_by_key(|(s, _)| (s.split('.').count(), s.chars().count()));
@@ -181,10 +185,10 @@ fn suffix_rules(lists: &Lists) -> Vec<Value> {
 /// The host configuration — what lands in `host.json`.
 pub fn render_host(i: &HostInput) -> Value {
     let mut rules: Vec<Value> = vec![json!({"action": "sniff"})];
-    rules.extend(suffix_rules(&i.lists));
+    rules.extend(suffix_rules(&i.lists, &i.escape_outbound));
     rules.extend(
         i.geo.escape.iter()
-            .map(|n| json!({"rule_set": [format!("geosite-{n}")], "outbound": "escape"})),
+            .map(|n| json!({"rule_set": [format!("geosite-{n}")], "outbound": i.escape_outbound})),
     );
     rules.extend(
         i.geo.block.iter()
@@ -326,7 +330,7 @@ mod tests {
             block_domains: vec!["foo.com".into()],
             ..Default::default()
         };
-        let got: Vec<String> = suffix_rules(&lists)
+        let got: Vec<String> = suffix_rules(&lists, "escape")
             .iter()
             .map(|r| r["domain_suffix"][0].as_str().unwrap().to_string())
             .collect();
@@ -343,11 +347,26 @@ mod tests {
             block_domains: vec!["ccc.com".into()],
             ..Default::default()
         };
-        let got: Vec<String> = suffix_rules(&lists)
+        let got: Vec<String> = suffix_rules(&lists, "escape")
             .iter()
             .map(|r| r["outbound"].as_str().unwrap().to_string())
             .collect();
         assert_eq!(got, vec!["escape", "corp", "block"]);
+    }
+
+    #[test]
+    fn local_mode_retargets_escape_but_keeps_precedence() {
+        // The rule for api.foo.com must still come first — dropping it would let
+        // block's foo.com swallow the domain instead of sending it direct.
+        let lists = Lists {
+            escape_domains: vec!["api.foo.com".into()],
+            block_domains: vec!["foo.com".into()],
+            ..Default::default()
+        };
+        let r = suffix_rules(&lists, "direct");
+        assert_eq!(r[0]["domain_suffix"][0], json!("api.foo.com"));
+        assert_eq!(r[0]["outbound"], json!("direct"));
+        assert_eq!(r[1]["outbound"], json!("block"));
     }
 
     #[test]

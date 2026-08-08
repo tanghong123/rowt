@@ -102,7 +102,13 @@ fn run() -> Result<String, String> {
     };
     // In vm mode the host keeps no members of its own — it hands escape traffic
     // to the guest over SOCKS and the selector lives in the VM.
-    let (escs, clash) = if mode == "vm" {
+    // local mode: no members, no urltest, no selector — and the direct-lane
+    // resolver moves to the public one, since AliDNS is the wrong answer from
+    // outside China.
+    let local_mode = mode == "local";
+    let (escs, clash) = if local_mode {
+        (json!([]), format!("127.0.0.1:{clash_port}"))
+    } else if mode == "vm" {
         let vm_ip = sget(&state, "vm_ip");
         if vm_ip.is_empty() {
             return Err("vm ip unknown (run: rowt vm up)".into());
@@ -160,7 +166,11 @@ fn run() -> Result<String, String> {
         secret,
         log_level,
         final_route: env_or("ROWT_FINAL", "direct"),
-        dns_direct: env_or("ROWT_DNS_DIRECT", "223.5.5.5"),
+        dns_direct: if local_mode {
+            env_or("ROWT_DNS_LOCAL", "1.1.1.1")
+        } else {
+            env_or("ROWT_DNS_DIRECT", "223.5.5.5")
+        },
         private_default: env_or("ROWT_PRIVATE_DEFAULT", "corp"),
         private_cidrs: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16"]
             .iter()
@@ -172,6 +182,7 @@ fn run() -> Result<String, String> {
             corp_cidrs: parse_list(&corp_src, Filter::Cidr),
             block_domains: parse_list(&block_src, Filter::Domain),
         },
+        escape_outbound: if local_mode { "direct".into() } else { "escape".into() },
         geo: Geo {
             escape: lane_geo(&escape_src),
             block: lane_geo(&block_src),

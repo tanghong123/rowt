@@ -30,7 +30,7 @@
 # Servers are VLESS / VMess / AnyTLS / hysteria2, from manual links and/or subscriptions. Commands
 # are grouped by noun (run 'rowt help' for the full list):
 #
-#   lifecycle : up [host|vm] · down · restart · reload · status · route <dest> · report
+#   lifecycle : up [host|vm|local] · down · restart · reload · status · route <dest> · report
 #   servers   : server {list|add|rm|clear|import} · sub {list|add|rm|update|clear|import|dump}
 #               use <tag>|auto · ping [tag] · probe
 #   lanes     : escape / corp  {list|add|rm|import <file>|clear|dump [file]}
@@ -53,7 +53,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.2.2"
+ROWT_VERSION="3.2.3"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -128,6 +128,18 @@ PRIVATE_CIDRS='["10.0.0.0/8","172.16.0.0/12","192.168.0.0/16","100.64.0.0/10","1
 # names are resolved by the VPS, corp names by the system resolver). Default
 # AliDNS. Override with an IP or host that serves DoH on 443 (e.g. 1.1.1.1).
 DNS_DIRECT="${ROWT_DNS_DIRECT:-223.5.5.5}"
+# Resolver for DIRECT-lane names in LOCAL mode (see 'up local'). AliDNS is the
+# right answer from inside China and the wrong one from outside it: a long round
+# trip that returns China-optimised addresses. Cloudflare is the default there —
+# DoH is TCP-based and 1.1.1.1 presents an IP-valid certificate, so no bootstrap
+# lookup is needed, exactly like the AliDNS case.
+DNS_LOCAL="${ROWT_DNS_LOCAL:-1.1.1.1}"
+# Canaries for "is the escape lane even needed here?" (see _direct_reaches_escape).
+# Every entry MUST be a host that is blocked from inside China — a reachable-
+# anywhere host would make the check answer "outside" everywhere. TLS has to
+# complete, so a forged DNS answer or an injected reset fails it.
+GFW_CANARIES="${ROWT_GFW_CANARIES:-https://www.google.com/generate_204 https://www.youtube.com/generate_204}"
+GFW_TIMEOUT="${ROWT_GFW_TIMEOUT:-3}"            # seconds per canary
 # ping liveness check: Google's gstatic generate_204 — the SAME target the
 # monitor's server-health probe and the watchdog use, so `ping`, the TUI, and
 # auto-recovery all agree on what's up. (gstatic is a CDN edge that stays
@@ -1196,6 +1208,10 @@ build_escape_outbounds() {
       local vmip; vmip="$(sget vm_ip)"; [ -n "$vmip" ] || die "vm ip unknown (run: $PROG vm up)"
       jq -n --arg s "$vmip" --argjson p "$VM_PORT" \
         '[{type:"socks",tag:"escape",server:$s,server_port:$p,version:"5"}]' ;;
+    local)
+      # No tunnel: no members, no urltest, no selector. The escape lane's rules
+      # point at the direct outbound instead (see assemble_host).
+      echo '[]' ;;
     *) die "unknown target: $1" ;;
   esac
 }
@@ -1263,10 +1279,37 @@ $(all_geosites)
 EOF
 }
 
+# True when the escape lane's own destinations answer on the physical NIC — i.e.
+# there is no censorship here to tunnel around, so the tunnel is pure overhead.
+# Bound to the interface and with the proxy bypassed, so it measures the DIRECT
+# path and not whatever the router is currently doing. Conservative by
+# construction: any failure (offline, canary down, flaky link) reads as "keep the
+# tunnel", which is the safe direction.
+_direct_reaches_escape() {
+  local ifc u code
+  ifc="$(detect_iface 2>/dev/null || true)"; [ -n "$ifc" ] || return 1
+  for u in $GFW_CANARIES; do
+    code="$(curl --interface "$ifc" --noproxy '*' -sS -o /dev/null -w '%{http_code}' \
+            -m "$GFW_TIMEOUT" "$u" 2>/dev/null || true)"
+    # A 2xx/3xx means TLS completed against the real host: the GFW cannot forge
+    # that. One strict hit is enough — requiring two only makes the common
+    # in-China case (every canary times out) slower for no extra certainty.
+    case "$code" in 2*|3*) return 0 ;; esac
+  done
+  return 1
+}
+
 assemble_host() {
   local escs="$1" listen="$2" clash="$3" ifc secret ads=""
   ifc="$(detect_iface)" || die "no physical interface found"
   secret="$(clash_secret)"
+  # LOCAL mode: no tunnel exists, so the escape lane's rules point at the direct
+  # outbound. The rules themselves are still emitted — they carry precedence.
+  # Dropping them would let a broader block entry (or the ad rule-set) swallow a
+  # domain the escape list was explicitly protecting.
+  local esc_out="escape" dns_srv="$DNS_DIRECT" rmode
+  rmode="$(sget mode)"; rmode="${rmode:-host}"
+  if [ "$rmode" = "local" ]; then esc_out="direct"; dns_srv="$DNS_LOCAL"; fi
   # geosite ad/tracker rule-set: rendered in ONLY when the .srs is cached, so a
   # first render offline still works (the hand list keeps working regardless).
   [ -f "$ADS_SRS" ] && ads="$ADS_SRS"
@@ -1291,7 +1334,8 @@ assemble_host() {
     --arg secret "$secret" \
     --arg lvl "$LOG_LEVEL" \
     --arg ads "$ads" \
-    --arg dns_direct "$DNS_DIRECT" \
+    --arg dns_direct "$dns_srv" \
+    --arg esc_out "$esc_out" \
     --argjson esc_dom "$(domains_json)" \
     --argjson corp_dom "$(corp_domains_json)" \
     --argjson corp_cidr "$(corp_cidrs_json)" \
@@ -1309,13 +1353,13 @@ assemble_host() {
     # order. A suffix lives in at most one lane (rowt enforces that), so no ties.
     (( ($block_dom | map({s:., o:"block"}))
      + ($corp_dom  | map({s:., o:"corp"}))
-     + ($esc_dom   | map({s:., o:"escape"})) )
+     + ($esc_dom   | map({s:., o:$esc_out})) )
      | sort_by([(.s|split(".")|length), (.s|length)]) | reverse
      | map({domain_suffix:[.s], outbound:.o})) as $suffix_rules
     |
     # Per-lane `geosite:<name>` rule-sets (e.g. `geosite:google` in escape) sit after
     # the hand suffixes (an explicit entry still wins) and before the broad ad set.
-    ( ($esc_geo   | map({rule_set:["geosite-"+.], outbound:"escape"}))
+    ( ($esc_geo   | map({rule_set:["geosite-"+.], outbound:$esc_out}))
     + ($block_geo | map({rule_set:["geosite-"+.], outbound:"block"})) ) as $geo_rules
     |
     # The geosite ad set is opaque (thousands of suffixes we cannot interleave), so
@@ -1411,9 +1455,11 @@ _render_shadow() { # $1=mode
 }
 
 cmd_render() {
-  [ -s "$SERVERS" ] || die "no servers — run: $PROG server add '<vless://...>' or $PROG sub add <url>"
-  ensure_singbox_host
   local mode; mode="$(sget mode)"; mode="${mode:-host}"
+  # local mode needs no servers at all — that is the point of it.
+  [ "$mode" = "local" ] || [ -s "$SERVERS" ] \
+    || die "no servers — run: $PROG server add '<vless://...>' or $PROG sub add <url>"
+  ensure_singbox_host
   info "rendering configs (mode=$mode, port=$PORT, servers=$(jq length "$SERVERS"))"
   # Render to temp files, validate, then atomically mv into place. A plain
   # '> host.json' truncates the file to 0 bytes before writing, so a concurrent
@@ -1421,7 +1467,9 @@ cmd_render() {
   # can read an empty file and die with "decode config EOF". mv is atomic on the
   # same filesystem, so readers only ever see a complete old-or-new file.
   local th tv; th="$(mktemp "$HOST_CFG.XXXXXX")"; tv="$(mktemp "$VM_CFG.XXXXXX")"
-  if [ "$mode" = "vm" ]; then
+  if [ "$mode" = "local" ]; then
+    assemble_host "$(build_escape_outbounds local)" "127.0.0.1" "127.0.0.1:$CLASH_PORT" > "$th"
+  elif [ "$mode" = "vm" ]; then
     # host forwards escape traffic to the VM over SOCKS; selector lives in the VM
     assemble_host "$(build_escape_outbounds vm-host)" "127.0.0.1" "" > "$th"
   else
@@ -1732,6 +1780,10 @@ servers_remove() {
 # re-render and restart; a plain tag->tag change in manual mode can switch live.
 cmd_use() {
   local tag="${1:-}"
+  # In local mode there is no escape selector to switch — say so plainly rather
+  # than letting the clash call fail with something cryptic.
+  [ "$(sget mode)" = "local" ] \
+    && die "local mode has no tunnel to select from — '$PROG up host' to bring one back"
   [ -s "$SERVERS" ] || die "no servers imported"
   if [ -z "$tag" ]; then servers_list; return 0; fi
   if [ "$tag" != "auto" ] && ! jq -e --arg t "$tag" 'any(.tag == $t)' "$SERVERS" >/dev/null; then
@@ -2545,19 +2597,26 @@ BASH
 # ---------- orchestration ----------------------------------------------------
 vm_running() { [ "$(limactl list "$VM_NAME" --format '{{.Status}}' 2>/dev/null)" = "Running" ]; }
 
-# cmd_setup [host|vm]   — an explicit mode arg skips probing and forces that mode
+# cmd_setup [host|vm|local] — an explicit mode arg skips probing and forces that mode
 #   ('rowt setup' probes; 'rowt setup-host' / 'rowt setup-vm' force it).
 cmd_setup() {
   local forced="" force=0 a
   for a in "$@"; do
     case "$a" in
       --force|-f) force=1 ;;
-      host|vm)    forced="$a" ;;
+      host|vm|local) forced="$a" ;;
       "")         ;;
-      *)          die "usage: $PROG up [host|vm] [--force]" ;;
+      *)          die "usage: $PROG up [host|vm|local] [--force]" ;;
     esac
   done
-  [ -s "$SERVERS" ] || die "first import servers: $PROG server add '<vless://...>' or $PROG sub add <url>"
+  # No target named: ask the network whether the escape lane is needed at all.
+  # Only here — an explicit 'up host' must never be second-guessed.
+  if [ -z "$forced" ] && _direct_reaches_escape; then
+    forced=local
+    info "escape-lane hosts answer directly on this network — choosing local mode (no tunnel)"
+  fi
+  [ "$forced" = "local" ] || [ -s "$SERVERS" ] \
+    || die "first import servers: $PROG server add '<vless://...>' or $PROG sub add <url>"
   # Record the user's intent to be UP (with the current boot id) so the watchdog
   # can tell a mid-session crash (recover it) from a deliberate 'down' or a fresh
   # boot (leave it). Set before the work so a failed setup still reads as "wanted
@@ -2568,7 +2627,7 @@ cmd_setup() {
   # re-detect it first and re-wire if it moved; only then declare nothing-to-do.
   # '--force' skips the shortcut entirely and does a full rebuild.
   if [ "$force" -eq 0 ] && [ -n "$forced" ] && [ "$(sget mode)" = "$forced" ] && host_running \
-     && { [ "$forced" = "host" ] || vm_running; }; then
+     && { [ "$forced" = "host" ] || [ "$forced" = "local" ] || vm_running; }; then
     if [ "$forced" = "vm" ]; then
       local cur; cur="$(vm_ip_detect)"
       if [ -n "$cur" ] && [ "$cur" != "$(sget vm_ip)" ]; then
@@ -2589,11 +2648,13 @@ cmd_setup() {
   [ -f "$ADS_SRS" ] || fetch_ads_ruleset || true
   fetch_all_geosites || true   # pull any referenced geosite:<name> not yet cached
   case "$forced" in
-    host) sset mode host; info "mode forced to 'host' (skipping probe)" ;;
+    host)  sset mode host; info "mode forced to 'host' (skipping probe)" ;;
+    local) sset mode local
+           info "mode: local — the escape lane routes direct; no tunnel, no server needed" ;;
     vm)   info "mode: vm (skipping probe) — bringing up the VM first"
           cmd_vm up ;;   # sets mode=vm + vm_ip only on success; dies otherwise (mode unchanged)
     "")   cmd_probe || true ;;
-    *)    die "setup mode must be 'host' or 'vm'" ;;
+    *)    die "setup mode must be 'host', 'vm' or 'local'" ;;
   esac
   local mode; mode="$(sget mode)"; mode="${mode:-host}"
   # probe may have chosen vm without starting it yet
@@ -2608,8 +2669,13 @@ cmd_setup() {
     cmd_vm down
   fi
   echo
-  info "done — mode=$mode. Listed domains now route through your escape VPN."
-  echo "  switch anytime: $PROG up host / $PROG up vm"
+  if [ "$mode" = "local" ]; then
+    info "done — mode=local. The escape lane routes direct; block and corp are unchanged."
+    echo "  back to the tunnel: $PROG up host"
+  else
+    info "done — mode=$mode. Listed domains now route through your escape VPN."
+    echo "  switch anytime: $PROG up host / $PROG up vm / $PROG up local"
+  fi
   echo "  edit lanes:     $PROG escape add <domain> / $PROG corp add <domain>"
 }
 
@@ -2829,6 +2895,10 @@ cmd_explain() {
     elif [ -n "$ip" ] && m="$(_private_hit "$ip")"; then lane=corp; why="resolves to $ip — private/overlay range '$m' (unbound, OS routing)"
     else lane="$FINAL_ROUTE"; why="no block/corp/escape rule; final route = $FINAL_ROUTE"; fi
   fi
+  local xmode; xmode="$(sget mode)"; xmode="${xmode:-host}"
+  if [ "$xmode" = "local" ] && [ "$lane" = "escape" ]; then
+    lane=direct; why="$why — local mode: the escape lane routes direct"
+  fi
   local desc
   case "$lane" in
     escape) desc="personal VLESS tunnel — through the proxy" ;;
@@ -2858,7 +2928,11 @@ cmd_explain() {
 # At-a-glance state + config validity (this absorbs the old 'doctor').
 cmd_status() {
   local mode; mode="$(sget mode)"; mode="${mode:-?}"
-  echo "mode:         $mode"
+  if [ "$mode" = "local" ]; then
+    echo "mode:         local  (no tunnel — the escape lane routes direct)"
+  else
+    echo "mode:         $mode"
+  fi
   echo "servers:      $(jq length "$SERVERS" 2>/dev/null || echo 0)  (selected: $(sget selected), subs: $(sub_count))"
   local now; now="$(clash_selected)"; [ -n "$now" ] && echo "active:       $now"
   [ "$mode" = "vm" ] && echo "vm ip:        $(sget vm_ip)"
@@ -2872,7 +2946,11 @@ cmd_status() {
   fi
   if host_running; then
     local vc; vc="$(curl -sS -m 8 -x "http://127.0.0.1:$PORT" -o /dev/null -w '%{http_code}' https://www.google.com/ 2>/dev/null || true)"; vc="${vc:-000}"
-    echo "via proxy:    HTTP $vc (google, escape lane)$([ "$vc" = 000 ] && echo '  — tunnel not reachable')"
+    if [ "$mode" = "local" ]; then
+      echo "via proxy:    HTTP $vc (google, direct)$([ "$vc" = 000 ] && echo '  — no route to it')"
+    else
+      echo "via proxy:    HTTP $vc (google, escape lane)$([ "$vc" = 000 ] && echo '  — tunnel not reachable')"
+    fi
   fi
 }
 
@@ -3292,7 +3370,9 @@ PLIST
         # the self-heal for a wedge that doesn't move the network (server-side
         # connection death, a stuck UDP socket) — the case change-triggered
         # reload can't see.
-        _watch_health "$ifc" || true
+        # local mode has no tunnel to probe; leaving this on would fail every
+        # tick and drive _watch_recover into a permanent reload loop.
+        [ "$(sget mode)" = "local" ] || _watch_health "$ifc" || true
         exit 0
       fi
       _watch_log "network change (iface '$cur' -> '$ifc', [$nid], service '$svc') — reloading"
@@ -3580,7 +3660,7 @@ cmd_diag() {
 _reg() {
 cat <<'REG'
 c@lifecycle@onboard@guided getting-started checklist (what to run next)
-c@lifecycle@up [host|vm] [--force]@set up & start (no arg = auto-detect the mode)
+c@lifecycle@up [host|vm|local] [--force]@set up & start (no arg = auto-detect the mode)
 c@lifecycle@down@tear down: proxy off + stop sing-box + vm down
 o@lifecycle@uninstall [--purge]@reverse setup for a clean re-onboard (--purge wipes config)
 o@lifecycle@skill <install|uninstall|status>@link the rowt agent skill so an agent can drive setup
@@ -3662,13 +3742,24 @@ followed by the full command list.
 EOF
 ;;
     up) cat <<EOF
-$PROG up [host|vm] [--force] — set up and start everything.
+$PROG up [host|vm|local] [--force] — set up and start everything.
 
 Ensures sing-box is installed, renders the configs, starts the router, and
-points the macOS system proxy at 127.0.0.1:$PORT. With no argument it runs
-'probe' first to auto-pick the mode; pass one to skip probing:
+points the macOS system proxy at 127.0.0.1:$PORT. With no argument it first
+checks whether the escape lane is needed here at all (see 'local' below), then
+runs 'probe' to auto-pick between host and vm. Pass a mode to skip both:
   $PROG up host   force host mode (VLESS bound to the physical NIC)
   $PROG up vm     force vm mode (a bridged Lima VM runs the tunnel)
+  $PROG up local  no tunnel at all — for when you are already outside the
+                  censored network (travelling, say) and the escape lane's
+                  destinations are reachable on the physical NIC. The escape
+                  lane's rules are still emitted but point at 'direct', so they
+                  keep beating broader block entries; block and corp are
+                  untouched; no server is needed or contacted; and the direct
+                  lane resolves through $DNS_LOCAL instead of $DNS_DIRECT.
+                  With no argument, rowt picks this itself when the canaries in
+                  ROWT_GFW_CANARIES answer over the physical NIC. Any failure
+                  keeps the tunnel — the safe direction.
 Idempotent — a no-op if already up in the requested mode, EXCEPT in vm mode it
 re-detects the VM's (DHCP) bridged IP and re-wires if it changed.
   --force / -f    skip the no-op shortcut and do a full rebuild (re-detect,

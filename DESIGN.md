@@ -238,7 +238,7 @@ Walkthrough — `gitlab.corp.example` → `100.64.75.10`, corp VPN off, on the c
    table → same wire. ✓ — planes two and three serve even the traffic rowt
    never touches, which is exactly why they don't live inside rowt.
 
-## 7. Two ways the escape uplink bypasses corp (modes)
+## 7. Three modes: how (and whether) the escape uplink runs
 
 Rules #3 (escape) and #4 (direct) both rely on the *bound-socket* trick. That
 works only if the corp client enforces its tunnel with **routes**. Some
@@ -254,8 +254,71 @@ detects this by testing a VPS both via the default route and via `en0`:
   independent of the host, so no corp filter can catch them. The host→VM hop
   rides the home LAN, which corp excludes.
 
-In both modes the app-facing proxy is still `127.0.0.1:7890`; only the `escape`
-outbound's implementation differs.
+- **mode `local`** — there is no uplink at all. For when you are already
+  *outside* the censored network (travelling, say): the escape lane's
+  destinations answer on the physical NIC, so tunnelling them is pure overhead —
+  an extra hop, a worse path, and a needless dependency on a server being alive.
+
+In all three the app-facing proxy is still `127.0.0.1:7890`; only the `escape`
+outbound's implementation differs — and in `local` it simply isn't there.
+
+### 7.1 What `local` mode changes, and what it deliberately doesn't
+
+`rowt up local` sets it; `rowt up host` goes back. With no argument, `rowt up`
+picks it automatically when the canaries in `ROWT_GFW_CANARIES` answer over the
+physical NIC (see below).
+
+| | `host` / `vm` | `local` |
+|---|---|---|
+| escape lane rules | `outbound: escape` | `outbound: direct` |
+| escape outbounds | members + urltest + selector | none — no server needed or contacted |
+| direct-lane DNS | `ROWT_DNS_DIRECT` (AliDNS) | `ROWT_DNS_LOCAL` (Cloudflare) |
+| block / corp / direct | — | unchanged |
+| watchdog tunnel probe | on | off |
+
+**The escape rules are still emitted.** Not dropping them is the whole subtlety:
+those rules carry *precedence*. They are interleaved with block and corp by
+suffix specificity, and they sit above the broad `geosite-ads` set. Remove them
+and two things break — an escape entry like `api.foo.com` starts matching a
+block entry for `foo.com`, and anything the ad/tracker set also covers gets
+sunk. Retargeting the same rules to `direct` changes the destination and
+nothing else.
+
+**DNS moves for a reason.** AliDNS is the right resolver from inside China and
+the wrong one from outside it: a long round trip that answers with
+China-optimised addresses. `local` mode uses a public resolver instead
+(Cloudflare by default — DoH is TCP-based and `1.1.1.1` presents an IP-valid
+certificate, so no bootstrap lookup is needed, exactly like the AliDNS case).
+
+**The watchdog stops probing the tunnel.** `_watch_health` delay-tests the
+escape server every tick and, after `HEALTH_FAILS` consecutive failures, calls
+`_watch_recover … cmd_reload`. With no tunnel that condition is permanent, so
+leaving it on would reload the router forever. This is the part that bites if
+you only retarget the rules.
+
+**A full-tunnel corp VPN does not defeat it.** The `direct` outbound carries
+`bind_interface: en0`, so direct traffic leaves through the physical NIC and
+never rides the corp tunnel back into the censored network — which is exactly
+the case this mode was built for: abroad, on a China corporate VPN.
+
+### 7.2 Detecting "is the escape lane needed here?"
+
+`_direct_reaches_escape` curls each canary with `--interface <en0>` and
+`--noproxy '*'`, so it measures the *direct* path rather than whatever the
+router is currently doing. A 2xx/3xx means TLS completed against the real host,
+which the GFW cannot forge — a poisoned DNS answer or an injected reset fails
+it. One strict hit is enough; requiring two only slows down the common in-China
+case, where every canary times out.
+
+Two properties matter:
+
+- **Every canary must be blocked inside China.** A reachable-anywhere host would
+  make the check answer "outside" everywhere. The defaults are Google and
+  YouTube endpoints.
+- **Failure is the safe direction.** Offline, a canary outage, a flaky link —
+  all read as "keep the tunnel", which is the conservative answer. The check
+  runs only for a bare `rowt up`; an explicit `rowt up host` is never
+  second-guessed.
 
 ## 8. What the proxy catches — and what it doesn't
 
