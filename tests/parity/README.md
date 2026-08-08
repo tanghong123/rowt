@@ -159,6 +159,37 @@ This is what accumulates evidence from networks no fixture can stage: offices,
 hotels, planes, VPN-up states. `selftest` steps 6 and 10 verify both shadows
 actually record a divergence rather than failing quietly.
 
+### Divergence bundles
+
+A verdict alone tells you *that* two implementations disagreed, which is the
+least useful half. So the watch shadow also captures, on divergence only, the
+raw output of every command the observation was built from — `scutil --dns`,
+the `networksetup` readers, `route`, `ipconfig`, `ifconfig`, `netstat`,
+`sysctl` — keyed exactly the way the recorder shim expects.
+
+    ~/.config/rowt/log/parity/<timestamp>/
+      obs.json   what the Rust tick was given
+      plan       what it decided
+      actual     what the shell decided
+      state      the state keys that fed it — the PRE-tick captive flag, since
+                 the tick may have just changed it
+      env/       the machine, as raw command output
+
+    tests/parity/bin/parity replay-bundle <dir>
+
+Because env/ is shim-shaped, replaying drops it straight into a sandbox and
+both implementations see exactly the machine that disagreed — offline, and as
+often as you like. That matters most for the failure this cannot otherwise
+catch: the two sides *parsing the same machine differently*. A decision log can
+never show that.
+
+The replay pins the captive verdict to what the bundle recorded rather than
+probing again, or it would classify the portal afresh and answer a question you
+did not ask.
+
+Bundles are mode 700 and **local only** — they contain your DNS configuration,
+network names and internal addresses.
+
 ## Characterized behavior worth knowing
 
 Facts the golden pins down, none of which are bugs introduced here. Under

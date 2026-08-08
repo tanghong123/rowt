@@ -27,6 +27,8 @@
 #   parity watch-diff        watchdog tick: bash's effects vs the FSM's plan
 #   parity platform-diff     the platform layer, compared by the argv it produces
 #   parity cli-diff          whole commands through rowt-rs vs the shell
+#   parity replay-bundle     re-run a captured divergence against the machine
+#                            state that produced it
 #   parity ledger            regenerate LEDGER.md from bin/rowt
 #
 # `mask` compares bash against itself — it characterizes, it does not compare
@@ -598,6 +600,56 @@ cmd_cli_diff() {
   [ "$fails" -eq 0 ]
 }
 
+# Replay a divergence bundle the shadow captured on a real machine.
+#
+# The bundle's env/ holds the RAW command output the observation was built from,
+# keyed the way the recorder shim expects — so dropping it into a sandbox makes
+# both implementations see exactly the machine that disagreed, offline and as
+# many times as you like. A divergence stops being a report and becomes a case.
+cmd_replay_bundle() {
+  local b="${1:?usage: parity replay-bundle <log/parity/DIR>}"
+  [ -d "$b/env" ] || die "no env/ in $b — not a divergence bundle"
+  local rust="${PARITY_RUST_WATCH:-$ROOT/target/release/rowt-watch-tick}"
+  local out; out="$(mktemp -d "${TMPDIR:-/tmp}/parity-replay.XXXXXX")"
+  make_sandbox "$out"
+  cp -R "$b/env/." "$out/env/" 2>/dev/null || true
+  [ -f "$b/state" ] && cat "$b/state" >> "$out/home/rowt/state"
+
+  echo "=== the machine as it was (captured outputs) ==="
+  local f
+  for f in "$b"/env/*; do
+    printf '  %s\n' "$(basename "$f")"
+  done
+
+  # Pin the captive verdict to what the bundle recorded. The shell re-probes on
+  # every tick, so without this the replay would classify the portal afresh and
+  # take a different branch than the one being debugged — a replay that answers
+  # a question you did not ask.
+  local cap url
+  cap="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["obs"].get("captive",""))' "$b/obs.json" 2>/dev/null || true)"
+  case "$cap" in
+    captive) url=http://127.0.0.1:8099/portal ;;
+    clear)   url=http://127.0.0.1:8099/success ;;
+    unknown) url=http://127.0.0.1:9/x ;;
+    *)       url="" ;;
+  esac
+  echo "=== shell, replayed against it (captive pinned to '${cap:-unrecorded}') ==="
+  run_in "$out" ${url:+ROWT_CAPTIVE_URL=$url} watch tick >/dev/null 2>&1 || true
+  sed -e 's/^[0-9-]* [0-9:]*  //' "$out/home/rowt/log/watch.log" 2>/dev/null | sed 's/^/  /' || echo "  (no decisions)"
+
+  echo "=== what the shell decided when it diverged ==="
+  sed 's/^/  /' "$b/actual" 2>/dev/null || echo "  (none)"
+
+  echo "=== rust plan, from the recorded observation ==="
+  if [ -x "$rust" ] && [ -f "$b/obs.json" ]; then
+    "$rust" --obs "$b/obs.json" 2>&1 | sed 's/^/  /'
+  else
+    echo "  (no planner built, or no obs.json)"
+  fi
+  echo
+  echo "sandbox kept for poking at: $out"
+}
+
 # The committed classifier baseline. `parity golden` fails if today's verdicts
 # drift from it; `parity golden --update` re-records them (review the diff — a
 # changed verdict is a routing change).
@@ -690,6 +742,7 @@ case "${1:-}" in
   watch-diff)      shift; cmd_watch_diff "$@" ;;
   platform-diff)   shift; cmd_platform_diff "$@" ;;
   cli-diff)        shift; cmd_cli_diff "$@" ;;
+  replay-bundle)   shift; cmd_replay_bundle "$@" ;;
   render-matrix)   shift; cmd_render_matrix "$@" ;;
   run)    shift; cmd_run "$@" ;;
   mask)   shift; cmd_mask "$@" ;;

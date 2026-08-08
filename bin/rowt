@@ -53,7 +53,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.2.6"
+ROWT_VERSION="3.2.7"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -3074,6 +3074,47 @@ _watch_probe() {
 # genuinely dead server (nothing local can fix) can't cause a restart storm.
 # Crucially it re-probes AFTER acting: a sing-box that starts then crashes would
 # otherwise log a false 'ok'. Resets the failure streak.
+# Same keying the parity harness's recorder shim uses, so a captured output can
+# be replayed by simply dropping it into that harness's env directory.
+_shadow_slug() { printf '%s' "$*" | tr -c 'A-Za-z0-9' '_' | sed -e 's/__*/_/g' -e 's/^_//' -e 's/_$//'; }
+
+# Snapshot the RAW command output an observation was built from.
+#
+# Without this a divergence says only that the two implementations disagreed —
+# not why. The interesting case is when they disagree because they PARSED the
+# same machine differently, and no amount of decision-level logging can show
+# that. Captured only when something actually diverged, so the cost is paid on
+# the rare path; the outputs are read a moment after the tick, not during it.
+#
+# LOCAL ONLY: this is your DNS configuration, network names and internal
+# addresses. Bundles live under log/parity/ and must never be committed or
+# pasted anywhere.
+_capture_env() { # $1 = bundle dir
+  local d="$1/env" svc ifc g
+  mkdir -p "$d" 2>/dev/null || return 0
+  svc="$(active_service 2>/dev/null || true)"
+  ifc="$(detect_iface 2>/dev/null || true)"
+  _cap() { "$@" >"$d/$(_shadow_slug "$@")" 2>/dev/null || true; }
+  _cap route -n get default
+  if [ -n "$ifc" ]; then
+    _cap ipconfig getifaddr "$ifc"
+    _cap ipconfig getoption "$ifc" router
+    _cap networksetup -getairportnetwork "$ifc"
+  fi
+  _cap networksetup -listnetworkserviceorder
+  _cap networksetup -listallhardwareports
+  if [ -n "$svc" ]; then
+    for g in -getsocksfirewallproxy -getwebproxy -getsecurewebproxy -getproxybypassdomains; do
+      _cap networksetup "$g" "$svc"
+    done
+  fi
+  _cap scutil --dns
+  _cap ifconfig -l
+  _cap netstat -rn -f inet
+  _cap sysctl -n kern.boottime
+  unset -f _cap
+}
+
 _watch_bin() { # the Rust tick planner, located like the other companions
   local b
   for b in "$HERE/bin/rowt-watch-tick" \
@@ -3122,7 +3163,38 @@ _watch_shadow() {
   sig="$(printf '%s %s' "$_SH_CAP" "$verdict" | cksum | awk '{print $1}')"
   if [ "$(sget watch_shadow_sig)" != "$sig" ]; then
     sset watch_shadow_sig "$sig"
-    { printf '%s  tick captive=%s verdict=%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$_SH_CAP" "$verdict"
+    local bundle=""
+    if [ "$verdict" = DIVERGED ]; then
+      bundle="$LOGDIR/parity/$(date '+%Y%m%d-%H%M%S')"
+      mkdir -p "$bundle" 2>/dev/null && chmod 700 "$bundle" 2>/dev/null || true
+      cp "$obs" "$bundle/obs.json" 2>/dev/null || true
+      cp "$plan" "$bundle/plan" 2>/dev/null || true
+      cp "$actual" "$bundle/actual" 2>/dev/null || true
+      # The captive flag as it was BEFORE this tick — the tick may have just set
+      # it, and replaying with the post-tick value would start the replay
+      # mid-episode and reach a different branch than the one being debugged.
+      { grep -E '^(mode|proxy_intent|intent|boot|selected)=' "$STATE" 2>/dev/null || true
+        printf 'captive=%s\n' "$_SH_CAPTIVE0"
+      } > "$bundle/state" 2>/dev/null || true
+      _capture_env "$bundle"
+      cat > "$bundle/README" <<RDM 2>/dev/null || true
+Watchdog shadow divergence, rowt $ROWT_VERSION.
+
+  obs.json   what the Rust tick was given
+  plan       what it decided
+  actual     what the shell decided (watch.log lines from this tick)
+  state      the state keys that fed the decision
+  env/       RAW command output the observation was built from
+
+Replay both sides against exactly this machine state:
+
+  tests/parity/bin/parity replay-bundle $bundle
+
+LOCAL ONLY — env/ holds your DNS configuration, network names and internal
+addresses. Do not commit or paste it.
+RDM
+    fi
+    { printf '%s  tick captive=%s verdict=%s%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$_SH_CAP" "$verdict" "${bundle:+  bundle=$bundle}"
       [ "$verdict" = DIVERGED ] && { echo "  shell:"; sed 's/^/    /' "$actual"; echo "  plan:"; sed 's/^/    /' "$plan"; }
     } >> "$LOGDIR/parity.log" 2>/dev/null || true
   fi
