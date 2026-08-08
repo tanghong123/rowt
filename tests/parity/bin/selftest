@@ -120,6 +120,31 @@ else
   fi
 fi
 
+echo "6. the render shadow must notice the same mutation"
+# Reuses step 5's already-mutated copy. _render_bin looks in \$HERE/bin first,
+# so the binary is linked there — otherwise the shadow finds nothing and returns
+# quietly, which would read as a pass.
+if [ ! -x "$rust" ]; then
+  echo "  skip — no release build"
+else
+  ln -sf "$rust" "$tmp/bin/rowt-render"
+  if ! grep -q 'tag:"corp", domain_resolver' "$tmp/bin/rowt"; then
+    # Captured whole, then trimmed to the first line: piping into `head` inside
+    # a command substitution SIGPIPEs the producer, and pipefail turns that into
+    # a failure that `set -e` acts on. Third time this trap has appeared here.
+    out="$("$P" run -- ROWT_RENDER_SHADOW=1 render 2>/dev/null || true)"
+    out="${out%%$'\n'*}"
+    log="$out/home/rowt/log/parity.log"
+    if [ -s "$log" ] && grep -q DIVERGED "$log"; then
+      ok "the shadow recorded a divergence"
+    else
+      bad "the shadow stayed silent on a diverging render ($(cat "$log" 2>/dev/null || echo 'no log'))"
+    fi
+  else
+    bad "step 5's mutation is not in place — cannot test the shadow"
+  fi
+fi
+
 echo
 echo "selftest: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

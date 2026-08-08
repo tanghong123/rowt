@@ -267,6 +267,10 @@ for the bug class Phase 1 introduces. So:
   investigation) and dial the destination corpus through both, comparing the
   outbound actually selected via the Clash API / lane logs. This is derived
   from the artifact rather than from a second model of it.
+  **Not needed while the configs are canonically identical** — identical JSON
+  produces identical routing by definition, so running it would be theater. It
+  becomes required the moment an intentional structural difference is
+  allow-listed, because from then on equality no longer implies equivalence.
 - **`explain` parity moves to Phase 2**, where classify/explain *is* the code
   under test and it is exactly the right oracle.
 
