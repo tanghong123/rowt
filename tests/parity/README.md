@@ -22,7 +22,11 @@ tests/parity/bin/parity render-matrix    # the rendered config, canonically
 tests/parity/bin/parity classify-matrix  # lane AND matched reason
 tests/parity/bin/parity lanes-diff       # lane-list edits: files + messages
 tests/parity/bin/parity reconcile-diff   # corp reconcile, over generated cases
+tests/parity/bin/parity netdetect-diff   # scutil --dns parser, over generated cases
+tests/parity/bin/parity vless-diff       # share-link parser: stdout + stderr + status
 tests/parity/bin/parity watch-diff       # watchdog decisions
+tests/parity/bin/parity platform-diff    # the argv the platform layer produces
+tests/parity/bin/parity cli-diff         # whole commands, rowt-rs vs the shell
 
 tests/parity/bin/selftest                # break each gate; every one must fire
 ```
@@ -118,7 +122,19 @@ reconcile and the watchdog's decision table. Each has a gate:
 | `classify-matrix` | `(lane, reason)` per destination | 9 shapes × 92 destinations |
 | `lanes-diff` | all three lane files + messages | 12 edits |
 | `reconcile-diff` | stdout contract vs the Python | 210 cases, 200 randomized |
+| `netdetect-diff` | stdout BYTES vs the Python (key order is contract) | 800 generated cases |
+| `vless-diff` | stdout + stderr + exit status vs the Python | 2,000 generated cases |
 | `watch-diff` | decisions, read back from watch.log + trace | 5 cases |
+| `platform-diff` | the argv the platform layer produces | 8 cases |
+| `cli-diff` | stdout, status, lane files, argv trace, audit log | 136 cases |
+
+`vless-diff` is the only one that compares stderr, because it is the only one
+where stderr is a result: `server add` and the subscription rebuild run the
+parser with stderr on the user's terminal, so "skipping a link (…)" and "not
+importing 'X' — same server as 'Y'" are what the user learns about their own
+servers. It is also the only gate that normalizes anything — the parenthetical
+of a `JSONDecodeError`, whose wording is interpreter-version-specific — and it
+prints how many cases that touched, so a growing number is visible.
 
 ### The render gate
 

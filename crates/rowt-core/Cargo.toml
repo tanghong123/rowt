@@ -31,3 +31,7 @@ path = "src/bin/rowt-reconcile.rs"
 [[bin]]
 name = "rowt-watch-tick"
 path = "src/bin/rowt-watch-tick.rs"
+
+[[bin]]
+name = "rowt-vless"
+path = "src/bin/rowt-vless.rs"

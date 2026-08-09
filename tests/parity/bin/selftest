@@ -17,8 +17,9 @@
 #   10.  …and the watchdog shadow must record it too
 #   11.  drop a proxy protocol           -> platform-diff must fire
 #   12.  reword an explain description  -> cli-diff must fire
-#   13.  widen an internal-NS range   -> netdetect-diff must fire
-#   14.  (structural) native() must not claim an arm run() cannot answer
+#   13.  shift the share-link tag index -> vless-diff must fire
+#   14.  widen an internal-NS range     -> netdetect-diff must fire
+#   15.  (structural) native() must not claim an arm run() cannot answer
 #
 # Everything happens in a throwaway copy of the repo; the real tree is never
 # touched. Run it after changing the harness itself.
@@ -324,6 +325,27 @@ else
     else
       ok "cli-diff caught the reworded lane description"
     fi
+  fi
+fi
+
+echo "13. shift the tag index in the share-link parser"
+if [ ! -x "$ROOT/target/release/rowt-vless" ]; then
+  echo "  skip — no release build"
+else
+  # `enumerate(links, 1)` is what makes a skipped line still consume an index,
+  # so an unnamed link on line 3 is `server-3` and not `server-2`. A port that
+  # numbers the SURVIVORS instead looks right on every corpus without blank
+  # lines — which is to say, on every hand-written test. Shifting the start is
+  # the smallest expression of that mistake.
+  perl -0pi -e 's/for i, raw in enumerate\(links, 1\):/for i, raw in enumerate(links, 2):/' \
+    "$tmp/config/vless-parse.py"
+  if ! grep -q 'enumerate(links, 2)' "$tmp/config/vless-parse.py"; then
+    bad "could not shift the tag index (parse_many moved?)"
+  elif PARITY_RUST_VLESS="$ROOT/target/release/rowt-vless" \
+       "$tmp/tests/parity/bin/parity" vless-diff 200 >/dev/null 2>&1; then
+    bad "vless-diff passed with the tag index shifted"
+  else
+    ok "vless-diff caught the shifted tag index"
   fi
 fi
 

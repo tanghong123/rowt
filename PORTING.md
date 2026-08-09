@@ -196,35 +196,40 @@ revertible and gated.
 | **1** ◑ | `rowt-core::render` — replace the giant jq program. bash calls `rowt-rs render` internally. | **render done** — `crates/rowt-render`, 18/18 cases canonically identical on host + vm (`parity render-matrix`), and identical against the real 22-server config. Remaining: throwaway-port outbound oracle, bash cutover, shadow window |
 | **2** ✅ | classify/explain, lane set logic, absorb `corp-sync-reconcile.py` | **done** — classify: 9/9 cases × 92 destinations identical on `(lane, reason)`; lane edits: 12/12 cases identical across all three files + messages; reconcile: 210 generated cases identical to the Python. `selftest` 9/9 |
 | **3** ◑ | watchdog: FSM into core, effects via `PlatformMac`; `cmd_watch` execs the Rust tick | **FSM + shadow done** — `rowt-core::watch`, 17 unit tests replaying §11's decision table; `parity watch-diff` 5/5; `ROWT_WATCH_SHADOW=1` compares the shell's decisions against the FSM's plan on every real tick, feeding it the tick's own captive verdict rather than re-probing. Remaining: `PlatformMac` effects, the `cmd_watch` cutover, and **time** — the shadow window itself |
-| **4** ◑ | CLI. Built as `rowt-rs` alongside the shell first, so each command lands with evidence; only then does bash reduce to a wrapper and get deleted. Formula ships the prebuilt binary (monitor-asset pattern). | **front door complete** — every command RUNS through rowt-rs: 29 of 37 arms answered natively, the other 8 handed to bin/rowt via the §6.6 fallthrough, so functional completeness does not wait on the last arm. `parity cli-diff` compares stdout, exit status, lane files, the **argv trace** and the **audit log** over 107 cases; `selftest` 13/13. Remaining: the 8 delegating arms (below), then the `ROWT_IMPL` cutover |
+| **4** ◑ | CLI. Built as `rowt-rs` alongside the shell first, so each command lands with evidence; only then does bash reduce to a wrapper and get deleted. Formula ships the prebuilt binary (monitor-asset pattern). | **all 37 arms native** — `parity cli-diff` compares stdout, exit status, lane files, the **argv trace** and the **audit log** over 136 cases. Remaining: the sub-arms wrapping the Python importers (below), 5 computed help pages, then the `ROWT_IMPL` cutover |
 | **5** | `PlatformLinux` + tun mode + systemd units; CI matrix (macOS + ubuntu — core tests run on both, platform tests feature-gated); linux tar assets | fresh-VM install → onboard → probe → captive drill; VPN-coexistence drill with Tailscale up |
-| 6 (opt) | port the import pipeline (1,484 lines of parsing Python). Already portable and tested — lowest ROI, may stay Python indefinitely. | existing py test suite as fixtures |
+| 6 ◑ | port the import pipeline (1,302 lines of parsing Python). No longer optional — the 2026-08-09 decision is one language in the repo, and this is what retires `depends_on "python@3.12"`. | **`vless-parse.py` done** — `rowt-core::sharelink`, `parity vless-diff` 2,000 generated cases identical on stdout, stderr AND exit status. Remaining: `foreign-import`, `sr-import`, `import-merge` |
 
-#### The last two arms, and the order they have to land in
+#### What still reaches for bash, and the order it comes back in
 
-`onboard` and `watch` are all that still delegate. `watch` is not simply
-"unported" — it is blocked, and on something worth naming:
+Every one of the 37 command arms answers natively. What remains are SUB-arms of
+arms that are otherwise ported, and they are all downstream of the same thing —
+the Python import pipeline:
 
-    watch tick  --(Action::CorpSync)-->  corp_sync
-    corp_sync   --> _dhcp_search_domains --> net-detect.py
+    server add|rm|clear|import      cmd_import, rebuild_servers, after_import,
+    sub add|rm|update|clear|import  servers_remove, subs_remove
+    config import                   prompts on /dev/tty
 
-So the tick cannot be native until `corp_sync` is, and `corp_sync` reaches
-into the Python. That makes the order fixed rather than a preference:
+`native()` deliberately does not claim them: `server`, `sub` and `config`
+answer `list`/`dump`/`export` and hand the rest through the §6.6 fallthrough. A
+listed-but-unimplemented arm is worse than an unlisted one, and `selftest` 15
+asserts the two agree.
 
-1. **`net-detect.py` -> Rust** (147 lines, already `--input FILE` testable —
-   §1 calls it the target shape). Gate it the way `reconcile` was gated.
-2. **`corp_sync` + `corp_suggest` -> Rust** (~140 lines with helpers; the hard
-   half, the CIDR superset reconcile, is ALREADY `rowt-core::reconcile`). This
-   also lands the `corp sync` / `corp suggest` sub-arms.
-3. **`watch` -> Rust.** The decisions are already ported —
-   `rowt-core::watch::{guard, netcheck}` with 17 tests replaying DESIGN.md §11.
-   What remains is the effects layer: the LaunchAgent plist, the scoped
-   sudoers, and carrying out the `Action`s. A draft of it sits in
-   `docs/wip/watch-effects.rs.draft`, deliberately NOT wired into the build —
-   an unwired module in `src/` rots, and a half-wired one fails the honest way
-   only by accident.
-4. **`onboard`** — independent of the above except that its checklist calls
-   `detect_import_sources` (the Python importers) and `_dhcp_search_domains`.
+So the order is fixed rather than a preference:
+
+1. **the import pipeline -> Rust.** `vless-parse.py` is done
+   (`rowt-core::sharelink`); `foreign-import`, `sr-import` and `import-merge`
+   follow, gated the same way.
+2. **the shell around it -> Rust** — `cmd_import`, `rebuild_servers`,
+   `after_import`, `servers_remove`, `subs_remove`. Little logic, but it is
+   what writes `servers.json`, so it lands only once the parser it wraps is
+   trusted by a gate rather than by reading.
+3. **`config import`** — the odd one out, because it prompts on `/dev/tty`;
+   the gate has no terminal, so this needs a scripted-input case first.
+
+Separately, 5 of the 32 help pages still render in the shell: their heredocs
+contain `$(… && echo … || echo …)`, so the text is computed, not interpolated.
+`help.rs` marks those `Detail::Shell` and delegates rather than pretending.
 
 The fallthrough is guarded against recursion (`ROWT_DELEGATED`), because
 bin/rowt already reaches for Rust binaries and §6.6 has it becoming a wrapper.
@@ -236,11 +241,31 @@ harness; `net-detect.py` + `geosite-lookup.py` (~330 lines) are pure parsers on
 hot paths and go next; the import pipeline (`vless-parse`, `foreign-import`,
 `sr-import`, `import-merge` — 1,302 lines, 73% of the total) is last, because
 it parses CREDENTIALS, where a subtle mis-parse yields a silently wrong
-outbound rather than an error, and because its 734 lines of existing tests
-become the differential corpus that makes the port safe. Porting it retires
-`depends_on "python@3.12"` from the Formula, which is the concrete prize.
-Sequenced AFTER the bash port finishes: two rewrites converging on the same
-files is how a differential harness stops telling you which side broke.
+outbound rather than an error. Porting it retires `depends_on "python@3.12"`
+from the Formula, which is the concrete prize. Sequenced AFTER the bash port
+finishes: two rewrites converging on the same files is how a differential
+harness stops telling you which side broke.
+
+`vless-parse.py` (421 lines) landed first of that group, as
+`rowt-core::sharelink` behind `parity vless-diff`. Two notes for the three that
+follow it.
+
+The existing tests are a **checklist, not a corpus**: `config/test_parse.py`
+calls the parser functions in-process, so nothing in it can be replayed through
+two binaries, and it never touches `parse_vless` or `parse_anytls` at all — the
+whole Reality path, every transport branch, and the `sni`→`peer`→host fallback
+had no coverage on either side. Its assertions were carried over as Rust unit
+tests; the gate's evidence comes from a generated corpus instead.
+
+Most of the work is not the protocol logic but **Python's semantics underneath
+it**, which is why `rowt-core` now carries `pyurl` and `pyjson`. `urlsplit`
+splits userinfo at the LAST `@` and the FIRST `:`; `parse_qs` drops a blank
+value so `sni=` reads as absent; `_first` unquotes what `parse_qs` already
+unquoted, so `%2520` arrives as a space; `u.port or 443` turns port 0 into 443;
+`base64.b64decode` discards stray characters but REFUSES a non-ASCII one
+outright; `json.dump` defaults to `ensure_ascii=True` while `net-detect.py`
+passes `ensure_ascii=False`, so the two need different writers. None of that is
+visible in the protocol code, and all of it changes what an outbound points at.
 
 Rough effort at this repo's session cadence: P0 ≈ a day, P1 2–3 d, P2 2 d,
 P3 3–4 d, P4 2–3 d, P5 4–5 d — order of three focused weeks total, spreadable.

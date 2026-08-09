@@ -12,8 +12,11 @@ pub mod geosite;
 pub mod laneerr;
 pub mod lanes;
 pub mod netdetect;
+pub mod pyjson;
+pub mod pyurl;
 pub mod reconcile;
 pub mod render;
+pub mod sharelink;
 pub mod watch;
 
 pub use classify::{classify, Classification, ClassifyInput, Lane};

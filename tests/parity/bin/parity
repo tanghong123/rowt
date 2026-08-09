@@ -25,6 +25,7 @@
 #   parity lanes-diff        lane-list edits, bash vs Rust: files + messages
 #   parity reconcile-diff    corp reconcile, Python vs Rust, over generated cases
 #   parity netdetect-diff    scutil --dns parser, Python vs Rust, over generated cases
+#   parity vless-diff        share-link parser, Python vs Rust: stdout+stderr+status
 #   parity watch-diff        watchdog tick: bash's effects vs the FSM's plan
 #   parity platform-diff     the platform layer, compared by the argv it produces
 #   parity cli-diff          whole commands through rowt-rs vs the shell
@@ -462,6 +463,73 @@ cmd_netdetect_diff() { # [count]
   done
   if [ "$fails" -eq 0 ]; then
     echo "  $n net-detect cases: identical"
+    rm -rf "$work"; return 0
+  fi
+  echo "  $fails/$n cases differ — artifacts: $work"; return 1
+}
+
+# Share links -> sing-box outbounds, Python vs Rust: stdout, stderr AND status.
+#
+# stderr is not decoration for this one. `server add` and the subscription
+# rebuild run the parser with stderr on the user's terminal, so "warning:
+# skipping a link (…)" and "note: not importing 'X' — same server as 'Y'" are
+# output, and a divergence there is a divergence in what the user is told about
+# their own servers. --sub IS exercised, against file:// URLs — urlopen and curl
+# both speak it, so the base64-or-plaintext decision that runs for every
+# subscription on every reload is covered without touching the network.
+#
+# One thing is normalized rather than compared: the parenthetical of "vmess link
+# is not base64-JSON (…)", which is Python's own JSONDecodeError text. Its
+# wording is interpreter-specific (3.13 reworded the trailing-comma case), so
+# pinning it would pin the wrong Python — the Formula asks for 3.12. It is safe
+# to normalize because it cannot hide a functional difference: a link one
+# implementation accepts and the other rejects changes the outbound array on
+# stdout, which is compared byte for byte. The count is reported so that a
+# growing number of them is visible rather than silent.
+cmd_vless_diff() { # [count]
+  local rust="${PARITY_RUST_VLESS:-$ROOT/target/release/rowt-vless}"
+  local py="$ROOT/config/vless-parse.py"
+  [ -x "$rust" ] || die "no rust parser at $rust — cargo build --release -p rowt-core"
+  local work n fails=0 squashed=0 d
+  local squash='s/is not base64-JSON (.*)$/is not base64-JSON (<json-error>)/'
+  work="$(mktemp -d "${TMPDIR:-/tmp}/parity-vless.XXXXXX")"
+  n="$(python3 "$SELF/gen-link-cases.py" "$work" "${1:-400}")"
+  for d in "$work"/case*; do
+    local args=() line rc
+    while IFS= read -r line; do args+=("$line"); done < "$d/argv"
+    # COLUMNS is pinned because argparse wraps its usage to the terminal width,
+    # so the same error would render differently on a wide screen.
+    rc=0
+    COLUMNS=80 python3 "$py" ${args[@]+"${args[@]}"} < "$d/stdin" \
+      > "$d/py.out" 2> "$d/py.err" || rc=$?
+    echo "$rc" > "$d/py.rc"
+    rc=0
+    COLUMNS=80 "$rust" ${args[@]+"${args[@]}"} < "$d/stdin" \
+      > "$d/rs.out" 2> "$d/rs.err" || rc=$?
+    echo "$rc" > "$d/rs.rc"
+    sed "$squash" "$d/py.err" > "$d/py.errn"
+    sed "$squash" "$d/rs.err" > "$d/rs.errn"
+    cmp -s "$d/py.err" "$d/py.errn" || squashed=$((squashed + 1))
+    local bad="" f
+    for f in out errn rc; do
+      diff -q "$d/py.$f" "$d/rs.$f" >/dev/null 2>&1 || bad="$bad $f"
+    done
+    if [ -n "$bad" ]; then
+      fails=$((fails + 1))
+      if [ "$fails" -le 3 ]; then
+        echo "  DIFFERS ($bad): $d"
+        sed 's/^/    argv: /' "$d/argv"
+        # `|| true`: head closing the pipe early is a SIGPIPE that pipefail
+        # would otherwise turn into an abort halfway through the corpus.
+        for f in $bad; do
+          diff "$d/py.$f" "$d/rs.$f" | sed 's/^/      /' | head -10 || true
+        done
+      fi
+    fi
+  done
+  if [ "$fails" -eq 0 ]; then
+    echo "  $n share-link cases: identical (stdout, stderr, status)"
+    echo "  ($squashed of them had a JSONDecodeError parenthetical normalized)"
     rm -rf "$work"; return 0
   fi
   echo "  $fails/$n cases differ — artifacts: $work"; return 1
@@ -938,6 +1006,7 @@ case "${1:-}" in
   classify-matrix) shift; cmd_classify_matrix "$@" ;;
   reconcile-diff)  shift; cmd_reconcile_diff "$@" ;;
   netdetect-diff)  shift; cmd_netdetect_diff "$@" ;;
+  vless-diff)      shift; cmd_vless_diff "$@" ;;
   lanes-diff)      shift; cmd_lanes_diff "$@" ;;
   watch-diff)      shift; cmd_watch_diff "$@" ;;
   platform-diff)   shift; cmd_platform_diff "$@" ;;
@@ -948,5 +1017,7 @@ case "${1:-}" in
   run)    shift; cmd_run "$@" ;;
   mask)   shift; cmd_mask "$@" ;;
   ledger) shift; cmd_ledger "$@" ;;
-  *) sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  # Ends on the last entry of the list rather than a fixed line number, which
+  # had silently stopped printing the last four gates as the list grew.
+  *) sed -n '2,/^#   parity ledger/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac
