@@ -78,6 +78,46 @@ fn registry() -> String {
     out
 }
 
+/// One registry row: `level@group@syntax@description`.
+pub fn reg_rows() -> impl Iterator<Item = (&'static str, &'static str, &'static str, &'static str)> {
+    REGISTRY.lines().filter_map(|l| {
+        let f: Vec<&str> = l.split('@').collect();
+        (f.len() >= 4).then(|| (f[0], f[1], f[2], f[3]))
+    })
+}
+
+/// The literal choice-sets inside a syntax field: `<a|b|c>` and `[a|b]`, but not
+/// `<tag>` or `[--force]` — a group without a pipe is a placeholder, not a menu.
+///
+/// `grep -oE '[<[][^]>]*\|[^]>]*[]>]'`: because the body may contain neither `]`
+/// nor `>`, a match always ends at the first closer after the opener. So the
+/// scan is "opener, next closer, keep it if there is a pipe between" — and on a
+/// miss the shell resumes one character along, not past the group.
+pub fn choice_tokens(syntax: &str) -> Vec<String> {
+    let b: Vec<char> = syntax.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == '<' || b[i] == '[' {
+            if let Some(end) = (i + 1..b.len()).find(|&j| b[j] == ']' || b[j] == '>') {
+                let body: String = b[i + 1..end].iter().collect();
+                if body.contains('|') {
+                    for tok in body.split('|') {
+                        let t: String = tok.chars().filter(|c| !c.is_whitespace()).collect();
+                        if !t.is_empty() && !t.starts_with("--") {
+                            out.push(t);
+                        }
+                    }
+                    i = end + 1;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
 pub fn usage(cfg: &Path) -> String {
     format!("{}{}{}", expand(USAGE_HEAD, cfg), registry(), expand(USAGE_TAIL, cfg))
         .trim_end()

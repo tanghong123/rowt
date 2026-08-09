@@ -70,7 +70,7 @@ fn native(cmd: &str, sub: &str) -> bool {
             "" | "list" | "dump" | "add" | "rm" | "remove" | "clear" | "import"
                 | "errors" | "stats" | "log"
         ),
-        "direct" | "connections" | "conns" => true,
+        "direct" | "connections" | "conns" | "_complete" => true,
         "proxy" => matches!(sub, "" | "status" | "check" | "env"),
         "router" => matches!(sub, "" | "up" | "down" | "restart" | "status"),
         _ => false,
@@ -583,6 +583,46 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                 _ => cmd_lane(&cfg, lane, &action, args),
             }
         }
+        // The hidden helper the completion functions call at tab-time. Driven by
+        // the same registry that renders `usage`, so the command set can never
+        // drift from what completes.
+        "_complete" => {
+            let first = |syntax: &str| syntax.split_whitespace().next().unwrap_or("").to_string();
+            if rest.is_empty() {
+                return Ok(help::reg_rows()
+                    .map(|(_, _, syn, desc)| format!("{}\t{desc}", first(syn)))
+                    .collect::<Vec<_>>().join("\n"));
+            }
+            // Only one level deep — anything further is the shell's business.
+            if rest.len() != 1 {
+                return Ok(String::new());
+            }
+            let sub = rest[0].as_str();
+            let tags = || -> Vec<String> {
+                serde_json::from_str::<Vec<Value>>(&read(&cfg.join("servers.json")))
+                    .unwrap_or_default().iter()
+                    .filter_map(|s| s.get("tag").and_then(|t| t.as_str()).map(|t| t.to_string()))
+                    .collect()
+            };
+            match sub {
+                "use" => {
+                    let mut o: Vec<String> = tags().iter().map(|t| format!("{t}\tserver")).collect();
+                    o.push("auto\tpick fastest live".into());
+                    return Ok(o.join("\n"));
+                }
+                "ping" => return Ok(tags().iter().map(|t| format!("{t}\tserver"))
+                                     .collect::<Vec<_>>().join("\n")),
+                "help" => return Ok(help::reg_rows()
+                    .map(|(_, _, syn, _)| format!("{}\t", first(syn)))
+                    .collect::<Vec<_>>().join("\n")),
+                _ => {}
+            }
+            let Some((_, _, syn, _)) = help::reg_rows().find(|(_, _, s, _)| first(s) == sub) else {
+                return Ok(String::new());
+            };
+            Ok(help::choice_tokens(syn).iter().map(|t| format!("{t}\t"))
+               .collect::<Vec<_>>().join("\n"))
+        }
         "connections" | "conns" => {
             let ctx = Ctx::new(cfg);
             match rest.first().map(|s| s.as_str()) {
@@ -819,8 +859,14 @@ fn main() -> ExitCode {
         }
     }
     match shell::dispatch(&cfg, &args, |cmd, rest| run(&cfg, cmd, rest)) {
+        // An arm with nothing to say prints NOTHING, not a blank line: the shell
+        // reaches its `return` without an echo, and `_complete nosuchcommand`
+        // feeding one empty candidate to the completion system is a real
+        // difference, not a cosmetic one.
         Ok(s) => {
-            println!("{s}");
+            if !s.is_empty() {
+                println!("{s}");
+            }
             ExitCode::SUCCESS
         }
         Err(e) => {

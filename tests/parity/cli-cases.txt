@@ -82,3 +82,14 @@ PARITY_SCENARIO=router-up connections nosuchlane
 PARITY_SCENARIO=router-up status
 PARITY_SCENARIO=router-up explain example.com
 PARITY_SCENARIO=router-up router status
+
+# the tab-completion helper, which is driven by the same registry as `usage`
+_complete
+_complete escape
+_complete up
+_complete use
+_complete ping
+_complete help
+_complete router
+_complete nosuchcommand
+_complete escape add
