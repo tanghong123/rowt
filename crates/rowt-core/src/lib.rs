@@ -9,6 +9,7 @@
 
 pub mod classify;
 pub mod geosite;
+pub mod importmerge;
 pub mod laneerr;
 pub mod lanes;
 pub mod netdetect;

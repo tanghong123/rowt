@@ -10,7 +10,7 @@ fn read(p: Option<&String>) -> String {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let mut get = |flag: &str| -> Option<String> {
+    let get = |flag: &str| -> Option<String> {
         args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned()
     };
     let (a, h, b, p) = (get("--active"), get("--handadded"), get("--block"), get("--private"));

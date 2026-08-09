@@ -25,6 +25,7 @@ fn c0_or_space(c: char) -> bool {
 pub struct Split {
     pub scheme: String,
     pub netloc: String,
+    pub path: String,
     pub query: String,
     pub fragment: String,
 }
@@ -80,12 +81,76 @@ pub fn urlsplit(url: &str) -> Result<Split, String> {
         url = l.to_string();
     }
     let mut query = String::new();
-    if let Some((_, r)) = url.split_once('?') {
+    if let Some((l, r)) = url.split_once('?') {
         query = r.to_string();
+        url = l.to_string();
     }
 
     checknetloc(&netloc)?;
-    Ok(Split { scheme, netloc, query, fragment })
+    Ok(Split { scheme, netloc, path: url, query, fragment })
+}
+
+/// The schemes `urlunsplit` will invent a `//` for when it has no netloc but the
+/// path is empty or absolute. Without this list `https:?a=1` and `https://?a=1`
+/// are the same input rendered two ways, and a subscription would dedup wrong.
+const USES_NETLOC: [&str; 26] = [
+    "", "ftp", "http", "gopher", "nntp", "telnet", "imap", "wais", "file", "mms", "https",
+    "shttp", "snews", "prospero", "rtsp", "rtspu", "rsync", "svn", "svn+ssh", "sftp", "nfs",
+    "git", "git+ssh", "ws", "wss", "itms-services",
+];
+
+/// `urlunsplit((scheme, netloc, path, query, fragment))`.
+pub fn urlunsplit(scheme: &str, netloc: &str, path: &str, query: &str, fragment: &str) -> String {
+    let mut url = path.to_string();
+    if !netloc.is_empty() {
+        if !url.is_empty() && !url.starts_with('/') {
+            url = format!("/{url}");
+        }
+        url = format!("//{netloc}{url}");
+    } else if url.starts_with("//") {
+        url = format!("//{url}");
+    } else if !scheme.is_empty()
+        && USES_NETLOC.contains(&scheme)
+        && (url.is_empty() || url.starts_with('/'))
+    {
+        url = format!("//{url}");
+    }
+    if !scheme.is_empty() {
+        url = format!("{scheme}:{url}");
+    }
+    if !query.is_empty() {
+        url = format!("{url}?{query}");
+    }
+    if !fragment.is_empty() {
+        url = format!("{url}#{fragment}");
+    }
+    url
+}
+
+/// `quote_plus(s, safe="")` — everything outside the always-safe set becomes
+/// `%XX` with UPPERCASE hex, and a space becomes `+`. (Decoding accepts either
+/// case; encoding only ever emits upper.)
+fn quote_plus(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.' | b'-' | b'~' => {
+                out.push(b as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// `urlencode(pairs)`.
+pub fn urlencode(pairs: &[(String, String)]) -> String {
+    pairs
+        .iter()
+        .map(|(k, v)| format!("{}={}", quote_plus(k), quote_plus(v)))
+        .collect::<Vec<_>>()
+        .join("&")
 }
 
 /// `_check_bracketed_host` — what goes in brackets must be an IPv6 literal.
@@ -286,21 +351,35 @@ fn unquote_to_bytes(s: &str) -> Vec<u8> {
     out
 }
 
-/// `parse_qs(query)` with the defaults the Python uses: `&` separates, `+` is a
-/// space, and a field with a blank value is DROPPED rather than kept as `""`.
-/// Key order is first-seen.
-pub fn parse_qs(query: &str) -> Vec<(String, Vec<String>)> {
-    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+/// `parse_qsl(query, keep_blank_values=…)` — the ordered pair list.
+///
+/// With `keep_blank` false (what `vless-parse` uses) a field with an empty
+/// value is DROPPED, so `sni=` reads as absent. With it true (what
+/// `import-merge` uses) the pair survives, and so does a field with no `=` at
+/// all — which then re-encodes as `flag=`, gaining an equals sign it never had.
+pub fn parse_qsl(query: &str, keep_blank: bool) -> Vec<(String, String)> {
+    let mut out = Vec::new();
     for field in query.split('&') {
         if field.is_empty() {
             continue;
         }
-        let Some((name, value)) = field.split_once('=') else { continue };
-        if value.is_empty() {
+        let (name, value) = match field.split_once('=') {
+            Some((n, v)) => (n, v),
+            None if keep_blank => (field, ""),
+            None => continue,
+        };
+        if value.is_empty() && !keep_blank {
             continue;
         }
-        let name = unquote(&name.replace('+', " "));
-        let value = unquote(&value.replace('+', " "));
+        out.push((unquote(&name.replace('+', " ")), unquote(&value.replace('+', " "))));
+    }
+    out
+}
+
+/// `parse_qs(query)` with `vless-parse`'s defaults, grouped by first-seen key.
+pub fn parse_qs(query: &str) -> Vec<(String, Vec<String>)> {
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    for (name, value) in parse_qsl(query, false) {
         match out.iter_mut().find(|(k, _)| *k == name) {
             Some((_, v)) => v.push(value),
             None => out.push((name, vec![value])),

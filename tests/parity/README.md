@@ -24,6 +24,7 @@ tests/parity/bin/parity lanes-diff       # lane-list edits: files + messages
 tests/parity/bin/parity reconcile-diff   # corp reconcile, over generated cases
 tests/parity/bin/parity netdetect-diff   # scutil --dns parser, over generated cases
 tests/parity/bin/parity vless-diff       # share-link parser: stdout + stderr + status
+tests/parity/bin/parity merge-diff       # import accumulation: the review file itself
 tests/parity/bin/parity watch-diff       # watchdog decisions
 tests/parity/bin/parity platform-diff    # the argv the platform layer produces
 tests/parity/bin/parity cli-diff         # whole commands, rowt-rs vs the shell
@@ -124,11 +125,18 @@ reconcile and the watchdog's decision table. Each has a gate:
 | `reconcile-diff` | stdout contract vs the Python | 210 cases, 200 randomized |
 | `netdetect-diff` | stdout BYTES vs the Python (key order is contract) | 800 generated cases |
 | `vless-diff` | stdout + stderr + exit status vs the Python | 2,000 generated cases |
+| `merge-diff` | the review FILE, plus the streams, vs the Python | 1,500 generated cases |
 | `watch-diff` | decisions, read back from watch.log + trace | 5 cases |
 | `platform-diff` | the argv the platform layer produces | 8 cases |
 | `cli-diff` | stdout, status, lane files, argv trace, audit log | 136 cases |
 
-`vless-diff` is the only one that compares stderr, because it is the only one
+`merge-diff` is the only gate whose primary artifact is a file written in
+place: `cmd_import` reads the accumulation straight back with jq, and a human
+edits it between the extract and the apply, so `_source`'s position inside an
+entry and the top-level key order are compared as bytes. It also runs each case
+twice in two copies of its own directory, since the run mutates its inputs.
+
+`vless-diff` and `merge-diff` are the two that compare stderr, because it is
 where stderr is a result: `server add` and the subscription rebuild run the
 parser with stderr on the user's terminal, so "skipping a link (…)" and "not
 importing 'X' — same server as 'Y'" are what the user learns about their own

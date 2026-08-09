@@ -19,7 +19,8 @@
 #   12.  reword an explain description  -> cli-diff must fire
 #   13.  shift the share-link tag index -> vless-diff must fire
 #   14.  widen an internal-NS range     -> netdetect-diff must fire
-#   15.  (structural) native() must not claim an arm run() cannot answer
+#   15.  keep a display-only sub name    -> merge-diff must fire
+#   16.  (structural) native() must not claim an arm run() cannot answer
 #
 # Everything happens in a throwaway copy of the repo; the real tree is never
 # touched. Run it after changing the harness itself.
@@ -382,7 +383,27 @@ fi
 # Compared statically rather than by invoking each name: several of these arms
 # start processes, exec a TUI, or reach for the system proxy, and a self-test
 # that has to be trusted not to do those things is not one worth having.
-echo "15. every name native() claims must be an arm of run()"
+echo "15. keep the display-only name= when normalizing a subscription URL"
+if [ ! -x "$ROOT/target/release/rowt-import-merge" ]; then
+  echo "  skip — no release build"
+else
+  # Dropping `name=` is what makes the same subscription, pasted once with a
+  # display name and once without, dedup to one entry. A port that forgets it
+  # agrees on every URL that has no name= — which is most of them, and all of
+  # the ones anybody writes by hand into a test.
+  perl -0pi -e 's/if k\.lower\(\) != "name"/if k.lower() != "nam"/' \
+    "$tmp/config/import-merge.py"
+  if ! grep -q '!= "nam"' "$tmp/config/import-merge.py"; then
+    bad "could not neuter the name filter (norm_sub moved?)"
+  elif PARITY_RUST_MERGE="$ROOT/target/release/rowt-import-merge" \
+       "$tmp/tests/parity/bin/parity" merge-diff 200 >/dev/null 2>&1; then
+    bad "merge-diff passed with the display-name filter removed"
+  else
+    ok "merge-diff caught the kept display name"
+  fi
+fi
+
+echo "16. every name native() claims must be an arm of run()"
 src="$ROOT/crates/rowt-cli/src/main.rs"
 # Command names only. A native() arm line is indented exactly eight spaces and
 # starts with a pattern; the sub-command lists inside `matches!(…)` are indented

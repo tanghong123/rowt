@@ -26,6 +26,7 @@
 #   parity reconcile-diff    corp reconcile, Python vs Rust, over generated cases
 #   parity netdetect-diff    scutil --dns parser, Python vs Rust, over generated cases
 #   parity vless-diff        share-link parser, Python vs Rust: stdout+stderr+status
+#   parity merge-diff        import accumulation, Python vs Rust: the review FILE
 #   parity watch-diff        watchdog tick: bash's effects vs the FSM's plan
 #   parity platform-diff     the platform layer, compared by the argv it produces
 #   parity cli-diff          whole commands through rowt-rs vs the shell
@@ -535,6 +536,72 @@ cmd_vless_diff() { # [count]
   echo "  $fails/$n cases differ — artifacts: $work"; return 1
 }
 
+# The import accumulation, Python vs Rust: the FILE, then the streams.
+#
+# Unlike the other Python gates the primary output is written in place, and
+# `cmd_import` reads it straight back with jq for the table it prints. So each
+# case is run twice in two copies of its own directory and the resulting
+# --into file is compared as BYTES — `_source`'s position inside an entry and
+# the servers/subscriptions/proxy_domains/skipped key order are contract, since
+# a human edits this file between the extract and the apply.
+#
+# Note this file is written with ensure_ascii=FALSE, the opposite of
+# vless-parse's — a node name in Chinese stays readable here and is escaped
+# there. The byte comparison is what keeps the two from being "unified".
+cmd_merge_diff() { # [count]
+  local rust="${PARITY_RUST_MERGE:-$ROOT/target/release/rowt-import-merge}"
+  local py="$ROOT/config/import-merge.py"
+  [ -x "$rust" ] || die "no rust merger at $rust — cargo build --release -p rowt-core"
+  local work n fails=0 d
+  work="$(mktemp -d "${TMPDIR:-/tmp}/parity-merge.XXXXXX")"
+  n="$(python3 "$SELF/gen-merge-cases.py" "$work" "${1:-400}")"
+  for d in "$work"/case*; do
+    local args=() line rc
+    while IFS= read -r line; do args+=("$line"); done < "$d/argv"
+    cp -R "$d" "$d.a"; cp -R "$d" "$d.b"
+    rc=0
+    ( cd "$d.a" && COLUMNS=80 python3 "$py" ${args[@]+"${args[@]}"} < stdin \
+      > out 2> err ) || rc=$?
+    echo "$rc" > "$d.a/rc"
+    rc=0
+    ( cd "$d.b" && COLUMNS=80 "$rust" ${args[@]+"${args[@]}"} < stdin \
+      > out 2> err ) || rc=$?
+    echo "$rc" > "$d.b/rc"
+    local bad="" f
+    for f in out err rc into.json; do
+      # Not `diff -N`: BSD diff only honours it while walking directories, so a
+      # `--into -` case (where NEITHER side writes the file) would read as a
+      # difference. Absent-on-both is equal; absent-on-one is not.
+      if [ -e "$d.a/$f" ] && [ -e "$d.b/$f" ]; then
+        cmp -s "$d.a/$f" "$d.b/$f" || bad="$bad $f"
+      elif [ -e "$d.a/$f" ] || [ -e "$d.b/$f" ]; then
+        bad="$bad $f"
+      fi
+    done
+    if [ -n "$bad" ]; then
+      fails=$((fails + 1))
+      if [ "$fails" -le 3 ]; then
+        echo "  DIFFERS ($bad): $d"
+        sed 's/^/    argv: /' "$d/argv"
+        for f in $bad; do
+          : > "$d.a/$f.x"; : > "$d.b/$f.x"
+          [ -e "$d.a/$f" ] && cat "$d.a/$f" > "$d.a/$f.x"
+          [ -e "$d.b/$f" ] && cat "$d.b/$f" > "$d.b/$f.x"
+          echo "      --- $f"
+          diff "$d.a/$f.x" "$d.b/$f.x" | sed 's/^/      /' | head -12 || true
+        done
+      fi
+    else
+      rm -rf "$d.a" "$d.b"
+    fi
+  done
+  if [ "$fails" -eq 0 ]; then
+    echo "  $n accumulation cases: identical (review file, stdout, stderr, status)"
+    rm -rf "$work"; return 0
+  fi
+  echo "  $fails/$n cases differ — artifacts: $work"; return 1
+}
+
 # Lane-list edits, bash vs Rust: the three files afterwards, and the lines the
 # user is told. The shell's surrounding effects (geosite fetch, the coverage
 # hint, the router reload) are filtered out — they are not set logic.
@@ -1007,6 +1074,7 @@ case "${1:-}" in
   reconcile-diff)  shift; cmd_reconcile_diff "$@" ;;
   netdetect-diff)  shift; cmd_netdetect_diff "$@" ;;
   vless-diff)      shift; cmd_vless_diff "$@" ;;
+  merge-diff)      shift; cmd_merge_diff "$@" ;;
   lanes-diff)      shift; cmd_lanes_diff "$@" ;;
   watch-diff)      shift; cmd_watch_diff "$@" ;;
   platform-diff)   shift; cmd_platform_diff "$@" ;;

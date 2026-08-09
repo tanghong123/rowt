@@ -35,3 +35,7 @@ path = "src/bin/rowt-watch-tick.rs"
 [[bin]]
 name = "rowt-vless"
 path = "src/bin/rowt-vless.rs"
+
+[[bin]]
+name = "rowt-import-merge"
+path = "src/bin/rowt-import-merge.rs"
