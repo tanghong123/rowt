@@ -13,6 +13,7 @@
 //! lines of help text are ported, but until then it would only add a dependency
 //! and a help format that does not match the shell's.
 
+mod corp;
 mod diag;
 mod fetch;
 mod help;
@@ -20,6 +21,7 @@ mod lifecycle;
 mod shell;
 mod skill;
 mod vm;
+mod watch;
 mod seeds {
     include!(concat!(env!("OUT_DIR"), "/seeds.rs"));
 }
@@ -73,13 +75,13 @@ fn native(cmd: &str, sub: &str) -> bool {
             sub,
             "" | "list" | "dump" | "add" | "rm" | "remove" | "clear" | "import"
                 | "errors" | "stats" | "log"
-        ),
+        ) || (cmd == "corp" && matches!(sub, "sync" | "suggest")),
         "direct" | "connections" | "conns" | "_complete" => true,
         "proxy" => matches!(sub, "" | "status" | "check" | "env"),
         // read arms only — the rest drive the Python importers
         "server" => matches!(sub, "" | "list" | "dump"),
         "sub" => matches!(sub, "" | "list" | "dump"),
-        "use" | "ping" | "run" | "skill" | "report" | "uninstall" | "fetch" | "probe" | "vm" => true,
+        "use" | "ping" | "run" | "skill" | "report" | "uninstall" | "fetch" | "probe" | "vm" | "watch" => true,
         // `config import` prompts on /dev/tty, which is exactly what this gate
         // cannot compare — porting it would move it out of reach.
         "config" => matches!(sub, "" | "list" | "export"),
@@ -678,8 +680,32 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                     cmd_lane_errors(&cfg, cmd, args.first().map(|s| s.as_str()).unwrap_or(d))
                 }
                 "log" => cmd_lane_log(&cfg, cmd),
+                // corp only: mirror the live tunnel's routes and the network's
+                // DHCP search domains into the lane.
+                "sync" if cmd == "corp" => {
+                    let ctx = Ctx::new(cfg.clone());
+                    let mut o = corp::Opts { dry_run: false, no_reload: false, quiet: false, iface: None };
+                    let mut it = args.iter();
+                    while let Some(a) = it.next() {
+                        match a.as_str() {
+                            "--dry-run" | "-n" => o.dry_run = true,
+                            "--no-reload" => o.no_reload = true,
+                            "--quiet" | "-q" => o.quiet = true,
+                            "--iface" => o.iface = it.next().cloned(),
+                            x if x.starts_with("--iface=") => o.iface = Some(x["--iface=".len()..].to_string()),
+                            _ => die(&cfg, &format!("usage: {PROG} corp sync [--iface utunN|<label>] [--dry-run] [--no-reload] [--quiet]")),
+                        }
+                    }
+                    corp::run(&ctx, &o)
+                }
+                "suggest" if cmd == "corp" => corp::suggest(&Ctx::new(cfg.clone())),
                 _ => cmd_lane(&cfg, lane, &action, args),
             }
+        }
+        "watch" => {
+            let ctx = Ctx::new(cfg.clone());
+            let me = std::env::current_exe().map_err(|e| e.to_string())?;
+            watch::cmd(&ctx, &me, rest.first().map(|s| s.as_str()).unwrap_or("status"))
         }
         "vm" => {
             let ctx = Ctx::new(cfg.clone());

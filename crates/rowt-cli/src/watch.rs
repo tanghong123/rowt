@@ -126,10 +126,13 @@ fn plist_body(ctx: &Ctx, self_bin: &Path) -> String {
 /// this user. Broad NOPASSWD would be a far bigger grant than the watchdog needs.
 fn sudoers_body() -> String {
     let user = out("id", &["-un"]).trim().to_string();
-    format!("# installed by rowt — scoped passwordless proxy toggles for the watchdog\n\
-             {user} ALL=(root) NOPASSWD: /usr/sbin/networksetup -setsocksfirewallproxystate *\n\
-             {user} ALL=(root) NOPASSWD: /usr/sbin/networksetup -setwebproxystate *\n\
-             {user} ALL=(root) NOPASSWD: /usr/sbin/networksetup -setsecurewebproxystate *\n")
+    // One line, all seven verbs, exactly as the shell emits it — `visudo -cf`
+    // validates this before it is installed, and a rule that differs from the
+    // shell's is a rule that grants something different.
+    format!("# Installed by 'rowt watch install'. Lets the rowt auto-reload LaunchAgent\n\
+             # re-apply the macOS system proxy on a network change without a password prompt.\n\
+             # Remove with:  rowt watch uninstall\n\
+             {user} ALL=(root) NOPASSWD: /usr/sbin/networksetup -setsocksfirewallproxy *, /usr/sbin/networksetup -setsocksfirewallproxystate *, /usr/sbin/networksetup -setwebproxy *, /usr/sbin/networksetup -setwebproxystate *, /usr/sbin/networksetup -setsecurewebproxy *, /usr/sbin/networksetup -setsecurewebproxystate *, /usr/sbin/networksetup -setproxybypassdomains *\n")
 }
 
 fn uid() -> String {
@@ -138,25 +141,38 @@ fn uid() -> String {
 
 // ------------------------------------------------------------------ observing
 
-/// `_captive_state` — is a walled garden in the way? Apple's probe expects an
-/// exact body; anything else, or a redirect, means a portal.
+/// `_captive_state` — is a walled garden in the way?
+///
+/// Apple's probe answers 200 with a body containing "Success". A 200 with
+/// anything ELSE is a portal serving its login page under the real URL, and a
+/// 3xx is a portal redirecting. Anything else — including no answer at all —
+/// is `unknown`, and unknown means hands-off: acting on a guess here would
+/// drop the proxy on a flaky network.
 fn captive_state() -> CaptiveState {
-    let url = env_or("ROWT_CAPTIVE_URL", "http://captive.apple.com/hotspot-detect.html");
-    let o = Command::new("curl")
-        .args(["--noproxy", "*", "-sS", "-m", "4", "-o", "-", "-w", "\n%{http_code}", &url])
-        .stderr(Stdio::null()).output();
-    let Ok(o) = o else { return CaptiveState::Unknown };
-    let body = String::from_utf8_lossy(&o.stdout);
-    let mut it = body.rsplitn(2, '\n');
-    let code = it.next().unwrap_or("").trim().to_string();
-    let payload = it.next().unwrap_or("");
-    if code == "000" || code.is_empty() {
+    if env_or("ROWT_CAPTIVE_CHECK", "1") != "1" {
         return CaptiveState::Unknown;
     }
-    if payload.contains("<TITLE>Success</TITLE>") || payload.contains("<title>Success</title>") {
-        CaptiveState::Clear
-    } else {
-        CaptiveState::Captive
+    let url = env_or("ROWT_CAPTIVE_URL", "http://captive.apple.com/hotspot-detect.html");
+    let t = env_or("ROWT_CAPTIVE_TIMEOUT", "3");
+    let o = Command::new("curl")
+        .args(["-s", "--noproxy", "*", "--max-time", &t, "-w", "\n%{http_code}", &url])
+        .stderr(Stdio::null()).output();
+    let Ok(o) = o else { return CaptiveState::Unknown };
+    if !o.status.success() {
+        return CaptiveState::Unknown;
+    }
+    let body = String::from_utf8_lossy(&o.stdout);
+    // `${out##*$'\n'}` / `${out%$'\n'*}` — split at the LAST newline, because
+    // the body itself contains plenty.
+    let (payload, code) = match body.rfind('\n') {
+        Some(i) => (&body[..i], body[i + 1..].trim()),
+        None => ("", body.trim()),
+    };
+    match code {
+        "200" if payload.contains("Success") => CaptiveState::Clear,
+        "200" => CaptiveState::Captive,
+        c if c.len() == 3 && c.starts_with("30") => CaptiveState::Captive,
+        _ => CaptiveState::Unknown,
     }
 }
 
@@ -167,14 +183,10 @@ fn net_id(iface: &str) -> String {
         return String::new();
     }
     let ssid = out("networksetup", &["-getairportnetwork", iface]);
-    let ssid = ssid.rsplit(ní_sep()).next().unwrap_or("").trim().to_string();
+    let ssid = ssid.rsplit(": ").next().unwrap_or("").trim().to_string();
     let addr = out("ipconfig", &["getifaddr", iface]).trim().to_string();
     let router = out("ipconfig", &["getoption", iface, "router"]).trim().to_string();
     format!("{ssid} {addr}/{router}").trim().to_string()
-}
-
-fn ní_sep() -> &'static str {
-    ": "
 }
 
 fn observe(ctx: &Ctx, cap: Option<CaptiveState>, health_ok: bool) -> Observation {
@@ -411,8 +423,16 @@ pub fn cmd(ctx: &Ctx, self_bin: &Path, action: &str) -> Result<String, String> {
                 for l in &lines[lines.len().saturating_sub(5)..] {
                     o.push(format!("    {l}"));
                 }
+                return Ok(o.join("\n"));
             }
-            Ok(o.join("\n"))
+            // The shell's last statement is `[ -f "$WATCH_LOG" ] && { … }`, so
+            // with no log yet the TEST becomes the function's return value and
+            // `watch status` exits 1 — on a machine where nothing is wrong. A
+            // reporting command that fails for having nothing to report is a
+            // bug, but it is the shell's behavior; §6.7 says the fix lands
+            // separately, on the shell side, with the gate updated in that commit.
+            println!("{}", o.join("\n"));
+            std::process::exit(1);
         }
         "tick" => {
             tick(ctx);

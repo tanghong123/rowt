@@ -159,3 +159,12 @@ PARITY_UNORDERED=1 probe
 PARITY_UNORDERED=1 PARITY_SCENARIO=lanes-empty probe
 vm status
 vm nosucharm
+
+# corp sync / suggest, and the watchdog's read arms
+corp sync --dry-run
+corp sync --no-reload --quiet
+corp suggest
+corp sync --nosuchflag
+watch
+watch status
+watch nosucharm
