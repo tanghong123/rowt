@@ -17,3 +17,11 @@ corp add example.com
 escape rm example.com
 escape rm absent.example
 block clear
+
+# local mode: the escape lane's verdicts must read DIRECT, with the reason saying why
+PARITY_SCENARIO=render-local explain example.com
+PARITY_SCENARIO=render-local explain sub.example.net
+PARITY_SCENARIO=render-local explain ads.example
+PARITY_SCENARIO=render-local explain intranet.corp.example
+PARITY_SCENARIO=render-local-precedence explain api.foo.com
+PARITY_SCENARIO=render-local escape list

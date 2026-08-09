@@ -14,3 +14,4 @@ proxy-any-on       | _proxy_any_on Wi-Fi         | proxy-any-on Wi-Fi
 proxy-pointing-ok  | _proxy_pointing_ok Wi-Fi    | proxy-pointing-ok Wi-Fi
 captive-drop       | _captive_proxy_off Wi-Fi    | captive-off Wi-Fi
 captive-restore    | _captive_proxy_on Wi-Fi     | captive-on Wi-Fi
+gfw-canaries       | _direct_reaches_escape      | gfw

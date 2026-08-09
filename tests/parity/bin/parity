@@ -568,18 +568,21 @@ cmd_cli_diff() {
   while IFS= read -r line; do
     case "$line" in ''|'#'*) continue ;; esac
     total=$((total + 1))
-    local A B
+    local A B scen="" cmdline="$line"
+    case "$line" in
+      PARITY_SCENARIO=*) scen="${line%% *}"; scen="${scen#PARITY_SCENARIO=}"; cmdline="${line#* }" ;;
+    esac
     A="$(mktemp -d "${TMPDIR:-/tmp}/parity-cli-a.XXXXXX")"
     B="$(mktemp -d "${TMPDIR:-/tmp}/parity-cli-b.XXXXXX")"
-    make_sandbox "$A"; make_sandbox "$B"
+    make_sandbox "$A" "$scen"; make_sandbox "$B" "$scen"
     # shellcheck disable=SC2086 — the case line is intentionally word-split
-    run_in "$A" $line > "$A/out" 2>/dev/null || true
+    run_in "$A" $cmdline > "$A/out" 2>/dev/null || true
     echo "$?" > "$A/rc"
     # shellcheck disable=SC2086
     env -i HOME="$B/home" XDG_CONFIG_HOME="$B/home" \
         PATH="$B/shims:/usr/bin:/bin:/usr/sbin:/sbin" TERM=dumb LC_ALL=C TZ=UTC \
         PARITY_TRACE="$B/trace" PARITY_ENV="$B/env" \
-        "$rs" $line > "$B/out" 2>/dev/null; echo "$?" > "$B/rc"
+        "$rs" $cmdline > "$B/out" 2>/dev/null; echo "$?" > "$B/rc"
     local bad="" f
     diff -q "$A/out" "$B/out" >/dev/null 2>&1 || bad="$bad stdout"
     for f in escape-domains.txt corp-domains.txt block-domains.txt; do

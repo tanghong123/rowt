@@ -31,6 +31,11 @@ pub trait Platform {
     fn proxy_states_on(&self, service: &str, passwordless: bool) -> Result<(), String>;
     /// Monotonic-ish boot identity: a reboot changes it.
     fn boot_id(&self) -> Option<String>;
+    /// True when the escape lane's own destinations answer on the physical NIC —
+    /// i.e. there is no censorship here to tunnel around, and `local` mode is
+    /// the right choice. Decides a mode, so it belongs to the platform, not the
+    /// pure core: it dials the network over a named interface.
+    fn direct_reaches_escape(&self, canaries: &[String], timeout: u32) -> bool;
 }
 
 fn out(cmd: &str, args: &[&str]) -> Option<String> {
@@ -203,6 +208,29 @@ impl Platform for Mac {
             let _ = self.sudo_networksetup(passwordless, &[state, service, "on"]);
         }
         Ok(())
+    }
+
+    fn direct_reaches_escape(&self, canaries: &[String], timeout: u32) -> bool {
+        // Bound to the interface and with the proxy bypassed, so it measures the
+        // DIRECT path rather than whatever the router is doing. A 2xx/3xx means
+        // TLS completed against the real host, which censorship cannot forge; one
+        // strict hit is enough. Every failure mode — offline, canary down, flaky
+        // link — reads as "keep the tunnel", the safe direction.
+        let Some(ifc) = self.detect_iface() else { return false };
+        let t = timeout.to_string();
+        for url in canaries {
+            let body = out(
+                "curl",
+                &["--interface", &ifc, "--noproxy", "*", "-sS", "-o", "/dev/null",
+                  "-w", "%{http_code}", "-m", &t, url],
+            )
+            .unwrap_or_default();
+            let code = body.trim();
+            if code.starts_with('2') || code.starts_with('3') {
+                return true;
+            }
+        }
+        false
     }
 
     fn boot_id(&self) -> Option<String> {

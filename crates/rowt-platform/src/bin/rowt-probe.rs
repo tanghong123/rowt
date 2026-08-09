@@ -13,6 +13,13 @@ fn main() -> ExitCode {
         Some("service") => println!("{}", p.active_service().unwrap_or_default()),
         Some("iface") => println!("{}", p.detect_iface().unwrap_or_default()),
         Some("boot-id") => println!("{}", p.boot_id().unwrap_or_default()),
+        Some("gfw") => {
+            let canaries: Vec<String> = std::env::var("ROWT_GFW_CANARIES")
+                .unwrap_or_else(|_| "https://www.google.com/generate_204 https://www.youtube.com/generate_204".into())
+                .split_whitespace().map(|s| s.to_string()).collect();
+            let t: u32 = std::env::var("ROWT_GFW_TIMEOUT").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+            println!("{}", p.direct_reaches_escape(&canaries, t));
+        }
         Some("proxy-any-on") => println!("{}", p.proxy_any_on(&svc(1))),
         Some("proxy-pointing-ok") => println!("{}", p.proxy_pointing_ok(&svc(1), port)),
         Some("proxy-on") => {
