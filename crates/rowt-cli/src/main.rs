@@ -56,18 +56,20 @@ pub fn die(cfg: &Path, msg: &str) -> ! {
 /// front door today rather than after the last arm lands: an unported command
 /// runs, it just runs in the shell. `parity cli-ledger` reads this table, so the
 /// published coverage is measured from the same source that decides it.
+/// Every name here MUST be answered by `run`. A name listed but unimplemented is
+/// strictly worse than one that was never listed: before the fallthrough existed
+/// it failed loudly, and now it would claim coverage while failing. Add a name
+/// the same commit that lands its arm, never before.
 fn native(cmd: &str, sub: &str) -> bool {
     match cmd {
         "explain" | "route" | "version" | "--version" | "-V" | "status" | "audit"
         | "shell-init" | "completion" | "monitor" | "mon" | "render" | "reload"
-        | "restart" | "up" | "down" | "help" | "-h" | "--help" | "_splitter" | "direct"
-        | "connections" | "conns" | "_complete" => true,
+        | "restart" | "up" | "down" | "help" | "-h" | "--help" | "_splitter" => true,
         "escape" | "corp" | "block" => matches!(
             sub,
-            "" | "list" | "dump" | "add" | "rm" | "remove" | "clear" | "import" | "errors"
-                | "stats" | "log"
+            "" | "list" | "dump" | "add" | "rm" | "remove" | "clear" | "import"
         ),
-        "proxy" => matches!(sub, "" | "status" | "check" | "env" | "on" | "off"),
+        "proxy" => matches!(sub, "" | "status" | "check" | "env"),
         "router" => matches!(sub, "" | "up" | "down" | "restart" | "status"),
         _ => false,
     }
@@ -93,10 +95,19 @@ fn delegate(args: &[String]) -> ! {
         eprintln!("error: no legacy rowt found — set ROWT_LEGACY=/path/to/bin/rowt");
         std::process::exit(1);
     };
+    // The shell already reaches for Rust binaries (`_render_bin`, `_watch_bin`),
+    // and §6.6 has it becoming a wrapper. If it ever reaches back for rowt-rs on
+    // a path that delegates, exec-ing again would spin forever and take the
+    // machine with it. One marker turns that into an error message.
+    if std::env::var("ROWT_DELEGATED").as_deref() == Ok("1") {
+        eprintln!("error: refusing to delegate twice — {} would exec back into rowt-rs", sh.display());
+        std::process::exit(1);
+    }
     // `exec`, not spawn-and-wait: the shell must own the terminal and the exit
     // status directly, or an interactive command (sudo prompt, `<lane> log`)
     // behaves differently through rowt-rs than through rowt.
-    let e = std::process::Command::new("bash").arg(sh).args(args).exec();
+    let e = std::process::Command::new("bash").arg(sh).args(args)
+        .env("ROWT_DELEGATED", "1").exec();
     eprintln!("error: could not exec the legacy rowt: {e}");
     std::process::exit(1);
 }
