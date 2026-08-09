@@ -31,7 +31,7 @@ is not 'does it work' but 'whose code ran, and what proves it'.
 | `mon` | **native** | — |
 | `monitor` | **native** | — |
 | `onboard` | legacy | — |
-| `ping` | legacy | — |
+| `ping` | **native** | cli-diff |
 | `probe` | legacy | — |
 | `proxy` | **native** | cli-diff |
 | `reload` | **native** | boot-test |
@@ -40,7 +40,7 @@ is not 'does it work' but 'whose code ran, and what proves it'.
 | `restart` | **native** | boot-test |
 | `route` | **native** | — |
 | `router` | **native** | cli-diff + boot-test |
-| `run` | legacy | — |
+| `run` | **native** | cli-diff |
 | `server` | **native** | cli-diff |
 | `shell-init` | **native** | cli-diff |
 | `skill` | legacy | — |
@@ -52,7 +52,7 @@ is not 'does it work' but 'whose code ran, and what proves it'.
 | `vm` | legacy | — |
 | `watch` | legacy | cli-diff (passthrough) |
 
-**27 of 37 command arms answered natively**; the other 10 run in the shell.
+**29 of 37 command arms answered natively**; the other 8 run in the shell.
 
 Partial arms — native for some sub-commands, legacy for the rest.
 `native()` in crates/rowt-cli/src/main.rs is the authority:
@@ -66,7 +66,7 @@ Partial arms — native for some sub-commands, legacy for the rest.
             // read arms only — the rest drive the Python importers
             "server" => matches!(sub, "" | "list" | "dump"),
             "sub" => matches!(sub, "" | "list" | "dump"),
-            "use" => true,
+            "use" | "ping" | "run" => true,
             // `config import` prompts on /dev/tty, which is exactly what this gate
             // cannot compare — porting it would move it out of reach.
             "config" => matches!(sub, "" | "list" | "export"),

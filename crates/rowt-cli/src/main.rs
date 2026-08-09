@@ -64,7 +64,7 @@ fn native(cmd: &str, sub: &str) -> bool {
     match cmd {
         "explain" | "route" | "version" | "--version" | "-V" | "status" | "audit"
         | "shell-init" | "completion" | "monitor" | "mon" | "render" | "reload"
-        | "restart" | "up" | "down" | "help" | "-h" | "--help" | "_splitter" => true,
+        | "restart" | "up" | "down" | "help" | "-h" | "--help" => true,
         "escape" | "corp" | "block" => matches!(
             sub,
             "" | "list" | "dump" | "add" | "rm" | "remove" | "clear" | "import"
@@ -75,7 +75,7 @@ fn native(cmd: &str, sub: &str) -> bool {
         // read arms only — the rest drive the Python importers
         "server" => matches!(sub, "" | "list" | "dump"),
         "sub" => matches!(sub, "" | "list" | "dump"),
-        "use" => true,
+        "use" | "ping" | "run" => true,
         // `config import` prompts on /dev/tty, which is exactly what this gate
         // cannot compare — porting it would move it out of reach.
         "config" => matches!(sub, "" | "list" | "export"),
@@ -154,6 +154,20 @@ fn sh_date_r(epoch: i64, fmt: &str) -> String {
         .stderr(std::process::Stdio::null()).output().ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim_end().to_string()).unwrap_or_default()
 }
+/// `urllib.parse.quote(s, safe="")` — every byte outside the unreserved set is
+/// percent-encoded, INCLUDING `/` and `:`, because the result is a query-string
+/// value inside the clash delay URL.
+fn urlencode(s: &str) -> String {
+    let mut o = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.' | b'-' | b'~' => o.push(b as char),
+            _ => o.push_str(&format!("%{b:02X}")),
+        }
+    }
+    o
+}
+
 /// `du -h "$f" | awk '{print $1}'`.
 fn du_h(p: &Path) -> String {
     std::process::Command::new("du").arg("-h").arg(p)
@@ -626,6 +640,178 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                 _ => cmd_lane(&cfg, lane, &action, args),
             }
         }
+        // Latency to every server THROUGH the tunnel, via the clash API's own
+        // delay test — not a plain HTTPS probe, which cannot speak AnyTLS and
+        // would report a working server as dead.
+        "ping" => {
+            let ctx = Ctx::new(cfg.clone());
+            let servers: Vec<Value> =
+                serde_json::from_str(&read(&cfg.join("servers.json"))).unwrap_or_default();
+            if servers.is_empty() {
+                die(&cfg, "no servers imported");
+            }
+            if lifecycle::host_running(&ctx).is_none() {
+                eprintln!("==> starting router for the test…");
+                if lifecycle::router_up(&ctx).is_err() {
+                    die(&cfg, "could not start router");
+                }
+            }
+            let tags: Vec<String> = match rest.first() {
+                Some(t) => vec![t.clone()],
+                None => servers.iter()
+                    .filter_map(|s| s.get("tag").and_then(|x| x.as_str()).map(|x| x.to_string()))
+                    .collect(),
+            };
+            let now = lifecycle::clash_selected(&ctx).unwrap_or_default();
+            let secret = ctx.sget("clash_secret");
+            let url = env_or("ROWT_PING_URL", "https://www.gstatic.com/generate_204");
+            let timeout: u32 = env_or("ROWT_PING_TIMEOUT", "8").parse().unwrap_or(8);
+            let enc = urlencode(&url);
+            eprintln!("==> testing latency to {url} through the tunnel (parallel, {timeout}s each)…");
+            // In parallel, as the shell backgrounds a subshell per server: a
+            // dozen dead servers serially would be a dozen timeouts.
+            let handles: Vec<_> = tags.into_iter().map(|t| {
+                let (secret, enc, ep) = (secret.clone(), enc.clone(), ctx.controller());
+                std::thread::spawn(move || {
+                    let out = std::process::Command::new("curl")
+                        .args(["--noproxy", "*", "-sS", "-m", &(timeout + 3).to_string(),
+                               "-H", &format!("Authorization: Bearer {secret}"),
+                               &format!("http://{ep}/proxies/{t}/delay?timeout={timeout}000&url={enc}")])
+                        .stderr(std::process::Stdio::null()).output().ok();
+                    let ms = out.and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok())
+                        .and_then(|v| v.get("delay").and_then(|d| d.as_u64()));
+                    match ms {
+                        // The sort key is the zero-padded number the shell
+                        // prints, so an unreachable server sorts last by being
+                        // 999999 rather than by a special case.
+                        Some(ms) => (format!("{ms:06}"), t, format!("{ms} ms")),
+                        None => ("999999".to_string(), t, "unreachable".to_string()),
+                    }
+                })
+            }).collect();
+            let mut rows: Vec<(String, String, String)> =
+                handles.into_iter().filter_map(|h| h.join().ok()).collect();
+            // `cat "$dir"/*.out | sort -n`: glob order in, numeric sort out, and
+            // the whole line as the last resort.
+            rows.sort_by(|a, b| {
+                let f = |x: &(String, String, String)| format!("{}\t{}\t{}", x.0, x.1, x.2);
+                a.0.cmp(&b.0).then_with(|| f(a).cmp(&f(b)))
+            });
+            let mut o = String::new();
+            for (_, t, disp) in rows {
+                let mark = if t == now && !now.is_empty() { "* " } else { "  " };
+                o.push_str(&format!("{mark}{} {disp}\n", pad(&t, 20)));
+            }
+            o.push_str(&format!("  * = active. 'unreachable' = server didn't answer in {timeout}s (down, or can't reach the test URL)."));
+            Ok(o)
+        }
+        // Find a proxy env that can actually reach the internet, then exec the
+        // command with it. For CLI tools that ignore the system proxy, when you
+        // are not sure which path works right now.
+        "run" => {
+            let ctx = Ctx::new(cfg.clone());
+            if rest.is_empty() {
+                die(&cfg, &format!("usage: {PROG} run <command> [args…]"));
+            }
+            let target = env_or("ROWT_RUN_TARGET", "https://www.google.com/generate_204");
+            // "Reached" = the target host answered at all — 2xx/3xx/4xx all prove
+            // the path works. Over HTTPS the answer cannot be a captive portal
+            // or a poisoned DNS reply. A 5xx through a proxy means the proxy
+            // could not reach upstream, which is a failure.
+            let reach = |proxy: Option<&str>| -> bool {
+                for attempt in 0..2 {
+                    let mut c = std::process::Command::new("curl");
+                    match proxy {
+                        Some(p) => { c.args(["-x", p]); }
+                        None => { c.args(["--noproxy", "*"]); }
+                    }
+                    let out = c.args(["-sS", "-o", "/dev/null", "-w", "%{http_code}",
+                                      "--connect-timeout", "4", "-m", "8", &target])
+                        .stderr(std::process::Stdio::null()).output().ok();
+                    let code = out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                        .unwrap_or_default();
+                    if matches!(code.chars().next(), Some('2') | Some('3') | Some('4')) && code.len() == 3 {
+                        return true;
+                    }
+                    // A single blip — a TUN mid-reconnect, a slow first packet —
+                    // must not reject a path that works.
+                    if attempt == 0 {
+                        std::thread::sleep(std::time::Duration::from_millis(400));
+                    }
+                }
+                false
+            };
+            let exec_with = |http: Option<(&str, String)>| -> ! {
+                let mut c = std::process::Command::new(&rest[0]);
+                c.args(&rest[1..]);
+                match http {
+                    Some((h, all)) => {
+                        for k in ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"] {
+                            c.env(k, h);
+                        }
+                        for k in ["all_proxy", "ALL_PROXY"] {
+                            c.env(k, &all);
+                        }
+                    }
+                    None => {
+                        for k in ["http_proxy", "https_proxy", "all_proxy",
+                                  "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
+                            c.env_remove(k);
+                        }
+                    }
+                }
+                let e = c.exec_replace();
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            };
+
+            let p = Mac;
+            let svc = p.active_service().unwrap_or_default();
+            let sysproxy_on = !svc.is_empty() && p.proxy_any_on(&svc);
+
+            // 1. whatever this shell already has
+            let envpx = ["https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY",
+                         "http_proxy", "HTTP_PROXY"]
+                .iter().find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()));
+            if let Some(px) = &envpx {
+                if reach(Some(px)) {
+                    eprintln!("==> run: reaching {target} via the current shell proxy env ({px})");
+                    let mut c = std::process::Command::new(&rest[0]);
+                    let e = c.args(&rest[1..]).exec_replace();
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            }
+            // 2. the macOS system proxy
+            if sysproxy_on {
+                let body = rowt_platform::read_proxy(&svc, "-getsecurewebproxy");
+                let field = |k: &str| body.lines().find(|l| l.starts_with(k))
+                    .and_then(|l| l.split_whitespace().nth(1)).unwrap_or("").to_string();
+                let (h, prt) = (field("Server:"), field("Port:"));
+                if !h.is_empty() && !prt.is_empty() {
+                    let u = format!("http://{h}:{prt}");
+                    if reach(Some(&u)) {
+                        eprintln!("==> run: reaching {target} via the system proxy ({u})");
+                        exec_with(Some((&u.clone(), u)));
+                    }
+                }
+            }
+            // 3. rowt's own port — only when the router is up AND the system
+            //    proxy is off, i.e. "rowt on but not hijacking everything".
+            if lifecycle::host_running(&ctx).is_some() && !sysproxy_on {
+                let u = format!("http://127.0.0.1:{}", ctx.port);
+                if reach(Some(&u)) {
+                    eprintln!("==> run: reaching {target} via rowt (127.0.0.1:{})", ctx.port);
+                    exec_with(Some((&u.clone(), format!("socks5h://127.0.0.1:{}", ctx.port))));
+                }
+            }
+            // 4. no proxy at all
+            if reach(None) {
+                eprintln!("==> run: {target} is reachable directly — running with no proxy");
+                exec_with(None);
+            }
+            die(&cfg, &format!("run: could not reach {target} via shell env, system proxy, rowt, or direct — not running '{}'", rest[0]));
+        }
         // Pin the escape server, or hand it back to the auto selector. Toggling
         // auto<->manual changes the config SHAPE (the urltest outbound appears
         // or disappears), so that path re-renders and restarts; a plain
@@ -1066,12 +1252,6 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                 .args(&rest).env("ROWT_BIN", &here).exec_replace();
             Err(err)
         }
-        "_splitter" => {
-            let hl = rest.first().map(PathBuf::from).ok_or("_splitter needs a log path")?;
-            let ld = rest.get(1).map(PathBuf::from).ok_or("_splitter needs a log dir")?;
-            lifecycle::run_splitter(&hl, &ld);
-            Ok(String::new())
-        }
         "render" => {
             let ctx = Ctx::new(cfg);
             lifecycle::cmd_render(&ctx)
@@ -1150,6 +1330,20 @@ fn main() -> ExitCode {
     // Falls through to the shell BEFORE the preamble runs, not after: bash's own
     // main() migrates, rotates and audits, and doing it on both sides would
     // double every audit line.
+    // The log splitter is an internal daemon this binary re-execs into, not a
+    // command anyone types. It must skip the whole preamble: migrating and
+    // rotating logs from inside a process that is about to WRITE those logs is
+    // wrong, and auditing it would put a BEGIN/END pair in the trail for every
+    // router start — noise in the one record that exists to be readable. The
+    // shell has no equivalent line because its splitter is a Python process.
+    if args.first().map(|s| s.as_str()) == Some("_splitter") {
+        let (Some(hl), Some(ld)) = (args.get(1), args.get(2)) else {
+            eprintln!("error: _splitter needs a log path and a log dir");
+            return ExitCode::FAILURE;
+        };
+        lifecycle::run_splitter(Path::new(hl), Path::new(ld));
+        return ExitCode::SUCCESS;
+    }
     match args.first() {
         None => delegate(&args), // no args: the shell's greeting + full command list
         Some(cmd) => {

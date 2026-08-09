@@ -263,7 +263,16 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-pub fn start_router(ctx: &Ctx, split: bool) -> Result<i32, String> {
+/// Returns the live `Child`, not just its pid, and the caller must keep it.
+///
+/// A spawned process this process never reaps becomes a ZOMBIE when it exits —
+/// and `kill(pid, 0)` SUCCEEDS on a zombie. So a sing-box that dies on startup
+/// (bad config, port already bound) would read as "running" for as long as
+/// rowt-rs lives. bash does not have this problem: it reaps its own background
+/// jobs, so its `kill -0` reports the truth. Found by the parity sandbox, whose
+/// fake sing-box exits immediately — the shell said "could not start router"
+/// and rowt-rs said "✓ running".
+pub fn start_router(ctx: &Ctx, split: bool) -> Result<std::process::Child, String> {
     fs::create_dir_all(ctx.logdir()).ok();
     // sing-box logs to STDERR. The shell merges the streams (`2>&1`) before the
     // splitter sees them; piping them separately and reading only one deadlocks
@@ -274,7 +283,7 @@ pub fn start_router(ctx: &Ctx, split: bool) -> Result<i32, String> {
                          shell_quote(&ctx.host_cfg().to_string_lossy()));
     let mut cmd = Command::new("sh");
     cmd.arg("-c").arg(&merged);
-    let pid = if split {
+    let child = if split {
         // The splitter is its own process, so both outlive this CLI — the shell
         // gets the same shape from process substitution.
         cmd.stdout(Stdio::piped()).stderr(Stdio::inherit());
@@ -286,16 +295,16 @@ pub fn start_router(ctx: &Ctx, split: bool) -> Result<i32, String> {
             .stdin(Stdio::from(out))
             .stdout(Stdio::null()).stderr(Stdio::null())
             .spawn().map_err(|e| format!("spawn splitter: {e}"))?;
-        child.id() as i32
+        child
     } else {
         let log = fs::OpenOptions::new().create(true).append(true).open(ctx.host_log())
             .map_err(|e| format!("open host.log: {e}"))?;
         let log2 = log.try_clone().map_err(|e| e.to_string())?;
         cmd.stdout(Stdio::from(log)).stderr(Stdio::from(log2));
-        cmd.spawn().map_err(|e| format!("spawn sing-box: {e}"))?.id() as i32
+        cmd.spawn().map_err(|e| format!("spawn sing-box: {e}"))?
     };
-    fs::write(ctx.pidfile(), format!("{pid}\n")).ok();
-    Ok(pid)
+    fs::write(ctx.pidfile(), format!("{}\n", child.id())).ok();
+    Ok(child)
 }
 
 /// `clash_curl` — the one shape every clash API call takes. Reproduced argv for
@@ -324,17 +333,55 @@ fn clash_ok(ctx: &Ctx) -> bool {
         .status().map(|s| s.success()).unwrap_or(false)
 }
 
-pub fn router_ready(ctx: &Ctx, tries: u32) -> bool {
+pub fn router_ready(ctx: &Ctx, tries: u32, child: &mut std::process::Child) -> bool {
     let mut seen = false;
     for _ in 0..tries {
         std::thread::sleep(std::time::Duration::from_secs(1));
+        // Reap first. Without this the exited child stays a zombie, `kill(pid,
+        // 0)` keeps succeeding, and `host_running` below would never notice.
+        if matches!(child.try_wait(), Ok(Some(_)) | Err(_)) { return false; }
         if host_running(ctx).is_none() { return false; }
         if clash_ok(ctx) { seen = true; }
     }
     seen
 }
 
+/// The metrics collector is located the way the monitor is: next to the shell,
+/// or in a local cargo build. Its lifetime is tied to the router's — a collector
+/// left polling a clash API that is gone spins on connection refusals.
+pub fn collector_bin(ctx: &Ctx) -> Option<PathBuf> {
+    let here = repo_root();
+    let mut cands: Vec<PathBuf> = vec![
+        here.join("bin/rowt-collector"),
+        here.join("rowt-monitor/target/release/rowt-collector"),
+        here.join("rowt-monitor/target/debug/rowt-collector"),
+    ];
+    cands.push(ctx.cfg.join("bin/rowt-collector"));
+    cands.into_iter().find(|c| c.is_file())
+}
+
+/// `$HERE` — the directory bin/rowt lives beside, i.e. the repo or brew prefix.
+fn repo_root() -> PathBuf {
+    std::env::current_exe().ok()
+        .and_then(|e| e.parent().map(|d| d.join("../..")))
+        .and_then(|d| d.canonicalize().ok())
+        .unwrap_or_default()
+}
+
+pub fn stop_collector(ctx: &Ctx) {
+    let pf = ctx.cfg.join("collector.pid");
+    if let Ok(p) = read(&pf).trim().parse::<i32>() {
+        if p > 0 { unsafe { libc::kill(p, libc::SIGTERM) }; }
+    }
+    let _ = fs::remove_file(&pf);
+    if let Some(b) = collector_bin(ctx) {
+        let _ = Command::new("pkill").arg("-f").arg(b)
+            .stdout(Stdio::null()).stderr(Stdio::null()).status();
+    }
+}
+
 pub fn router_stop(ctx: &Ctx) {
+    stop_collector(ctx);
     if let Some(pid) = host_running(ctx) {
         unsafe { libc::kill(pid, libc::SIGTERM) };
     }
@@ -443,17 +490,21 @@ pub fn router_up(ctx: &Ctx) -> Result<String, String> {
         cmd_render(ctx)?;
     }
     eprintln!("==> starting rule-router on 127.0.0.1:{}", ctx.port);
-    let pid = start_router(ctx, true)?;
-    if router_ready(ctx, 5) {
+    let mut child = start_router(ctx, true)?;
+    let pid = child.id();
+    if router_ready(ctx, 5, &mut child) {
         return Ok(format!("  ✓ running (pid {pid})"));
     }
     eprintln!("error: router did not come up healthy within 5s — retrying once (plain log)");
     router_stop(ctx);
+    let _ = child.try_wait();
     std::thread::sleep(std::time::Duration::from_secs(2));
-    let pid = start_router(ctx, false)?;
-    if router_ready(ctx, 5) {
+    let mut child = start_router(ctx, false)?;
+    let pid = child.id();
+    if router_ready(ctx, 5, &mut child) {
         return Ok(format!("  ✓ running (pid {pid})  [plain log]"));
     }
+    let _ = child.try_wait();
     ensure_no_limbo(ctx);
     Err(format!("router failed to come up healthy — see {}", ctx.host_log().display()))
 }

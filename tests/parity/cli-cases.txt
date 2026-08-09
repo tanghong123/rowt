@@ -132,3 +132,10 @@ metrics query
 metrics nosucharm
 router status
 PARITY_TIMEOUT=3 router log
+
+# ping / run
+ping
+PARITY_SCENARIO=router-up ping
+PARITY_SCENARIO=router-up ping alpha
+PARITY_SCENARIO=lanes-empty ping
+run
