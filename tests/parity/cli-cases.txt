@@ -93,3 +93,24 @@ _complete help
 _complete router
 _complete nosuchcommand
 _complete escape add
+
+# server / sub: the read arms. The rest drive the Python importers and stay
+# with the shell, so they are not listed as native.
+server
+server list
+server dump
+sub
+sub list
+sub dump
+server nosucharm
+sub nosucharm
+PARITY_SCENARIO=router-up server list
+# An empty list dumps a bare NEWLINE — `printf '%s\n' ""` — not nothing. Each
+# case gets a fresh sandbox, so emptiness has to come from a scenario rather
+# than from a `clear` in the case before it.
+PARITY_SCENARIO=lanes-empty block dump
+PARITY_SCENARIO=lanes-empty escape dump
+PARITY_SCENARIO=lanes-empty escape list
+PARITY_SCENARIO=lanes-empty sub dump
+PARITY_SCENARIO=lanes-empty sub list
+PARITY_SCENARIO=lanes-empty explain anything.example

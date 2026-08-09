@@ -9,7 +9,12 @@ build = "build.rs"
 [dependencies]
 rowt-core = { path = "../rowt-core" }
 rowt-platform = { path = "../rowt-platform" }
-serde_json = "1"
+# preserve_order: `server dump` is `jq .` over servers.json, and jq keeps a
+# file's key order. serde_json's default Map is a BTreeMap, which sorts them —
+# so a dump would round-trip the file into a different byte sequence than the
+# one the shell produces. The rendered configs are compared canonically, so
+# this is free there.
+serde_json = { version = "1", features = ["preserve_order"] }
 libc = "0.2"
 
 [[bin]]

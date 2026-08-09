@@ -41,18 +41,18 @@ is not 'does it work' but 'whose code ran, and what proves it'.
 | `route` | **native** | — |
 | `router` | **native** | cli-diff + boot-test |
 | `run` | legacy | — |
-| `server` | legacy | — |
+| `server` | **native** | cli-diff |
 | `shell-init` | **native** | cli-diff |
 | `skill` | legacy | — |
 | `status` | **native** | cli-diff |
-| `sub` | legacy | — |
+| `sub` | **native** | cli-diff |
 | `uninstall` | legacy | — |
 | `up` | **native** | boot-test |
 | `use` | legacy | — |
 | `vm` | legacy | — |
 | `watch` | legacy | cli-diff (passthrough) |
 
-**22 of 37 command arms answered natively**; the other 15 run in the shell.
+**24 of 37 command arms answered natively**; the other 13 run in the shell.
 
 Partial arms — native for some sub-commands, legacy for the rest.
 `native()` in crates/rowt-cli/src/main.rs is the authority:
@@ -63,4 +63,7 @@ Partial arms — native for some sub-commands, legacy for the rest.
                     | "errors" | "stats" | "log"
             ),
             "proxy" => matches!(sub, "" | "status" | "check" | "env"),
+            // read arms only — the rest drive the Python importers
+            "server" => matches!(sub, "" | "list" | "dump"),
+            "sub" => matches!(sub, "" | "list" | "dump"),
             "router" => matches!(sub, "" | "up" | "down" | "restart" | "status"),

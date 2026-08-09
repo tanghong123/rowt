@@ -72,6 +72,9 @@ fn native(cmd: &str, sub: &str) -> bool {
         ),
         "direct" | "connections" | "conns" | "_complete" => true,
         "proxy" => matches!(sub, "" | "status" | "check" | "env"),
+        // read arms only — the rest drive the Python importers
+        "server" => matches!(sub, "" | "list" | "dump"),
+        "sub" => matches!(sub, "" | "list" | "dump"),
         "router" => matches!(sub, "" | "up" | "down" | "restart" | "status"),
         _ => false,
     }
@@ -133,6 +136,11 @@ fn config_dir() -> PathBuf {
         Ok(x) if !x.is_empty() => PathBuf::from(x).join("rowt"),
         _ => PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/rowt"),
     }
+}
+
+fn set_mode(p: &Path, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode))
 }
 
 fn read(p: &Path) -> String {
@@ -525,7 +533,18 @@ fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<Str
             }
             Ok(o)
         }
-        "dump" => Ok(dump(&body).join("\n")),
+        // Same bare-newline shape as `sub dump` — an empty lane dumps one.
+        "dump" => {
+            match args.first() {
+                Some(f) => {
+                    std::fs::write(f, format!("{}\n", dump(&body).join("\n")))
+                        .map_err(|e| format!("write: {e}"))?;
+                    eprintln!("  dumped {label} list -> {f}");
+                }
+                None => println!("{}", dump(&body).join("\n")),
+            }
+            Ok(String::new())
+        }
         "add" | "rm" | "remove" | "clear" | "import" => {
             let op = match action {
                 "add" => Op::Add(args.to_vec()),
@@ -581,6 +600,98 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                 }
                 "log" => cmd_lane_log(&cfg, cmd),
                 _ => cmd_lane(&cfg, lane, &action, args),
+            }
+        }
+        // `server` / `sub`: the READ arms only. Everything that changes the pool
+        // — add, import, rm, clear, update — runs the Python importers and
+        // `rebuild_servers`, so it stays with the shell (PORTING.md §5 phase 6:
+        // 1,484 lines of tested parsing Python is the lowest-ROI thing in the
+        // tree to rewrite, and may stay Python indefinitely).
+        "server" => {
+            let ctx = Ctx::new(cfg.clone());
+            let servers: Vec<Value> =
+                serde_json::from_str(&read(&cfg.join("servers.json"))).unwrap_or_default();
+            match rest.first().map(|s| s.as_str()).unwrap_or("list") {
+                "list" => {
+                    if servers.is_empty() {
+                        die(&cfg, &format!("no servers — '{PROG} server add <link>' or '{PROG} sub add <url>'"));
+                    }
+                    let now = lifecycle::clash_selected(&ctx).unwrap_or_default();
+                    let live = if now.is_empty() { String::new() } else { format!(", live: {now}") };
+                    let mut o = format!("servers (selected: {}{live}):", ctx.sget("selected"));
+                    for s in &servers {
+                        let g = |k: &str| s.get(k).map(|v| match v {
+                            Value::String(x) => x.clone(), o => o.to_string(),
+                        }).unwrap_or_default();
+                        let tag = g("tag");
+                        let mark = if tag == now && !now.is_empty() { "* " } else { "  " };
+                        o.push_str(&format!("\n{mark}{} {} {}:{}",
+                            pad(&tag, 18), pad(&g("type"), 7), g("server"), g("server_port")));
+                    }
+                    Ok(o)
+                }
+                "dump" => {
+                    let manual = read(&cfg.join("manual.json"));
+                    let out = serde_json::from_str::<Value>(&manual)
+                        .map(|v| serde_json::to_string_pretty(&v).unwrap_or_else(|_| "[]".into()))
+                        .unwrap_or_else(|_| "[]".into());
+                    match rest.get(1) {
+                        Some(f) => {
+                            std::fs::write(f, format!("{out}\n")).map_err(|e| e.to_string())?;
+                            let _ = set_mode(Path::new(f), 0o600);
+                            eprintln!("  dumped manual servers -> {f} (contains secrets, chmod 600)");
+                            Ok(String::new())
+                        }
+                        None => { println!("{out}"); Ok(String::new()) }
+                    }
+                }
+                o => die(&cfg, &format!("usage: {PROG} server [list | add <link>… | rm <tag>… | clear | import <--detect|--from SRC [--output FILE]|--apply [--input FILE]> | dump [file]]  (got {o})")),
+            }
+        }
+        "sub" => {
+            let subs = read(&cfg.join("subs.txt"));
+            let active: Vec<&str> = subs.lines()
+                .filter(|l| { let t = l.trim(); !t.is_empty() && !t.starts_with('#') }).collect();
+            match rest.first().map(|s| s.as_str()).unwrap_or("list") {
+                "list" => {
+                    let mut o = String::from("subscriptions:");
+                    if subs.is_empty() {
+                        o.push_str("\n  (none)");
+                    } else {
+                        // `grep -n` numbers by position in the FILE, so a comment
+                        // line shifts the numbers of everything after it — and
+                        // those numbers are what `sub rm <n>` takes.
+                        for (i, l) in subs.lines().enumerate() {
+                            let t = l.trim();
+                            if !t.is_empty() && !t.starts_with('#') {
+                                o.push_str(&format!("\n  {}  {l}", i + 1));
+                            }
+                        }
+                    }
+                    let n = serde_json::from_str::<Vec<Value>>(&read(&cfg.join("manual.json")))
+                        .map(|v| v.len().to_string()).unwrap_or_else(|_| "0".into());
+                    o.push_str(&format!("\nmanual servers: {n}"));
+                    if subs.is_empty() {
+                        o.push_str(&format!("\n  {PROG} sub add <url> | rm <n|url> | update | clear"));
+                    }
+                    Ok(o)
+                }
+                "dump" => {
+                    let body = active.join("\n");
+                    match rest.get(1) {
+                        Some(f) => {
+                            std::fs::write(f, format!("{body}\n")).map_err(|e| e.to_string())?;
+                            eprintln!("  dumped subscriptions -> {f}");
+                            Ok(String::new())
+                        }
+                        // `printf '%s\n' "$entries"` prints a bare newline when
+                        // there are no subscriptions. main() suppresses an empty
+                        // result (so `_complete` offers no blank candidate), so
+                        // this one prints for itself.
+                        None => { println!("{body}"); Ok(String::new()) }
+                    }
+                }
+                o => die(&cfg, &format!("usage: {PROG} sub [list | add <url>… | rm <n|url> | update | clear | import [--apply] | dump [file]]  (got {o})")),
             }
         }
         // The hidden helper the completion functions call at tab-time. Driven by
