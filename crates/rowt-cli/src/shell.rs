@@ -214,3 +214,57 @@ where
     audit(cfg, &format!("END   {op} rc={rc} ({}s)", t0.elapsed().as_secs()));
     r
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The audit log records mutations, so a wrong answer here is either a
+    /// mutation that leaves no trace or a read that fills the trail with noise.
+    /// The table lives in two languages, and `cli-diff` only exercises the
+    /// handful of pairs that happen to be in cli-cases.txt — every branch the
+    /// shell's `case` distinguishes is pinned here instead.
+    #[test]
+    fn readonly_matches_the_shells_case_arms() {
+        for (cmd, arg) in [
+            ("status", ""), ("report", ""), ("explain", "x"), ("connections", ""),
+            ("monitor", ""), ("ping", ""), ("version", ""), ("run", "ls"),
+            ("onboard", ""), ("audit", "clear"), ("metrics", "top"), ("help", ""),
+        ] {
+            assert!(is_readonly(cmd, arg), "{cmd} {arg} should be read-only");
+        }
+        // The mixed commands: read-only in some forms, mutating in others.
+        for (cmd, arg) in [
+            ("proxy", "on"), ("proxy", "off"),
+            ("router", "up"), ("router", "down"), ("router", "restart"),
+            ("vm", "delete"), ("watch", "install"), ("watch", "refresh"),
+            ("config", "import"),
+            ("escape", "add"), ("corp", "sync"), ("block", "clear"), ("direct", "nonsense"),
+            ("server", "rm"), ("sub", "add"),
+            // The default is FALSE — better to over-record than miss a mutation.
+            ("up", ""), ("down", ""), ("reload", ""), ("nosuchcommand", ""),
+        ] {
+            assert!(!is_readonly(cmd, arg), "{cmd} {arg} should be audited");
+        }
+        for (cmd, arg) in [
+            ("proxy", "status"), ("proxy", ""), ("router", "status"), ("router", ""),
+            ("watch", "status"), ("config", "list"), ("config", ""),
+            ("escape", "errors"), ("escape", "list"), ("escape", "log"), ("escape", ""),
+            ("server", "list"), ("server", "show"), ("sub", "count"), ("sub", ""),
+        ] {
+            assert!(is_readonly(cmd, arg), "{cmd} {arg} should be read-only");
+        }
+    }
+
+    /// `${2:-status}` — an ABSENT subcommand takes the default, and the default
+    /// is the read-only one for every mixed command. `rowt proxy` is `proxy
+    /// status`; `rowt router` is `router status`, not `router up`.
+    #[test]
+    fn an_absent_subcommand_takes_the_read_only_default() {
+        assert!(is_readonly("proxy", ""));
+        assert!(is_readonly("router", ""));
+        assert!(is_readonly("vm", ""));
+        assert!(is_readonly("watch", ""));
+        assert!(is_readonly("config", ""));
+    }
+}

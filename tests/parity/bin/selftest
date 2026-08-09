@@ -17,6 +17,7 @@
 #   10.  …and the watchdog shadow must record it too
 #   11.  drop a proxy protocol           -> platform-diff must fire
 #   12.  reword an explain description  -> cli-diff must fire
+#   13.  (structural) native() must not claim an arm run() cannot answer
 #
 # Everything happens in a throwaway copy of the repo; the real tree is never
 # touched. Run it after changing the harness itself.
@@ -31,6 +32,14 @@ trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/bin" "$tmp/tests"
 cp -R "$DIR" "$tmp/tests/parity"
 cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+# The shell locates its sidecars relative to ITSELF ($HERE), while rowt-rs
+# locates them relative to its own executable — which stays in the real tree,
+# because the throwaway copy has no target/. Copying only bin/rowt therefore
+# makes the two disagree about whether rowt-collector exists at all, and
+# `_router_stop` pkills it only when it does. Link the sidecar tree so the copy
+# is a faithful one; without this, cli-diff fails on a difference the selftest
+# itself created.
+ln -sfn "$ROOT/rowt-monitor" "$tmp/rowt-monitor"
 P="$tmp/tests/parity/bin/parity"
 
 pass=0 fail=0
@@ -294,6 +303,48 @@ else
       ok "cli-diff caught the reworded lane description"
     fi
   fi
+fi
+
+# ---------------------------------------------------------------------------
+# Not a mutation test — a structural one, and the only check here that runs
+# nothing. `native()` decides which arms rowt-rs ANSWERS and which it hands to
+# the shell, and CLI-LEDGER.md is generated from it. A name listed there that
+# `run()` does not implement is the worst of both worlds: it stops falling
+# through to bash AND fails, while the published coverage counts it as ported.
+# That desync has happened once, so it is a gate now rather than a comment
+# asking for care.
+#
+# Compared statically rather than by invoking each name: several of these arms
+# start processes, exec a TUI, or reach for the system proxy, and a self-test
+# that has to be trusted not to do those things is not one worth having.
+echo "13. every name native() claims must be an arm of run()"
+src="$ROOT/crates/rowt-cli/src/main.rs"
+# Command names only. A native() arm line is indented exactly eight spaces and
+# starts with a pattern; the sub-command lists inside `matches!(…)` are indented
+# twelve, and scraping those too would compare command names against lane verbs.
+claimed="$(sed -n '/^fn native(/,/^}/p' "$src" | grep -E '^        ["|]' | sed 's/=>.*//' \
+           | grep -oE '"[a-z_-]+"' | tr -d '"' | sort -u)"
+# Top-level arms only — exactly eight spaces of indent. A nested match inside an
+# arm is a different question, and counting its patterns is how the OLD ledger
+# managed to report `status` as ported because `proxy` mentioned it.
+answered="$(sed -n '/^fn run(/,/^}/p' "$src" | grep -E '^        "' | sed 's/=>.*//' \
+            | grep -oE '"[a-z_-]+"' | tr -d '"' | sort -u)"
+# Routed before dispatch reaches run(), in main() and shell::dispatch.
+preroute="help -h --help --version -V"
+missing=""
+for n in $claimed; do
+  # preroute first, and `grep -x --` after: several of these names begin with a
+  # dash, which grep would otherwise read as its own flags.
+  case " $preroute " in *" $n "*) continue ;; esac
+  printf '%s\n' "$answered" | grep -qxF -- "$n" && continue
+  missing="$missing $n"
+done
+if [ -n "$missing" ]; then
+  bad "native() claims arms run() does not answer:$missing"
+elif [ -z "$claimed" ] || [ -z "$answered" ]; then
+  bad "could not read native()/run() — did the dispatch move?"
+else
+  ok "native() and run() agree on every claimed arm"
 fi
 
 echo

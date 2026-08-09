@@ -196,9 +196,27 @@ revertible and gated.
 | **1** ◑ | `rowt-core::render` — replace the giant jq program. bash calls `rowt-rs render` internally. | **render done** — `crates/rowt-render`, 18/18 cases canonically identical on host + vm (`parity render-matrix`), and identical against the real 22-server config. Remaining: throwaway-port outbound oracle, bash cutover, shadow window |
 | **2** ✅ | classify/explain, lane set logic, absorb `corp-sync-reconcile.py` | **done** — classify: 9/9 cases × 92 destinations identical on `(lane, reason)`; lane edits: 12/12 cases identical across all three files + messages; reconcile: 210 generated cases identical to the Python. `selftest` 9/9 |
 | **3** ◑ | watchdog: FSM into core, effects via `PlatformMac`; `cmd_watch` execs the Rust tick | **FSM + shadow done** — `rowt-core::watch`, 17 unit tests replaying §11's decision table; `parity watch-diff` 5/5; `ROWT_WATCH_SHADOW=1` compares the shell's decisions against the FSM's plan on every real tick, feeding it the tick's own captive verdict rather than re-probing. Remaining: `PlatformMac` effects, the `cmd_watch` cutover, and **time** — the shadow window itself |
-| **4** ◑ | CLI. Built as `rowt-rs` alongside the shell first, so each command lands with evidence; only then does bash reduce to a wrapper and get deleted. Formula ships the prebuilt binary (monitor-asset pattern). | `parity cli-diff` — identical stdout, exit status and lane files, command for command (16 today); then the full ledger green + `ROWT_IMPL` escape hatch (§6.6) |
+| **4** ◑ | CLI. Built as `rowt-rs` alongside the shell first, so each command lands with evidence; only then does bash reduce to a wrapper and get deleted. Formula ships the prebuilt binary (monitor-asset pattern). | **front door complete** — every command RUNS through rowt-rs: 29 of 37 arms answered natively, the other 8 handed to bin/rowt via the §6.6 fallthrough, so functional completeness does not wait on the last arm. `parity cli-diff` compares stdout, exit status, lane files, the **argv trace** and the **audit log** over 107 cases; `selftest` 13/13. Remaining: the 8 delegating arms (below), then the `ROWT_IMPL` cutover |
 | **5** | `PlatformLinux` + tun mode + systemd units; CI matrix (macOS + ubuntu — core tests run on both, platform tests feature-gated); linux tar assets | fresh-VM install → onboard → probe → captive drill; VPN-coexistence drill with Tailscale up |
 | 6 (opt) | port the import pipeline (1,484 lines of parsing Python). Already portable and tested — lowest ROI, may stay Python indefinitely. | existing py test suite as fixtures |
+
+#### Why eight arms still delegate
+
+Not "not got to yet" — each fails one of the two things the gate can check, so
+porting them would buy a `native` label without evidence:
+
+| Arm | Why it stays with the shell |
+|---|---|
+| `fetch` | Downloads release tarballs from GitHub. Not stageable in the sandbox, not safe to live-test repeatedly. |
+| `onboard` | Runs `python3 <importer> --detect` against real client config dirs and reads the network's DHCP search domains. Its output embeds live machine state by design. |
+| `probe` | Decides host-vs-vm by dialling. The dial IS the behavior, and the sandbox cannot stage the corp-VPN-up network it exists to detect. |
+| `report` | Writes a timestamped diagnostic file; live-verified delegating correctly. |
+| `vm` | Lima, macOS-only. §4.1 argues it should not be ported at all — Linux gets tun mode instead. |
+| `watch` | The launchd plist and the sudoers rule are **Phase 3's** remaining half, not Phase 4's. The FSM is already in `rowt-core`. |
+| `skill`, `uninstall` | Easy, and that is the trap. `uninstall --purge` deletes the config directory and edits rc files in `$HOME`; comparing its *output* proves nothing about what it removed, and `snapshot_fs` cannot see either. A destructive path whose effects the gate cannot observe does not get ported for the label. |
+
+The fallthrough is guarded against recursion (`ROWT_DELEGATED`), because
+bin/rowt already reaches for Rust binaries and §6.6 has it becoming a wrapper.
 
 Rough effort at this repo's session cadence: P0 ≈ a day, P1 2–3 d, P2 2 d,
 P3 3–4 d, P4 2–3 d, P5 4–5 d — order of three focused weeks total, spreadable.
@@ -338,6 +356,16 @@ If the Rust version "fixes" something the bash did wrong, that is still a
 divergence. Parity lands first; the fix lands as a **separate** commit
 afterward, with the golden update in that commit. Otherwise "it's a fix"
 becomes the channel through which accidental regressions get laundered.
+
+The running list — each is reproduced in Rust today, with a comment pointing
+here, and each is a shell-side commit waiting to be written:
+
+| Behavior | Where | Why it is not "just fixed" |
+|---|---|---|
+| `domain_suffix` matching has no dot boundary, so `example.com` also captures `xexample.com` | `_longest_domain_hit`, mirrored in `classify::longest_domain_hit` | It matches what sing-box's `domain_suffix` actually does, so "fixing" the explainer alone would make it *disagree with the router*. Both sides move together or neither does. |
+| `resolve_ip` is defined **twice**; the second wins, so `explain` uses dig-then-dscacheutil and `probe` uses a different one | bin/rowt:1843 and :2853 | Two call sites currently depend on the two different behaviors. |
+| A host render probes the interface **twice** — `build_escape_outbounds host` runs `detect_iface`, then `assemble_host` runs it again | bin/rowt:1203, :1304 | Six subprocess calls where three would do. Collapsing them changes the argv trace, which is a gate; it needs its own commit and a golden update. |
+| A domain whose failures tie across two categories gets whichever `for (k in cc)` reaches first | `lane_errors`'s awk | Genuinely unspecified, so there is no behavior to copy. rowt-rs takes the lexicographically first to be repeatable. Do not build a fixture that hits this — it would compare two implementations against a coin flip. |
 
 ### 6.8 Coverage ledger
 

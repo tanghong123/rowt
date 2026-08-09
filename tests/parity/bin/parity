@@ -169,10 +169,23 @@ snapshot_fs() {  # $1=outdir — the config tree, minus what is volatile by desi
 
 # ---------------------------------------------------------------- normalize
 
+# The tree the RUST binary was built in, which is not always $ROOT. The shell
+# finds its sidecars relative to bin/rowt ($HERE); rowt-rs finds them relative
+# to its own executable. Those are the same directory in every real layout —
+# repo checkout or brew prefix — but the selftest runs a COPY of bin/rowt while
+# the binary stays put, so the two name the same collector by two paths. Both
+# become <REPO>, because "which tree" is not what any of these gates is asking.
+rust_root() {
+  local b="${PARITY_RUST_CLI:-$ROOT/target/release/rowt-rs}"
+  ( cd -P "$(dirname "$b")/../.." 2>/dev/null && pwd ) || true
+}
+
 normalize() {    # $1=file $2=outdir — strip everything that legitimately varies
   [ -f "$1" ] || { : ; return 0; }
+  local rr; rr="$(rust_root)"
   sed -e "s#$2#<RUN>#g" \
       -e "s#$ROOT#<REPO>#g" \
+      ${rr:+-e "s#$rr#<REPO>#g"} \
       -f "$NORMALIZE" "$1"
 }
 
