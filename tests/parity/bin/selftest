@@ -253,11 +253,12 @@ else
   if ! "$P" platform-diff >/dev/null 2>&1; then
     bad "platform-diff already fails before the mutation"
   else
-    perl -0pi -e 's/^  sudo -n \/usr\/sbin\/networksetup -setsecurewebproxystate "\$1" off.*\n//m' "$tmp/bin/rowt"
+    # matches the post-refactor form: every proxy write goes through _ns_write
+    perl -0pi -e 's/^  _ns_write 1 -setsecurewebproxystate "\$1" off.*\n//m' "$tmp/bin/rowt"
     # Counted into a variable, not piped: `grep -c` exits 1 when the count is
     # zero, and under pipefail that turns "the mutation worked" into "it failed".
     # Fourth appearance of this trap in this harness.
-    left="$(grep -c 'setsecurewebproxystate "\$1" off' "$tmp/bin/rowt" || true)"
+    left="$(grep -c '_ns_write 1 -setsecurewebproxystate "\$1" off' "$tmp/bin/rowt" || true)"
     if [ "$left" = 0 ]; then
       if "$P" platform-diff >/dev/null 2>&1; then
         bad "platform-diff passed with a protocol dropped from the captive path"
