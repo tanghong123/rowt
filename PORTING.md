@@ -200,23 +200,47 @@ revertible and gated.
 | **5** | `PlatformLinux` + tun mode + systemd units; CI matrix (macOS + ubuntu — core tests run on both, platform tests feature-gated); linux tar assets | fresh-VM install → onboard → probe → captive drill; VPN-coexistence drill with Tailscale up |
 | 6 (opt) | port the import pipeline (1,484 lines of parsing Python). Already portable and tested — lowest ROI, may stay Python indefinitely. | existing py test suite as fixtures |
 
-#### Why eight arms still delegate
+#### The last two arms, and the order they have to land in
 
-Not "not got to yet" — each fails one of the two things the gate can check, so
-porting them would buy a `native` label without evidence:
+`onboard` and `watch` are all that still delegate. `watch` is not simply
+"unported" — it is blocked, and on something worth naming:
 
-| Arm | Why it stays with the shell |
-|---|---|
-| `fetch` | Downloads release tarballs from GitHub. Not stageable in the sandbox, not safe to live-test repeatedly. |
-| `onboard` | Runs `python3 <importer> --detect` against real client config dirs and reads the network's DHCP search domains. Its output embeds live machine state by design. |
-| `probe` | Decides host-vs-vm by dialling. The dial IS the behavior, and the sandbox cannot stage the corp-VPN-up network it exists to detect. |
-| `report` | Writes a timestamped diagnostic file; live-verified delegating correctly. |
-| `vm` | Lima, macOS-only. §4.1 argues it should not be ported at all — Linux gets tun mode instead. |
-| `watch` | The launchd plist and the sudoers rule are **Phase 3's** remaining half, not Phase 4's. The FSM is already in `rowt-core`. |
-| `skill`, `uninstall` | Easy, and that is the trap. `uninstall --purge` deletes the config directory and edits rc files in `$HOME`; comparing its *output* proves nothing about what it removed, and `snapshot_fs` cannot see either. A destructive path whose effects the gate cannot observe does not get ported for the label. |
+    watch tick  --(Action::CorpSync)-->  corp_sync
+    corp_sync   --> _dhcp_search_domains --> net-detect.py
+
+So the tick cannot be native until `corp_sync` is, and `corp_sync` reaches
+into the Python. That makes the order fixed rather than a preference:
+
+1. **`net-detect.py` -> Rust** (147 lines, already `--input FILE` testable —
+   §1 calls it the target shape). Gate it the way `reconcile` was gated.
+2. **`corp_sync` + `corp_suggest` -> Rust** (~140 lines with helpers; the hard
+   half, the CIDR superset reconcile, is ALREADY `rowt-core::reconcile`). This
+   also lands the `corp sync` / `corp suggest` sub-arms.
+3. **`watch` -> Rust.** The decisions are already ported —
+   `rowt-core::watch::{guard, netcheck}` with 17 tests replaying DESIGN.md §11.
+   What remains is the effects layer: the LaunchAgent plist, the scoped
+   sudoers, and carrying out the `Action`s. A draft of it sits in
+   `docs/wip/watch-effects.rs.draft`, deliberately NOT wired into the build —
+   an unwired module in `src/` rots, and a half-wired one fails the honest way
+   only by accident.
+4. **`onboard`** — independent of the above except that its checklist calls
+   `detect_import_sources` (the Python importers) and `_dhcp_search_domains`.
 
 The fallthrough is guarded against recursion (`ROWT_DELEGATED`), because
 bin/rowt already reaches for Rust binaries and §6.6 has it becoming a wrapper.
+
+**Python.** The decision (2026-08-09) is to port all of it — one language in
+the repo. It splits into three groups with different urgency, not one job:
+`corp-sync-reconcile.py` is already done and `fake-portal.py` is a test
+harness; `net-detect.py` + `geosite-lookup.py` (~330 lines) are pure parsers on
+hot paths and go next; the import pipeline (`vless-parse`, `foreign-import`,
+`sr-import`, `import-merge` — 1,302 lines, 73% of the total) is last, because
+it parses CREDENTIALS, where a subtle mis-parse yields a silently wrong
+outbound rather than an error, and because its 734 lines of existing tests
+become the differential corpus that makes the port safe. Porting it retires
+`depends_on "python@3.12"` from the Formula, which is the concrete prize.
+Sequenced AFTER the bash port finishes: two rewrites converging on the same
+files is how a differential harness stops telling you which side broke.
 
 Rough effort at this repo's session cadence: P0 ≈ a day, P1 2–3 d, P2 2 d,
 P3 3–4 d, P4 2–3 d, P5 4–5 d — order of three focused weeks total, spreadable.
