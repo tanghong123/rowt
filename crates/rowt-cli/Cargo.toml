@@ -9,6 +9,8 @@ build = "build.rs"
 [dependencies]
 rowt-core = { path = "../rowt-core" }
 rowt-platform = { path = "../rowt-platform" }
+serde_json = "1"
+libc = "0.2"
 
 [[bin]]
 name = "rowt-rs"

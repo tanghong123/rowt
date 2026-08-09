@@ -14,7 +14,7 @@ this is how much of it could stand in, and how much of that is proven.
 | `conns` | — | — |
 | `corp` | yes | yes |
 | `direct` | — | — |
-| `down` | — | — |
+| `down` | yes | — |
 | `escape` | yes | yes |
 | `explain` | yes | yes |
 | `fetch` | — | — |
@@ -25,22 +25,22 @@ this is how much of it could stand in, and how much of that is proven.
 | `ping` | — | — |
 | `probe` | — | — |
 | `proxy` | yes | yes |
-| `reload` | — | — |
-| `render` | — | — |
+| `reload` | yes | — |
+| `render` | yes | — |
 | `report` | — | — |
-| `restart` | — | — |
+| `restart` | yes | — |
 | `route` | yes | — |
-| `router` | — | — |
+| `router` | yes | — |
 | `run` | — | — |
 | `server` | — | — |
 | `shell-init` | — | — |
 | `skill` | — | — |
-| `status` | — | — |
+| `status` | yes | — |
 | `sub` | — | — |
 | `uninstall` | — | — |
-| `up` | — | — |
+| `up` | yes | — |
 | `use` | — | — |
 | `vm` | — | — |
 | `watch` | — | — |
 
-**6 of 37 command arms.** The rest still run only in the shell.
+**13 of 37 command arms.** The rest still run only in the shell.

@@ -13,6 +13,8 @@
 //! lines of help text are ported, but until then it would only add a dependency
 //! and a help format that does not match the shell's.
 
+mod lifecycle;
+use lifecycle::Ctx;
 use rowt_core::classify::{classify, ClassifyInput, Lane};
 use rowt_core::lanes::{apply, dump, Lanes, Op};
 use rowt_platform::{Mac, Platform};
@@ -260,6 +262,61 @@ fn run() -> Result<String, String> {
             cmd_lane(&cfg, lane, &action, &rest[1.min(rest.len())..])
         }
         "version" | "--version" | "-V" => Ok(format!("{PROG} {}", env!("ROWT_SHELL_VERSION"))),
+        // hidden: the log splitter re-execs this binary so sing-box's output is
+        // classified by a process that outlives the CLI
+        "_splitter" => {
+            let hl = rest.first().map(PathBuf::from).ok_or("_splitter needs a log path")?;
+            let ld = rest.get(1).map(PathBuf::from).ok_or("_splitter needs a log dir")?;
+            lifecycle::run_splitter(&hl, &ld);
+            Ok(String::new())
+        }
+        "render" => {
+            let ctx = Ctx::new(cfg);
+            lifecycle::cmd_render(&ctx)
+        }
+        "router" => {
+            let ctx = Ctx::new(cfg);
+            match rest.first().map(|s| s.as_str()).unwrap_or("up") {
+                "up" => lifecycle::router_up(&ctx),
+                "down" => Ok(lifecycle::router_down(&ctx)),
+                "restart" => { lifecycle::router_stop(&ctx); lifecycle::router_up(&ctx) }
+                "status" => Ok(match lifecycle::host_running(&ctx) {
+                    Some(pid) => format!("  router: running (pid {pid}) on 127.0.0.1:{}", ctx.port),
+                    None => format!("  router: stopped (would listen on 127.0.0.1:{})", ctx.port),
+                }),
+                o => Err(format!("usage: {PROG} router [up|down|restart|status] (got {o})")),
+            }
+        }
+        "reload" => {
+            let ctx = Ctx::new(cfg);
+            lifecycle::cmd_render(&ctx)?;
+            lifecycle::router_stop(&ctx);
+            let r = lifecycle::router_up(&ctx)?;
+            let p = lifecycle::proxy_on(&ctx, false);
+            eprintln!("==> reloaded (mode={}).", ctx.mode());
+            Ok(format!("{r}\n{p}"))
+        }
+        "restart" => {
+            let ctx = Ctx::new(cfg);
+            lifecycle::router_stop(&ctx);
+            lifecycle::router_up(&ctx)
+        }
+        "up" => {
+            let ctx = Ctx::new(cfg);
+            lifecycle::sset(&ctx, "intent", "up");
+            lifecycle::cmd_render(&ctx)?;
+            lifecycle::router_stop(&ctx);
+            let r = lifecycle::router_up(&ctx)?;
+            let p = lifecycle::proxy_on(&ctx, false);
+            Ok(format!("{r}\n{p}"))
+        }
+        "down" => {
+            let ctx = Ctx::new(cfg);
+            lifecycle::sset(&ctx, "intent", "down");
+            let p = lifecycle::proxy_off(&ctx);
+            let r = lifecycle::router_down(&ctx);
+            Ok(format!("{p}\n{r}"))
+        }
         "proxy" => {
             let action = rest.first().map(|s| s.as_str()).unwrap_or("status");
             let (out, ok) = cmd_proxy(action, rest.get(1).map(|s| s.as_str()))?;
