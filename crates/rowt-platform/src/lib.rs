@@ -73,6 +73,13 @@ impl Mac {
     /// `sudo networksetup …` for the interactive ones — the shell distinguishes
     /// them and so must this, because the argv differs.
     fn sudo_networksetup(&self, passwordless: bool, args: &[&str]) -> Result<(), String> {
+        // The same single guard the shell has (`_ns_write`). A private config
+        // directory and a private port do not isolate the system proxy — that
+        // setting is global — so testing an instance safely needs the write path
+        // itself to be switchable, in both implementations.
+        if std::env::var("ROWT_NO_SYSPROXY").as_deref() == Ok("1") {
+            return Ok(());
+        }
         let mut a: Vec<&str> = Vec::new();
         if passwordless {
             a.push("-n");

@@ -190,6 +190,36 @@ did not ask.
 Bundles are mode 700 and **local only** — they contain your DNS configuration,
 network names and internal addresses.
 
+## Does it actually work? (`bin/boot-test`)
+
+Every other gate compares two implementations. This one asks what comparison
+cannot: sing-box is handed the **Rust** render and real traffic is pushed
+through each lane.
+
+    tests/parity/bin/boot-test                       # synthetic servers
+    tests/parity/bin/boot-test --server <tag>        # …plus a real tunnel
+
+It renders with both, makes sing-box judge the Rust output, boots that config on
+a private port, and drives the direct, block and escape lanes for real — then
+runs `reload` and `router down` and checks the machine is untouched.
+
+**The safety rule it encodes, learned by breaking it:** a private config
+directory and a private port do *not* isolate the system proxy. That setting is
+global, and `up`, `down`, `reload`, `restart` and `router down` all reach for
+it — `reload` re-points it at the test instance's port, `router down` turns it
+off. Running a second instance without accounting for that will break the
+machine's networking, which is exactly what happened here first.
+
+So every system-proxy write in both implementations now goes through a single
+guarded function — `_ns_write` in the shell, `sudo_networksetup` in
+rowt-platform — and `ROWT_NO_SYSPROXY=1` turns them all into no-ops while reads
+keep working. With the guard set, the lifecycle commands that used to be too
+dangerous to test are the ones this exercises. The test verifies the guard held
+by comparing the system proxy before and after.
+
+`--server` copies real credentials into a mode-700 scratch directory removed on
+exit, including on failure. Local only; never CI.
+
 ## Characterized behavior worth knowing
 
 Facts the golden pins down, none of which are bugs introduced here. Under

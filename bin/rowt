@@ -53,7 +53,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.2.7"
+ROWT_VERSION="3.2.8"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -2309,6 +2309,22 @@ _proxy_any_on() {
 # Prints clear | captive | unknown. Only definite portal evidence counts as
 # captive: an HTTP redirect, or a 200 whose body is not the expected Success
 # page. Timeouts/offline are 'unknown' so a flaky network never drops the proxy.
+# ---- the ONLY place the macOS system proxy is written ----------------------
+# Every change to the system proxy goes through here, so there is exactly one
+# thing to guard. ROWT_NO_SYSPROXY=1 turns all of them into no-ops (reads still
+# work), which is what makes it safe to run a second instance on another port:
+# a private config dir and a private port do NOT isolate the system proxy —
+# that setting is global, and `reload`/`up`/`down` all reach for it.
+_ns_write() { # $1 = 1 for the passwordless watchdog form, 0 for interactive
+  local pw="$1"; shift
+  if [ "${ROWT_NO_SYSPROXY:-0}" = 1 ]; then
+    _NS_SKIPPED=1
+    return 0
+  fi
+  if [ "$pw" = 1 ]; then sudo -n /usr/sbin/networksetup "$@"
+  else                   sudo networksetup "$@"; fi
+}
+
 _captive_state() {
   [ "${ROWT_CAPTIVE_CHECK:-1}" = 1 ] || { echo unknown; return 0; }
   local url="${ROWT_CAPTIVE_URL:-http://captive.apple.com/hotspot-detect.html}"
@@ -2326,14 +2342,14 @@ _captive_state() {
 # sudo -n under the watch sudoers, and never touch proxy_intent. After restore
 # the normal tick reconciles anything else that drifted while walled off.
 _captive_proxy_off() { # $1 = network service
-  sudo -n /usr/sbin/networksetup -setsocksfirewallproxystate "$1" off 2>/dev/null || return 1
-  sudo -n /usr/sbin/networksetup -setwebproxystate "$1" off 2>/dev/null || true
-  sudo -n /usr/sbin/networksetup -setsecurewebproxystate "$1" off 2>/dev/null || true
+  _ns_write 1 -setsocksfirewallproxystate "$1" off 2>/dev/null || return 1
+  _ns_write 1 -setwebproxystate "$1" off 2>/dev/null || true
+  _ns_write 1 -setsecurewebproxystate "$1" off 2>/dev/null || true
 }
 _captive_proxy_on() { # $1 = network service
-  sudo -n /usr/sbin/networksetup -setsocksfirewallproxystate "$1" on 2>/dev/null || return 1
-  sudo -n /usr/sbin/networksetup -setwebproxystate "$1" on 2>/dev/null || true
-  sudo -n /usr/sbin/networksetup -setsecurewebproxystate "$1" on 2>/dev/null || true
+  _ns_write 1 -setsocksfirewallproxystate "$1" on 2>/dev/null || return 1
+  _ns_write 1 -setwebproxystate "$1" on 2>/dev/null || true
+  _ns_write 1 -setsecurewebproxystate "$1" on 2>/dev/null || true
 }
 
 # ---- discovery journal (watchdog; DESIGN.md §5) ------------------------------
@@ -2423,12 +2439,12 @@ cmd_proxy() {
       else
         if [ "$set_proxy" = 1 ]; then
           info "pointing '$svc' system proxy at 127.0.0.1:$PORT (SOCKS + HTTP; needs admin)"
-          sudo networksetup -setsocksfirewallproxy "$svc" 127.0.0.1 "$PORT" \
-            && sudo networksetup -setsocksfirewallproxystate "$svc" on \
-            && sudo networksetup -setwebproxy "$svc" 127.0.0.1 "$PORT" \
-            && sudo networksetup -setwebproxystate "$svc" on \
-            && sudo networksetup -setsecurewebproxy "$svc" 127.0.0.1 "$PORT" \
-            && sudo networksetup -setsecurewebproxystate "$svc" on \
+          _ns_write 0 -setsocksfirewallproxy "$svc" 127.0.0.1 "$PORT" \
+            && _ns_write 0 -setsocksfirewallproxystate "$svc" on \
+            && _ns_write 0 -setwebproxy "$svc" 127.0.0.1 "$PORT" \
+            && _ns_write 0 -setwebproxystate "$svc" on \
+            && _ns_write 0 -setsecurewebproxy "$svc" 127.0.0.1 "$PORT" \
+            && _ns_write 0 -setsecurewebproxystate "$svc" on \
             || die "could not set system proxy (admin required). Run: sudo -v, then '$PROG proxy on'"
         else
           echo "  proxy already pointing at 127.0.0.1:$PORT — left as is"
@@ -2441,8 +2457,12 @@ cmd_proxy() {
           # _proxy_bypass_want for the why). One source of truth: that function.
           local -a _bp=(); local _b
           while IFS= read -r _b; do _bp+=("$_b"); done < <(_proxy_bypass_want)
-          sudo networksetup -setproxybypassdomains "$svc" "${_bp[@]}" >/dev/null 2>&1 || true
+          _ns_write 0 -setproxybypassdomains "$svc" "${_bp[@]}" >/dev/null 2>&1 || true
+          if [ "${_NS_SKIPPED:-0}" = 1 ]; then
+          echo "  (system proxy left alone — ROWT_NO_SYSPROXY=1)"
+        else
           echo "  ✓ proxy bypass set (*.local / private ranges / captive-probe hosts)"
+        fi
         else
           echo "  ✓ local/mDNS bypass already set — left as is"
         fi
@@ -2451,9 +2471,9 @@ cmd_proxy() {
     off)
       [ -n "$svc" ] || { echo "  no active network service — proxy already effectively off"; return 0; }
       if _proxy_any_on "$svc"; then
-        sudo networksetup -setsocksfirewallproxystate "$svc" off || true
-        sudo networksetup -setwebproxystate "$svc" off || true
-        sudo networksetup -setsecurewebproxystate "$svc" off || true
+        _ns_write 0 -setsocksfirewallproxystate "$svc" off || true
+        _ns_write 0 -setwebproxystate "$svc" off || true
+        _ns_write 0 -setsecurewebproxystate "$svc" off || true
         echo "  proxy off for '$svc'"
       else
         echo "  proxy already off for '$svc' — no change (no sudo)"
@@ -3474,9 +3494,9 @@ PLIST
         if [ -n "$gsvc" ] && _proxy_pointing_ok "$gsvc"; then
           _watch_log "rowt not running but '$gsvc' proxy still set to 127.0.0.1:$PORT — clearing (stale, no-limbo)"
           _audit "watchdog: cleared stale system proxy on '$gsvc' (router down, intent=${intent:-unset})"
-          sudo -n /usr/sbin/networksetup -setsocksfirewallproxystate "$gsvc" off 2>/dev/null || true
-          sudo -n /usr/sbin/networksetup -setwebproxystate       "$gsvc" off 2>/dev/null || true
-          sudo -n /usr/sbin/networksetup -setsecurewebproxystate "$gsvc" off 2>/dev/null || true
+          _ns_write 1 -setsocksfirewallproxystate "$gsvc" off 2>/dev/null || true
+          _ns_write 1 -setwebproxystate       "$gsvc" off 2>/dev/null || true
+          _ns_write 1 -setsecurewebproxystate "$gsvc" off 2>/dev/null || true
         fi
         exit 0
       fi

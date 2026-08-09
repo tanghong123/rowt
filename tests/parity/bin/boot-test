@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+#
+# boot-test — does the Rust-rendered configuration actually WORK?
+#
+# Every other gate compares two implementations. This one asks the only question
+# comparison cannot answer: sing-box is handed the Rust render, and real traffic
+# is pushed through each lane. Canonical equality says the two renders agree; it
+# does not say the thing they agree on boots and routes.
+#
+#   tests/parity/bin/boot-test              # synthetic servers: direct + block
+#   tests/parity/bin/boot-test --server TAG # add a real escape server from your
+#                                           # own config, so the tunnel is tested
+#
+# LOCAL ONLY, and never part of CI: with --server it copies real credentials into
+# a mode-700 scratch directory, which is removed on exit including on failure.
+#
+# ---------------------------------------------------------------------------
+# THE SAFETY RULE, learned by breaking it: an isolated config directory and a
+# private port do NOT isolate the system proxy. That is one global setting, and
+# `up`/`down`/`reload`/`restart`/`router down` all reach for it — `reload`
+# re-points it at this instance's port, and `router down` turns it off.
+#
+# Hence ROWT_NO_SYSPROXY=1, exported below. Both implementations funnel every
+# system-proxy write through one guarded function (`_ns_write` in the shell,
+# `sudo_networksetup` in rowt-platform), so with the guard set the whole
+# lifecycle is safe to exercise — which is the point: the interesting paths are
+# exactly the ones that used to be too dangerous to run.
+# ---------------------------------------------------------------------------
+set -euo pipefail
+
+SELF="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DIR="$(cd -P "$SELF/.." && pwd)"
+ROOT="$(cd -P "$DIR/../.." && pwd)"
+ROWT="$ROOT/bin/rowt"
+RENDER="${PARITY_RUST_RENDER:-$ROOT/target/release/rowt-render}"
+PORT="${BOOT_PORT:-17890}"
+CLASH="${BOOT_CLASH:-19090}"
+REAL_CFG="${XDG_CONFIG_HOME:-$HOME/.config}/rowt"
+
+server=""
+[ "${1:-}" = "--server" ] && server="${2:?--server needs a tag}"
+
+pass=0 fail=0
+ok()  { echo "  ok   — $*"; pass=$((pass + 1)); }
+bad() { echo "  FAIL — $*"; fail=$((fail + 1)); }
+
+S="$(mktemp -d "${TMPDIR:-/tmp}/rowt-boot.XXXXXX")"; chmod 700 "$S"
+pidfile="$S/rowt/host.pid"
+cleanup() {
+  local p; p="$(cat "$pidfile" 2>/dev/null || true)"
+  [ -n "$p" ] && kill "$p" 2>/dev/null || true
+  rm -rf "$S"
+}
+trap cleanup EXIT
+
+# Record the system proxy up front and verify it afterwards — the whole point is
+# that this test is invisible to the machine it runs on.
+proxy_before="$(networksetup -getsecurewebproxy Wi-Fi 2>/dev/null | tr '\n' ' ')"
+
+mkdir -p "$S/rowt/bin" "$S/rowt/log" "$S/rowt/cache"
+cp -R "$DIR/fixtures/config/." "$S/rowt/"
+ln -sf "$REAL_CFG/bin/sing-box" "$S/rowt/bin/sing-box"
+[ -x "$S/rowt/bin/sing-box" ] || { echo "no sing-box at $REAL_CFG/bin — run 'rowt fetch host'"; exit 1; }
+
+if [ -n "$server" ]; then
+  jq --arg t "$server" '[.[] | select(.tag==$t)]' "$REAL_CFG/servers.json" > "$S/rowt/servers.json"
+  chmod 600 "$S/rowt/servers.json"
+  [ "$(jq length "$S/rowt/servers.json")" = 1 ] || { echo "no server tagged '$server'"; exit 1; }
+  # a destination that only resolves through a working tunnel
+  printf '# boot test\nwww.google.com\n' > "$S/rowt/escape-domains.txt"
+else
+  # well-formed but unroutable, so the escape lane is expected to fail
+  cat > "$S/rowt/servers.json" <<'JSON'
+[{"type":"vless","tag":"alpha","server":"203.0.113.10","server_port":443,
+  "uuid":"00000000-0000-4000-8000-000000000001",
+  "tls":{"enabled":true,"server_name":"alpha.example"}}]
+JSON
+fi
+
+export XDG_CONFIG_HOME="$S" ROWT_PORT="$PORT" ROWT_CLASH_PORT="$CLASH"
+export ROWT_NO_SYSPROXY=1   # the whole reason the lifecycle below is safe
+
+echo "1. render, both implementations, and let sing-box judge them"
+bash "$ROWT" render >/dev/null 2>&1 || true
+[ -s "$S/rowt/host.json" ] && cp "$S/rowt/host.json" "$S/bash-host.json" || bad "shell produced no config"
+if [ -x "$RENDER" ]; then
+  "$RENDER" host --config-dir "$S/rowt" --iface "$(bash -c 'source '"$ROWT"' version >/dev/null 2>&1; detect_iface')" \
+    > "$S/rust-host.json" 2>/dev/null || true
+  if diff -q <(jq -S . "$S/bash-host.json") <(jq -S . "$S/rust-host.json") >/dev/null 2>&1; then
+    ok "the two renders agree canonically"
+  else
+    bad "renders differ"
+  fi
+  "$S/rowt/bin/sing-box" check -c "$S/rust-host.json" >/dev/null 2>&1 \
+    && ok "sing-box accepts the RUST render" || bad "sing-box rejects the rust render"
+  cp "$S/rust-host.json" "$S/rowt/host.json"   # boot the Rust one, not the shell's
+else
+  echo "  skip — no rust render built; booting the shell's"
+fi
+
+echo "2. start the router (never 'up' — that would set the system proxy)"
+bash "$ROWT" router up </dev/null >"$S/up.log" 2>&1 || true
+sleep 3
+pid="$(cat "$pidfile" 2>/dev/null || true)"
+if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then ok "router running (pid $pid) on 127.0.0.1:$PORT"
+else bad "router did not start — $(tail -1 "$S/up.log" 2>/dev/null)"; fi
+
+echo "3. push real traffic through each lane"
+P="http://127.0.0.1:$PORT"
+# curl prints a code via -w even on failure (000), so `|| echo 000` would append
+# a SECOND one and yield "000000". But a failing curl must not abort the script
+# either — a failed lane is a result, not a crash — so the `|| true` goes inside,
+# where it swallows the status without adding output.
+code() { curl -sS -x "$P" -o /dev/null -w '%{http_code}' -m "${2:-15}" "$1" 2>/dev/null || true; }
+
+c="$(code https://www.baidu.com)"
+[ "$c" = 200 ] && ok "direct lane carries traffic (HTTP $c)" || bad "direct lane: HTTP $c"
+
+c="$(code http://ads.example/ 8)"
+[ "$c" = 502 ] && ok "block lane refuses without dialling (HTTP $c)" || bad "block lane: HTTP $c (want 502)"
+
+if [ -n "$server" ]; then
+  c="$(code https://www.google.com/generate_204 20)"
+  [ "$c" = 204 ] && ok "escape lane carries traffic through the tunnel (HTTP $c)" \
+                 || bad "escape lane: HTTP $c (want 204 via '$server')"
+else
+  c="$(code https://www.google.com/generate_204 8)"
+  [ "$c" = 000 ] && ok "escape lane routed to the (unroutable) test server, as expected" \
+                 || bad "escape lane: HTTP $c — expected failure with a synthetic server"
+fi
+
+echo "4. the lifecycle paths that touch the proxy plane — safe under the guard"
+bash "$ROWT" reload </dev/null >"$S/reload.log" 2>&1 && ok "reload completed" || bad "reload failed"
+sleep 2
+c="$(code https://www.baidu.com)"
+[ "$c" = 200 ] && ok "still serving after reload (HTTP $c)" || bad "after reload: HTTP $c"
+bash "$ROWT" router down </dev/null >"$S/rdown.log" 2>&1 && ok "router down completed" || bad "router down failed"
+
+echo "5. the machine must be exactly as it was"
+proxy_after="$(networksetup -getsecurewebproxy Wi-Fi 2>/dev/null | tr '\n' ' ')"
+[ "$proxy_before" = "$proxy_after" ] && ok "system proxy untouched" \
+  || bad "SYSTEM PROXY CHANGED: '$proxy_before' -> '$proxy_after'"
+pgrep -f "$REAL_CFG/host.json" >/dev/null 2>&1 && ok "the real router is still running" \
+  || echo "  note — no real router was running to begin with"
+
+echo
+echo "boot-test: $pass passed, $fail failed"
+[ "$fail" -eq 0 ]
