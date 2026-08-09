@@ -87,6 +87,12 @@ fn main() {
     seeds.push_str("];\n");
     std::fs::write(out.join("seeds.rs"), seeds).unwrap();
 
+    // `onboard`'s always-on reference block — the "Choose what goes where" /
+    // "Everyday" text it prints after the checklist. Pure output, so it comes
+    // out of the shell like the rest of the help.
+    let ob = between(&body, "\n  cat <<EOF\n\nChoose what goes where", "\nEOF\n");
+    std::fs::write(out.join("onboard_ref.txt"), format!("\nChoose what goes where{ob}")).unwrap();
+
     // `metrics path` prints the store's schema from a heredoc — pure reference
     // text about the four rollup tables, and the sort of thing that goes stale
     // instantly if it exists twice.

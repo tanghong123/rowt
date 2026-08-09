@@ -118,6 +118,15 @@ pub fn choice_tokens(syntax: &str) -> Vec<String> {
     out
 }
 
+const ONBOARD_REF: &str = include_str!(concat!(env!("OUT_DIR"), "/onboard_ref.txt"));
+
+/// The reference block `onboard` always prints after its checklist. Extracted
+/// from bin/rowt like the rest of the help — it names commands, and a second
+/// copy of a command list is a command list that goes stale.
+pub fn onboard_reference(cfg: &Path) -> String {
+    expand(ONBOARD_REF, cfg).trim_end().to_string()
+}
+
 pub fn usage(cfg: &Path) -> String {
     format!("{}{}{}", expand(USAGE_HEAD, cfg), registry(), expand(USAGE_TAIL, cfg))
         .trim_end()

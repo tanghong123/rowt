@@ -18,6 +18,7 @@ mod diag;
 mod fetch;
 mod help;
 mod lifecycle;
+mod onboard;
 mod shell;
 mod skill;
 mod vm;
@@ -81,7 +82,7 @@ fn native(cmd: &str, sub: &str) -> bool {
         // read arms only — the rest drive the Python importers
         "server" => matches!(sub, "" | "list" | "dump"),
         "sub" => matches!(sub, "" | "list" | "dump"),
-        "use" | "ping" | "run" | "skill" | "report" | "uninstall" | "fetch" | "probe" | "vm" | "watch" => true,
+        "use" | "ping" | "run" | "skill" | "report" | "uninstall" | "fetch" | "probe" | "vm" | "watch" | "onboard" => true,
         // `config import` prompts on /dev/tty, which is exactly what this gate
         // cannot compare — porting it would move it out of reach.
         "config" => matches!(sub, "" | "list" | "export"),
@@ -702,6 +703,7 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                 _ => cmd_lane(&cfg, lane, &action, args),
             }
         }
+        "onboard" => Ok(onboard::run(&Ctx::new(cfg.clone()), &here_dir())),
         "watch" => {
             let ctx = Ctx::new(cfg.clone());
             let me = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -1646,7 +1648,13 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     match args.first() {
-        None => delegate(&args), // no args: the shell's greeting + full command list
+        // No args: the onboarding checklist, then the full command list. Handled
+        // before the preamble only because there is no command to route.
+        None => {
+            let ctx = Ctx::new(cfg.clone());
+            println!("{}\n\n{}", onboard::run(&ctx, &here_dir()), help::usage(&cfg));
+            return ExitCode::SUCCESS;
+        }
         Some(cmd) => {
             // Help is answered here for every arm, ported or not — the text comes
             // out of bin/rowt at build time, so a delegated command's help is the

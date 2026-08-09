@@ -168,3 +168,6 @@ corp sync --nosuchflag
 watch
 watch status
 watch nosucharm
+onboard
+PARITY_SCENARIO=router-up onboard
+PARITY_SCENARIO=lanes-empty onboard

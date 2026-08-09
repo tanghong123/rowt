@@ -30,7 +30,7 @@ is not 'does it work' but 'whose code ran, and what proves it'.
 | `metrics` | **native** | cli-diff |
 | `mon` | **native** | — |
 | `monitor` | **native** | — |
-| `onboard` | legacy | — |
+| `onboard` | **native** | cli-diff |
 | `ping` | **native** | cli-diff |
 | `probe` | **native** | — |
 | `proxy` | **native** | cli-diff |
@@ -52,7 +52,7 @@ is not 'does it work' but 'whose code ran, and what proves it'.
 | `vm` | **native** | cli-diff |
 | `watch` | **native** | cli-diff |
 
-**36 of 37 command arms answered natively**; the other 1 run in the shell.
+**37 of 37 command arms answered natively**; the other 0 run in the shell.
 
 Partial arms — native for some sub-commands, legacy for the rest.
 `native()` in crates/rowt-cli/src/main.rs is the authority:
@@ -66,7 +66,7 @@ Partial arms — native for some sub-commands, legacy for the rest.
             // read arms only — the rest drive the Python importers
             "server" => matches!(sub, "" | "list" | "dump"),
             "sub" => matches!(sub, "" | "list" | "dump"),
-            "use" | "ping" | "run" | "skill" | "report" | "uninstall" | "fetch" | "probe" | "vm" | "watch" => true,
+            "use" | "ping" | "run" | "skill" | "report" | "uninstall" | "fetch" | "probe" | "vm" | "watch" | "onboard" => true,
             // `config import` prompts on /dev/tty, which is exactly what this gate
             // cannot compare — porting it would move it out of reach.
             "config" => matches!(sub, "" | "list" | "export"),
