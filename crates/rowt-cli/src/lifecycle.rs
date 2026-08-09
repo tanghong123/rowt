@@ -289,6 +289,23 @@ pub fn start_router(ctx: &Ctx, split: bool) -> Result<i32, String> {
     Ok(pid)
 }
 
+/// `clash_curl` — the one shape every clash API call takes. Reproduced argv for
+/// argv (including the `-X GET` the shell always passes and curl would otherwise
+/// imply) because `cli-diff` compares the trace: a call that behaves the same but
+/// is spelled differently is still a difference, and the next one might not be.
+pub fn clash_curl(ctx: &Ctx, method: &str, path: &str, body: Option<&str>) -> Option<String> {
+    let secret = ctx.sget("clash_secret");
+    let auth = format!("Authorization: Bearer {secret}");
+    let url = format!("http://{}{path}", ctx.controller());
+    let mut c = Command::new("curl");
+    c.args(["--noproxy", "*", "-sS", "-m", "6", "-X", method, "-H", &auth]);
+    if let Some(b) = body {
+        c.args(["-H", "Content-Type: application/json", "-d", b]);
+    }
+    let o = c.arg(&url).stderr(Stdio::null()).output().ok()?;
+    o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
+}
+
 fn clash_ok(ctx: &Ctx) -> bool {
     let secret = ctx.sget("clash_secret");
     Command::new("curl")
@@ -393,12 +410,8 @@ pub fn proxy_on(ctx: &Ctx, force: bool) -> String {
 /// The escape selector's current pick, via the clash API. None when the router
 /// is down or the API does not answer — the shell omits the line entirely then.
 pub fn clash_selected(ctx: &Ctx) -> Option<String> {
-    let secret = ctx.sget("clash_secret");
-    let out = Command::new("curl")
-        .args(["--noproxy", "*", "-sS", "-m", "6", "-H", &format!("Authorization: Bearer {secret}"),
-               &format!("http://{}/proxies/escape", ctx.controller())])
-        .stderr(Stdio::null()).output().ok()?;
-    let v: Value = serde_json::from_slice(&out.stdout).ok()?;
+    let body = clash_curl(ctx, "GET", "/proxies/escape", None)?;
+    let v: Value = serde_json::from_str(&body).ok()?;
     v.get("now")?.as_str().filter(|s| !s.is_empty()).map(|s| s.to_string())
 }
 

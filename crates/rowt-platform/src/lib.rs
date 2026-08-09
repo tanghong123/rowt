@@ -269,6 +269,40 @@ mod tests {
     }
 }
 
+/// `resolve_ip` — the system's answer for a name, or "" if there isn't one.
+///
+/// dig first, then the macOS resolver cache. Note bin/rowt defines `resolve_ip`
+/// TWICE; this mirrors the second, which is the one that wins and the one
+/// `explain` therefore calls. (The duplicate is a characterized bash bug, listed
+/// in PORTING.md §6.7 to fix on the shell side rather than to replicate here.)
+pub fn resolve_ip(d: &str) -> String {
+    fn ipv4(s: &str) -> bool {
+        let p: Vec<&str> = s.split('.').collect();
+        p.len() == 4 && p.iter().all(|x| !x.is_empty() && x.len() <= 3 && x.chars().all(|c| c.is_ascii_digit()))
+    }
+    if which("dig") {
+        let body = out("dig", &["+short", "+time=2", "+tries=1", "A", d]).unwrap_or_default();
+        if let Some(l) = body.lines().map(str::trim).find(|l| ipv4(l)) {
+            return l.to_string();
+        }
+    }
+    // `awk '/ip_address/{print $2; exit}'` — matched anywhere in the line, and
+    // the SECOND whitespace field, not the text after the colon.
+    let body = out("dscacheutil", &["-q", "host", "-a", "name", d]).unwrap_or_default();
+    body.lines()
+        .find(|l| l.contains("ip_address"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .unwrap_or("")
+        .to_string()
+}
+
+/// `have` — on PATH?
+pub fn which(cmd: &str) -> bool {
+    std::env::var("PATH").unwrap_or_default().split(':').any(|d| {
+        !d.is_empty() && std::fs::metadata(std::path::Path::new(d).join(cmd)).is_ok()
+    })
+}
+
 /// Raw output of one `networksetup` proxy getter — the CLI formats it the way
 /// the shell's awk does, so the parsing and the formatting stay separable.
 pub fn read_proxy(service: &str, flag: &str) -> String {

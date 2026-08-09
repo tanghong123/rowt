@@ -44,3 +44,26 @@ audit path
 audit all
 status
 PARITY_SCENARIO=render-local status
+
+# help routing: the systematic '<cmd> --help' as well as 'help <cmd>'
+--help
+help
+help up
+help escape
+help nosuchcommand
+escape --help
+watch --help
+
+# lane sub-arms — a gated arm is not a gated COMMAND. These are the forms
+# `escape|corp|block|direct` take that are not list edits.
+escape errors
+corp errors 1h
+block errors
+direct errors
+direct log
+escape errors nonsense
+direct nonsense
+
+# live-state readers
+connections
+conns escape

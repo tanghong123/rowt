@@ -204,6 +204,19 @@ pub fn longest_domain_hit(dest: &str, escape: &str, corp: &str, block: &str) -> 
     best
 }
 
+/// Would this destination reach the branch that needs a DNS answer?
+///
+/// The shell resolves lazily — `resolve_ip` runs only in the `else` after both
+/// the IP-literal and the suffix-match branches have missed. A caller that
+/// resolved eagerly would still print the right verdict but would dial DNS for
+/// destinations the shell never looks up, and `cli-diff` compares the argv
+/// trace, so that difference is a failure. Hence the question is asked here,
+/// where the branch structure lives, rather than guessed at the call site.
+pub fn needs_resolution(raw_dest: &str, escape: &str, corp: &str, block: &str) -> bool {
+    let dest = normalize_dest(raw_dest);
+    !is_ipv4(&dest) && longest_domain_hit(&dest, escape, corp, block).is_none()
+}
+
 pub fn classify(raw_dest: &str, i: &ClassifyInput) -> Classification {
     let dest = normalize_dest(raw_dest);
     let mut ip = String::new();

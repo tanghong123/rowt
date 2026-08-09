@@ -581,15 +581,19 @@ cmd_cli_diff() {
     # exit status. A non-zero result is normal here (`proxy check` says no), so
     # both sides capture it instead of letting `set -e` end the sweep.
     local arc=0 brc=0
+    # `perl -e alarm` for the same reason run_in has it: a case like `<lane> log`
+    # ends in `tail -f`, and a gate that can wedge forever is a gate nobody runs.
     # shellcheck disable=SC2086 — the case line is intentionally word-split
     env -i HOME="$A/home" XDG_CONFIG_HOME="$A/home" \
         PATH="$A/shims:/usr/bin:/bin:/usr/sbin:/sbin" TERM=dumb LC_ALL=C TZ=UTC \
         PARITY_TRACE="$A/trace" PARITY_ENV="$A/env" \
+        perl -e 'alarm shift; exec @ARGV' "$TIMEOUT" \
         bash "$ROWT" $cmdline > "$A/out" 2>/dev/null || arc=$?
     # shellcheck disable=SC2086
     env -i HOME="$B/home" XDG_CONFIG_HOME="$B/home" \
         PATH="$B/shims:/usr/bin:/bin:/usr/sbin:/sbin" TERM=dumb LC_ALL=C TZ=UTC \
         PARITY_TRACE="$B/trace" PARITY_ENV="$B/env" \
+        perl -e 'alarm shift; exec @ARGV' "$TIMEOUT" \
         "$rs" $cmdline > "$B/out" 2>/dev/null || brc=$?
     echo "$arc" > "$A/rc"; echo "$brc" > "$B/rc"
     local bad="" f
@@ -602,10 +606,30 @@ cmd_cli_diff() {
     for f in escape-domains.txt corp-domains.txt block-domains.txt; do
       diff -q "$A/home/rowt/$f" "$B/home/rowt/$f" >/dev/null 2>&1 || bad="$bad $f"
     done
+    # The argv trace, which stdout cannot see. Half the remaining surface —
+    # fetch, ping, use, server, sub, watch — is a thin wrapper over something
+    # external: what it PRINTS is nearly nothing, what it RUNS is the whole
+    # behavior. Without this, "identical stdout" would certify an empty stub.
+    [ -f "$A/trace" ] || : > "$A/trace"; [ -f "$B/trace" ] || : > "$B/trace"
+    normalize "$A/trace" "$A" > "$A/trace.n"; normalize "$B/trace" "$B" > "$B/trace.n"
+    diff -q "$A/trace.n" "$B/trace.n" >/dev/null 2>&1 || bad="$bad trace"
+    # And the audit log, so the BEGIN/END bracketing around mutating commands is
+    # proven rather than asserted. The elapsed seconds are wall clock, so they go.
+    # Volatile by construction: the clock, the two pids, and the elapsed seconds.
+    # The `by=` context field is NOT normalized away — it is the field the audit
+    # log exists for (hands-on vs watchdog), so it has to match.
+    for f in "$A" "$B"; do
+      sed -e 's/^[0-9-]* [0-9:]* [+-][0-9]*  //' -e 's/^pid=[0-9]* ppid=[0-9]* //' \
+          -e 's/ ([0-9]*s)$//' \
+          "$f/home/rowt/log/audit.log" 2>/dev/null > "$f/audit.n" || : > "$f/audit.n"
+    done
+    diff -q "$A/audit.n" "$B/audit.n" >/dev/null 2>&1 || bad="$bad audit"
     if [ -n "$bad" ]; then
       fails=$((fails + 1))
       echo "[$line] DIFFERS:$bad"
-      diff "$A/out.n" "$B/out.n" 2>/dev/null | sed 's/^/    /' | head -10
+      case "$bad" in *stdout*) diff "$A/out.n" "$B/out.n" 2>/dev/null | sed 's/^/    /' | head -10 ;; esac
+      case "$bad" in *trace*)  diff "$A/trace.n" "$B/trace.n" 2>/dev/null | sed 's/^/    T /' | head -10 ;; esac
+      case "$bad" in *audit*)  diff "$A/audit.n" "$B/audit.n" 2>/dev/null | sed 's/^/    A /' | head -6 ;; esac
       echo "    artifacts: $A $B"
     else
       echo "[$line] identical"

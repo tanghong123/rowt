@@ -13,7 +13,12 @@
 //! lines of help text are ported, but until then it would only add a dependency
 //! and a help format that does not match the shell's.
 
+mod help;
 mod lifecycle;
+mod shell;
+mod seeds {
+    include!(concat!(env!("OUT_DIR"), "/seeds.rs"));
+}
 use lifecycle::Ctx;
 use rowt_core::classify::{classify, ClassifyInput, Lane};
 use rowt_core::lanes::{apply, dump, Lanes, Op};
@@ -22,7 +27,79 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const PROG: &str = "rowt";
+pub const PROG: &str = "rowt";
+
+/// The mutating operation in flight, so a fatal error can be attributed to it in
+/// the audit log without threading context through every call — the shell keeps
+/// `_AUDIT_OP` for exactly this.
+static AUDIT_OP: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+pub fn set_audit_op(s: &str) {
+    if let Ok(mut g) = AUDIT_OP.lock() {
+        *g = s.to_string();
+    }
+}
+
+/// `die` — the error, an ABORT line if a mutation was in flight, exit 1.
+pub fn die(cfg: &Path, msg: &str) -> ! {
+    eprintln!("error: {msg}");
+    let op = AUDIT_OP.lock().map(|g| g.clone()).unwrap_or_default();
+    if !op.is_empty() {
+        shell::audit(cfg, &format!("ABORT {op}: {msg}"));
+    }
+    std::process::exit(1);
+}
+
+/// Which arms rowt-rs answers itself.
+///
+/// Everything else falls through to bin/rowt, which is installed alongside for
+/// exactly this reason (PORTING.md §6.6). That is what makes rowt-rs a complete
+/// front door today rather than after the last arm lands: an unported command
+/// runs, it just runs in the shell. `parity cli-ledger` reads this table, so the
+/// published coverage is measured from the same source that decides it.
+fn native(cmd: &str, sub: &str) -> bool {
+    match cmd {
+        "explain" | "route" | "version" | "--version" | "-V" | "status" | "audit"
+        | "shell-init" | "completion" | "monitor" | "mon" | "render" | "reload"
+        | "restart" | "up" | "down" | "help" | "-h" | "--help" | "_splitter" | "direct"
+        | "connections" | "conns" | "_complete" => true,
+        "escape" | "corp" | "block" => matches!(
+            sub,
+            "" | "list" | "dump" | "add" | "rm" | "remove" | "clear" | "import" | "errors"
+                | "stats" | "log"
+        ),
+        "proxy" => matches!(sub, "" | "status" | "check" | "env" | "on" | "off"),
+        "router" => matches!(sub, "" | "up" | "down" | "restart" | "status"),
+        _ => false,
+    }
+}
+
+/// Hand the whole invocation to bin/rowt. Found next to this binary (how the
+/// Formula lays it out), then via ROWT_LEGACY, then in the repo tree — so it
+/// works installed, in a sandbox, and from `cargo run` alike.
+fn delegate(args: &[String]) -> ! {
+    use std::os::unix::process::CommandExt;
+    let mut cands: Vec<PathBuf> = Vec::new();
+    if let Ok(p) = std::env::var("ROWT_LEGACY") {
+        cands.push(PathBuf::from(p));
+    }
+    if let Ok(here) = std::env::current_exe() {
+        if let Some(d) = here.parent() {
+            cands.push(d.join("rowt-legacy"));
+            cands.push(d.join("rowt"));
+            cands.push(d.join("../../bin/rowt"));
+        }
+    }
+    let Some(sh) = cands.into_iter().find(|c| c.is_file()) else {
+        eprintln!("error: no legacy rowt found — set ROWT_LEGACY=/path/to/bin/rowt");
+        std::process::exit(1);
+    };
+    // `exec`, not spawn-and-wait: the shell must own the terminal and the exit
+    // status directly, or an interactive command (sudo prompt, `<lane> log`)
+    // behaves differently through rowt-rs than through rowt.
+    let e = std::process::Command::new("bash").arg(sh).args(args).exec();
+    eprintln!("error: could not exec the legacy rowt: {e}");
+    std::process::exit(1);
+}
 
 /// `exec` the child, replacing this process — the shell does the same so the TUI
 /// owns the terminal rather than running under a parent that would outlive it.
@@ -49,10 +126,6 @@ fn read(p: &Path) -> String {
     std::fs::read_to_string(p).unwrap_or_default()
 }
 
-fn sget(state: &str, key: &str) -> String {
-    state.lines().filter_map(|l| l.strip_prefix(&format!("{key}="))).next_back().unwrap_or("").into()
-}
-
 fn lane_file(cfg: &Path, l: Lane) -> PathBuf {
     cfg.join(match l {
         Lane::Escape => "escape-domains.txt",
@@ -76,18 +149,24 @@ fn geosites(body: &str) -> Vec<String> {
 }
 
 fn cmd_explain(cfg: &Path, dest: &str) -> String {
+    let ctx = Ctx::new(cfg.to_path_buf());
     let lanes = load_lanes(cfg);
-    let state = read(&cfg.join("state"));
-    let mode = { let m = sget(&state, "mode"); if m.is_empty() { "host".into() } else { m } };
+    let mode = ctx.mode();
     let private: Vec<String> =
         ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16"]
             .iter().map(|s| s.to_string()).collect();
     let final_route = Lane::parse(&env_or("ROWT_FINAL", "direct")).unwrap_or(Lane::Direct);
     let pd = env_or("ROWT_PRIVATE_DEFAULT", "corp");
+    // Resolved only on the branch that needs it — see `needs_resolution`.
+    let ip = if rowt_core::classify::needs_resolution(dest, &lanes.escape, &lanes.corp, &lanes.block) {
+        rowt_platform::resolve_ip(&rowt_core::classify::normalize_dest(dest))
+    } else {
+        String::new()
+    };
     let c = classify(dest, &ClassifyInput {
         escape_list: &lanes.escape, corp_list: &lanes.corp, block_list: &lanes.block,
         private_cidrs: &private, private_default: &pd, final_route,
-        local_mode: mode == "local", resolved_ip: "",
+        local_mode: mode == "local", resolved_ip: &ip,
     });
     let mut out = c.render();
 
@@ -111,6 +190,13 @@ fn cmd_explain(cfg: &Path, dest: &str) -> String {
     }
     if c.lane == Lane::Block {
         out.push_str("\n  live:    (skipped — blocked by design)");
+    } else if lifecycle::host_running(&ctx).is_some() {
+        // Deliberately no `--noproxy '*'` — that would override -x and send the
+        // probe DIRECT, which is exactly not the path being tested.
+        let code = lifecycle::curl_code(&format!("http://127.0.0.1:{}", ctx.port),
+                                        &format!("https://{}/", c.dest));
+        out.push_str(&format!("\n  live:    HTTP {code} through the router{}",
+            if code == "000" { "  (000 = lane not reachable)" } else { "" }));
     }
     out
 }
@@ -257,11 +343,9 @@ fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<Str
     }
 }
 
-fn run() -> Result<String, String> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let cfg = config_dir();
-    let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
-    let rest: Vec<String> = args.iter().skip(1).cloned().collect();
+fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
+    let cfg = cfg.to_path_buf();
+    let rest: Vec<String> = rest.to_vec();
     match cmd {
         "explain" | "route" => {
             let d = rest.first().ok_or(format!("usage: {PROG} explain <domain|ip>"))?;
@@ -452,13 +536,34 @@ fn run() -> Result<String, String> {
             }
             Ok(out)
         }
-        "" => Err(format!("usage: {PROG}-rs <version|explain|proxy|escape|corp|block> …")),
+        // `native` gates what reaches here, so this is unreachable in practice;
+        // it stays as the same last line of defence the shell's `*)` arm is.
         other => Err(format!("unknown command: {other}")),
     }
 }
 
 fn main() -> ExitCode {
-    match run() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let cfg = config_dir();
+    // Falls through to the shell BEFORE the preamble runs, not after: bash's own
+    // main() migrates, rotates and audits, and doing it on both sides would
+    // double every audit line.
+    match args.first() {
+        None => delegate(&args), // no args: the shell's greeting + full command list
+        Some(cmd) => {
+            // Help is answered here for every arm, ported or not — the text comes
+            // out of bin/rowt at build time, so a delegated command's help is the
+            // same page either way and this only saves a process.
+            let wants_help = matches!(cmd.as_str(), "help" | "-h" | "--help")
+                || (!matches!(cmd.as_str(), "run" | "monitor" | "mon")
+                    && args[1..].iter().any(|a| a == "--help" || a == "-h"));
+            let sub = args.get(1).cloned().unwrap_or_default();
+            if !wants_help && !native(cmd, &sub) {
+                delegate(&args);
+            }
+        }
+    }
+    match shell::dispatch(&cfg, &args, |cmd, rest| run(&cfg, cmd, rest)) {
         Ok(s) => {
             println!("{s}");
             ExitCode::SUCCESS
