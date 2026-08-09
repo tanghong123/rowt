@@ -1,0 +1,3 @@
+2026-08-01	blocked.example	dial tcp: i/o timeout
+2026-08-01	blocked.example	dial tcp: i/o timeout
+2026-08-01	flaky.example	lookup failed: dns: exchange failed

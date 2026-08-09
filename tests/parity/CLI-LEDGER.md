@@ -19,10 +19,10 @@ is not 'does it work' but 'whose code ran, and what proves it'.
 | `block` | **native** | cli-diff |
 | `completion` | **native** | cli-diff |
 | `config` | legacy | — |
-| `connections` | legacy | cli-diff (passthrough) |
-| `conns` | legacy | cli-diff (passthrough) |
+| `connections` | **native** | cli-diff |
+| `conns` | **native** | cli-diff |
 | `corp` | **native** | cli-diff |
-| `direct` | legacy | cli-diff (passthrough) |
+| `direct` | **native** | cli-diff |
 | `down` | **native** | boot-test |
 | `escape` | **native** | cli-diff |
 | `explain` | **native** | cli-diff |
@@ -39,7 +39,7 @@ is not 'does it work' but 'whose code ran, and what proves it'.
 | `report` | legacy | — |
 | `restart` | **native** | boot-test |
 | `route` | **native** | — |
-| `router` | **native** | boot-test |
+| `router` | **native** | cli-diff + boot-test |
 | `run` | legacy | — |
 | `server` | legacy | — |
 | `shell-init` | **native** | cli-diff |
@@ -52,7 +52,7 @@ is not 'does it work' but 'whose code ran, and what proves it'.
 | `vm` | legacy | — |
 | `watch` | legacy | cli-diff (passthrough) |
 
-**18 of 37 command arms answered natively**; the other 19 run in the shell.
+**21 of 37 command arms answered natively**; the other 16 run in the shell.
 
 Partial arms — native for some sub-commands, legacy for the rest.
 `native()` in crates/rowt-cli/src/main.rs is the authority:
@@ -60,6 +60,7 @@ Partial arms — native for some sub-commands, legacy for the rest.
             "escape" | "corp" | "block" => matches!(
                 sub,
                 "" | "list" | "dump" | "add" | "rm" | "remove" | "clear" | "import"
+                    | "errors" | "stats" | "log"
             ),
             "proxy" => matches!(sub, "" | "status" | "check" | "env"),
             "router" => matches!(sub, "" | "up" | "down" | "restart" | "status"),

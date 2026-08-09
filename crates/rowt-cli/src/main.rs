@@ -68,7 +68,9 @@ fn native(cmd: &str, sub: &str) -> bool {
         "escape" | "corp" | "block" => matches!(
             sub,
             "" | "list" | "dump" | "add" | "rm" | "remove" | "clear" | "import"
+                | "errors" | "stats" | "log"
         ),
+        "direct" | "connections" | "conns" => true,
         "proxy" => matches!(sub, "" | "status" | "check" | "env"),
         "router" => matches!(sub, "" | "up" | "down" | "restart" | "status"),
         _ => false,
@@ -293,6 +295,210 @@ fn cmd_proxy(action: &str, arg: Option<&str>) -> Result<(String, bool), String> 
     }
 }
 
+/// `printf "%-Ns"` pads to N BYTES in awk under LC_ALL=C, where Rust's `{:<N}`
+/// pads to N chars. Identical for ASCII and different the moment a host is an
+/// IDN — and connection tables are exactly where a non-ASCII host shows up.
+fn pad(s: &str, width: usize) -> String {
+    let mut o = s.to_string();
+    for _ in s.len()..width {
+        o.push(' ');
+    }
+    o
+}
+
+/// awk's `hb()` — bytes, humanised. `%.0f`/`%.1f` round half-to-even in C, which
+/// is what Rust's `{:.0}`/`{:.1}` do too.
+fn human_bytes(b: u64) -> String {
+    match b {
+        b if b < 1024 => format!("{b}B"),
+        b if b < 1_048_576 => format!("{:.0}K", b as f64 / 1024.0),
+        b if b < 1_073_741_824 => format!("{:.1}M", b as f64 / 1_048_576.0),
+        b => format!("{:.1}G", b as f64 / 1_073_741_824.0),
+    }
+}
+
+/// The router's live connections, from the clash API, with the lane each is on.
+/// Unlike `<lane> errors` this shows SUCCESSFUL traffic — it is a snapshot of
+/// what is open, not a log of what failed.
+fn connections_show(ctx: &Ctx, filt: &str) -> String {
+    if lifecycle::host_running(ctx).is_none() {
+        return format!("router isn't running — '{PROG} up' first.");
+    }
+    let Some(body) = lifecycle::clash_curl(ctx, "GET", "/connections", None).filter(|b| !b.is_empty())
+    else {
+        return format!("couldn't reach the clash API ({}) — is the router up?", ctx.controller());
+    };
+    let v: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+    let empty = vec![];
+    let conns = v.get("connections").and_then(|c| c.as_array()).unwrap_or(&empty);
+
+    struct Row { lane: &'static str, hp: String, up: u64, down: u64, rule: String }
+    let mut rows: Vec<Row> = Vec::new();
+    for c in conns {
+        // jq's `index("block")` over an ARRAY is an exact element match, not a
+        // substring search — a chain named "blocklist" would not count.
+        let chains: Vec<&str> =
+            c.get("chains").and_then(|x| x.as_array())
+             .map(|a| a.iter().filter_map(|x| x.as_str()).collect()).unwrap_or_default();
+        let lane = if chains.contains(&"block") { "block" }
+                   else if chains.contains(&"direct") { "direct" }
+                   else if chains.contains(&"corp") { "corp" }
+                   else { "escape" };
+        if !filt.is_empty() && lane != filt {
+            continue;
+        }
+        let md = c.get("metadata");
+        let nz = |k: &str| md.and_then(|m| m.get(k)).and_then(|x| x.as_str()).filter(|s| !s.is_empty());
+        let host = nz("host").or_else(|| nz("destinationIP")).unwrap_or("?").to_string();
+        // `@tsv` renders a number as a number and a string as itself, so a port
+        // arrives either way; `// "?"` only when the key is absent or null.
+        let port = md.and_then(|m| m.get("destinationPort")).map(|p| match p {
+            Value::String(s) => s.clone(),
+            Value::Null => "?".into(),
+            other => other.to_string(),
+        }).unwrap_or_else(|| "?".into());
+        let num = |k: &str| c.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+        // `match(r, /^[A-Za-z_]+/)` — the rule's leading word only ("RuleSet",
+        // "DomainSuffix"), so the column stays narrow.
+        let raw = c.get("rule").and_then(|x| x.as_str()).unwrap_or("");
+        let rule: String = raw.chars().take_while(|c| c.is_ascii_alphabetic() || *c == '_').collect();
+        rows.push(Row { lane, hp: format!("{host}:{port}"), up: num("upload"), down: num("download"),
+                        rule: if rule.is_empty() { raw.to_string() } else { rule } });
+    }
+    if rows.is_empty() {
+        let on = if filt.is_empty() { String::new() } else { format!(" on the {filt} lane") };
+        return format!("no active connections{on} right now.");
+    }
+
+    let mut out = format!("{} active connections:", rows.len());
+    for l in ["escape", "direct", "corp", "block"] {
+        let n = rows.iter().filter(|r| r.lane == l).count();
+        if n > 0 {
+            out.push_str(&format!("  {l}={n}"));
+        }
+    }
+
+    // Aggregate by lane + host:port, which collapses the many parallel dials one
+    // client makes to a single API host into one row.
+    use std::collections::BTreeMap;
+    let mut agg: BTreeMap<(&str, String), (u64, u64, u64, String)> = BTreeMap::new();
+    for r in &rows {
+        let e = agg.entry((r.lane, r.hp.clone())).or_insert((0, 0, 0, String::new()));
+        e.0 += 1;
+        e.1 += r.up;
+        e.2 += r.down;
+        e.3 = r.rule.clone(); // last one wins, as awk's R[k]= does
+    }
+    // `sort -t<TAB> -k1,1 -k4,4nr`: lane ascending, download DESCENDING, and the
+    // whole line ascending as the last resort (`-r` rides on the k4 key alone,
+    // not on the final comparison).
+    let mut lines: Vec<(&str, u64, u64, u64, String, String)> = agg
+        .into_iter()
+        .map(|((lane, hp), (c, u, d, rule))| (lane, c, u, d, hp, rule))
+        .collect();
+    lines.sort_by(|a, b| {
+        a.0.cmp(b.0)
+            .then_with(|| b.3.cmp(&a.3))
+            .then_with(|| {
+                let f = |x: &(&str, u64, u64, u64, String, String)| {
+                    format!("{}\t{}\t{}\t{}\t{}\t{}", x.0, x.1, x.2, x.3, x.4, x.5)
+                };
+                f(a).cmp(&f(b))
+            })
+    });
+    for (lane, count, up, down, hp, rule) in lines {
+        out.push_str(&format!("\n  {} {} {:>2}× ↑{} ↓{} {}",
+            pad(lane, 7), pad(&hp, 40), count,
+            pad(&human_bytes(up), 7), pad(&human_bytes(down), 8), rule));
+    }
+    out
+}
+
+/// `_period_cutoff` — the parse is pure, the clock is not. `date -v` rather than
+/// a time crate: same program, same DST and zone rules, no second answer to keep
+/// in sync.
+fn period_cutoff(p: &str) -> Result<String, ()> {
+    let Some((n, u)) = rowt_core::laneerr::parse_period(p)? else { return Ok(String::new()) };
+    let flag = format!("-v-{n}{}", match u { 'm' => 'M', 'h' => 'H', _ => 'd' });
+    let o = std::process::Command::new("date").arg(&flag).arg("+%Y-%m-%d %H:%M:%S")
+        .stderr(std::process::Stdio::null()).output().map_err(|_| ())?;
+    Ok(String::from_utf8_lossy(&o.stdout).trim_end().to_string())
+}
+
+/// `lane_errors` — the per-lane failure summary.
+fn cmd_lane_errors(cfg: &Path, lane: &str, period: &str) -> Result<String, String> {
+    let base = cfg.join(format!("log/lane-{lane}.log"));
+    let Ok(cutoff) = period_cutoff(period) else {
+        die(cfg, &format!("usage: {PROG} {lane} errors [5m|10m|1h|24h|7d|all]"));
+    };
+    // block refuses by design, so its verb is different — "nothing blocked" is
+    // a healthy sinkhole, "no escape errors" is a healthy tunnel.
+    let (noun, empty) = if lane == "block" {
+        ("blocked", "nothing blocked".to_string())
+    } else {
+        ("failed", format!("no {lane} errors"))
+    };
+
+    // The live log plus every rotation of it (`for f in "$base" "$base".*`).
+    let mut bodies = String::new();
+    let mut any = false;
+    let mut files: Vec<PathBuf> = Vec::new();
+    if base.is_file() {
+        files.push(base.clone());
+    }
+    if let Ok(rd) = std::fs::read_dir(cfg.join("log")) {
+        let prefix = format!("lane-{lane}.log.");
+        let mut rot: Vec<PathBuf> = rd.flatten()
+            .map(|e| e.path())
+            .filter(|p| p.file_name().map(|n| n.to_string_lossy().starts_with(&prefix)).unwrap_or(false))
+            .collect();
+        // Glob order, which is what the shell's `"$base".*` expands to.
+        rot.sort();
+        files.extend(rot);
+    }
+    for f in &files {
+        any = true;
+        bodies.push_str(&read(f));
+    }
+    let ctx = Ctx::new(cfg.to_path_buf());
+    if !any {
+        let mut o = format!("{empty} recorded — only failed/refused connections are logged, not successful traffic (so an empty list means no errors, not no traffic).");
+        if lifecycle::host_running(&ctx).is_none() {
+            o.push_str(&format!("\n  (the router isn't running — '{PROG} up' first, then reproduce the app)"));
+        }
+        return Ok(o);
+    }
+
+    let rows = rowt_core::laneerr::tally(&bodies, &cutoff);
+    let tot: u64 = rows.iter().map(|r| r.count).sum();
+    let doms = rows.len();
+    let window = if cutoff.is_empty() { String::new() } else { format!(" in the last {period}") };
+    let mut o = format!("{lane} lane — {tot} {noun} connection(s){window}, across {doms} domain(s):");
+    if tot == 0 {
+        o.push_str(&format!("\n  ({empty}{window} — remember only errors are logged, not successful traffic)"));
+        return Ok(o);
+    }
+    for r in rows.iter().take(40) {
+        o.push_str(&format!("\n  {:>7}  {:<8} {}", r.count, r.cat, r.domain));
+    }
+    if doms > 40 {
+        o.push_str(&format!("\n  … {} more (widen with 'all', or narrow with '5m')", doms - 40));
+    }
+    if lane == "direct" || lane == "corp" {
+        o.push_str(&format!("\n  → tunnel the real ones: {PROG} escape add <domain>  (timeout/reset/refused ⇒ likely blocked; dns ⇒ often transient)"));
+    }
+    Ok(o)
+}
+
+/// `_lane_log_tail` — `tail -f` on the lane's log, exec'd so Ctrl-C reaches it.
+fn cmd_lane_log(cfg: &Path, lane: &str) -> Result<String, String> {
+    let f = cfg.join(format!("log/lane-{lane}.log"));
+    if !f.is_file() {
+        die(cfg, &format!("no {lane} log yet — start the router first: {PROG} up"));
+    }
+    Err(std::process::Command::new("tail").arg("-f").arg(&f).exec_replace())
+}
+
 fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<String, String> {
     let label = lane.as_str();
     let lanes = load_lanes(cfg);
@@ -365,8 +571,46 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
         "escape" | "corp" | "block" => {
             let lane = Lane::parse(cmd).unwrap();
             let action = rest.first().cloned().unwrap_or_else(|| "list".into());
-            cmd_lane(&cfg, lane, &action, &rest[1.min(rest.len())..])
+            let args = &rest[1.min(rest.len())..];
+            match action.as_str() {
+                // block's window defaults to a day, not ten minutes: a sinkhole
+                // that refused nothing in the last ten minutes is normal.
+                "errors" | "stats" => {
+                    let d = if cmd == "block" { "24h" } else { "10m" };
+                    cmd_lane_errors(&cfg, cmd, args.first().map(|s| s.as_str()).unwrap_or(d))
+                }
+                "log" => cmd_lane_log(&cfg, cmd),
+                _ => cmd_lane(&cfg, lane, &action, args),
+            }
         }
+        "connections" | "conns" => {
+            let ctx = Ctx::new(cfg);
+            match rest.first().map(|s| s.as_str()) {
+                Some("-w") | Some("--watch") => {
+                    let filt = rest.get(1).cloned().unwrap_or_default();
+                    loop {
+                        print!("\x1b[H\x1b[2J");
+                        let t = std::process::Command::new("date").arg("+%H:%M:%S")
+                            .output().map(|o| String::from_utf8_lossy(&o.stdout).trim_end().to_string())
+                            .unwrap_or_default();
+                        println!("rowt connections — {t}   (Ctrl-C to stop)");
+                        println!("{}", connections_show(&ctx, &filt));
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                    }
+                }
+                other => Ok(connections_show(&ctx, other.unwrap_or(""))),
+            }
+        }
+        // 'direct' is not an editable lane — it is the pass-through default, so
+        // only the diagnostics exist. What FAILED going direct is the useful
+        // question: those are the escape-lane candidates.
+        "direct" => match rest.first().map(|s| s.as_str()).unwrap_or("errors") {
+            "errors" | "stats" => {
+                cmd_lane_errors(&cfg, "direct", rest.get(1).map(|s| s.as_str()).unwrap_or("10m"))
+            }
+            "log" => cmd_lane_log(&cfg, "direct"),
+            _ => die(&cfg, &format!("usage: {PROG} direct [errors [5m|10m|1h|…|all] | log]")),
+        },
         "version" | "--version" | "-V" => Ok(format!("{PROG} {}", env!("ROWT_SHELL_VERSION"))),
         // hidden: the log splitter re-execs this binary so sing-box's output is
         // classified by a process that outlives the CLI

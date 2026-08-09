@@ -60,10 +60,25 @@ escape errors
 corp errors 1h
 block errors
 direct errors
-direct log
+# `log` is `tail -f`: both sides are expected to be killed by the alarm, so
+# it gets a short one rather than a minute of proving they hang alike.
+PARITY_TIMEOUT=3 direct log
+PARITY_TIMEOUT=3 escape log
 escape errors nonsense
 direct nonsense
 
 # live-state readers
 connections
 conns escape
+
+# with the router up: the clash API answers, so the aggregation, the humanised
+# byte columns and both sort keys are reachable — as are status's proxy probe
+# and explain's live line.
+PARITY_SCENARIO=router-up connections
+PARITY_SCENARIO=router-up connections escape
+PARITY_SCENARIO=router-up connections direct
+PARITY_SCENARIO=router-up conns block
+PARITY_SCENARIO=router-up connections nosuchlane
+PARITY_SCENARIO=router-up status
+PARITY_SCENARIO=router-up explain example.com
+PARITY_SCENARIO=router-up router status

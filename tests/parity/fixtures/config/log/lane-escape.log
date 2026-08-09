@@ -1,0 +1,61 @@
+2026-08-01	a.example	dial tcp: i/o timeout
+2026-08-01	a.example	dial tcp: i/o timeout
+2026-08-01	a.example	dial tcp: i/o timeout
+2026-08-01	a.example	dial tcp: i/o timeout
+2026-08-01	a.example	dial tcp: i/o timeout
+2026-08-01	a.example	dial tcp: i/o timeout
+2026-08-01	a.example	dial tcp: i/o timeout
+2026-08-01	a.example	dial tcp: i/o timeout
+2026-08-01	a.example	dial tcp: i/o timeout
+2026-08-01	b.example	read: connection reset by peer
+2026-08-01	b.example	read: connection reset by peer
+2026-08-01	b.example	read: connection reset by peer
+2026-08-01	b.example	read: connection reset by peer
+2026-08-01	b.example	read: connection reset by peer
+2026-08-01	b.example	read: connection reset by peer
+2026-08-01	b.example	read: connection reset by peer
+2026-08-01	tie-one.example	dial tcp: connect: connection refused
+2026-08-01	tie-one.example	dial tcp: connect: connection refused
+2026-08-01	tie-one.example	dial tcp: connect: connection refused
+2026-08-01	tie-two.example	dial tcp: connect: connection refused
+2026-08-01	tie-two.example	dial tcp: connect: connection refused
+2026-08-01	tie-two.example	dial tcp: connect: connection refused
+2026-08-01	tie-three.example	lookup failed: dns: exchange failed
+2026-08-01	tie-three.example	lookup failed: dns: exchange failed
+2026-08-01	tie-three.example	lookup failed: dns: exchange failed
+2026-08-01	z00.example	dial tcp: network is unreachable
+2026-08-01	z01.example	dial tcp: i/o timeout
+2026-08-01	z02.example	dial tcp: network is unreachable
+2026-08-01	z03.example	dial tcp: i/o timeout
+2026-08-01	z04.example	dial tcp: network is unreachable
+2026-08-01	z05.example	dial tcp: i/o timeout
+2026-08-01	z06.example	dial tcp: network is unreachable
+2026-08-01	z07.example	dial tcp: i/o timeout
+2026-08-01	z08.example	dial tcp: network is unreachable
+2026-08-01	z09.example	dial tcp: i/o timeout
+2026-08-01	z10.example	dial tcp: network is unreachable
+2026-08-01	z11.example	dial tcp: i/o timeout
+2026-08-01	z12.example	dial tcp: network is unreachable
+2026-08-01	z13.example	dial tcp: i/o timeout
+2026-08-01	z14.example	dial tcp: network is unreachable
+2026-08-01	z15.example	dial tcp: i/o timeout
+2026-08-01	z16.example	dial tcp: network is unreachable
+2026-08-01	z17.example	dial tcp: i/o timeout
+2026-08-01	z18.example	dial tcp: network is unreachable
+2026-08-01	z19.example	dial tcp: i/o timeout
+2026-08-01	z20.example	dial tcp: network is unreachable
+2026-08-01	z21.example	dial tcp: i/o timeout
+2026-08-01	z22.example	dial tcp: network is unreachable
+2026-08-01	z23.example	dial tcp: i/o timeout
+2026-08-01	z24.example	dial tcp: network is unreachable
+2026-08-01	z25.example	dial tcp: i/o timeout
+2026-08-01	z26.example	dial tcp: network is unreachable
+2026-08-01	z27.example	dial tcp: i/o timeout
+2026-08-01	z28.example	dial tcp: network is unreachable
+2026-08-01	z29.example	dial tcp: i/o timeout
+2026-08-01	z30.example	dial tcp: network is unreachable
+2026-08-01	z31.example	dial tcp: i/o timeout
+2026-08-01	z32.example	dial tcp: network is unreachable
+2026-08-01	z33.example	dial tcp: i/o timeout
+2026-08-01	z34.example	dial tcp: network is unreachable
+2026-08-01	z35.example	dial tcp: i/o timeout

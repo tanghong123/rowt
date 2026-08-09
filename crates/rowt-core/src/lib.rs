@@ -8,6 +8,7 @@
 //! `tests/parity` rather than by inspection.
 
 pub mod classify;
+pub mod laneerr;
 pub mod lanes;
 pub mod reconcile;
 pub mod render;

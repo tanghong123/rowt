@@ -83,6 +83,14 @@ make_sandbox() { # $1=outdir  [$2=scenario]
     [ -d "$DIR/fixtures/scenarios/$scenario/config" ] && cp -R "$DIR/fixtures/scenarios/$scenario/config/." "$cfg/"
     [ -d "$DIR/fixtures/scenarios/$scenario/env" ]    && cp -R "$DIR/fixtures/scenarios/$scenario/env/." "$out/env/"
   fi
+  # "The router is running" cannot be a static fixture: `host_running` reads a
+  # pidfile and then `kill -0`s it, so any pid committed to the repo is either
+  # dead or, worse, someone else's. A scenario asks for it with an empty
+  # `host.pid.self` marker and gets THIS harness's pid, which is alive for
+  # exactly as long as the comparison runs — and is the same pid on both sides.
+  if [ -f "$cfg/host.pid.self" ]; then
+    echo "$$" > "$cfg/host.pid"; rm -f "$cfg/host.pid.self"
+  fi
   mkdir -p "$cfg/bin" "$cfg/log" "$cfg/cache"
   cp "$DIR/fixtures/bin/sing-box" "$cfg/bin/sing-box"
   chmod +x "$cfg/bin/sing-box"
@@ -569,10 +577,18 @@ cmd_cli_diff() {
   while IFS= read -r line; do
     case "$line" in ''|'#'*) continue ;; esac
     total=$((total + 1))
-    local A B scen="" cmdline="$line"
-    case "$line" in
-      PARITY_SCENARIO=*) scen="${line%% *}"; scen="${scen#PARITY_SCENARIO=}"; cmdline="${line#* }" ;;
-    esac
+    local A B scen="" tmo="$TIMEOUT" cmdline="$line"
+    # Leading KEY=VALUE tokens select the machine state (PARITY_SCENARIO) or the
+    # alarm (PARITY_TIMEOUT). The second exists for the streaming commands:
+    # `<lane> log` is `tail -f`, so BOTH sides must be killed by the alarm and a
+    # long default would spend a minute per case proving they hang identically.
+    while :; do
+      case "$cmdline" in
+        PARITY_SCENARIO=*) scen="${cmdline%% *}"; scen="${scen#PARITY_SCENARIO=}"; cmdline="${cmdline#* }" ;;
+        PARITY_TIMEOUT=*)  tmo="${cmdline%% *}";  tmo="${tmo#PARITY_TIMEOUT=}";    cmdline="${cmdline#* }" ;;
+        *) break ;;
+      esac
+    done
     A="$(mktemp -d "${TMPDIR:-/tmp}/parity-cli-a.XXXXXX")"
     B="$(mktemp -d "${TMPDIR:-/tmp}/parity-cli-b.XXXXXX")"
     make_sandbox "$A" "$scen"; make_sandbox "$B" "$scen"
@@ -584,17 +600,26 @@ cmd_cli_diff() {
     # `perl -e alarm` for the same reason run_in has it: a case like `<lane> log`
     # ends in `tail -f`, and a gate that can wedge forever is a gate nobody runs.
     # shellcheck disable=SC2086 — the case line is intentionally word-split
-    env -i HOME="$A/home" XDG_CONFIG_HOME="$A/home" \
+    # A case killed by the alarm dies of a signal, and bash announces that from
+    # THIS shell when it reaps the job, so the two "Alarm clock" lines a
+    # streaming case prints cannot be redirected away from the child. Left
+    # alone: silencing the harness's own stderr to tidy them would also swallow
+    # the errors this gate exists to surface.
+    ( env -i HOME="$A/home" XDG_CONFIG_HOME="$A/home" \
         PATH="$A/shims:/usr/bin:/bin:/usr/sbin:/sbin" TERM=dumb LC_ALL=C TZ=UTC \
         PARITY_TRACE="$A/trace" PARITY_ENV="$A/env" \
-        perl -e 'alarm shift; exec @ARGV' "$TIMEOUT" \
-        bash "$ROWT" $cmdline > "$A/out" 2>/dev/null || arc=$?
+        perl -e 'alarm shift; exec @ARGV' "$tmo" \
+        bash "$ROWT" $cmdline > "$A/out" 2>/dev/null ) 2>/dev/null || arc=$?
     # shellcheck disable=SC2086
-    env -i HOME="$B/home" XDG_CONFIG_HOME="$B/home" \
+    # Wrapped in a subshell whose stderr is discarded: a case killed by the
+    # alarm dies of a signal, and the JOB CONTROL notice about that comes from
+    # this shell, not the child — redirecting the child alone leaves "Alarm
+    # clock" splattered through the report.
+    ( env -i HOME="$B/home" XDG_CONFIG_HOME="$B/home" \
         PATH="$B/shims:/usr/bin:/bin:/usr/sbin:/sbin" TERM=dumb LC_ALL=C TZ=UTC \
         PARITY_TRACE="$B/trace" PARITY_ENV="$B/env" \
-        perl -e 'alarm shift; exec @ARGV' "$TIMEOUT" \
-        "$rs" $cmdline > "$B/out" 2>/dev/null || brc=$?
+        perl -e 'alarm shift; exec @ARGV' "$tmo" \
+        "$rs" $cmdline > "$B/out" 2>/dev/null ) 2>/dev/null || brc=$?
     echo "$arc" > "$A/rc"; echo "$brc" > "$B/rc"
     local bad="" f
     # Normalised per side, like every other gate: each sandbox has its own
