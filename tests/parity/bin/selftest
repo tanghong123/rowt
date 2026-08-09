@@ -48,9 +48,20 @@ cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
 # tree so the copy is a faithful one. Anything added beside bin/rowt in future
 # belongs in this list; without it, cli-diff fails on a difference the selftest
 # itself created.
-for _side in rowt-monitor skills lima config target; do
+# README.md and DESIGN.md are in this list for the same reason as the trees:
+# `onboard` prints their paths only `if p.is_file()`, and rowt-rs resolves them
+# from the REAL tree while the shell resolves them from this copy. Without them
+# the two disagree about whether the guides exist, and cli-diff reports a
+# difference the selftest itself created.
+for _side in rowt-monitor skills lima target README.md DESIGN.md; do
   [ -e "$ROOT/$_side" ] && ln -sfn "$ROOT/$_side" "$tmp/$_side"
 done
+# config/ is COPIED rather than linked, because the steps below mutate files
+# inside it. A symlink means `perl -i` resolves through it and rewrites the REAL
+# repo — which is exactly how a bogus 9.0.0.0/8 internal-nameserver range got
+# written into config/net-detect.py and committed. The copy is 300K.
+cp -R "$ROOT/config" "$tmp/config"
+rm -rf "$tmp/config/__pycache__"
 P="$tmp/tests/parity/bin/parity"
 
 pass=0 fail=0
@@ -317,7 +328,6 @@ else
 fi
 
 echo "14. widen an internal-nameserver range in the Python"
-cp "$ROOT/config/net-detect.py" "$tmp/net-detect.py.orig" 2>/dev/null || true
 if [ ! -x "$ROOT/target/release/rowt-netdetect" ]; then
   echo "  skip — no release build"
 else
