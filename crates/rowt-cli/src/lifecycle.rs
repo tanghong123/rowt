@@ -424,13 +424,18 @@ pub fn proxy_off(_ctx: &Ctx) -> String {
 
 pub fn proxy_on(ctx: &Ctx, force: bool) -> String {
     let p = Mac;
+    // Resolved BEFORE the router-running guard, because the shell resolves it
+    // before its own — `svc` is computed once at the top of cmd_proxy for every
+    // action. Short-circuiting would skip four probes the shell makes, and
+    // cli-diff compares the argv trace.
+    let svc = p.active_service();
     if !force && host_running(ctx).is_none() {
         return format!(
             "  router not running — nothing is listening on 127.0.0.1:{} yet.\n  start it first:  rowt up      (that renders, starts the router, and sets the proxy)\n  override anyway: rowt proxy on --force",
             ctx.port
         );
     }
-    let Some(svc) = p.active_service() else {
+    let Some(svc) = svc else {
         return "no active network service — connect a network first".into();
     };
     let pointing = p.proxy_pointing_ok(&svc, ctx.port);

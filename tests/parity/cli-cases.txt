@@ -171,3 +171,10 @@ watch nosucharm
 onboard
 PARITY_SCENARIO=router-up onboard
 PARITY_SCENARIO=lanes-empty onboard
+
+# proxy on/off — safe to gate because BOTH sides funnel every system-proxy
+# write through one guarded choke point, and the sandbox has no service anyway.
+proxy off
+proxy on
+PARITY_SCENARIO=proxy-on proxy off
+PARITY_SCENARIO=router-up proxy on

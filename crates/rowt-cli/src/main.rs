@@ -78,7 +78,7 @@ fn native(cmd: &str, sub: &str) -> bool {
                 | "errors" | "stats" | "log"
         ) || (cmd == "corp" && matches!(sub, "sync" | "suggest")),
         "direct" | "connections" | "conns" | "_complete" => true,
-        "proxy" => matches!(sub, "" | "status" | "check" | "env"),
+        "proxy" => matches!(sub, "" | "status" | "check" | "env" | "on" | "off"),
         // read arms only — the rest drive the Python importers
         "server" => matches!(sub, "" | "list" | "dump"),
         "sub" => matches!(sub, "" | "list" | "dump"),
@@ -1614,6 +1614,19 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
         }
         "proxy" => {
             let action = rest.first().map(|s| s.as_str()).unwrap_or("status");
+            // on/off record the user's INTENT, which the watchdog reads: a
+            // deliberately-off proxy is a normal running state (router up,
+            // routing direct) and the watchdog must never re-enable it.
+            // status/check do not touch intent — asking is not deciding.
+            if matches!(action, "on" | "off") {
+                let ctx = Ctx::new(cfg.clone());
+                lifecycle::sset(&ctx, "proxy_intent", action);
+                if action == "off" {
+                    return Ok(lifecycle::proxy_off(&ctx));
+                }
+                let force = rest.iter().any(|a| a == "--force" || a == "-f");
+                return Ok(lifecycle::proxy_on(&ctx, force));
+            }
             let (out, ok) = cmd_proxy(action, rest.get(1).map(|s| s.as_str()))?;
             if !ok {
                 println!("{out}");
