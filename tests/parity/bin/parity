@@ -590,7 +590,7 @@ cmd_cli_diff() {
   while IFS= read -r line; do
     case "$line" in ''|'#'*) continue ;; esac
     total=$((total + 1))
-    local A B scen="" tmo="$TIMEOUT" cmdline="$line"
+    local A B scen="" tmo="$TIMEOUT" unordered=0 cmdline="$line"
     # Leading KEY=VALUE tokens select the machine state (PARITY_SCENARIO) or the
     # alarm (PARITY_TIMEOUT). The second exists for the streaming commands:
     # `<lane> log` is `tail -f`, so BOTH sides must be killed by the alarm and a
@@ -599,6 +599,7 @@ cmd_cli_diff() {
       case "$cmdline" in
         PARITY_SCENARIO=*) scen="${cmdline%% *}"; scen="${scen#PARITY_SCENARIO=}"; cmdline="${cmdline#* }" ;;
         PARITY_TIMEOUT=*)  tmo="${cmdline%% *}";  tmo="${tmo#PARITY_TIMEOUT=}";    cmdline="${cmdline#* }" ;;
+        PARITY_UNORDERED=1) unordered=1; cmdline="${cmdline#* }" ;;
         *) break ;;
       esac
     done
@@ -650,6 +651,14 @@ cmd_cli_diff() {
     # behavior. Without this, "identical stdout" would certify an empty stub.
     [ -f "$A/trace" ] || : > "$A/trace"; [ -f "$B/trace" ] || : > "$B/trace"
     normalize "$A/trace" "$A" > "$A/trace.n"; normalize "$B/trace" "$B" > "$B/trace.n"
+    # A command that fans out (ping, probe) writes its trace from concurrent
+    # processes, so the ORDER is whatever the scheduler chose — on both sides.
+    # Marked cases compare the trace as a SET. Not the default: for the proxy
+    # plane the sequence IS the behavior, and sorting everything would retire a
+    # gate that has already caught a reordered protocol list.
+    if [ "$unordered" = 1 ]; then
+      sort -o "$A/trace.n" "$A/trace.n"; sort -o "$B/trace.n" "$B/trace.n"
+    fi
     diff -q "$A/trace.n" "$B/trace.n" >/dev/null 2>&1 || bad="$bad trace"
     # And the audit log, so the BEGIN/END bracketing around mutating commands is
     # proven rather than asserted. The elapsed seconds are wall clock, so they go.

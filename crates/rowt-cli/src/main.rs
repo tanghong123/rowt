@@ -13,9 +13,13 @@
 //! lines of help text are ported, but until then it would only add a dependency
 //! and a help format that does not match the shell's.
 
+mod diag;
+mod fetch;
 mod help;
 mod lifecycle;
 mod shell;
+mod skill;
+mod vm;
 mod seeds {
     include!(concat!(env!("OUT_DIR"), "/seeds.rs"));
 }
@@ -75,7 +79,7 @@ fn native(cmd: &str, sub: &str) -> bool {
         // read arms only — the rest drive the Python importers
         "server" => matches!(sub, "" | "list" | "dump"),
         "sub" => matches!(sub, "" | "list" | "dump"),
-        "use" | "ping" | "run" => true,
+        "use" | "ping" | "run" | "skill" | "report" | "uninstall" | "fetch" | "probe" | "vm" => true,
         // `config import` prompts on /dev/tty, which is exactly what this gate
         // cannot compare — porting it would move it out of reach.
         "config" => matches!(sub, "" | "list" | "export"),
@@ -132,8 +136,45 @@ impl ExecReplace for std::process::Command {
     }
 }
 
-fn env_or(k: &str, d: &str) -> String {
+pub fn env_or(k: &str, d: &str) -> String {
     std::env::var(k).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| d.to_string())
+}
+
+/// The rc files `shell-init --install` may have written into, in the order the
+/// shell walks them.
+fn strip_rc_files() {
+    let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    let mut changed = false;
+    for rc in [".zshrc", ".bashrc", ".bash_profile", ".profile", ".zprofile"] {
+        let p = home.join(rc);
+        if !p.is_file() {
+            continue;
+        }
+        if let Some(new) = skill::strip_shell_init(&read(&p)) {
+            if std::fs::write(&p, new).is_ok() {
+                eprintln!("==> stripped shell integration from {}", p.display());
+                changed = true;
+            }
+        }
+    }
+    if !changed {
+        eprintln!("==> no shell integration found in rc files");
+    }
+}
+
+/// `$HERE` — the tree bin/rowt sits under (repo checkout or brew prefix). The
+/// shell derives it from its own path; this binary lives one level deeper in a
+/// checkout (target/release) and beside it once installed, so both are tried.
+fn here_dir() -> PathBuf {
+    let exe = std::env::current_exe().unwrap_or_default();
+    let d = exe.parent().unwrap_or(Path::new("."));
+    for up in ["..", "../.."] {
+        let c = d.join(up);
+        if c.join("skills/rowt").is_dir() || c.join("bin/rowt").is_file() {
+            return c.canonicalize().unwrap_or(c);
+        }
+    }
+    d.join("..").canonicalize().unwrap_or_else(|_| d.to_path_buf())
 }
 
 fn config_dir() -> PathBuf {
@@ -145,7 +186,7 @@ fn config_dir() -> PathBuf {
 
 /// `date(1)` rather than a time crate — same program, same zone and locale
 /// rules, and nothing to keep in sync.
-fn sh_date(fmt: &str) -> String {
+pub fn sh_date(fmt: &str) -> String {
     std::process::Command::new("date").arg(fmt).output().ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim_end().to_string()).unwrap_or_default()
 }
@@ -181,7 +222,7 @@ fn set_mode(p: &Path, mode: u32) -> std::io::Result<()> {
     std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode))
 }
 
-fn read(p: &Path) -> String {
+pub fn read(p: &Path) -> String {
     std::fs::read_to_string(p).unwrap_or_default()
 }
 
@@ -337,14 +378,14 @@ fn cmd_proxy(action: &str, arg: Option<&str>) -> Result<(String, bool), String> 
                 Ok((format!("  ✗ system proxy not fully configured — run '{PROG} proxy on'"), false))
             }
         }
-        other => Err(format!("usage: {PROG} proxy [status | check | on [--force] | off | env [--off]] (got {other})")),
+        _ => Err(format!("usage: {PROG} proxy [status | check | on [--force] | off | env [--off]]")),
     }
 }
 
 /// `printf "%-Ns"` pads to N BYTES in awk under LC_ALL=C, where Rust's `{:<N}`
 /// pads to N chars. Identical for ASCII and different the moment a host is an
 /// IDN — and connection tables are exactly where a non-ASCII host shows up.
-fn pad(s: &str, width: usize) -> String {
+pub fn pad(s: &str, width: usize) -> String {
     let mut o = s.to_string();
     for _ in s.len()..width {
         o.push(' ');
@@ -611,8 +652,8 @@ fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<Str
             }
             Ok(e.messages.join("\n"))
         }
-        other => Err(format!(
-            "usage: {PROG} {label} [list | add <e>… | rm <e>… | import <file> | clear | dump [file]] (got {other})"
+        _ => Err(format!(
+            "usage: {PROG} {label} [list | add <e>… | rm <e>… | import <file> | clear | dump [file]]"
         )),
     }
 }
@@ -638,6 +679,240 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                 }
                 "log" => cmd_lane_log(&cfg, cmd),
                 _ => cmd_lane(&cfg, lane, &action, args),
+            }
+        }
+        "vm" => {
+            let ctx = Ctx::new(cfg.clone());
+            vm::cmd(&ctx, &here_dir(), rest.first().map(|s| s.as_str()).unwrap_or("up"))
+        }
+        // Pre-download everything `up` needs, while a working VPN is on — the
+        // whole point is that afterwards `up` never has to reach GitHub.
+        "fetch" => {
+            let what = rest.first().map(|s| s.as_str()).unwrap_or("both");
+            match what {
+                "host" => {
+                    fetch::ensure_singbox(&cfg)?;
+                    fetch::ads_ruleset(&cfg, true)?;
+                    fetch::all_geosites(&cfg);
+                }
+                "vm" => fetch::vm_artifacts(&cfg)?,
+                "both" | "all" | "" => {
+                    fetch::ensure_singbox(&cfg)?;
+                    fetch::ads_ruleset(&cfg, true)?;
+                    fetch::all_geosites(&cfg);
+                    fetch::vm_artifacts(&cfg)?;
+                }
+                _ => die(&cfg, &format!("usage: {PROG} fetch [host|vm|both]")),
+            }
+            eprintln!("==> done — you can now run '{PROG} up' without internet to GitHub.");
+            Ok(String::new())
+        }
+        // Which escape mode works here? Reach every server BOTH via the default
+        // route and bound to the physical NIC. default ok + bind FAIL is the
+        // signal that matters: the corp VPN is enforcing with a packet filter,
+        // so bind_interface cannot get out and only the VM can.
+        "probe" => {
+            let ctx = Ctx::new(cfg.clone());
+            let servers: Vec<Value> =
+                serde_json::from_str(&read(&cfg.join("servers.json"))).unwrap_or_default();
+            if servers.is_empty() {
+                die(&cfg, &format!("import/subscribe servers first: {PROG} server add '<vless://...>'"));
+            }
+            let Some(iface) = Mac.detect_iface() else {
+                die(&cfg, "no physical interface detected");
+            };
+            eprintln!("==> probing {} server(s) in parallel via default route and via {iface} (corp VPN should be up)…",
+                      servers.len());
+            let handles: Vec<_> = servers.iter().map(|s| {
+                let g = |k: &str| s.get(k).map(|v| match v {
+                    Value::String(x) => x.clone(), o => o.to_string(),
+                }).unwrap_or_default();
+                let (tag, host, port, ifc) = (g("tag"), g("server"), g("server_port"), iface.clone());
+                std::thread::spawn(move || {
+                    let ip = rowt_platform::resolve_ip(&host);
+                    if ip.is_empty() {
+                        return (tag, format!("DNS-FAIL ({host})"), "-".to_string(), "-".to_string());
+                    }
+                    let d = if diag::tcp_reaches("", &ip, &port) { "ok" } else { "✗" };
+                    let b = if diag::tcp_reaches(&ifc, &ip, &port) { "ok" } else { "✗" };
+                    (tag, format!("{ip}:{port}"), d.to_string(), b.to_string())
+                })
+            }).collect();
+            // Collected in SERVER order, not completion order — the shell writes
+            // one file per index and reads them back by glob.
+            let rows: Vec<_> = handles.into_iter().filter_map(|h| h.join().ok()).collect();
+            let mut o = Vec::new();
+            let (mut any_default, mut any_bind) = (false, false);
+            for (tag, ipp, d, b) in &rows {
+                if d == "ok" { any_default = true; }
+                if b == "ok" { any_bind = true; }
+                o.push(format!("  {} {} default:{} {iface}:{b}", pad(tag, 18), pad(ipp, 24), pad(d, 3)));
+            }
+            o.push(String::new());
+            if !any_default {
+                o.push("  ✗ no server reachable via the default route — check connectivity/servers".into());
+                o.push(format!("  (or skip probing: {PROG} up host / {PROG} up vm)"));
+                println!("{}", o.join("\n"));
+                std::process::exit(1);
+            }
+            if any_bind {
+                lifecycle::sset(&ctx, "mode", "host");
+                o.push("→ mode HOST works (bind_interface bypasses the corp tunnel).".into());
+            } else {
+                lifecycle::sset(&ctx, "mode", "vm");
+                o.push("→ bind failed while default works → corp enforces via packet filter → mode VM.".into());
+            }
+            Ok(o.join("\n"))
+        }
+        // The full diagnostic. Written to a timestamped file AND echoed, and
+        // only the five most recent are kept — a report you forgot to delete
+        // should not become a directory of them.
+        "report" => {
+            let ctx = Ctx::new(cfg.clone());
+            let out = cfg.join(format!("diag-{}.txt", sh_date("+%Y%m%d-%H%M%S")));
+            let body = diag::body(&ctx, &here_dir());
+            std::fs::write(&out, format!("{body}\n")).map_err(|e| format!("write {}: {e}", out.display()))?;
+            let mut old: Vec<PathBuf> = std::fs::read_dir(&cfg).map(|rd| rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.file_name().map(|n| {
+                    let n = n.to_string_lossy();
+                    n.starts_with("diag-") && n.ends_with(".txt")
+                }).unwrap_or(false)).collect()).unwrap_or_default();
+            // `ls -t | tail -n +6` — newest five stay. Sorting by NAME is the
+            // same order here (the name is the timestamp) and does not depend
+            // on mtimes a copy or a restore would have rewritten.
+            old.sort();
+            for f in old.iter().rev().skip(5) {
+                let _ = std::fs::remove_file(f);
+            }
+            println!("{body}");
+            // The shell's `tee` is followed by a bare `echo` before the two
+            // info lines — a blank line on stdout, not stderr.
+            println!();
+            eprintln!("==> saved to: {}", out.display());
+            eprintln!("==> secrets (uuid/password/keys) are NOT included — safe to share for debugging.");
+            Ok(String::new())
+        }
+        // Reverse setup for a clean re-onboard. Every step is best-effort and
+        // ordered so a failure cannot strand the machine: the teardown runs
+        // before anything is removed.
+        "uninstall" => {
+            let ctx = Ctx::new(cfg.clone());
+            let mut purge = false;
+            for a in &rest {
+                match a.as_str() {
+                    "--purge" => purge = true,
+                    "-h" | "--help" => return Ok(format!("usage: {PROG} uninstall [--purge]   (--purge also removes {})", cfg.display())),
+                    _ => die(&cfg, &format!("usage: {PROG} uninstall [--purge]")),
+                }
+            }
+            eprintln!("==> uninstalling rowt — reversing setup…");
+            let _ = lifecycle::proxy_off(&ctx);
+            lifecycle::router_stop(&ctx);
+            let _ = run(&cfg, "watch", &["uninstall".to_string()]);
+            strip_rc_files();
+            if purge {
+                if std::fs::remove_dir_all(&cfg).is_ok() {
+                    eprintln!("==> removed all config/state ({})", cfg.display());
+                }
+            } else {
+                eprintln!("==> kept config/state at {}  (re-run with --purge to remove servers/subs/lanes/state)", cfg.display());
+            }
+            if Path::new("/private/etc/sudoers.d/lima").is_file() {
+                eprintln!("==> VM sudoers still at /private/etc/sudoers.d/lima — 'sudo rm -f' it if you used VM mode");
+            }
+            println!();
+            eprintln!("==> done. To remove the rowt binary itself:");
+            Ok("    brew uninstall rowt          # if installed via Homebrew\n    # or, if installed from the repo:  <repo>/install.sh --uninstall".into())
+        }
+        // Link the agent skill so an agent can drive setup. Everything here
+        // happens OUTSIDE the config dir — symlinks under ~/.claude and
+        // ~/.agents — which is precisely what cli-diff cannot observe, so the
+        // assertions that matter are the unit tests in skill.rs.
+        "skill" => {
+            let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+            let action = rest.first().cloned().unwrap_or_else(|| "status".into());
+            let (mut force, mut dev) = (false, String::new());
+            let mut it = rest.iter().skip(1);
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--force" => force = true,
+                    "--dev" => dev = it.next().cloned().unwrap_or_default(),
+                    x if x.starts_with("--dev=") => dev = x["--dev=".len()..].to_string(),
+                    _ => die(&cfg, &format!("usage: {PROG} skill <install [--force] [--dev <repo>] | uninstall | status>")),
+                }
+            }
+            let src = if dev.is_empty() {
+                skill::skill_src(&here_dir())
+            } else {
+                let d = PathBuf::from(dev.trim_end_matches('/')).join("skills/rowt");
+                if !d.is_dir() {
+                    die(&cfg, &format!("no skill at {} — is it a rowt repo checkout?", d.display()));
+                }
+                d.canonicalize().unwrap_or(d)
+            };
+            let targets = skill::skill_targets(&home);
+            let mut o = Vec::new();
+            match action.as_str() {
+                "install" => {
+                    if !src.is_dir() {
+                        die(&cfg, &format!("skill files not found at {}", src.display()));
+                    }
+                    let mut did = false;
+                    for t in targets {
+                        if std::fs::read_link(&t).map(|l| l == src).unwrap_or(false) {
+                            eprintln!("==> already linked: {}", t.display());
+                            did = true;
+                            continue;
+                        }
+                        if t.symlink_metadata().is_ok() {
+                            if skill::skill_ours(&t) {
+                                eprintln!("warning: {} already links another rowt skill ({}) — switching it to {}",
+                                    t.display(), std::fs::read_link(&t).unwrap_or_default().display(), src.display());
+                            } else if !force {
+                                eprintln!("error: {} exists and isn't a rowt skill — re-run with --force to replace", t.display());
+                                continue;
+                            }
+                            let _ = std::fs::remove_file(&t);
+                            let _ = std::fs::remove_dir_all(&t);
+                        }
+                        if let Some(d) = t.parent() { let _ = std::fs::create_dir_all(d); }
+                        if std::os::unix::fs::symlink(&src, &t).is_ok() {
+                            eprintln!("==> linked {} -> {}", t.display(), src.display());
+                            did = true;
+                        }
+                    }
+                    if did {
+                        eprintln!("==> start a NEW agent session to load the 'rowt' skill.");
+                    }
+                    Ok(String::new())
+                }
+                "uninstall" => {
+                    for t in targets {
+                        if skill::skill_ours(&t) {
+                            let _ = std::fs::remove_file(&t);
+                            eprintln!("==> unlinked {}", t.display());
+                        } else if t.symlink_metadata().is_ok() {
+                            eprintln!("==> left {} (not a rowt-skill link)", t.display());
+                        }
+                    }
+                    Ok(String::new())
+                }
+                "status" => {
+                    o.push(format!("skill source: {}  ({})", src.display(),
+                                   if src.is_dir() { "present" } else { "MISSING" }));
+                    for t in targets {
+                        let link = std::fs::read_link(&t);
+                        o.push(match link {
+                            Ok(l) if l == src => format!("  linked:  {}", t.display()),
+                            Ok(l) => format!("  other:   {} -> {}", t.display(), l.display()),
+                            Err(_) if t.exists() => format!("  dir:     {} (real, not a link)", t.display()),
+                            Err(_) => format!("  absent:  {}", t.display()),
+                        });
+                    }
+                    Ok(o.join("\n"))
+                }
+                _ => die(&cfg, &format!("usage: {PROG} skill <install [--force] [--dev <repo>] | uninstall | status>")),
             }
         }
         // Latency to every server THROUGH the tunnel, via the clash API's own
@@ -898,7 +1173,7 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                 // and asks for confirmation on /dev/tty first. Left with the
                 // shell: an interactive prompt is exactly the thing this gate
                 // cannot compare, so porting it would move it out of reach.
-                o => die(&cfg, &format!("usage: {PROG} config [ list | export [file] | import <file> [-y] ]  (got {o})")),
+                _ => die(&cfg, &format!("usage: {PROG} config [ list | export [file] | import <file> [-y] ]")),
             }
         }
         // Per-domain traffic history. The store is SQLite and every arm is a
@@ -971,7 +1246,7 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                     // collector's store.
                     Ok(sqlite(&["-readonly", "-header", "-column", &db.display().to_string(), &sql]))
                 }
-                o => die(&cfg, &format!("usage: {PROG} metrics [ status | top [seconds] | path | query \"<SQL>\" ]  (got {o})")),
+                _ => die(&cfg, &format!("usage: {PROG} metrics [ status | top [seconds] | path | query \"<SQL>\" ]")),
             }
         }
         // `server` / `sub`: the READ arms only. Everything that changes the pool
@@ -1017,7 +1292,7 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                         None => { println!("{out}"); Ok(String::new()) }
                     }
                 }
-                o => die(&cfg, &format!("usage: {PROG} server [list | add <link>… | rm <tag>… | clear | import <--detect|--from SRC [--output FILE]|--apply [--input FILE]> | dump [file]]  (got {o})")),
+                _ => die(&cfg, &format!("usage: {PROG} server [list | add <link>… | rm <tag>… | clear | import <--detect|--from SRC [--output FILE]|--apply [--input FILE]> | dump [file]]")),
             }
         }
         "sub" => {
@@ -1063,7 +1338,7 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                         None => { println!("{body}"); Ok(String::new()) }
                     }
                 }
-                o => die(&cfg, &format!("usage: {PROG} sub [list | add <url>… | rm <n|url> | update | clear | import [--apply] | dump [file]]  (got {o})")),
+                _ => die(&cfg, &format!("usage: {PROG} sub [list | add <url>… | rm <n|url> | update | clear | import [--apply] | dump [file]]")),
             }
         }
         // The hidden helper the completion functions call at tab-time. Driven by
@@ -1207,7 +1482,7 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
         "shell-init" => match rest.first().map(|s| s.as_str()) {
             None | Some("") => Ok(include_str!(concat!(env!("OUT_DIR"), "/shell_init.txt")).trim_end().to_string()),
             Some("-h") | Some("--help") => Ok(format!("usage: {PROG} shell-init [--install [<rc-file>]]")),
-            Some(o) => Err(format!("usage: {PROG} shell-init [--install [<rc-file>]] (got {o})")),
+            Some(_) => Err(format!("usage: {PROG} shell-init [--install [<rc-file>]]")),
         },
         "completion" => match rest.first().map(|s| s.as_str()) {
             Some("zsh") => Ok(include_str!(concat!(env!("OUT_DIR"), "/completion_zsh.txt")).trim_end().to_string()),
@@ -1235,7 +1510,7 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                     let tail = lines[lines.len().saturating_sub(n)..].join("\n");
                     Ok(format!("# {} (last {n})\n{tail}", log.display()))
                 }
-                Some(o) => Err(format!("usage: {PROG} audit [ -n <N> | all | path | clear ] (got {o})")),
+                Some(_) => Err(format!("usage: {PROG} audit [ -n <N> | all | path | clear ]")),
             }
         }
         "monitor" | "mon" => {
@@ -1276,7 +1551,7 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                     }
                     Err(std::process::Command::new("tail").arg("-f").arg(&f).exec_replace())
                 }
-                o => Err(format!("usage: {PROG} router [up|down|restart|status] (got {o})")),
+                _ => Err(format!("usage: {PROG} router up|down|restart|status|log")),
             }
         }
         "reload" => {

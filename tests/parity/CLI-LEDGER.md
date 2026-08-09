@@ -26,33 +26,33 @@ is not 'does it work' but 'whose code ran, and what proves it'.
 | `down` | **native** | boot-test |
 | `escape` | **native** | cli-diff |
 | `explain` | **native** | cli-diff |
-| `fetch` | legacy | — |
+| `fetch` | **native** | cli-diff |
 | `metrics` | **native** | cli-diff |
 | `mon` | **native** | — |
 | `monitor` | **native** | — |
 | `onboard` | legacy | — |
 | `ping` | **native** | cli-diff |
-| `probe` | legacy | — |
+| `probe` | **native** | — |
 | `proxy` | **native** | cli-diff |
 | `reload` | **native** | boot-test |
 | `render` | **native** | boot-test |
-| `report` | legacy | — |
+| `report` | **native** | cli-diff |
 | `restart` | **native** | boot-test |
 | `route` | **native** | — |
 | `router` | **native** | cli-diff + boot-test |
 | `run` | **native** | cli-diff |
 | `server` | **native** | cli-diff |
 | `shell-init` | **native** | cli-diff |
-| `skill` | legacy | — |
+| `skill` | **native** | cli-diff |
 | `status` | **native** | cli-diff |
 | `sub` | **native** | cli-diff |
-| `uninstall` | legacy | — |
+| `uninstall` | **native** | — |
 | `up` | **native** | boot-test |
 | `use` | **native** | cli-diff |
-| `vm` | legacy | — |
+| `vm` | **native** | cli-diff |
 | `watch` | legacy | cli-diff (passthrough) |
 
-**29 of 37 command arms answered natively**; the other 8 run in the shell.
+**35 of 37 command arms answered natively**; the other 2 run in the shell.
 
 Partial arms — native for some sub-commands, legacy for the rest.
 `native()` in crates/rowt-cli/src/main.rs is the authority:
@@ -66,7 +66,7 @@ Partial arms — native for some sub-commands, legacy for the rest.
             // read arms only — the rest drive the Python importers
             "server" => matches!(sub, "" | "list" | "dump"),
             "sub" => matches!(sub, "" | "list" | "dump"),
-            "use" | "ping" | "run" => true,
+            "use" | "ping" | "run" | "skill" | "report" | "uninstall" | "fetch" | "probe" | "vm" => true,
             // `config import` prompts on /dev/tty, which is exactly what this gate
             // cannot compare — porting it would move it out of reach.
             "config" => matches!(sub, "" | "list" | "export"),

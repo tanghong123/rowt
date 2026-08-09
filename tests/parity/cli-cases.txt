@@ -134,8 +134,28 @@ router status
 PARITY_TIMEOUT=3 router log
 
 # ping / run
-ping
-PARITY_SCENARIO=router-up ping
+PARITY_UNORDERED=1 ping
+PARITY_UNORDERED=1 PARITY_SCENARIO=router-up ping
 PARITY_SCENARIO=router-up ping alpha
-PARITY_SCENARIO=lanes-empty ping
+PARITY_UNORDERED=1 PARITY_SCENARIO=lanes-empty ping
 run
+
+# skill / report / uninstall. `report` probes the live machine, so what the gate
+# checks is the SHAPE — section order and every probe's argv — not the diagnosis.
+skill
+skill status
+skill nosucharm
+report
+PARITY_SCENARIO=router-up report
+# The usage lines a die() emits reach the AUDIT log via ABORT, so a message that
+# only bash's stderr would have shown is still compared for the mutating arms.
+proxy nosucharm
+escape nosucharm
+router nosucharm
+metrics query
+shell-init nosucharm
+fetch nosucharm
+PARITY_UNORDERED=1 probe
+PARITY_UNORDERED=1 PARITY_SCENARIO=lanes-empty probe
+vm status
+vm nosucharm
