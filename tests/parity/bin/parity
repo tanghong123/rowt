@@ -672,7 +672,13 @@ cmd_cli_ledger() {
   local rs_src="$ROOT/crates/rowt-cli/src/main.rs"
   local arms impl gated c
   arms="$(sed -n '/^run_command()/,/^}/p' "$ROWT" | sed -n 's/^ *\([a-z_|-]*\)) *cmd_.*/\1/p' | tr '|' '\n' | sort -u | grep -v '^$')"
-  impl="$(sed -n '/match cmd {/,/^    }/p' "$rs_src" | grep -oE '"[a-z_-]+"' | tr -d '"' | sort -u)"
+  # Only match ARMS count — strings anywhere else in the block do not. Scraping
+  # every literal once reported `status` as implemented because the proxy arm
+  # contains `unwrap_or("status")`, and a ledger that overstates coverage is
+  # worse than no ledger: it is the exact false comfort this harness exists to
+  # prevent. Take the text left of `=>` only.
+  impl="$(sed -n '/match cmd {/,/^    }/p' "$rs_src" \
+          | grep '=>' | sed 's/=>.*//' | grep -oE '"[a-z_-]+"' | tr -d '"' | sort -u)"
   {
     echo "# rowt-rs readiness"
     echo
@@ -686,7 +692,11 @@ cmd_cli_ledger() {
       total=$((total + 1))
       local has="—" g="—"
       printf '%s\n' "$impl" | grep -qx "$c" && { has="yes"; done_n=$((done_n + 1)); }
-      grep -qE "(^|[[:space:]])$c([[:space:]]|\$)" "$DIR/cli-cases.txt" 2>/dev/null && g="yes"
+      # The command must be the FIRST word of a case (after any scenario
+      # prefix), or `status` matches the line `proxy status` and reports itself
+      # covered by someone else's test.
+      awk -v c="$c" '$1 ~ /^PARITY_SCENARIO=/ { $1=""; sub(/^ /,"") } $1==c { found=1 }
+                     END { exit !found }' "$DIR/cli-cases.txt" 2>/dev/null && g="yes"
       printf '| `%s` | %s | %s |\n' "$c" "$has" "$g"
     done
     echo

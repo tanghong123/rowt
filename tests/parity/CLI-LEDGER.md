@@ -35,7 +35,7 @@ this is how much of it could stand in, and how much of that is proven.
 | `server` | — | — |
 | `shell-init` | — | — |
 | `skill` | — | — |
-| `status` | yes | yes |
+| `status` | — | — |
 | `sub` | — | — |
 | `uninstall` | — | — |
 | `up` | — | — |
@@ -43,4 +43,4 @@ this is how much of it could stand in, and how much of that is proven.
 | `vm` | — | — |
 | `watch` | — | — |
 
-**7 of 37 command arms.** The rest still run only in the shell.
+**6 of 37 command arms.** The rest still run only in the shell.
