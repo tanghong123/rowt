@@ -593,7 +593,11 @@ cmd_cli_diff() {
         "$rs" $cmdline > "$B/out" 2>/dev/null || brc=$?
     echo "$arc" > "$A/rc"; echo "$brc" > "$B/rc"
     local bad="" f
-    diff -q "$A/out" "$B/out" >/dev/null 2>&1 || bad="$bad stdout"
+    # Normalised per side, like every other gate: each sandbox has its own
+    # mktemp path, and a command that prints where it looked (audit, config)
+    # would otherwise "differ" on nothing but that.
+    normalize "$A/out" "$A" > "$A/out.n"; normalize "$B/out" "$B" > "$B/out.n"
+    diff -q "$A/out.n" "$B/out.n" >/dev/null 2>&1 || bad="$bad stdout"
     [ "$arc" = "$brc" ] || bad="$bad rc($arc/$brc)"
     for f in escape-domains.txt corp-domains.txt block-domains.txt; do
       diff -q "$A/home/rowt/$f" "$B/home/rowt/$f" >/dev/null 2>&1 || bad="$bad $f"
@@ -601,7 +605,7 @@ cmd_cli_diff() {
     if [ -n "$bad" ]; then
       fails=$((fails + 1))
       echo "[$line] DIFFERS:$bad"
-      diff "$A/out" "$B/out" 2>/dev/null | sed 's/^/    /' | head -10
+      diff "$A/out.n" "$B/out.n" 2>/dev/null | sed 's/^/    /' | head -10
       echo "    artifacts: $A $B"
     else
       echo "[$line] identical"

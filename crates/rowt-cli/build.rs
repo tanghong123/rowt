@@ -18,4 +18,19 @@ fn main() {
         })
         .unwrap_or_else(|| "0.0.0".into());
     println!("cargo:rustc-env=ROWT_SHELL_VERSION={version}");
+
+    // The static text blocks come out of the shell too. They are pure output
+    // with no logic in them, so transcribing them into Rust string literals
+    // would add nothing but a second copy to keep in sync — and the whole point
+    // of this port is that the shell is the specification until it isn't.
+    let body = std::fs::read_to_string(&shell).unwrap_or_default();
+    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    for (name, marker) in [("shell_init", "SH"), ("completion_zsh", "ZSH"), ("completion_bash", "BASH")] {
+        let open = format!("<<'{marker}'\n");
+        let text = body
+            .split_once(&open)
+            .and_then(|(_, rest)| rest.split_once(&format!("\n{marker}\n")).map(|(t, _)| t))
+            .unwrap_or("");
+        std::fs::write(out.join(format!("{name}.txt")), format!("{text}\n")).unwrap();
+    }
 }

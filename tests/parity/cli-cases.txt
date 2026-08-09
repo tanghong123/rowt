@@ -34,3 +34,13 @@ proxy check
 proxy status
 escape import tests/parity/fixtures/import-list.txt
 corp import tests/parity/fixtures/import-list.txt
+
+# static text and log readers, extracted from the shell at build time
+shell-init
+completion zsh
+completion bash
+audit
+audit path
+audit all
+status
+PARITY_SCENARIO=render-local status

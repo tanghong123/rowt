@@ -6,9 +6,9 @@ this is how much of it could stand in, and how much of that is proven.
 | command | rowt-rs | gated by cli-diff |
 |---|---|---|
 | `_complete` | — | — |
-| `audit` | — | — |
+| `audit` | yes | yes |
 | `block` | yes | yes |
-| `completion` | — | — |
+| `completion` | yes | yes |
 | `config` | — | — |
 | `connections` | — | — |
 | `conns` | — | — |
@@ -19,8 +19,8 @@ this is how much of it could stand in, and how much of that is proven.
 | `explain` | yes | yes |
 | `fetch` | — | — |
 | `metrics` | — | — |
-| `mon` | — | — |
-| `monitor` | — | — |
+| `mon` | yes | — |
+| `monitor` | yes | — |
 | `onboard` | — | — |
 | `ping` | — | — |
 | `probe` | — | — |
@@ -33,9 +33,9 @@ this is how much of it could stand in, and how much of that is proven.
 | `router` | yes | — |
 | `run` | — | — |
 | `server` | — | — |
-| `shell-init` | — | — |
+| `shell-init` | yes | yes |
 | `skill` | — | — |
-| `status` | yes | — |
+| `status` | yes | yes |
 | `sub` | — | — |
 | `uninstall` | — | — |
 | `up` | yes | — |
@@ -43,4 +43,4 @@ this is how much of it could stand in, and how much of that is proven.
 | `vm` | — | — |
 | `watch` | — | — |
 
-**13 of 37 command arms.** The rest still run only in the shell.
+**18 of 37 command arms.** The rest still run only in the shell.

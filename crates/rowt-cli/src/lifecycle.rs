@@ -390,6 +390,29 @@ pub fn proxy_on(ctx: &Ctx, force: bool) -> String {
     out
 }
 
+/// The escape selector's current pick, via the clash API. None when the router
+/// is down or the API does not answer — the shell omits the line entirely then.
+pub fn clash_selected(ctx: &Ctx) -> Option<String> {
+    let secret = ctx.sget("clash_secret");
+    let out = Command::new("curl")
+        .args(["--noproxy", "*", "-sS", "-m", "6", "-H", &format!("Authorization: Bearer {secret}"),
+               &format!("http://{}/proxies/escape", ctx.controller())])
+        .stderr(Stdio::null()).output().ok()?;
+    let v: Value = serde_json::from_slice(&out.stdout).ok()?;
+    v.get("now")?.as_str().filter(|s| !s.is_empty()).map(|s| s.to_string())
+}
+
+/// An HTTP status through a proxy, "000" when it never answered.
+pub fn curl_code(proxy: &str, url: &str) -> String {
+    let out = Command::new("curl")
+        .args(["-sS", "-m", "8", "-x", proxy, "-o", "/dev/null", "-w", "%{http_code}", url])
+        .stderr(Stdio::null()).output();
+    match out {
+        Ok(o) if !o.stdout.is_empty() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        _ => "000".into(),
+    }
+}
+
 pub fn router_up(ctx: &Ctx) -> Result<String, String> {
     if let Some(pid) = host_running(ctx) {
         return Ok(format!("  router already running (pid {pid})"));
