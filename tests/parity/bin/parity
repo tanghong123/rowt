@@ -24,6 +24,7 @@
 #   parity classify-matrix   every classifier case (the Phase 2 gate)
 #   parity lanes-diff        lane-list edits, bash vs Rust: files + messages
 #   parity reconcile-diff    corp reconcile, Python vs Rust, over generated cases
+#   parity netdetect-diff    scutil --dns parser, Python vs Rust, over generated cases
 #   parity watch-diff        watchdog tick: bash's effects vs the FSM's plan
 #   parity platform-diff     the platform layer, compared by the argv it produces
 #   parity cli-diff          whole commands through rowt-rs vs the shell
@@ -432,6 +433,35 @@ cmd_reconcile_diff() { # [count]
   done
   if [ "$fails" -eq 0 ]; then
     echo "  $n reconcile cases: identical"
+    rm -rf "$work"; return 0
+  fi
+  echo "  $fails/$n cases differ — artifacts: $work"; return 1
+}
+
+# net-detect: the Python parser vs the Rust one, over generated `scutil --dns`
+# outputs. Compared as BYTES, not as re-parsed JSON — the key order and the
+# within-list order are part of the contract (`internal_domains` is first-seen
+# order, and corp_suggest shows it to a human in that order).
+cmd_netdetect_diff() { # [count]
+  local rust="${PARITY_RUST_NETDETECT:-$ROOT/target/release/rowt-netdetect}"
+  local py="$ROOT/config/net-detect.py"
+  [ -x "$rust" ] || die "no rust netdetect at $rust — cargo build --release -p rowt-core"
+  local work n fails=0 d
+  work="$(mktemp -d "${TMPDIR:-/tmp}/parity-netdetect.XXXXXX")"
+  n="$(python3 "$SELF/gen-scutil-cases.py" "$work" "${1:-200}")"
+  for d in "$work"/case*; do
+    python3 "$py" --input "$d/scutil" > "$d/py.out" 2>"$d/py.err" || true
+    "$rust"       --input "$d/scutil" > "$d/rs.out" 2>"$d/rs.err" || true
+    if ! diff -q "$d/py.out" "$d/rs.out" >/dev/null 2>&1; then
+      fails=$((fails + 1))
+      if [ "$fails" -le 3 ]; then
+        echo "  DIFFERS: $d"
+        diff "$d/py.out" "$d/rs.out" | sed 's/^/    /' | head -12
+      fi
+    fi
+  done
+  if [ "$fails" -eq 0 ]; then
+    echo "  $n net-detect cases: identical"
     rm -rf "$work"; return 0
   fi
   echo "  $fails/$n cases differ — artifacts: $work"; return 1
@@ -907,6 +937,7 @@ case "${1:-}" in
   classify-diff)   shift; cmd_classify_diff "$@" ;;
   classify-matrix) shift; cmd_classify_matrix "$@" ;;
   reconcile-diff)  shift; cmd_reconcile_diff "$@" ;;
+  netdetect-diff)  shift; cmd_netdetect_diff "$@" ;;
   lanes-diff)      shift; cmd_lanes_diff "$@" ;;
   watch-diff)      shift; cmd_watch_diff "$@" ;;
   platform-diff)   shift; cmd_platform_diff "$@" ;;

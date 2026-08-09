@@ -17,7 +17,8 @@
 #   10.  …and the watchdog shadow must record it too
 #   11.  drop a proxy protocol           -> platform-diff must fire
 #   12.  reword an explain description  -> cli-diff must fire
-#   13.  (structural) native() must not claim an arm run() cannot answer
+#   13.  widen an internal-NS range   -> netdetect-diff must fire
+#   14.  (structural) native() must not claim an arm run() cannot answer
 #
 # Everything happens in a throwaway copy of the repo; the real tree is never
 # touched. Run it after changing the harness itself.
@@ -39,7 +40,17 @@ cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
 # `_router_stop` pkills it only when it does. Link the sidecar tree so the copy
 # is a faithful one; without this, cli-diff fails on a difference the selftest
 # itself created.
-ln -sfn "$ROOT/rowt-monitor" "$tmp/rowt-monitor"
+# The shell locates its sidecars relative to ITSELF ($HERE); rowt-rs locates
+# them relative to its own executable, which stays in the real tree because the
+# throwaway copy has no target/. Copying only bin/rowt therefore makes the two
+# disagree about whether rowt-collector, or the agent skill, or the importers
+# exist AT ALL — and several arms branch on exactly that. Link every sidecar
+# tree so the copy is a faithful one. Anything added beside bin/rowt in future
+# belongs in this list; without it, cli-diff fails on a difference the selftest
+# itself created.
+for _side in rowt-monitor skills lima config target; do
+  [ -e "$ROOT/$_side" ] && ln -sfn "$ROOT/$_side" "$tmp/$_side"
+done
 P="$tmp/tests/parity/bin/parity"
 
 pass=0 fail=0
@@ -305,6 +316,28 @@ else
   fi
 fi
 
+echo "14. widen an internal-nameserver range in the Python"
+cp "$ROOT/config/net-detect.py" "$tmp/net-detect.py.orig" 2>/dev/null || true
+if [ ! -x "$ROOT/target/release/rowt-netdetect" ]; then
+  echo "  skip — no release build"
+else
+  # 9.0.0.0/8 is NOT internal. Adding it makes the Python classify 9.x
+  # nameservers as corp while Rust does not — a one-line change to a constant,
+  # which is exactly the kind of drift a hand-written port accumulates.
+  perl -0pi -e 's/        "6\.0\.0\.0\/12",/        "6.0.0.0\/12",\n        "9.0.0.0\/8",/' "$tmp/config/net-detect.py"
+  if ! grep -q '9\.0\.0\.0/8' "$tmp/config/net-detect.py"; then
+    bad "could not widen the nameserver range (the table moved?)"
+  else
+    # Point the gate at the mutated Python by running it from the copied tree.
+    if PARITY_RUST_NETDETECT="$ROOT/target/release/rowt-netdetect" \
+       "$tmp/tests/parity/bin/parity" netdetect-diff 400 >/dev/null 2>&1; then
+      bad "netdetect-diff passed with a widened internal-NS range"
+    else
+      ok "netdetect-diff caught the widened nameserver range"
+    fi
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # Not a mutation test — a structural one, and the only check here that runs
 # nothing. `native()` decides which arms rowt-rs ANSWERS and which it hands to
@@ -317,7 +350,7 @@ fi
 # Compared statically rather than by invoking each name: several of these arms
 # start processes, exec a TUI, or reach for the system proxy, and a self-test
 # that has to be trusted not to do those things is not one worth having.
-echo "13. every name native() claims must be an arm of run()"
+echo "15. every name native() claims must be an arm of run()"
 src="$ROOT/crates/rowt-cli/src/main.rs"
 # Command names only. A native() arm line is indented exactly eight spaces and
 # starts with a pattern; the sub-command lists inside `matches!(…)` are indented

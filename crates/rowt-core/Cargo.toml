@@ -6,7 +6,10 @@ description = "The pure parts of rowt — configuration render and lane classifi
 license = "MIT"
 
 [dependencies]
-serde_json = "1"
+# preserve_order: `net-detect` emits a dict whose KEY ORDER is Python's
+# insertion order, and the gate compares bytes. serde_json's default Map sorts,
+# which would reorder every object it renders.
+serde_json = { version = "1", features = ["preserve_order"] }
 ipnet = "2"
 
 [[bin]]

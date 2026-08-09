@@ -8,8 +8,10 @@
 //! `tests/parity` rather than by inspection.
 
 pub mod classify;
+pub mod geosite;
 pub mod laneerr;
 pub mod lanes;
+pub mod netdetect;
 pub mod reconcile;
 pub mod render;
 pub mod watch;
