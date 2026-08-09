@@ -18,7 +18,7 @@ is not 'does it work' but 'whose code ran, and what proves it'.
 | `audit` | **native** | cli-diff |
 | `block` | **native** | cli-diff |
 | `completion` | **native** | cli-diff |
-| `config` | legacy | — |
+| `config` | **native** | cli-diff |
 | `connections` | **native** | cli-diff |
 | `conns` | **native** | cli-diff |
 | `corp` | **native** | cli-diff |
@@ -27,7 +27,7 @@ is not 'does it work' but 'whose code ran, and what proves it'.
 | `escape` | **native** | cli-diff |
 | `explain` | **native** | cli-diff |
 | `fetch` | legacy | — |
-| `metrics` | legacy | — |
+| `metrics` | **native** | cli-diff |
 | `mon` | **native** | — |
 | `monitor` | **native** | — |
 | `onboard` | legacy | — |
@@ -48,11 +48,11 @@ is not 'does it work' but 'whose code ran, and what proves it'.
 | `sub` | **native** | cli-diff |
 | `uninstall` | legacy | — |
 | `up` | **native** | boot-test |
-| `use` | legacy | — |
+| `use` | **native** | cli-diff |
 | `vm` | legacy | — |
 | `watch` | legacy | cli-diff (passthrough) |
 
-**24 of 37 command arms answered natively**; the other 13 run in the shell.
+**27 of 37 command arms answered natively**; the other 10 run in the shell.
 
 Partial arms — native for some sub-commands, legacy for the rest.
 `native()` in crates/rowt-cli/src/main.rs is the authority:
@@ -66,4 +66,11 @@ Partial arms — native for some sub-commands, legacy for the rest.
             // read arms only — the rest drive the Python importers
             "server" => matches!(sub, "" | "list" | "dump"),
             "sub" => matches!(sub, "" | "list" | "dump"),
-            "router" => matches!(sub, "" | "up" | "down" | "restart" | "status"),
+            "use" => true,
+            // `config import` prompts on /dev/tty, which is exactly what this gate
+            // cannot compare — porting it would move it out of reach.
+            "config" => matches!(sub, "" | "list" | "export"),
+            "router" => matches!(sub, "" | "up" | "down" | "restart" | "status" | "log"),
+            _ => false,
+        }
+    }

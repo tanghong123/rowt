@@ -75,7 +75,12 @@ fn native(cmd: &str, sub: &str) -> bool {
         // read arms only — the rest drive the Python importers
         "server" => matches!(sub, "" | "list" | "dump"),
         "sub" => matches!(sub, "" | "list" | "dump"),
-        "router" => matches!(sub, "" | "up" | "down" | "restart" | "status"),
+        "use" => true,
+        // `config import` prompts on /dev/tty, which is exactly what this gate
+        // cannot compare — porting it would move it out of reach.
+        "config" => matches!(sub, "" | "list" | "export"),
+        "metrics" => true,
+        "router" => matches!(sub, "" | "up" | "down" | "restart" | "status" | "log"),
         _ => false,
     }
 }
@@ -136,6 +141,25 @@ fn config_dir() -> PathBuf {
         Ok(x) if !x.is_empty() => PathBuf::from(x).join("rowt"),
         _ => PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/rowt"),
     }
+}
+
+/// `date(1)` rather than a time crate — same program, same zone and locale
+/// rules, and nothing to keep in sync.
+fn sh_date(fmt: &str) -> String {
+    std::process::Command::new("date").arg(fmt).output().ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim_end().to_string()).unwrap_or_default()
+}
+fn sh_date_r(epoch: i64, fmt: &str) -> String {
+    std::process::Command::new("date").arg("-r").arg(epoch.to_string()).arg(fmt)
+        .stderr(std::process::Stdio::null()).output().ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim_end().to_string()).unwrap_or_default()
+}
+/// `du -h "$f" | awk '{print $1}'`.
+fn du_h(p: &Path) -> String {
+    std::process::Command::new("du").arg("-h").arg(p)
+        .stderr(std::process::Stdio::null()).output().ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().next().unwrap_or("").to_string())
+        .unwrap_or_default()
 }
 
 fn set_mode(p: &Path, mode: u32) -> std::io::Result<()> {
@@ -602,6 +626,168 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                 _ => cmd_lane(&cfg, lane, &action, args),
             }
         }
+        // Pin the escape server, or hand it back to the auto selector. Toggling
+        // auto<->manual changes the config SHAPE (the urltest outbound appears
+        // or disappears), so that path re-renders and restarts; a plain
+        // tag->tag change in manual mode switches live over the clash API.
+        "use" => {
+            let ctx = Ctx::new(cfg.clone());
+            if ctx.mode() == "local" {
+                die(&cfg, &format!("local mode has no tunnel to select from — '{PROG} up host' to bring one back"));
+            }
+            let servers: Vec<Value> =
+                serde_json::from_str(&read(&cfg.join("servers.json"))).unwrap_or_default();
+            if servers.is_empty() {
+                die(&cfg, "no servers imported");
+            }
+            let Some(tag) = rest.first().cloned() else {
+                return run(&cfg, "server", &["list".to_string()]);
+            };
+            let known = |t: &str| servers.iter().any(|s| s.get("tag").and_then(|x| x.as_str()) == Some(t));
+            if tag != "auto" && !known(&tag) {
+                die(&cfg, &format!("unknown server '{tag}' — see: {PROG} server"));
+            }
+            let prev = ctx.sget("selected");
+            lifecycle::sset(&ctx, "selected", &tag);
+            lifecycle::cmd_render(&ctx)?;
+            if lifecycle::host_running(&ctx).is_none() {
+                eprintln!("==> escape -> {tag} (applies on next '{PROG} router up')");
+                return Ok(String::new());
+            }
+            let live = prev != "auto" && tag != "auto"
+                && lifecycle::clash_curl(&ctx, "PUT", "/proxies/escape",
+                                         Some(&format!("{{\"name\":\"{tag}\"}}"))).is_some();
+            if live {
+                eprintln!("==> escape -> {tag} (live)");
+            } else {
+                lifecycle::router_stop(&ctx);
+                lifecycle::router_up(&ctx)?;
+                if tag == "auto" {
+                    eprintln!("==> escape -> auto (fastest live server, re-probed every {})",
+                              env_or("ROWT_AUTO_INTERVAL", "20m"));
+                } else {
+                    eprintln!("==> escape -> {tag}");
+                }
+            }
+            Ok(String::new())
+        }
+        // Back up / move the whole setup. Only the SOURCE-of-truth files: the
+        // rendered configs, `state` and the runtime trees are machine-specific
+        // and are rebuilt by render/up.
+        "config" => {
+            let src = ["servers.json", "manual.json", "import-review.json", "subs.txt",
+                       "outbound.json", "escape-domains.txt", "corp-domains.txt",
+                       "block-domains.txt"];
+            match rest.first().map(|s| s.as_str()).unwrap_or("list") {
+                "list" => {
+                    let mut o = format!("config bundle — '{PROG} config export' packs the present ones:");
+                    for f in src {
+                        o.push_str(&format!("\n  {} {f}", if cfg.join(f).is_file() { "✓" } else { "·" }));
+                    }
+                    o.push_str("\nnot included (machine-specific; regenerated by 'render'/'up'):");
+                    o.push_str("\n  host.json  vm.json  state  bin/  cache/  log/  metrics/");
+                    Ok(o)
+                }
+                "export" => {
+                    let names: Vec<&str> = src.iter().copied().filter(|f| cfg.join(f).is_file()).collect();
+                    if names.is_empty() {
+                        die(&cfg, &format!("no config files found under {}", cfg.display()));
+                    }
+                    let out = match rest.get(1) {
+                        Some(o) => o.clone(),
+                        None => format!("rowt-config-{}.tgz", sh_date("+%Y%m%d-%H%M%S")),
+                    };
+                    let ok = std::process::Command::new("tar")
+                        .arg("czf").arg(&out).arg("-C").arg(&cfg).args(&names)
+                        .status().map(|s| s.success()).unwrap_or(false);
+                    if !ok {
+                        die(&cfg, &format!("could not write {out}"));
+                    }
+                    let _ = set_mode(Path::new(&out), 0o600);
+                    Ok(format!(
+                        "wrote {out}  ({})\n  packed: {}\n  ⚠ contains server credentials + subscription tokens — move it over an\n    encrypted channel (scp / rsync -e ssh) and delete it afterward.",
+                        du_h(Path::new(&out)), names.join(" ")))
+                }
+                // `import` extracts a bundle, chmods the secrets and re-renders,
+                // and asks for confirmation on /dev/tty first. Left with the
+                // shell: an interactive prompt is exactly the thing this gate
+                // cannot compare, so porting it would move it out of reach.
+                o => die(&cfg, &format!("usage: {PROG} config [ list | export [file] | import <file> [-y] ]  (got {o})")),
+            }
+        }
+        // Per-domain traffic history. The store is SQLite and every arm is a
+        // sqlite3 invocation, so this is a wrapper: what it RUNS is the
+        // behavior, which is why cli-diff compares the argv trace.
+        "metrics" => {
+            let db = cfg.join("metrics/traffic.db");
+            let now: i64 = sh_date("+%s").parse().unwrap_or(0);
+            let sqlite = |args: &[&str]| -> String {
+                std::process::Command::new("sqlite3").args(args)
+                    .stderr(std::process::Stdio::null()).output().ok()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim_end().to_string())
+                    .unwrap_or_default()
+            };
+            match rest.first().map(|s| s.as_str()).unwrap_or("status") {
+                "status" | "" => {
+                    let pid = read(&cfg.join("collector.pid")).trim().parse::<i32>().ok()
+                        .filter(|p| *p > 0 && unsafe { libc::kill(*p, 0) } == 0);
+                    let mut o = match pid {
+                        Some(p) => format!("collector: running (pid {p})"),
+                        None => format!("collector: stopped{}", match std::env::var("ROWT_METRICS") {
+                            Ok(v) if !v.is_empty() => format!(" (ROWT_METRICS={v})"),
+                            _ => String::new(),
+                        }),
+                    };
+                    if !db.is_file() {
+                        o.push_str(&format!("\nstore:     none yet ({})", db.display()));
+                        return Ok(o);
+                    }
+                    let dbs = db.display().to_string();
+                    let lw = sqlite(&[&dbs, "SELECT v FROM meta WHERE k='last_write'"]);
+                    if !lw.is_empty() {
+                        let t: i64 = lw.parse().unwrap_or(0);
+                        o.push_str(&format!("\nlast write: {} ({}s ago)",
+                            sh_date_r(t, "+%H:%M:%S"), now - t));
+                    }
+                    o.push_str(&format!("\nstore:     {dbs} ({})", du_h(&db)));
+                    let rows = sqlite(&[&dbs, "SELECT '5s rows='||count(*) FROM sample_5s"]);
+                    if !rows.is_empty() {
+                        o.push_str(&format!("\n{rows}"));
+                    }
+                    Ok(o)
+                }
+                "top" => {
+                    if !rowt_platform::which("sqlite3") {
+                        die(&cfg, "sqlite3 not found");
+                    }
+                    if !db.is_file() {
+                        die(&cfg, &format!("no metrics store yet ({}) — is the collector running?", db.display()));
+                    }
+                    let span: i64 = rest.get(1).and_then(|s| s.parse().ok()).unwrap_or(3600);
+                    let q = format!("SELECT domain, lane, sum(bytes_dn) dn, sum(bytes_up) up FROM sample_5s \\\n         WHERE ts >= {} AND lane<>'-' GROUP BY domain,lane ORDER BY dn DESC LIMIT 20;", now - span);
+                    Ok(format!("# top domains by ↓download over the last {span}s\n{}",
+                               sqlite(&["-header", "-column", &db.display().to_string(), &q])))
+                }
+                "path" => Ok(format!("{}\n{}", db.display(),
+                                     include_str!(concat!(env!("OUT_DIR"), "/metrics_path.txt")).trim_end())),
+                "query" => {
+                    let sql = rest[1..].join(" ");
+                    if sql.is_empty() {
+                        die(&cfg, &format!("usage: {PROG} metrics query \"<SQL>\"   (read-only)"));
+                    }
+                    if !rowt_platform::which("sqlite3") {
+                        die(&cfg, "sqlite3 not found");
+                    }
+                    if !db.is_file() {
+                        die(&cfg, &format!("no metrics store yet ({}) — is the collector running?", db.display()));
+                    }
+                    // -readonly, so an arbitrary query can never mutate the
+                    // collector's store.
+                    Ok(sqlite(&["-readonly", "-header", "-column", &db.display().to_string(), &sql]))
+                }
+                o => die(&cfg, &format!("usage: {PROG} metrics [ status | top [seconds] | path | query \"<SQL>\" ]  (got {o})")),
+            }
+        }
         // `server` / `sub`: the READ arms only. Everything that changes the pool
         // — add, import, rm, clear, update — runs the Python importers and
         // `rebuild_servers`, so it stays with the shell (PORTING.md §5 phase 6:
@@ -891,15 +1077,25 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
             lifecycle::cmd_render(&ctx)
         }
         "router" => {
-            let ctx = Ctx::new(cfg);
+            let ctx = Ctx::new(cfg.clone());
             match rest.first().map(|s| s.as_str()).unwrap_or("up") {
                 "up" => lifecycle::router_up(&ctx),
                 "down" => Ok(lifecycle::router_down(&ctx)),
                 "restart" => { lifecycle::router_stop(&ctx); lifecycle::router_up(&ctx) }
+                // The stopped line carries no port. It reads like an omission;
+                // it is the shell's output, and inventing the friendlier
+                // version is a behavior change wearing a polish's clothes.
                 "status" => Ok(match lifecycle::host_running(&ctx) {
                     Some(pid) => format!("  router: running (pid {pid}) on 127.0.0.1:{}", ctx.port),
-                    None => format!("  router: stopped (would listen on 127.0.0.1:{})", ctx.port),
+                    None => "  router: stopped".to_string(),
                 }),
+                "log" => {
+                    let f = ctx.logdir().join("host.log");
+                    if !f.is_file() {
+                        die(&cfg, &format!("no router log yet — start it first: {PROG} up (or {PROG} router up)"));
+                    }
+                    Err(std::process::Command::new("tail").arg("-f").arg(&f).exec_replace())
+                }
                 o => Err(format!("usage: {PROG} router [up|down|restart|status] (got {o})")),
             }
         }

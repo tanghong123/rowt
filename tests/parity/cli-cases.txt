@@ -114,3 +114,21 @@ PARITY_SCENARIO=lanes-empty escape list
 PARITY_SCENARIO=lanes-empty sub dump
 PARITY_SCENARIO=lanes-empty sub list
 PARITY_SCENARIO=lanes-empty explain anything.example
+
+# use / config / metrics / router
+PARITY_SCENARIO=lanes-empty use
+use alpha
+use auto
+use nosuchtag
+PARITY_SCENARIO=render-local use alpha
+config
+config list
+config nosucharm
+metrics
+metrics status
+metrics path
+metrics top
+metrics query
+metrics nosucharm
+router status
+PARITY_TIMEOUT=3 router log

@@ -86,6 +86,12 @@ fn main() {
     }
     seeds.push_str("];\n");
     std::fs::write(out.join("seeds.rs"), seeds).unwrap();
+
+    // `metrics path` prints the store's schema from a heredoc — pure reference
+    // text about the four rollup tables, and the sort of thing that goes stale
+    // instantly if it exists twice.
+    let m = between(&body, "\n    path)\n      echo \"$db\"\n      cat <<EOF\n", "\nEOF\n");
+    std::fs::write(out.join("metrics_path.txt"), m).unwrap();
 }
 
 /// A heredoc body: everything up to the closing `EOF` line. The terminator may

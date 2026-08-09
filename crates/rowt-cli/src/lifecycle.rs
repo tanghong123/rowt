@@ -71,7 +71,7 @@ pub fn host_running(ctx: &Ctx) -> Option<i32> {
 
 // ---------------------------------------------------------------- render
 
-fn escape_outbounds(ctx: &Ctx, iface: &str) -> Result<(Value, String), String> {
+fn escape_outbounds(ctx: &Ctx) -> Result<(Value, String), String> {
     let servers: Vec<Value> =
         serde_json::from_str(&read(&ctx.cfg.join("servers.json"))).unwrap_or_default();
     let selected = { let s = ctx.sget("selected"); if s.is_empty() { "auto".into() } else { s } };
@@ -87,13 +87,23 @@ fn escape_outbounds(ctx: &Ctx, iface: &str) -> Result<(Value, String), String> {
             Ok((json!([{"type":"socks","tag":"escape","server":ip,
                         "server_port":ctx.port + 1,"version":"5"}]), String::new()))
         }
-        _ => Ok((group(&servers, iface, &selected, &interval),
+        // Detected HERE rather than passed in, because `build_escape_outbounds
+        // host` runs its own `detect_iface` and `assemble_host` runs another —
+        // two probes of the network per render. Wasteful, and reproduced
+        // anyway: `cli-diff` compares the argv trace, and collapsing the two
+        // would be a behavior change smuggled in as a tidy-up. Listed in
+        // PORTING.md §6.7 to fix on the shell side, where it belongs.
+        _ => Ok((group(&servers, &Mac.detect_iface().unwrap_or_default(), &selected, &interval),
                  format!("127.0.0.1:{}", ctx.clash_port))),
     }
 }
 
-pub fn build_host(ctx: &Ctx, iface: &str) -> Result<Value, String> {
-    let (escapes, clash) = escape_outbounds(ctx, iface)?;
+pub fn build_host(ctx: &Ctx) -> Result<Value, String> {
+    // Order matters to the argv trace: `assemble_host "$(build_escape_outbounds
+    // …)"` runs the substitution first, so the outbound builder's probe lands
+    // before assemble's own.
+    let (escapes, clash) = escape_outbounds(ctx)?;
+    let iface = Mac.detect_iface().unwrap_or_default();
     let cache = ctx.cfg.join("cache");
     let esc_src = read(&ctx.cfg.join("escape-domains.txt"));
     let corp_src = read(&ctx.cfg.join("corp-domains.txt"));
@@ -143,8 +153,7 @@ pub fn cmd_render(ctx: &Ctx) -> Result<String, String> {
         return Err("no servers — run: rowt server add '<vless://...>' or rowt sub add <url>".into());
     }
     eprintln!("==> rendering configs (mode={mode}, port={}, servers={servers_n})", ctx.port);
-    let iface = Mac.detect_iface().unwrap_or_default();
-    let host = build_host(ctx, &iface)?;
+    let host = build_host(ctx)?;
 
     let servers: Vec<Value> =
         serde_json::from_str(&read(&ctx.cfg.join("servers.json"))).unwrap_or_default();
