@@ -69,7 +69,10 @@ fn run() -> Result<String, String> {
         "clear" => Op::Clear,
         "import" => {
             let f = operands.first().ok_or("import needs a file")?;
-            Op::Import(read(Path::new(f)).lines().map(|s| s.to_string()).collect())
+            Op::Import {
+                lines: read(Path::new(f)).lines().map(|s| s.to_string()).collect(),
+                source: f.clone(),
+            }
         }
         other => return Err(format!("unknown action: {other}")),
     };

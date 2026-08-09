@@ -25,3 +25,12 @@ PARITY_SCENARIO=render-local explain ads.example
 PARITY_SCENARIO=render-local explain intranet.corp.example
 PARITY_SCENARIO=render-local-precedence explain api.foo.com
 PARITY_SCENARIO=render-local escape list
+
+# newly ported: version, the proxy read paths, and lane import
+version
+proxy env
+proxy env --off
+proxy check
+proxy status
+escape import tests/parity/fixtures/import-list.txt
+corp import tests/parity/fixtures/import-list.txt

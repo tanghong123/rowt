@@ -43,6 +43,7 @@ name = "rowt-cli"
 version = "0.1.0"
 dependencies = [
  "rowt-core",
+ "rowt-platform",
 ]
 
 [[package]]

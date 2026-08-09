@@ -15,6 +15,7 @@
 
 use rowt_core::classify::{classify, ClassifyInput, Lane};
 use rowt_core::lanes::{apply, dump, Lanes, Op};
+use rowt_platform::{Mac, Platform};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -101,6 +102,87 @@ fn cmd_explain(cfg: &Path, dest: &str) -> String {
     out
 }
 
+fn port() -> u16 {
+    env_or("ROWT_PORT", "7890").parse().unwrap_or(7890)
+}
+
+/// `awk '/Enabled/{print $2} /Server/{s=$2} /Port/{print "         "s":"$2}'`
+/// then `tr '\n' ' '` — reproduced rather than tidied, because the shell's
+/// output is the specification. Note "Authenticated Proxy Enabled: 0" also
+/// matches /Enabled/, which is why "Proxy" appears in the result.
+fn proxy_awk(body: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut server = String::new();
+    for line in body.lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if line.contains("Enabled") {
+            out.push(f.get(1).unwrap_or(&"").to_string());
+        }
+        if line.contains("Server") {
+            server = f.get(1).unwrap_or(&"").to_string();
+        }
+        if line.contains("Port") {
+            out.push(format!("         {server}:{}", f.get(1).unwrap_or(&"")));
+        }
+    }
+    let mut s = out.join(" ");
+    if !s.is_empty() {
+        s.push(' ');
+    }
+    s
+}
+
+fn cmd_proxy(action: &str, arg: Option<&str>) -> Result<(String, bool), String> {
+    let p = Mac;
+    let prt = port();
+    match action {
+        "env" => {
+            if arg == Some("--off") {
+                return Ok((
+                    "unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY".into(),
+                    true,
+                ));
+            }
+            let h = format!("http://127.0.0.1:{prt}");
+            let s = format!("socks5h://127.0.0.1:{prt}");
+            Ok((
+                format!(
+                    "export http_proxy={h} https_proxy={h} all_proxy={s}\nexport HTTP_PROXY={h} HTTPS_PROXY={h} ALL_PROXY={s}"
+                ),
+                true,
+            ))
+        }
+        "status" => {
+            let Some(svc) = p.active_service() else {
+                return Ok(("system proxy: no active network service (nothing configured)".into(), true));
+            };
+            let read = |flag: &str| -> String {
+                proxy_awk(&rowt_platform::read_proxy(&svc, flag))
+            };
+            Ok((
+                format!(
+                    "system proxy (service '{svc}'):\n  socks:  {}\n  https:  {}\n  bypass: {}\n  CLI env: eval \"$({PROG} proxy env)\"   (off: {PROG} proxy env --off)",
+                    read("-getsocksfirewallproxy"),
+                    read("-getsecurewebproxy"),
+                    rowt_platform::read_bypass(&svc),
+                ),
+                true,
+            ))
+        }
+        "check" => {
+            let Some(svc) = p.active_service() else {
+                return Ok(("  ✗ no active network service".into(), false));
+            };
+            if p.proxy_pointing_ok(&svc, prt) && rowt_platform::bypass_ok(&svc) {
+                Ok((format!("  ✓ system proxy fully configured for '{svc}' (127.0.0.1:{prt} + local bypass)"), true))
+            } else {
+                Ok((format!("  ✗ system proxy not fully configured — run '{PROG} proxy on'"), false))
+            }
+        }
+        other => Err(format!("usage: {PROG} proxy [status | check | on [--force] | off | env [--off]] (got {other})")),
+    }
+}
+
 fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<String, String> {
     let label = lane.as_str();
     let lanes = load_lanes(cfg);
@@ -128,10 +210,19 @@ fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<Str
             Ok(o)
         }
         "dump" => Ok(dump(&body).join("\n")),
-        "add" | "rm" | "remove" | "clear" => {
+        "add" | "rm" | "remove" | "clear" | "import" => {
             let op = match action {
                 "add" => Op::Add(args.to_vec()),
                 "clear" => Op::Clear,
+                "import" => {
+                    let f = args.first().ok_or(format!(
+                        "usage: {PROG} {label} import <file>   (one domain per line)"
+                    ))?;
+                    Op::Import {
+                        lines: read(Path::new(f)).lines().map(|s| s.to_string()).collect(),
+                        source: f.clone(),
+                    }
+                }
                 _ => Op::Rm(args.to_vec()),
             };
             let e = apply(&lanes, lane, &op);
@@ -168,7 +259,17 @@ fn run() -> Result<String, String> {
             let action = rest.first().cloned().unwrap_or_else(|| "list".into());
             cmd_lane(&cfg, lane, &action, &rest[1.min(rest.len())..])
         }
-        "" => Err(format!("usage: {PROG}-rs <explain|escape|corp|block> …")),
+        "version" | "--version" | "-V" => Ok(format!("{PROG} {}", env!("ROWT_SHELL_VERSION"))),
+        "proxy" => {
+            let action = rest.first().map(|s| s.as_str()).unwrap_or("status");
+            let (out, ok) = cmd_proxy(action, rest.get(1).map(|s| s.as_str()))?;
+            if !ok {
+                println!("{out}");
+                std::process::exit(1);
+            }
+            Ok(out)
+        }
+        "" => Err(format!("usage: {PROG}-rs <version|explain|proxy|escape|corp|block> …")),
         other => Err(format!("unknown command: {other}")),
     }
 }

@@ -46,8 +46,10 @@ pub enum Op {
     Add(Vec<String>),
     Rm(Vec<String>),
     Clear,
-    /// Batch add — one entry per line, as `import` reads a file.
-    Import(Vec<String>),
+    /// Batch add — one entry per line, as `import` reads a file. Carries the
+    /// source name because the shell names it in the summary line, and that
+    /// summary is the message this has to reproduce.
+    Import { lines: Vec<String>, source: String },
 }
 
 /// `tr -d '[:space:]'` — every whitespace character goes, not just the ends.
@@ -91,8 +93,8 @@ pub fn apply(lanes: &Lanes, target: Lane, op: &Op) -> Edit {
     let mut msgs = Vec::new();
 
     match op {
-        Op::Add(entries) | Op::Import(entries) => {
-            let importing = matches!(op, Op::Import(_));
+        Op::Add(entries) | Op::Import { lines: entries, .. } => {
+            let importing = matches!(op, Op::Import { .. });
             let mut added = 0usize;
             let mut already = 0usize;
             for raw in entries {
@@ -135,8 +137,12 @@ pub fn apply(lanes: &Lanes, target: Lane, op: &Op) -> Edit {
                 }
             }
             if importing {
+                let source = match op {
+                    Op::Import { source, .. } => source.as_str(),
+                    _ => "",
+                };
                 msgs.push(format!(
-                    "  {} += {added} new, {already} already present",
+                    "  {} += {added} new, {already} already present (from {source})",
                     target.as_str()
                 ));
             }
@@ -262,8 +268,8 @@ mod tests {
     #[test]
     fn import_counts_rather_than_narrating() {
         let src = vec!["# c".into(), "".into(), "new.example".into(), "example.com".into()];
-        let e = apply(&lanes(), Lane::Escape, &Op::Import(src));
-        assert_eq!(e.messages, vec!["  escape += 1 new, 1 already present"]);
+        let e = apply(&lanes(), Lane::Escape, &Op::Import { lines: src, source: "list.txt".into() });
+        assert_eq!(e.messages, vec!["  escape += 1 new, 1 already present (from list.txt)"]);
         assert!(e.lanes.escape.contains("new.example"));
     }
 

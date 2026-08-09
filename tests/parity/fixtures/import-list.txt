@@ -1,0 +1,5 @@
+# an import source: comments and blanks skipped, duplicates counted
+new-one.example
+
+example.com
+new-two.example

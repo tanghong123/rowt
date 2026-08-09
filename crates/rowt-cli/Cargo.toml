@@ -4,9 +4,11 @@ version = "0.1.0"
 edition = "2021"
 description = "rowt-rs — the Rust CLI, built alongside the shell rather than replacing it"
 license = "MIT"
+build = "build.rs"
 
 [dependencies]
 rowt-core = { path = "../rowt-core" }
+rowt-platform = { path = "../rowt-platform" }
 
 [[bin]]
 name = "rowt-rs"

@@ -261,3 +261,39 @@ mod tests {
         assert_eq!(GETTERS[1], "-getwebproxy");
     }
 }
+
+/// Raw output of one `networksetup` proxy getter — the CLI formats it the way
+/// the shell's awk does, so the parsing and the formatting stay separable.
+pub fn read_proxy(service: &str, flag: &str) -> String {
+    out("networksetup", &[flag, service]).unwrap_or_default()
+}
+
+/// The bypass list as the shell prints it: newlines squashed to spaces.
+pub fn read_bypass(service: &str) -> String {
+    let body = out("networksetup", &["-getproxybypassdomains", service]).unwrap_or_default();
+    let mut s = body.replace('\n', " ");
+    while s.ends_with("  ") {
+        s.pop();
+    }
+    s
+}
+
+/// `_proxy_bypass_ok`: the configured list, sorted, equals what rowt wants.
+pub fn bypass_ok(service: &str) -> bool {
+    let body = out("networksetup", &["-getproxybypassdomains", service]).unwrap_or_default();
+    let mut have: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
+    have.sort_unstable();
+    let mut want: Vec<&str> = bypass_want().to_vec();
+    want.sort_unstable();
+    have == want
+}
+
+/// `_proxy_bypass_want` — one source of truth for what must never be proxied.
+pub fn bypass_want() -> &'static [&'static str] {
+    &[
+        "*.local", "169.254/16", "127.0.0.1", "localhost", "*.arpa",
+        "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+        "captive.apple.com", "connectivitycheck.gstatic.com",
+        "detectportal.firefox.com", "www.msftconnecttest.com",
+    ]
+}
