@@ -125,7 +125,14 @@ fn plist_body(ctx: &Ctx, self_bin: &Path) -> String {
 /// The scoped passwordless rule: only the three proxy-state toggles, only for
 /// this user. Broad NOPASSWD would be a far bigger grant than the watchdog needs.
 fn sudoers_body() -> String {
-    let user = out("id", &["-un"]).trim().to_string();
+    sudoers_for(out("id", &["-un"]).trim())
+}
+
+/// Split from the `id` call so the GRANT can be asserted without running as
+/// somebody. This is a passwordless-root rule: the seven verbs it names, and
+/// the fact that it names verbs rather than a whole binary, are the whole of
+/// what keeps it narrow.
+fn sudoers_for(user: &str) -> String {
     // One line, all seven verbs, exactly as the shell emits it — `visudo -cf`
     // validates this before it is installed, and a rule that differs from the
     // shell's is a rule that grants something different.
@@ -161,7 +168,27 @@ fn captive_state() -> CaptiveState {
     if !o.status.success() {
         return CaptiveState::Unknown;
     }
-    let body = String::from_utf8_lossy(&o.stdout);
+    probe_verdict(&String::from_utf8_lossy(&o.stdout))
+}
+
+/// `jq -e '.delay // empty'` on the clash delay-test's answer.
+///
+/// `//` falls through on `null` and `false` ONLY, and `-e` fails on those two
+/// and on no output at all. A delay of 0 is a number jq is perfectly happy
+/// with, so it counts as answering — which matters, because the alternative
+/// reading (0 is falsy, as in C or Python) would call a perfectly live tunnel
+/// wedged and trigger a recovery every tick.
+fn delay_answered(out: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(out).ok()
+        .and_then(|v| v.get("delay").cloned())
+        .is_some_and(|d| !matches!(d, serde_json::Value::Null | serde_json::Value::Bool(false)))
+}
+
+/// The verdict alone, given what `curl -w '\n%{http_code}'` wrote.
+///
+/// Split from the call so it can be tested: this is the decision that drops
+/// the system proxy, and the alternative to a test is toggling a real portal.
+fn probe_verdict(body: &str) -> CaptiveState {
     // `${out##*$'\n'}` / `${out%$'\n'*}` — split at the LAST newline, because
     // the body itself contains plenty.
     let (payload, code) = match body.rfind('\n') {
@@ -359,13 +386,7 @@ fn health_ok(ctx: &Ctx) -> bool {
                    &format!("http://{ep}/proxies/{sel}/delay?timeout={}000&url={enc}", t)])
             .stderr(Stdio::null()).output().ok()
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
-        // `jq -e '.delay // empty'` — `//` falls through on null and false
-        // only, and `-e` fails on those two and on no output at all. A delay of
-        // 0 is a number jq is perfectly happy with, so it counts as answering.
-        if serde_json::from_str::<serde_json::Value>(&out).ok()
-            .and_then(|v| v.get("delay").cloned())
-            .is_some_and(|d| !matches!(d, serde_json::Value::Null | serde_json::Value::Bool(false)))
-        {
+        if delay_answered(&out) {
             return true;
         }
         if try_n == 1 {
@@ -543,4 +564,102 @@ fn tick(ctx: &Ctx) {
     perform(ctx, &n.actions);
     save_state(ctx, &n.state);
     let _ = std::fs::remove_dir(&lock);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The captive verdict decides whether the watchdog DROPS the system
+    /// proxy. Getting it wrong on a flaky network strands the machine, and
+    /// the only other way to exercise it is a real portal.
+    #[test]
+    fn a_portal_is_told_apart_from_a_working_network() {
+        let v = |s: &str| format!("{:?}", probe_verdict(s));
+        // Apple's probe: 200 with "Success" in the body and nothing else.
+        assert_eq!(v("<HTML><HEAD><TITLE>Success</TITLE></HEAD></HTML>\n\n200"), "Clear");
+        // A portal serving its login page under the real URL — 200, wrong body.
+        assert_eq!(v("<html>Please sign in to the hotel wifi</html>\n302 moved\n200"), "Captive");
+        // …and one that redirects instead.
+        assert_eq!(v("\n302"), "Captive");
+        assert_eq!(v("\n307"), "Captive");
+        // Anything else is UNKNOWN, and unknown means hands off. A 404 or a
+        // timeout is not evidence of a portal, and acting on it would drop the
+        // proxy because the network was briefly unreachable.
+        assert_eq!(v("\n404"), "Unknown");
+        assert_eq!(v("\n500"), "Unknown");
+        assert_eq!(v(""), "Unknown");
+        assert_eq!(v("\n"), "Unknown");
+        // `3` alone is not `30x`: the shell tests three characters.
+        assert_eq!(v("\n3"), "Unknown");
+    }
+
+    /// The body is split at the LAST newline, not the first — Apple's page is
+    /// multi-line, and splitting at the first would read HTML as a status code.
+    #[test]
+    fn the_status_code_is_the_last_line_not_the_first() {
+        assert_eq!(format!("{:?}", probe_verdict("line one\nline two\nSuccess\n200")), "Clear");
+    }
+
+    /// `jq -e '.delay // empty'`, which is not the same as "delay is truthy".
+    #[test]
+    fn a_zero_delay_still_counts_as_an_answer() {
+        // The one that matters: jq's `//` falls through on null and false
+        // ONLY. Reading 0 as falsy would call a live tunnel wedged and fire a
+        // recovery on every tick.
+        assert!(delay_answered(r#"{"delay":0}"#));
+        assert!(delay_answered(r#"{"delay":142}"#));
+        assert!(!delay_answered(r#"{"delay":null}"#));
+        assert!(!delay_answered(r#"{"delay":false}"#));
+        // The clash API's shape when the outbound cannot be reached.
+        assert!(!delay_answered(r#"{"message":"An error occurred in the delay test"}"#));
+        assert!(!delay_answered("{}"));
+        assert!(!delay_answered(""));
+        assert!(!delay_answered("not json at all"));
+    }
+
+    /// A passwordless-root grant. What keeps it narrow is that it names seven
+    /// VERBS rather than the binary — `networksetup *` would let the watchdog
+    /// rename network services or read every stored password-protected setting.
+    #[test]
+    fn the_sudoers_rule_grants_exactly_the_seven_proxy_verbs() {
+        let body = sudoers_for("someone");
+        let rule = body.lines().find(|l| l.contains("NOPASSWD")).expect("a NOPASSWD line");
+        assert!(rule.starts_with("someone ALL=(root) NOPASSWD: "), "scoped to the user: {rule}");
+        for verb in ["-setsocksfirewallproxy", "-setsocksfirewallproxystate",
+                     "-setwebproxy", "-setwebproxystate",
+                     "-setsecurewebproxy", "-setsecurewebproxystate",
+                     "-setproxybypassdomains"] {
+            assert!(rule.contains(&format!("/usr/sbin/networksetup {verb} *")),
+                    "missing {verb} in: {rule}");
+        }
+        // Seven commas' worth of verbs and no bare binary.
+        assert_eq!(rule.matches("/usr/sbin/networksetup").count(), 7);
+        assert!(!rule.contains("networksetup *"), "a bare wildcard would grant everything");
+        // And it says how to remove itself, since it outlives the process.
+        assert!(body.contains("rowt watch uninstall"));
+    }
+
+    /// The LaunchAgent. `AbandonProcessGroup` is the load-bearing key: without
+    /// it launchd SIGKILLs the tick's whole process group when the tick exits,
+    /// which kills the sing-box a reload just started — the router silently
+    /// going down on a network switch.
+    #[test]
+    fn the_launch_agent_abandons_the_process_group_it_starts() {
+        let ctx = Ctx::new(std::path::PathBuf::from("/tmp/rowt-test-cfg"));
+        let body = plist_body(&ctx, Path::new("/opt/homebrew/bin/rowt"));
+        assert!(body.contains("<key>AbandonProcessGroup</key><true/>"));
+        // The two triggers: a resolver rewrite (every network transition) and
+        // the periodic liveness poll.
+        assert!(body.contains("/etc/resolv.conf"));
+        assert!(body.contains("/var/run/resolv.conf"));
+        assert!(body.contains("<key>StartInterval</key>"));
+        // It must invoke `watch tick`, not `watch`, and name the binary it was
+        // installed from rather than whatever `rowt` resolves to later.
+        assert!(body.contains("<string>/opt/homebrew/bin/rowt</string>"));
+        assert!(body.contains("<string>watch</string>\n    <string>tick</string>"));
+        assert!(body.contains(&format!("<key>Label</key><string>{LABEL}</string>")));
+        // Both streams land in watch.log, which is where a recovery's story is.
+        assert!(body.contains("/tmp/rowt-test-cfg/log/watch.log"));
+    }
 }

@@ -144,14 +144,53 @@ fn networks_setup(cfg: &Path) {
 /// The bridged address. Lima's added interface is lima0/lima1/… — eth0 is its
 /// internal NAT (192.168.x), unreachable from the host, and emphatically not it.
 pub fn vm_ip_detect() -> String {
-    let body = out("limactl", &["shell", VM_NAME, "ip", "-4", "-o", "addr", "show"]);
+    bridged_ip(&out("limactl", &["shell", VM_NAME, "ip", "-4", "-o", "addr", "show"]))
+}
+
+/// The guest's BRIDGED address, out of `ip -4 -o addr show`.
+///
+/// Split from the call because picking the wrong line is silent and expensive:
+/// the guest also has a `lo` at 127.0.0.1 and Lima's own user-mode NIC at
+/// 192.168.5.15, and rendering either into the host's escape outbound gives a
+/// tunnel that resolves, connects to nothing, and reports itself up. Only
+/// `lima<digit>` is the socket_vmnet bridge.
+fn bridged_ip(body: &str) -> String {
     for l in body.lines() {
         let f: Vec<&str> = l.split_whitespace().collect();
-        if f.len() >= 4 && f[1].starts_with("lima") && f[1][4..].starts_with(|c: char| c.is_ascii_digit()) {
+        if f.len() >= 4
+            && f[1].starts_with("lima")
+            && f[1].as_bytes().get(4).is_some_and(u8::is_ascii_digit)
+        {
             return f[3].split('/').next().unwrap_or("").to_string();
         }
     }
     String::new()
+}
+
+/// Repoint OUR arch's `location:` at the local file, and only that one.
+///
+/// `s#location: "https[^"]*<arch>.img"#location: "<img>"#` — a SUBSTRING
+/// replacement, which is load-bearing twice over. The template lists an image
+/// per architecture, so the arch has to be in the pattern or the arm64 entry
+/// gets pointed at an amd64 file. And the line is a YAML list item, `  - `
+/// included: rebuilding it from its leading whitespace drops the `- ` and
+/// produces a file Lima cannot parse. Only the matched span is replaced;
+/// everything to its left is untouched.
+fn repoint_image(body: &str, needle: &str, path: &str) -> String {
+    const HEAD: &str = "location: \"";
+    let mut out = String::new();
+    for line in body.lines() {
+        let rewritten = line.find("location: \"https").and_then(|i| {
+            let after = &line[i + HEAD.len()..];
+            let q = after.find('"')?;
+            // `[^"]*<arch>.img"` — the span must END with our arch's file.
+            after[..q + 1].ends_with(needle)
+                .then(|| format!("{}{HEAD}{path}\"{}", &line[..i], &after[q + 1..]))
+        });
+        out.push_str(rewritten.as_deref().unwrap_or(line));
+        out.push('\n');
+    }
+    out
 }
 
 /// The repo's Lima template with our arch's image location repointed at the
@@ -168,18 +207,7 @@ fn render_vm_yaml(ctx: &Ctx, here: &Path) -> Result<(), String> {
         return Err(format!("no Lima template at {}", tmpl.display()));
     }
     if img.is_file() {
-        let needle = format!("{}.img\"", fetch::larch());
-        let mut outp = String::new();
-        for line in body.lines() {
-            if line.contains("location: \"https") && line.contains(&needle) {
-                let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
-                outp.push_str(&format!("{indent}location: \"{}\"\n", img.display()));
-            } else {
-                outp.push_str(line);
-                outp.push('\n');
-            }
-        }
-        body = outp;
+        body = repoint_image(&body, &format!("{}.img\"", fetch::larch()), &img.display().to_string());
         eprintln!("==> using cached ubuntu image: {}", img.display());
     }
     std::fs::write(ctx.cfg.join("rowt-vm.yaml"), body).map_err(|e| e.to_string())
@@ -300,5 +328,74 @@ pub fn cmd(ctx: &Ctx, here: &Path, action: &str) -> Result<String, String> {
             Ok("  VM deleted".into())
         }
         _ => die(cfg, &format!("usage: {PROG} vm up|down|restart|status|log|delete")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Which of the guest's addresses is the one the host tunnels to. Picking
+    /// wrong is silent: the render succeeds, sing-box starts, and the escape
+    /// lane points at something that answers nothing.
+    #[test]
+    fn only_the_socket_vmnet_bridge_counts_as_the_vm_ip() {
+        // Verbatim `ip -4 -o addr show` from a bridged Lima guest: loopback,
+        // Lima's own user-mode NIC, then the socket_vmnet bridge.
+        let body = "\
+1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever preferred_lft forever
+2: lima0    inet 192.168.5.15/24 metric 100 brd 192.168.5.255 scope global dynamic lima0\\       valid_lft 85903sec
+3: lima1    inet 192.0.2.50/24 metric 200 brd 192.0.2.255 scope global dynamic lima1\\       valid_lft 3591sec
+";
+        // lima0 comes first in the file and wins — which is what the shell
+        // does too. The bridge is whichever lima<N> the guest lists first.
+        assert_eq!(bridged_ip(body), "192.168.5.15");
+        // With only the bridge present, that is the answer.
+        let one = "3: lima1    inet 192.0.2.50/24 brd 192.0.2.255 scope global dynamic lima1\n";
+        assert_eq!(bridged_ip(one), "192.0.2.50");
+        // The mask is stripped; the host renders `server`, not a CIDR.
+        assert!(!bridged_ip(one).contains('/'));
+    }
+
+    /// `lima` alone is not `lima<N>` — an interface literally named "lima", or
+    /// "limbo", must not be mistaken for the bridge. The digit check reads one
+    /// byte past "lima", and it must not panic when there is nothing there.
+    #[test]
+    fn an_interface_merely_starting_with_lima_is_not_the_bridge() {
+        assert_eq!(bridged_ip("2: lima    inet 10.0.0.1/8 scope global lima\n"), "");
+        assert_eq!(bridged_ip("2: limahost    inet 10.0.0.1/8 scope global limahost\n"), "");
+        assert_eq!(bridged_ip(""), "");
+        // A short line cannot be indexed as if it had four fields.
+        assert_eq!(bridged_ip("2: lima1\n"), "");
+    }
+
+    /// The Lima template carries one image per architecture. A rewrite that
+    /// matched on `location: "https` alone would repoint the WRONG arch — or
+    /// both arches at one file — and the VM would fail to boot after a
+    /// download the cache was meant to avoid.
+    #[test]
+    fn only_our_architectures_image_gets_repointed() {
+        let tmpl = "\
+images:
+  - location: \"https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img\"
+    arch: \"aarch64\"
+  - location: \"https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img\"
+    arch: \"x86_64\"
+";
+        let out = repoint_image(tmpl, "arm64.img\"", "/cache/ubuntu-24.04-server-cloudimg-arm64.img");
+        assert!(out.contains("  - location: \"/cache/ubuntu-24.04-server-cloudimg-arm64.img\""),
+                "arm64 repointed, with its indent:\n{out}");
+        assert!(out.contains("cloudimg-amd64.img\""), "amd64 left alone:\n{out}");
+        assert_eq!(out.matches("location:").count(), 2, "no line gained or lost");
+        // The list-item indent survives, or the YAML stops parsing.
+        assert!(out.lines().any(|l| l.starts_with("  - location: \"/cache/")));
+    }
+
+    /// A template with nothing to repoint comes back unchanged apart from a
+    /// guaranteed trailing newline — it is written straight to disk.
+    #[test]
+    fn a_template_without_our_image_is_left_alone() {
+        let t = "images:\n  - location: \"https://example.invalid/other.img\"\n";
+        assert_eq!(repoint_image(t, "arm64.img\"", "/cache/x.img"), t);
     }
 }

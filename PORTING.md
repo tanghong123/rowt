@@ -334,6 +334,50 @@ visible in the protocol code, and all of it changes what an outbound points at.
 Rough effort at this repo's session cadence: P0 ≈ a day, P1 2–3 d, P2 2 d,
 P3 3–4 d, P4 2–3 d, P5 4–5 d — order of three focused weeks total, spreadable.
 
+#### Phase 5 handoff — what it needs before it can start
+
+Phase 5 is the only phase that cannot begin on the machine the rest of the port
+was written on, and the reason is not effort. Written down here (2026-08-10) so
+whoever picks it up starts from the blocker rather than rediscovering it.
+
+**It needs a Linux target with systemd, systemd-resolved, and Tailscale.** Not
+to run the finished thing — to *start*. Two of this repo's own rules make a
+blind implementation worse than none:
+
+- §6.1: the corpus is generated and harvested, never invented. `PlatformLinux`
+  is mostly parsers — `resolvectl status`, `ip route`, `/proc/stat`'s `btime` —
+  and the shape of that output is exactly what a fixture written from memory
+  gets subtly wrong. `netdetect.rs` is the model: a pure parser over recorded
+  `scutil --dns`, gated by `netdetect-diff`. There is no Linux equivalent to
+  record from here.
+- The phase's stated gate is a fresh-VM install → onboard → probe → captive
+  drill, plus a VPN-coexistence drill with Tailscale up. §4.1.2 is a list of
+  ways tun mode breaks *other people's* tunnels — `auto_route` outranking a
+  VPN's routes, DNS hijack colliding with per-link DNS, tun capturing the VPN
+  client's own traffic. Every one of those is a claim about a running machine.
+
+**The work, in the order it unblocks:**
+
+1. Harvest `resolvectl status`, `ip route`, `ip -o addr`, `/proc/stat` from a
+   real box into `tests/parity/fixtures/linux/`, and add a `linux-diff` gate in
+   the shape of `netdetect-diff`.
+2. `PlatformLinux` against those fixtures. The trait is already the seam and
+   already has everything the shell asks the OS for; what does NOT exist is a
+   compile-time selection — `Mac` is named directly at 12 call sites across
+   `lifecycle.rs`, `watch.rs`, `vm.rs` and `main.rs`. Deliberately left alone:
+   introducing a `Host` alias changes nothing on macOS, so it produces no
+   evidence, and it is one edit for whoever has a target to point it at.
+3. Tun mode in `rowt-core::render` per §4.1.2 — `route_exclude_address` fed by
+   `corp_sync`, `strict_route: false`, and the no-fighting rule (journal and
+   fail open rather than re-assert a shadowed rule).
+4. systemd units (§4.1.4: a long-running service with an internal tick, not a
+   timer firing oneshots) and `CAP_NET_ADMIN` via `AmbientCapabilities`.
+5. CI matrix — core tests on both, platform tests feature-gated — and the Linux
+   tar assets.
+
+**What is NOT a Phase 5 problem:** the VM subsystem is macOS-only by purpose
+(§2) and gets `cfg(target_os = "macos")`, not a port.
+
 ## 6. Parity: proving the rewrite leaves no gaps
 
 A rewrite of daily-driver infrastructure fails in three distinct ways, and
