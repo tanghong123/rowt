@@ -256,6 +256,10 @@ use alpha
 use auto
 use nosuchtag
 PARITY_SCENARIO=render-local use alpha
+# A name nobody documents: error to stderr, a blank line and the usage to
+# stdout, exit 1 — and, because the shell's catch-all calls `exit` from inside
+# the audited region, a BEGIN with no END in the trail. All four compared.
+nosuchcommand
 config
 config list
 config nosucharm

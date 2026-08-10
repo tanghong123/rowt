@@ -145,7 +145,13 @@ fn native(cmd: &str, sub: &str) -> bool {
         "config" => matches!(sub, "" | "list" | "export" | "import"),
         "metrics" => true,
         "router" => matches!(sub, "" | "up" | "down" | "restart" | "status" | "log"),
-        _ => false,
+        // A name none of the above claims is one of two things, and they want
+        // opposite answers: a command bin/rowt documents but this binary has no
+        // arm for yet — the §6.6 escape hatch, still the shell's — or a typo,
+        // which needs the error-and-usage the shell would print and no shell to
+        // print it. The registry, extracted from bin/rowt at build time, is
+        // what tells them apart.
+        _ => !help::is_registered(cmd),
     }
 }
 
@@ -1285,6 +1291,9 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                     // gzipped tar at all, and does it carry a file only a rowt
                     // bundle would have? The second stops `config import` from
                     // unpacking an arbitrary archive over the config directory.
+                    // The shell asks them with two `tar tzf` runs; one listing
+                    // answers both, and `tar` is not a traced command, so there
+                    // is nothing observable between the two shapes.
                     let listing = std::process::Command::new("tar")
                         .arg("tzf").arg(&input).stderr(std::process::Stdio::null()).output();
                     let Ok(listing) = listing.ok().filter(|o| o.status.success()).ok_or(()) else {
@@ -1824,9 +1833,11 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
             }
             Ok(out)
         }
-        // `native` gates what reaches here, so this is unreachable in practice;
-        // it stays as the same last line of defence the shell's `*)` arm is.
-        other => Err(format!("unknown command: {other}")),
+        // The shell's `*)` arm, and reached for the same reason: a name nobody
+        // documents. `native` sends the DOCUMENTED-but-unported ones to bash
+        // instead, so what arrives here is a typo, and answering it needs no
+        // shell.
+        other => help::unknown(&cfg, other),
     }
 }
 

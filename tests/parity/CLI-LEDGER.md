@@ -62,12 +62,20 @@ Partial arms — native for some sub-commands, legacy for the rest.
                 "" | "list" | "dump" | "add" | "rm" | "remove" | "clear" | "import"
                     | "errors" | "stats" | "log"
             ) || (cmd == "corp" && matches!(sub, "sync" | "suggest")),
+            "direct" | "connections" | "conns" | "_complete" => true,
             "proxy" => matches!(sub, "" | "status" | "check" | "env" | "on" | "off"),
             "server" => matches!(sub, "" | "list" | "dump" | "add" | "rm" | "remove" | "clear" | "import"),
             "sub" => matches!(sub, "" | "list" | "dump" | "add" | "rm" | "remove" | "update" | "clear" | "import"),
             "use" | "ping" | "run" | "skill" | "report" | "uninstall" | "fetch" | "probe" | "vm" | "watch" | "onboard" => true,
             "config" => matches!(sub, "" | "list" | "export" | "import"),
+            "metrics" => true,
             "router" => matches!(sub, "" | "up" | "down" | "restart" | "status" | "log"),
-            _ => false,
+            // A name none of the above claims is one of two things, and they want
+            // opposite answers: a command bin/rowt documents but this binary has no
+            // arm for yet — the §6.6 escape hatch, still the shell's — or a typo,
+            // which needs the error-and-usage the shell would print and no shell to
+            // print it. The registry, extracted from bin/rowt at build time, is
+            // what tells them apart.
+            _ => !help::is_registered(cmd),
         }
     }

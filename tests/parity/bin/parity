@@ -1204,7 +1204,13 @@ cmd_cli_ledger() {
       echo "Partial arms — native for some sub-commands, legacy for the rest."
       echo "\`native()\` in crates/rowt-cli/src/main.rs is the authority:"
       echo
-      sed -n '/^fn native(/,/^}/p' "$rs_src" | sed -n '/=> matches!/,/),$/p' | sed 's/^/    /'
+      # From the first arm to the end of the function. The previous form ended
+      # each chunk at the next line closing with `),`, which meant every arm
+      # BETWEEN two `matches!` arms was dropped — `"metrics" => true,` and the
+      # `direct|connections|conns` line were missing from a block this file
+      # calls the authority. It also left the braces unbalanced as soon as the
+      # last arm ended in `),`.
+      sed -n '/^fn native(/,/^}/p' "$rs_src" | sed -n '/=> matches!/,$p' | sed 's/^/    /'
     fi
   } > "$DIR/CLI-LEDGER.md"
   grep -c '| yes |' "$DIR/CLI-LEDGER.md" >/dev/null 2>&1 || true

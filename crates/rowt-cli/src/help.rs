@@ -232,6 +232,16 @@ fn registry() -> String {
     out
 }
 
+/// Is this a command bin/rowt documents? The question `native()` asks about a
+/// name it does not recognize: an unlisted one is a typo, and rowt-rs answers
+/// those itself, while a listed one it has no arm for is an unported command
+/// and still falls through to the shell (PORTING.md §6.6). Reading the registry
+/// rather than a second list keeps the escape hatch honest — a command added to
+/// the shell is covered by it the moment it is documented.
+pub fn is_registered(cmd: &str) -> bool {
+    reg_rows().any(|(_, _, syntax, _)| syntax.split_whitespace().next() == Some(cmd))
+}
+
 /// One registry row: `level@group@syntax@description`.
 pub fn reg_rows() -> impl Iterator<Item = (&'static str, &'static str, &'static str, &'static str)> {
     REGISTRY.lines().filter_map(|l| {
@@ -332,13 +342,22 @@ pub fn show(cfg: &Path, cmd: &str) -> Result<String, String> {
         return Ok(usage(cfg));
     }
     match detail(cfg, cmd) {
-        Detail::Text(d) => return Ok(d),
+        Detail::Text(d) => Ok(d),
         Detail::Shell => crate::delegate(&["help".to_string(), cmd.to_string()]),
-        Detail::Unknown => {}
+        Detail::Unknown => unknown(cfg, cmd),
     }
-    // `err` goes to stderr, then usage to stdout, then rc 1 — reproduced as
-    // written rather than tidied into one stream, because cli-diff compares
-    // stdout and the exit status separately and would catch the tidying.
+}
+
+/// `err "unknown command: $c"; echo; usage; exit 1` — the shell's answer both
+/// for `help <nonsense>` and for running one.
+///
+/// Reproduced as written rather than tidied into one stream: cli-diff compares
+/// stdout and the exit status separately, and would catch the tidying. Exiting
+/// here rather than returning an error is also behavior — `run_command`'s
+/// catch-all calls `exit 1` from inside the audited region, so the trail keeps
+/// a BEGIN with no END for an unknown command, and that is what the log says
+/// today.
+pub fn unknown(cfg: &Path, cmd: &str) -> ! {
     eprintln!("error: unknown command: {cmd}");
     println!();
     println!("{}", usage(cfg));
@@ -407,6 +426,24 @@ mod tests {
         assert!(s.contains("by $SHELL"), "escaped $SHELL was expanded away:\n{s}");
         assert!(s.contains(r#"eval "$(rowt shell-init)""#), "{s}");
         assert!(!s.contains(r"\$"), "a backslash survived into the page:\n{s}");
+    }
+
+    /// `native()` routes an unrecognized name by this, so it decides between
+    /// "print the usage" and "hand it to bash". The registry's syntax field
+    /// leads with the command, and reading anything else out of it would send
+    /// every typo to the shell — or, worse, answer an unported command.
+    #[test]
+    fn the_registry_knows_which_names_are_commands() {
+        assert!(is_registered("status"));
+        assert!(is_registered("escape"));
+        assert!(is_registered("shell-init"));
+        assert!(!is_registered("nosuchcommand"));
+        // Hidden commands are not in the registry on purpose; `native` claims
+        // them by name before the fallback is reached.
+        assert!(!is_registered("_complete"));
+        // Not a prefix match, and not the description's words either.
+        assert!(!is_registered("stat"));
+        assert!(!is_registered("domains"));
     }
 
     #[test]

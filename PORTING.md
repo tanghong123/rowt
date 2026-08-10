@@ -255,6 +255,16 @@ gate now has a case per page rather than the seven that stood for 32.
 The fallthrough is guarded against recursion (`ROWT_DELEGATED`), because
 bin/rowt already reaches for Rust binaries and §6.6 has it becoming a wrapper.
 
+It is also no longer where a typo goes. An unrecognized name is one of two
+things that want opposite answers — a command bin/rowt documents but this
+binary has no arm for (the escape hatch, still the shell's) or nonsense (the
+shell's error-and-usage, which needs no shell to print). `native()` tells them
+apart with the command registry, extracted from bin/rowt at build time, so the
+hatch covers a new shell command the moment it is documented. Exiting from
+inside the audited region is part of the behavior: the shell's `*)` arm calls
+`exit 1`, so an unknown command leaves a BEGIN with no END, and the case
+compares that too.
+
 **Python.** The decision (2026-08-09) is to port all of it — one language in
 the repo. It splits into three groups with different urgency, not one job:
 `corp-sync-reconcile.py` was already done and `fake-portal.py` is a test
