@@ -465,17 +465,9 @@ after a release cycle in which the fallback was never needed.
 **Not yet built.** Every command arm is now native AND compared against the
 shell, the lifecycle arms included — they were the last ones carrying the
 ledger's "proven by boot-test" note, which turned out to mean "run against a
-real sing-box", never "compared to bash". What is left is worth writing down as
-four separate things, only the first of which is more porting:
+real sing-box", never "compared to bash". What is left before the switch is
+worth writing down as three separate things, none of which is more porting:
 
-0. **The watchdog's recovery bookkeeping.** `Action::Recover` now runs the real
-   `cmd_reload`, so the state stamps and the guard match. What it still does not
-   reproduce is what the shell wraps around that call: the post-recovery settle
-   and re-probe, and the "recovery ok — escape tunnel answering" /
-   "recovery INCOMPLETE" pair that follows from it, plus their audit lines. The
-   cooldown that decides *whether* to recover is already in `rowt-core`'s pure
-   tick and is gated; this is the reporting after the fact, so a recovery that
-   silently half-worked currently reads in watch.log as one that worked.
 1. **Data.** §6.5's promotion rule — 14 days of real use with zero unexplained
    divergences, including a corp-network day and a foreign-network day. The
    shadow window ships (3.2.6) but a window that was never started produces
@@ -534,6 +526,16 @@ commands I remembered to test" from masquerading as the command surface.
 - **Interactive flows** (`onboard` prompts) — manual checklist, not automated.
 - **Environments never visited during the shadow window.** Mitigated by
   fail-open design (§4.1.2) and the journal, not by tests.
+- **The watchdog's EFFECTS.** `watch-diff` compares the pure tick — what the
+  watchdog decides, given an observation — over the recorded episodes, and that
+  is the half where the logic lives. What no gate reaches is `perform`: the
+  reload it runs, the probe it re-runs afterwards, the lines it writes to
+  watch.log. Two real divergences hid there and were found by reading, not by
+  failing: `Action::Recover` inlined a partial reload that skipped the state
+  stamps, and the liveness probe was an HTTP fetch through the mixed proxy —
+  which the shell tried first and abandoned, because that target is routed by
+  the normal rules and usually goes DIRECT, so a flaky CDN read as a wedged
+  tunnel. Both are fixed; the gap that let them through is not.
 
 ## 7. Risks
 

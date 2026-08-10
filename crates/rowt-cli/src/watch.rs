@@ -261,8 +261,31 @@ fn perform(ctx: &Ctx, actions: &[Action]) {
             // includes the guard it refuses on, the vm branch, and the three
             // state stamps (`proxy_intent`, `intent`, `boot`) the NEXT tick
             // reads to decide whether any of this was deliberate.
-            Action::Recover(_) => {
+            Action::Recover(reason) => {
+                // The audit lines bracket the reload and name the watchdog as
+                // the actor: "what changed the system, when, and who did it" is
+                // the question the audit log exists to answer, and a recovery
+                // that looks like a hands-on reload is the exact ambiguity that
+                // made the last incident hard to read.
+                crate::shell::audit(&ctx.cfg, &format!("BEGIN watchdog recover: cmd_reload — {reason}"));
                 let _ = crate::redirected(&watch_log_path(ctx), || lifecycle::cmd_reload(ctx, &crate::here_dir()));
+                // Then ASK, rather than believe the return value: a reload can
+                // report success and still leave a tunnel that does not carry
+                // traffic, which is the failure this whole path exists for.
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let up = lifecycle::host_running(ctx).is_some();
+                if up && health_ok(ctx) {
+                    watch_log(ctx, "recovery ok — escape tunnel answering");
+                    crate::shell::audit(&ctx.cfg, "END   watchdog recover: cmd_reload — ok (tunnel answering)");
+                } else {
+                    let cool = env_or("ROWT_HEALTH_COOLDOWN", "600");
+                    watch_log(ctx, &format!(
+                        "recovery INCOMPLETE — router {}, tunnel still not answering (retry after {cool}s)",
+                        if up { "up" } else { "DOWN" }));
+                    crate::shell::audit(&ctx.cfg, &format!(
+                        "END   watchdog recover: cmd_reload — INCOMPLETE (router {})",
+                        if up { "up" } else { "down" }));
+                }
             }
             Action::Reload(_) => {
                 crate::shell::audit(&ctx.cfg, "BEGIN watchdog reload — network change");
@@ -306,18 +329,50 @@ fn journal(ctx: &Ctx, cap: CaptiveState) {
     }
 }
 
-/// `_watch_health` — is the tunnel actually carrying traffic? The self-heal for
-/// a wedge that does not move the network: a server-side connection death, a
-/// stuck UDP socket. Change-triggered reload cannot see those.
+/// `_watch_probe` — is the ESCAPE tunnel actually carrying traffic? The
+/// self-heal for a wedge that does not move the network: a server-side
+/// connection death, a stuck UDP socket. A change-triggered reload cannot see
+/// those.
+///
+/// Through the clash API's delay test (local → selected escape server →
+/// target), NOT an HTTP request through the mixed proxy. The mixed-proxy probe
+/// is the obvious implementation and the wrong one: its target is routed by the
+/// normal rules, so on a censored network it usually goes DIRECT, and a flaky
+/// direct-to-CDN path then reads as a wedged tunnel and triggers a recovery
+/// that fixes nothing. The delay test forces the traffic through the escape
+/// server regardless of routing. Two tries, so one dropped packet is not a
+/// verdict.
 fn health_ok(ctx: &Ctx) -> bool {
+    let Some(ep) = lifecycle::controller(ctx) else { return false };   // API gone = wedged
+    let secret = lifecycle::clash_secret(ctx);
+    let sel = { let s = ctx.sget("selected"); if s.is_empty() { "auto".into() } else { s } };
     let url = env_or("ROWT_HEALTH_URL", "https://www.gstatic.com/generate_204");
-    let t = env_or("ROWT_HEALTH_TIMEOUT", "8");
-    let code = Command::new("curl")
-        .args(["-sS", "-m", &t, "-x", &format!("http://127.0.0.1:{}", ctx.port),
-               "-o", "/dev/null", "-w", "%{http_code}", &url])
-        .stderr(Stdio::null()).output().ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
-    matches!(code.chars().next(), Some('2') | Some('3'))
+    let t: u32 = env_or("ROWT_HEALTH_TIMEOUT", "8").parse().unwrap_or(8);
+    // `python3 -c 'urllib.parse.quote(u, safe="")'` — in-process, same rules.
+    let enc = rowt_core::pyurl::quote(&url, "");
+    for try_n in 1..=2 {
+        // curl's max-time must exceed the clash delay timeout or it cuts the
+        // test short and a slow-but-live tunnel reads as dead.
+        let out = Command::new("curl")
+            .args(["--noproxy", "*", "-sS", "-m", &(t + 3).to_string(),
+                   "-H", &format!("Authorization: Bearer {secret}"),
+                   &format!("http://{ep}/proxies/{sel}/delay?timeout={}000&url={enc}", t)])
+            .stderr(Stdio::null()).output().ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+        // `jq -e '.delay // empty'` — `//` falls through on null and false
+        // only, and `-e` fails on those two and on no output at all. A delay of
+        // 0 is a number jq is perfectly happy with, so it counts as answering.
+        if serde_json::from_str::<serde_json::Value>(&out).ok()
+            .and_then(|v| v.get("delay").cloned())
+            .is_some_and(|d| !matches!(d, serde_json::Value::Null | serde_json::Value::Bool(false)))
+        {
+            return true;
+        }
+        if try_n == 1 {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+    }
+    false
 }
 
 // ------------------------------------------------------------------ command
