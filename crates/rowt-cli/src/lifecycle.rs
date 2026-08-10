@@ -51,6 +51,41 @@ pub fn sget(state: &str, key: &str) -> String {
     state.lines().filter_map(|l| l.strip_prefix(&format!("{key}="))).next_back().unwrap_or("").into()
 }
 
+/// 0600 on a file the shell writes through `mktemp` + `mv`.
+///
+/// `mktemp` creates its file 0600 and `mv` carries that mode onto the
+/// destination, so every file the shell renders this way is owner-only whether
+/// or not it also chmods. Rust's `fs::write` creates 0666 & ~umask — 0644 on a
+/// normal Mac. For `state` that is a cosmetic difference; for `host.json` and
+/// `vm.json`, which carry the escape server's uuid/password, it is the file
+/// permission that keeps the credentials off every other account on the
+/// machine. Same idiom, same mode.
+pub fn private(p: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(p, fs::Permissions::from_mode(0o600));
+}
+
+/// `reload_if_running` — re-render and restart, but only if the router is up.
+///
+/// Every edit that changes what gets routed ends here: a lane change, a corp
+/// sync, an import. With the router down there is nothing to reload and the
+/// next `up` renders anyway, so this is silent; with it up, the `==>` lines are
+/// deliberately NOT swallowed, because a watchdog-triggered reload is only
+/// legible in watch.log if the restart said whether it worked.
+pub fn reload_if_running(ctx: &Ctx) -> Result<(), String> {
+    if host_running(ctx).is_none() {
+        return Ok(());
+    }
+    eprintln!("==> reloading router");
+    // `cmd_render >/dev/null` — the rendered paths are noise here; its `==>`
+    // line still shows, and a render that fails ends the command, because the
+    // shell's cmd_render dies rather than returning.
+    cmd_render(ctx)?;
+    router_stop(ctx);
+    router_up(ctx)?;
+    Ok(())
+}
+
 /// `sset` — replace the last value or append, preserving the rest.
 pub fn sset(ctx: &Ctx, key: &str, val: &str) {
     let p = ctx.cfg.join("state");
@@ -61,7 +96,9 @@ pub fn sset(ctx: &Ctx, key: &str, val: &str) {
         .map(|s| s.to_string())
         .collect();
     out.push(format!("{key}={val}"));
-    let _ = fs::write(p, out.join("\n") + "\n");
+    if fs::write(&p, out.join("\n") + "\n").is_ok() {
+        private(&p);
+    }
 }
 
 pub fn host_running(ctx: &Ctx) -> Option<i32> {
@@ -170,6 +207,10 @@ pub fn cmd_render(ctx: &Ctx) -> Result<String, String> {
         let tmp = path.with_extension("json.tmp");
         fs::write(&tmp, serde_json::to_string_pretty(val).unwrap() + "\n")
             .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+        // Before the check, not after the rename: these hold the escape
+        // server's credentials, and the window where they are world-readable
+        // is the window `sing-box check` spends on them.
+        private(&tmp);
         let ok = Command::new(ctx.sb()).arg("check").arg("-c").arg(&tmp)
             .stdout(Stdio::null()).stderr(Stdio::inherit()).status()
             .map(|s| s.success()).unwrap_or(false);

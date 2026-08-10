@@ -85,12 +85,30 @@ fn append_line(body: &str, entry: &str) -> String {
 pub struct Edit {
     pub lanes: Lanes,
     pub messages: Vec<String>,
+    /// Lanes the shell rewrites through `mktemp` + `mv` rather than in place —
+    /// a removal, either an explicit `rm` or the single-lane pull-out. `mktemp`
+    /// creates its file 0600 and `mv` carries that mode onto the lane file, so
+    /// those two paths leave the lane 0600 where `add` (append) and `clear`
+    /// (truncate in place) leave the mode alone.
+    ///
+    /// Incidental in the shell, but it is on-disk state, `parity cli-diff`
+    /// compares modes, and a lane list is not secret enough to be worth
+    /// diverging over. Reproduced, not corrected (PORTING.md §6.7).
+    pub tightened: Vec<Lane>,
 }
 
 /// Apply one operation to one lane.
 pub fn apply(lanes: &Lanes, target: Lane, op: &Op) -> Edit {
     let mut out = lanes.clone();
     let mut msgs = Vec::new();
+    let mut tightened: Vec<Lane> = Vec::new();
+    macro_rules! tighten {
+        ($l:expr) => {
+            if !tightened.contains(&$l) {
+                tightened.push($l);
+            }
+        };
+    }
 
     match op {
         Op::Add(entries) | Op::Import { lines: entries, .. } => {
@@ -132,6 +150,7 @@ pub fn apply(lanes: &Lanes, target: Lane, op: &Op) -> Edit {
                     let other = out.get(lane).to_string();
                     if has_line(&other, &e) {
                         out.set(lane, drop_line(&other, &e));
+                        tighten!(lane);
                         msgs.push(format!("  moved out of {} lane: {e}", lane.as_str()));
                     }
                 }
@@ -153,6 +172,7 @@ pub fn apply(lanes: &Lanes, target: Lane, op: &Op) -> Edit {
                 let body = out.get(target).to_string();
                 if has_line(&body, &e) {
                     out.set(target, drop_line(&body, &e));
+                    tighten!(target);
                     msgs.push(format!("  removed: {e}"));
                 } else {
                     msgs.push(format!("  not found: {e}"));
@@ -179,7 +199,7 @@ pub fn apply(lanes: &Lanes, target: Lane, op: &Op) -> Edit {
             msgs.push(format!("  {} list cleared (comments kept)", target.as_str()));
         }
     }
-    Edit { lanes: out, messages: msgs }
+    Edit { lanes: out, messages: msgs, tightened }
 }
 
 /// `dump` — the active entries, comments and blanks removed.

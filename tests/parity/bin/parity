@@ -167,7 +167,14 @@ snapshot_fs() {  # $1=outdir — the config tree, minus what is volatile by desi
           # Checksum the NORMALIZED content: a file whose body carries a
           # timestamp (rowt report's saved diag) would otherwise differ on every
           # run and drown out the real on-disk-format signal.
-          printf '%s  %s\n' "$(normalize "$f" "$out" | cksum | awk '{print $1}')" "$f"
+          # The MODE travels with it: servers.json, manual.json and the review
+          # file hold credentials and are chmod 600 on purpose, and a checksum
+          # cannot see a dropped chmod. A port that writes the right bytes with
+          # the wrong permissions is a security regression, not a near-miss.
+          printf '%s %s  %s\n' \
+            "$(normalize "$f" "$out" | cksum | awk '{print $1}')" \
+            "$(stat -f %Lp "$f" 2>/dev/null || stat -c %a "$f" 2>/dev/null || echo '?')" \
+            "$f"
         done
   ) > "$out/fsstate"
 }
@@ -904,6 +911,14 @@ cmd_cli_diff() {
     # reports success for everything — an exit status that is always 0 is not an
     # exit status. A non-zero result is normal here (`proxy check` says no), so
     # both sides capture it instead of letting `set -e` end the sweep.
+    #
+    # `< /dev/null` is load-bearing. Without it the case inherits THIS loop's
+    # stdin, which is the case list: any child that reads stdin swallows a
+    # buffer's worth of it, and the loop resumes wherever that child stopped.
+    # The failure is silent and looks like nothing — the skipped cases are
+    # simply never reported — and it cost 26 of them before it was noticed. It
+    # also makes the sandbox honest: a command that would prompt gets EOF here
+    # rather than a mouthful of the test suite.
     local arc=0 brc=0
     # `perl -e alarm` for the same reason run_in has it: a case like `<lane> log`
     # ends in `tail -f`, and a gate that can wedge forever is a gate nobody runs.
@@ -917,7 +932,7 @@ cmd_cli_diff() {
         PATH="$A/shims:/usr/bin:/bin:/usr/sbin:/sbin" TERM=dumb LC_ALL=C TZ=UTC \
         PARITY_TRACE="$A/trace" PARITY_ENV="$A/env" \
         perl -e 'alarm shift; exec @ARGV' "$tmo" \
-        bash "$ROWT" $cmdline > "$A/out" 2>/dev/null ) 2>/dev/null || arc=$?
+        bash "$ROWT" $cmdline > "$A/out" 2>/dev/null < /dev/null ) 2>/dev/null || arc=$?
     # shellcheck disable=SC2086
     # Wrapped in a subshell whose stderr is discarded: a case killed by the
     # alarm dies of a signal, and the JOB CONTROL notice about that comes from
@@ -927,7 +942,7 @@ cmd_cli_diff() {
         PATH="$B/shims:/usr/bin:/bin:/usr/sbin:/sbin" TERM=dumb LC_ALL=C TZ=UTC \
         PARITY_TRACE="$B/trace" PARITY_ENV="$B/env" \
         perl -e 'alarm shift; exec @ARGV' "$tmo" \
-        "$rs" $cmdline > "$B/out" 2>/dev/null ) 2>/dev/null || brc=$?
+        "$rs" $cmdline > "$B/out" 2>/dev/null < /dev/null ) 2>/dev/null || brc=$?
     echo "$arc" > "$A/rc"; echo "$brc" > "$B/rc"
     local bad="" f
     # Normalised per side, like every other gate: each sandbox has its own
@@ -939,6 +954,18 @@ cmd_cli_diff() {
     for f in escape-domains.txt corp-domains.txt block-domains.txt; do
       diff -q "$A/home/rowt/$f" "$B/home/rowt/$f" >/dev/null 2>&1 || bad="$bad $f"
     done
+    # …and everything ELSE the command left on disk, content AND mode. The three
+    # lane files keep their own check because "escape-domains.txt differs" reads
+    # better than "fsstate differs"; this covers the rest — servers.json,
+    # manual.json, subs.txt, state, import-review.json. Without it, a pool
+    # command that prints the right summary and writes nothing passes: what
+    # `server add` and `sub rm` DO is write files, and their stdout is a
+    # courtesy. Normalized like every other stream, because the file NAMES are
+    # content here too: `report` writes diag-<date>-<time>.txt, and two runs
+    # seconds apart would otherwise "differ" on the clock.
+    snapshot_fs "$A"; snapshot_fs "$B"
+    normalize "$A/fsstate" "$A" > "$A/fsstate.n"; normalize "$B/fsstate" "$B" > "$B/fsstate.n"
+    diff -q "$A/fsstate.n" "$B/fsstate.n" >/dev/null 2>&1 || bad="$bad fsstate"
     # The argv trace, which stdout cannot see. Half the remaining surface —
     # fetch, ping, use, server, sub, watch — is a thin wrapper over something
     # external: what it PRINTS is nearly nothing, what it RUNS is the whole
@@ -968,9 +995,24 @@ cmd_cli_diff() {
     if [ -n "$bad" ]; then
       fails=$((fails + 1))
       echo "[$line] DIFFERS:$bad"
-      case "$bad" in *stdout*) diff "$A/out.n" "$B/out.n" 2>/dev/null | sed 's/^/    /' | head -10 ;; esac
-      case "$bad" in *trace*)  diff "$A/trace.n" "$B/trace.n" 2>/dev/null | sed 's/^/    T /' | head -10 ;; esac
-      case "$bad" in *audit*)  diff "$A/audit.n" "$B/audit.n" 2>/dev/null | sed 's/^/    A /' | head -6 ;; esac
+      # Every one of these ends in `|| true`: `diff` exits 1 on difference,
+      # which is the only reason this branch runs at all, and under `set -e` +
+      # `pipefail` that status would abort the sweep at the FIRST divergence —
+      # turning a report of everything that differs into a report of one thing.
+      case "$bad" in *stdout*) { diff "$A/out.n" "$B/out.n" 2>/dev/null || true; } | sed 's/^/    /' | head -10 ;; esac
+      case "$bad" in *trace*)  { diff "$A/trace.n" "$B/trace.n" 2>/dev/null || true; } | sed 's/^/    T /' | head -10 ;; esac
+      # Names the file, then shows it: a checksum line tells you WHICH file
+      # diverged and nothing about how, and the file is usually small JSON.
+      case "$bad" in *fsstate*)
+        { diff "$A/fsstate.n" "$B/fsstate.n" 2>/dev/null || true; } | sed 's/^/    F /' | head -8
+        { diff "$A/fsstate" "$B/fsstate" 2>/dev/null || true; } \
+          | sed -n 's/^[<>] *[0-9]* *[0-9?]*  //p' | sort -u \
+          | while IFS= read -r f; do
+              { diff <(normalize "$A/home/rowt/$f" "$A") <(normalize "$B/home/rowt/$f" "$B") 2>/dev/null || true; } \
+                | sed "s#^#    F $f: #" | head -8
+            done ;;
+      esac
+      case "$bad" in *audit*)  { diff "$A/audit.n" "$B/audit.n" 2>/dev/null || true; } | sed 's/^/    A /' | head -6 ;; esac
       echo "    artifacts: $A $B"
     else
       echo "[$line] identical"

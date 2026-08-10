@@ -400,11 +400,8 @@ pub fn run(ctx: &Ctx, o: &Opts) -> Result<String, String> {
     // Logged even under --quiet: this is a real change that triggers a reload,
     // so the watchdog log has to record WHY it reloaded. No-op ticks stay silent.
     eprintln!("==> corp sync: updated corp lane — {nd} DHCP domain(s) + {nc} CIDR(s) (superset of {na} live route(s))");
-    if !o.no_reload && lifecycle::host_running(ctx).is_some() {
-        eprintln!("==> reloading router");
-        lifecycle::cmd_render(ctx)?;
-        lifecycle::router_stop(ctx);
-        lifecycle::router_up(ctx)?;
+    if !o.no_reload {
+        lifecycle::reload_if_running(ctx)?;
     }
     Ok(String::new())
 }

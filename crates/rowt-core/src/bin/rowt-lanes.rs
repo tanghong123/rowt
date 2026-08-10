@@ -90,7 +90,14 @@ fn run() -> Result<String, String> {
             _ => &edit.lanes.block,
         };
         if before != after {
-            std::fs::write(file_of(&cfg, l), after).map_err(|e| format!("write: {e}"))?;
+            let p = file_of(&cfg, l);
+            std::fs::write(&p, after).map_err(|e| format!("write: {e}"))?;
+            // The shell rewrites a lane it REMOVED from through mktemp + mv,
+            // which leaves it 0600 (lanes::Edit::tightened).
+            if edit.tightened.contains(&l) {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
+            }
         }
     }
     Ok(edit.messages.join("\n"))

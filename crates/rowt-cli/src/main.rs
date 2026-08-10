@@ -650,7 +650,13 @@ fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<Str
                     _ => (&lanes.block, &e.lanes.block),
                 };
                 if before != after {
-                    std::fs::write(lane_file(cfg, l), after).map_err(|x| format!("write: {x}"))?;
+                    let p = lane_file(cfg, l);
+                    std::fs::write(&p, after).map_err(|x| format!("write: {x}"))?;
+                    // A removal is `mktemp` + `mv` in the shell, which leaves
+                    // the lane 0600 (lanes::Edit::tightened).
+                    if e.tightened.contains(&l) {
+                        let _ = set_mode(&p, 0o600);
+                    }
                 }
             }
             Ok(e.messages.join("\n"))
