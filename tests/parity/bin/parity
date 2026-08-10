@@ -59,6 +59,56 @@ system_profiler security osascript defaults sing-box"
 die() { echo "parity: $*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Time-box a case AND take down what it spawned, in a session it cannot escape.
+# Used as: perl -e "$TMO" <seconds> <cmd> [args…]
+#
+# Three jobs, and the first two are not the timeout:
+#
+#   setsid   a new session with no controlling terminal. A command that prompts
+#            on /dev/tty — `config import` asks before overwriting — gets an
+#            error instead of the operator, whether or not the gate itself was
+#            started from a terminal. Same intent as the `< /dev/null` below:
+#            the sandbox must not be able to reach outside itself, and a gate
+#            whose answer depends on how it was launched is not a gate.
+#   kill -$$ SIGALRM kills the process it is delivered to and nothing else. A
+#            `<lane> log` case ends in `tail -f`, which bash runs as a CHILD, so
+#            the alarm took bash and left the tail running — one per streaming
+#            case per run, still there hours later. Signalling the process group
+#            takes the tree. (rowt-rs execs into tail, so only the bash side
+#            leaked, which is exactly the kind of asymmetry a gate should not
+#            have.) The kill runs on the normal path too: a case that exits on
+#            its own can still leave something behind.
+#   fork     the alarm has to outlive the exec to be able to kill anything, so
+#            the timeout lives in a parent that waits rather than in the process
+#            being timed. It costs the "Alarm clock" job-control noise the
+#            report used to carry: the child dies of TERM inside this wrapper
+#            now, and the shell reaping US sees an ordinary exit.
+#
+# The status is passed through as the shell would report it (128+signal for a
+# signal death, 127 for an exec failure) with one substitution: a timeout is
+# 142, what the bare `alarm` used to produce, rather than the 143 the group
+# TERM would now give.
+TMO='
+use POSIX ();
+use Errno ();
+my $t = shift;
+POSIX::setsid() > 0 or POSIX::setpgid(0, 0);
+$SIG{TERM} = "IGNORE";
+my $pid = fork();
+defined $pid or exit 127;
+if ($pid == 0) { $SIG{TERM} = "DEFAULT"; exec { $ARGV[0] } @ARGV; exit 127 }
+my $timedout = 0;
+$SIG{ALRM} = sub { $timedout = 1; kill "TERM", -$$ };
+alarm $t;
+my $got;
+do { $got = waitpid($pid, 0) } while ($got < 0 && $!{EINTR});
+my $s = $?;
+alarm 0;
+kill "TERM", -$$;
+exit 142 if $timedout;
+exit($s & 127 ? 128 + ($s & 127) : $s >> 8);
+'
+
 # ---------------------------------------------------------------- matrix
 
 matrix_rows() {  # id<TAB>flags<TAB>args…
@@ -128,7 +178,7 @@ run_in() {       # $1=outdir (sandbox already built)  rest=rowt args — stdout 
     PARITY_TRACE="$out/trace" \
     PARITY_ENV="$out/env" \
     ROWT_IMPL="${ROWT_IMPL:-bash}" \
-    perl -e 'alarm shift; exec @ARGV' "$TIMEOUT" \
+    perl -e "$TMO" "$TIMEOUT" \
     bash "$ROWT" "$@" 2>/dev/null || true
 }
 
@@ -140,8 +190,9 @@ run_one() {      # $1=outdir  rest=rowt args
     case "$1" in [A-Z_]*=*) ENVS+=("$1"); shift ;; *) break ;; esac
   done
   make_sandbox "$out" "$(scenario_of ${ENVS[@]+"${ENVS[@]}"})"
-  # perl's alarm is the same timeout trick rowt itself uses (_tmo) — it keeps a
-  # `tail -f`-style command from wedging the harness.
+  # `$TMO` is the same timeout trick rowt itself uses (_tmo), plus the session
+  # and process-group handling a `tail -f`-style command needs — it keeps one
+  # from wedging the harness, and from outliving it.
   env -i \
     ${ENVS[@]+"${ENVS[@]}"} \
     HOME="$out/home" \
@@ -151,7 +202,7 @@ run_one() {      # $1=outdir  rest=rowt args
     PARITY_TRACE="$out/trace" \
     PARITY_ENV="$out/env" \
     ROWT_IMPL="${ROWT_IMPL:-bash}" \
-    perl -e 'alarm shift; exec @ARGV' "$TIMEOUT" \
+    perl -e "$TMO" "$TIMEOUT" \
     bash "$ROWT" "$@" >"$out/stdout" 2>"$out/stderr" || rc=$?
   echo "$rc" > "$out/rc"
   [ -f "$out/trace" ] || : > "$out/trace"   # exists even when nothing was shimmed
@@ -920,28 +971,26 @@ cmd_cli_diff() {
     # also makes the sandbox honest: a command that would prompt gets EOF here
     # rather than a mouthful of the test suite.
     local arc=0 brc=0
-    # `perl -e alarm` for the same reason run_in has it: a case like `<lane> log`
-    # ends in `tail -f`, and a gate that can wedge forever is a gate nobody runs.
+    # `$TMO` for the same reason run_in has it: a case like `<lane> log` ends in
+    # `tail -f`, and a gate that can wedge forever is a gate nobody runs. It
+    # also puts the case in its own session, which is what makes a command that
+    # prompts on /dev/tty answerable here — see the wrapper.
     # shellcheck disable=SC2086 — the case line is intentionally word-split
-    # A case killed by the alarm dies of a signal, and bash announces that from
-    # THIS shell when it reaps the job, so the two "Alarm clock" lines a
-    # streaming case prints cannot be redirected away from the child. Left
-    # alone: silencing the harness's own stderr to tidy them would also swallow
-    # the errors this gate exists to surface.
     ( env -i HOME="$A/home" XDG_CONFIG_HOME="$A/home" \
         PATH="$A/shims:/usr/bin:/bin:/usr/sbin:/sbin" TERM=dumb LC_ALL=C TZ=UTC \
         PARITY_TRACE="$A/trace" PARITY_ENV="$A/env" \
-        perl -e 'alarm shift; exec @ARGV' "$tmo" \
+        perl -e "$TMO" "$tmo" \
         bash "$ROWT" $cmdline > "$A/out" 2>/dev/null < /dev/null ) 2>/dev/null || arc=$?
     # shellcheck disable=SC2086
-    # Wrapped in a subshell whose stderr is discarded: a case killed by the
-    # alarm dies of a signal, and the JOB CONTROL notice about that comes from
-    # this shell, not the child — redirecting the child alone leaves "Alarm
-    # clock" splattered through the report.
+    # Both sides stay wrapped in a subshell whose stderr is discarded. The
+    # wrapper no longer dies of a signal, so the "Alarm clock" notice this was
+    # written for is gone — but a case is still free to leave a message on the
+    # harness's own stderr on its way out, and the report should carry the
+    # comparison, not the debris.
     ( env -i HOME="$B/home" XDG_CONFIG_HOME="$B/home" \
         PATH="$B/shims:/usr/bin:/bin:/usr/sbin:/sbin" TERM=dumb LC_ALL=C TZ=UTC \
         PARITY_TRACE="$B/trace" PARITY_ENV="$B/env" \
-        perl -e 'alarm shift; exec @ARGV' "$tmo" \
+        perl -e "$TMO" "$tmo" \
         "$rs" $cmdline > "$B/out" 2>/dev/null < /dev/null ) 2>/dev/null || brc=$?
     echo "$arc" > "$A/rc"; echo "$brc" > "$B/rc"
     local bad="" f
