@@ -377,7 +377,9 @@ fn run() -> i32 {
     // the Python leaves `main` with 1 before any review exists.
     let result: R<Option<(Vec<String>, Vec<Value>)>> = (|| {
         if source == "clash-verge" || source == "flclash" {
-            let cands = match &args.path {
+            // `[Path(args.path)] if args.path else …` — Python's truthiness,
+            // so `--path ""` uses the defaults instead of naming ".".
+            let cands = match args.path.as_deref().filter(|p| !p.is_empty()) {
                 Some(p) => vec![pypath::path_str(p)],
                 None if source == "clash-verge" => clash_verge_dirs(),
                 None => flclash_dirs(),
@@ -389,7 +391,9 @@ fn run() -> i32 {
             eprintln!("reading {source} from {root}");
             import_clash_dir(&fs, &root, &mut skipped).map(Some)
         } else {
-            let cands = match &args.path {
+            // `[Path(args.path)] if args.path else …` — Python's truthiness,
+            // so `--path ""` uses the defaults instead of naming ".".
+            let cands = match args.path.as_deref().filter(|p| !p.is_empty()) {
                 Some(p) => vec![pypath::path_str(p)],
                 None => v2box_dbs(),
             };

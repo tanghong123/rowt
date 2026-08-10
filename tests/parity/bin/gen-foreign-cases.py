@@ -375,6 +375,9 @@ def make_case(rng: random.Random, d: str, i: int) -> str:
                 ["--from=v2box", "--path", "nowhere/db.sqlite"],
                 ["positional"],
                 ["--detect", "--from", "v2box"],
+                # `if args.path` is truthiness: an empty one uses the defaults
+                # rather than resolving to ".".
+                ["--from", "flclash", "--path", ""],
             ]
         )
     elif kind < 0.2:

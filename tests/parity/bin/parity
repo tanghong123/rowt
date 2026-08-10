@@ -28,6 +28,7 @@
 #   parity vless-diff        share-link parser, Python vs Rust: stdout+stderr+status
 #   parity merge-diff        import accumulation, Python vs Rust: the review FILE
 #   parity foreign-diff      other clients' config trees, Python vs Rust
+#   parity sr-diff           Shadowrocket's plist + rules, Python vs Rust
 #   parity watch-diff        watchdog tick: bash's effects vs the FSM's plan
 #   parity platform-diff     the platform layer, compared by the argv it produces
 #   parity cli-diff          whole commands through rowt-rs vs the shell
@@ -500,9 +501,13 @@ cmd_vless_diff() { # [count]
     local args=() line rc
     while IFS= read -r line; do args+=("$line"); done < "$d/argv"
     # COLUMNS is pinned because argparse wraps its usage to the terminal width,
-    # so the same error would render differently on a wide screen.
+    # so the same error would render differently on a wide screen. PYTHONUTF8
+    # is pinned because the Pythons that write with ensure_ascii=False put CJK
+    # on stdout raw, and under an ASCII locale that is a UnicodeEncodeError the
+    # Rust side has no equivalent of — a gate that only passes for whoever
+    # invoked it is not a gate.
     rc=0
-    COLUMNS=80 python3 "$py" ${args[@]+"${args[@]}"} < "$d/stdin" \
+    COLUMNS=80 PYTHONUTF8=1 python3 "$py" ${args[@]+"${args[@]}"} < "$d/stdin" \
       > "$d/py.out" 2> "$d/py.err" || rc=$?
     echo "$rc" > "$d/py.rc"
     rc=0
@@ -561,7 +566,7 @@ cmd_merge_diff() { # [count]
     while IFS= read -r line; do args+=("$line"); done < "$d/argv"
     cp -R "$d" "$d.a"; cp -R "$d" "$d.b"
     rc=0
-    ( cd "$d.a" && COLUMNS=80 python3 "$py" ${args[@]+"${args[@]}"} < stdin \
+    ( cd "$d.a" && COLUMNS=80 PYTHONUTF8=1 python3 "$py" ${args[@]+"${args[@]}"} < stdin \
       > out 2> err ) || rc=$?
     echo "$rc" > "$d.a/rc"
     rc=0
@@ -635,7 +640,7 @@ cmd_foreign_diff() { # [count]
     # directories carrying python3 and a yq that misbehaves in one way.
     case "$mode" in real) p="$PATH" ;; *) p="$work/bin-$mode" ;; esac
     rc=0
-    ( cd "$d" && export HOME="$d/home" PATH="$p" COLUMNS=80
+    ( cd "$d" && export HOME="$d/home" PATH="$p" COLUMNS=80 PYTHONUTF8=1
       python3 "$py" ${args[@]+"${args[@]}"} < stdin > py.out 2> py.err ) || rc=$?
     echo "$rc" > "$d/py.rc"
     rc=0
@@ -662,6 +667,64 @@ cmd_foreign_diff() { # [count]
   done
   if [ "$fails" -eq 0 ]; then
     echo "  $n client-tree cases: identical (stdout, stderr, status)"
+    echo "  ($squashed of them ended in a traceback, normalized to its type)"
+    rm -rf "$work"; return 0
+  fi
+  echo "  $fails/$n cases differ — artifacts: $work"; return 1
+}
+
+# Shadowrocket into a review, Python vs Rust. Each case is a fake $HOME with a
+# binary NSKeyedArchiver store and .conf rule files in the places the importer
+# globs for them — including stores that have been truncated or byte-flipped,
+# where the invariant is that both sides agree on which are still readable.
+#
+# Tracebacks are normalized to `<EXC:TypeName>` on both sides, for the same
+# reason as `foreign-diff`: several inputs really do die, and reproducing THAT
+# matters while reproducing CPython's frame lines does not.
+cmd_sr_diff() { # [count]
+  local rust="${PARITY_RUST_SR:-$ROOT/target/release/rowt-sr-import}"
+  local py="$ROOT/config/sr-import.py"
+  [ -x "$rust" ] || die "no rust importer at $rust — cargo build --release -p rowt-core"
+  local work n fails=0 squashed=0 d
+  local squash='
+    /^Traceback \(most recent call last\):$/ { t = 1; next }
+    t == 1 { if ($0 ~ /^[A-Za-z_][A-Za-z0-9_.]*(:|$)/) last = $0; next }
+    { print }
+    END { if (t == 1) { n = last; sub(/:.*$/, "", n); print "<EXC:" n ">" } }
+  '
+  work="$(mktemp -d "${TMPDIR:-/tmp}/parity-sr.XXXXXX")"
+  n="$(python3 "$SELF/gen-sr-cases.py" "$work" "${1:-300}")"
+  for d in "$work"/case*; do
+    local args=() line rc
+    while IFS= read -r line; do args+=("$line"); done < "$d/argv"
+    rc=0
+    ( cd "$d" && export HOME="$d/home" COLUMNS=80 PYTHONUTF8=1
+      python3 "$py" ${args[@]+"${args[@]}"} < stdin > py.out 2> py.err ) || rc=$?
+    echo "$rc" > "$d/py.rc"
+    rc=0
+    ( cd "$d" && export HOME="$d/home" COLUMNS=80
+      "$rust" ${args[@]+"${args[@]}"} < stdin > rs.out 2> rs.err ) || rc=$?
+    echo "$rc" > "$d/rs.rc"
+    awk "$squash" "$d/py.err" > "$d/py.errn"
+    awk "$squash" "$d/rs.err" > "$d/rs.errn"
+    cmp -s "$d/py.err" "$d/py.errn" || squashed=$((squashed + 1))
+    local bad="" f
+    for f in out errn rc; do
+      cmp -s "$d/py.$f" "$d/rs.$f" || bad="$bad $f"
+    done
+    if [ -n "$bad" ]; then
+      fails=$((fails + 1))
+      if [ "$fails" -le 3 ]; then
+        echo "  DIFFERS ($bad): $d"
+        sed 's/^/    argv: /' "$d/argv"
+        for f in $bad; do
+          diff "$d/py.$f" "$d/rs.$f" | sed 's/^/      /' | head -12 || true
+        done
+      fi
+    fi
+  done
+  if [ "$fails" -eq 0 ]; then
+    echo "  $n Shadowrocket cases: identical (stdout, stderr, status)"
     echo "  ($squashed of them ended in a traceback, normalized to its type)"
     rm -rf "$work"; return 0
   fi
@@ -1142,6 +1205,7 @@ case "${1:-}" in
   vless-diff)      shift; cmd_vless_diff "$@" ;;
   merge-diff)      shift; cmd_merge_diff "$@" ;;
   foreign-diff)    shift; cmd_foreign_diff "$@" ;;
+  sr-diff)         shift; cmd_sr_diff "$@" ;;
   lanes-diff)      shift; cmd_lanes_diff "$@" ;;
   watch-diff)      shift; cmd_watch_diff "$@" ;;
   platform-diff)   shift; cmd_platform_diff "$@" ;;

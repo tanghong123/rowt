@@ -198,7 +198,7 @@ revertible and gated.
 | **3** ◑ | watchdog: FSM into core, effects via `PlatformMac`; `cmd_watch` execs the Rust tick | **FSM + shadow done** — `rowt-core::watch`, 17 unit tests replaying §11's decision table; `parity watch-diff` 5/5; `ROWT_WATCH_SHADOW=1` compares the shell's decisions against the FSM's plan on every real tick, feeding it the tick's own captive verdict rather than re-probing. Remaining: `PlatformMac` effects, the `cmd_watch` cutover, and **time** — the shadow window itself |
 | **4** ◑ | CLI. Built as `rowt-rs` alongside the shell first, so each command lands with evidence; only then does bash reduce to a wrapper and get deleted. Formula ships the prebuilt binary (monitor-asset pattern). | **all 37 arms native** — `parity cli-diff` compares stdout, exit status, lane files, the **argv trace** and the **audit log** over 136 cases. Remaining: the sub-arms wrapping the Python importers (below), 5 computed help pages, then the `ROWT_IMPL` cutover |
 | **5** | `PlatformLinux` + tun mode + systemd units; CI matrix (macOS + ubuntu — core tests run on both, platform tests feature-gated); linux tar assets | fresh-VM install → onboard → probe → captive drill; VPN-coexistence drill with Tailscale up |
-| 6 ◑ | port the import pipeline (1,302 lines of parsing Python). No longer optional — the 2026-08-09 decision is one language in the repo, and this is what retires `depends_on "python@3.12"`. | **`vless-parse.py` + `import-merge.py` + `foreign-import.py` done** — `rowt-core::{sharelink,importmerge,foreign}`; `parity vless-diff` 2,000 cases, `merge-diff` 1,500 (the review FILE plus the streams), `foreign-diff` 1,200 (whole synthetic client config TREES). Remaining: `sr-import` (253), which reads Shadowrocket's NSKeyedArchiver plist |
+| 6 ◑ | port the import pipeline (1,302 lines of parsing Python). No longer optional — the 2026-08-09 decision is one language in the repo, and this is what retires `depends_on "python@3.12"`. | **all four done** — `rowt-core::{sharelink,importmerge,foreign,srimport}` (+`bplist`); `parity vless-diff` 2,000 cases, `merge-diff` 1,500 (the review FILE plus the streams), `foreign-diff` 1,200 (synthetic client config TREES), `sr-diff` 1,200 (synthetic Shadowrocket installs). What remains is the CUTOVER: `bin/rowt` still calls the Pythons, which are the reference side of those gates |
 
 #### What still reaches for bash, and the order it comes back in
 
@@ -212,14 +212,15 @@ the Python import pipeline:
 
 `native()` deliberately does not claim them: `server`, `sub` and `config`
 answer `list`/`dump`/`export` and hand the rest through the §6.6 fallthrough. A
-listed-but-unimplemented arm is worse than an unlisted one, and `selftest` 18
+listed-but-unimplemented arm is worse than an unlisted one, and `selftest` 20
 asserts the two agree.
 
 So the order is fixed rather than a preference:
 
-1. **the import pipeline -> Rust.** `vless-parse.py` (`rowt-core::sharelink`),
-   `import-merge.py` (`::importmerge`) and `foreign-import.py` (`::foreign`)
-   are done; `sr-import` follows, gated the same way.
+1. ~~**the import pipeline -> Rust.**~~ Done: `vless-parse.py`
+   (`rowt-core::sharelink`), `import-merge.py` (`::importmerge`),
+   `foreign-import.py` (`::foreign`) and `sr-import.py` (`::srimport`, on
+   `::bplist`), each behind its own differential gate.
 2. **the shell around it -> Rust** — `cmd_import`, `rebuild_servers`,
    `after_import`, `servers_remove`, `subs_remove`. Little logic, but it is
    what writes `servers.json`, so it lands only once the parser it wraps is
@@ -236,15 +237,21 @@ bin/rowt already reaches for Rust binaries and §6.6 has it becoming a wrapper.
 
 **Python.** The decision (2026-08-09) is to port all of it — one language in
 the repo. It splits into three groups with different urgency, not one job:
-`corp-sync-reconcile.py` is already done and `fake-portal.py` is a test
+`corp-sync-reconcile.py` was already done and `fake-portal.py` is a test
 harness; `net-detect.py` + `geosite-lookup.py` (~330 lines) are pure parsers on
-hot paths and go next; the import pipeline (`vless-parse`, `foreign-import`,
-`sr-import`, `import-merge` — 1,302 lines, 73% of the total) is last, because
+hot paths and went next; the import pipeline (`vless-parse`, `foreign-import`,
+`sr-import`, `import-merge` — 1,302 lines, 73% of the total) was last, because
 it parses CREDENTIALS, where a subtle mis-parse yields a silently wrong
-outbound rather than an error. Porting it retires `depends_on "python@3.12"`
-from the Formula, which is the concrete prize. Sequenced AFTER the bash port
-finishes: two rewrites converging on the same files is how a differential
-harness stops telling you which side broke.
+outbound rather than an error. Sequenced AFTER the bash port finished: two
+rewrites converging on the same files is how a differential harness stops
+telling you which side broke.
+
+**All of it now has a Rust counterpart** — the last, `sr-import.py`, as
+`rowt-core::{srimport,bplist}` behind `parity sr-diff`. What is left is not
+translation but CUTOVER: `bin/rowt` still shells out to `config/*.py`, and the
+Pythons stay in the tree until it does not, because they are the reference side
+of every gate. Retiring `depends_on "python@3.12"` from the Formula is the
+concrete prize and it lands with the cutover, not with the last port.
 
 `vless-parse.py` (421 lines) landed first of that group, as
 `rowt-core::sharelink` behind `parity vless-diff`; `import-merge.py` (172)

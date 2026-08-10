@@ -50,3 +50,7 @@ path = "src/bin/rowt-import-merge.rs"
 [[bin]]
 name = "rowt-foreign-import"
 path = "src/bin/rowt-foreign-import.rs"
+
+[[bin]]
+name = "rowt-sr-import"
+path = "src/bin/rowt-sr-import.rs"

@@ -7,6 +7,7 @@
 //! Each module is held to the bash it replaces by a differential gate in
 //! `tests/parity` rather than by inspection.
 
+pub mod bplist;
 pub mod classify;
 pub mod foreign;
 pub mod geosite;
@@ -20,6 +21,7 @@ pub mod pyurl;
 pub mod reconcile;
 pub mod render;
 pub mod sharelink;
+pub mod srimport;
 pub mod watch;
 
 pub use classify::{classify, Classification, ClassifyInput, Lane};

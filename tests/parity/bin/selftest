@@ -22,7 +22,9 @@
 #   15.  keep a display-only sub name    -> merge-diff must fire
 #   16.  sort a profile scan as strings  -> foreign-diff must fire
 #   17.  unify the two sni precedences   -> foreign-diff must fire
-#   18.  (structural) native() must not claim an arm run() cannot answer
+#   18.  prefer uuid over password       -> sr-diff must fire
+#   19.  take the OLDEST .conf           -> sr-diff must fire
+#   20.  (structural) native() must not claim an arm run() cannot answer
 #
 # Everything happens in a throwaway copy of the repo; the real tree is never
 # touched. Run it after changing the harness itself.
@@ -450,7 +452,51 @@ else
   cp "$ROOT/config/foreign-import.py" "$tmp/config/foreign-import.py"
 fi
 
-echo "18. every name native() claims must be an arm of run()"
+echo "18. take the VLESS id from uuid instead of password"
+if [ ! -x "$ROOT/target/release/rowt-sr-import" ]; then
+  echo "  skip — no release build"
+else
+  # Shadowrocket stores the real VLESS id in its GENERIC `password` slot — the
+  # same one AnyTLS and Shadowsocks use — while `uuid` is its own internal
+  # config id. Reading `uuid` first produces outbounds that look completely
+  # correct, pass every schema check, and never connect. The Python carries a
+  # three-line comment about it, which is exactly the kind of thing a port
+  # reads past.
+  perl -0pi -e 's/vid = s\.get\("password"\) or s\.get\("uuid"\)/vid = s.get("uuid") or s.get("password")/' \
+    "$tmp/config/sr-import.py"
+  if ! grep -q 'vid = s.get("uuid")' "$tmp/config/sr-import.py"; then
+    bad "could not swap the id preference (_to_vless moved?)"
+  elif PARITY_RUST_SR="$ROOT/target/release/rowt-sr-import" \
+       "$tmp/tests/parity/bin/parity" sr-diff 150 >/dev/null 2>&1; then
+    bad "sr-diff passed with the VLESS id taken from uuid"
+  else
+    ok "sr-diff caught the id taken from the wrong field"
+  fi
+  cp "$ROOT/config/sr-import.py" "$tmp/config/sr-import.py"
+fi
+
+echo "19. take the oldest matching .conf instead of the newest"
+if [ ! -x "$ROOT/target/release/rowt-sr-import" ]; then
+  echo "  skip — no release build"
+else
+  # Three glob patterns are tried in order and the first with any hits wins;
+  # WITHIN it the newest file by mtime is the one read. A machine with one
+  # .conf agrees whichever way that goes, and a machine that has synced
+  # iCloud twice does not.
+  perl -0pi -e 's/return max\(hits, key=os\.path\.getmtime\)/return min(hits, key=os.path.getmtime)/' \
+    "$tmp/config/sr-import.py"
+  if ! grep -q 'min(hits' "$tmp/config/sr-import.py"; then
+    bad "could not invert the mtime pick (_find_conf moved?)"
+  elif PARITY_RUST_SR="$ROOT/target/release/rowt-sr-import" \
+       "$tmp/tests/parity/bin/parity" sr-diff 150 >/dev/null 2>&1; then
+    bad "sr-diff passed with the oldest .conf preferred"
+  else
+    ok "sr-diff caught the oldest-wins rule file pick"
+  fi
+  cp "$ROOT/config/sr-import.py" "$tmp/config/sr-import.py"
+fi
+
+echo "20. every name native() claims must be an arm of run()"
 src="$ROOT/crates/rowt-cli/src/main.rs"
 # Command names only. A native() arm line is indented exactly eight spaces and
 # starts with a pattern; the sub-command lists inside `matches!(…)` are indented
