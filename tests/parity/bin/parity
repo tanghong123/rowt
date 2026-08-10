@@ -1001,6 +1001,11 @@ cmd_cli_diff() {
     diff -q "$A/out.n" "$B/out.n" >/dev/null 2>&1 || bad="$bad stdout"
     [ "$arc" = "$brc" ] || bad="$bad rc($arc/$brc)"
     for f in escape-domains.txt corp-domains.txt block-domains.txt; do
+      # `diff -q` on two ABSENT files exits 2, which reads here as "differs" —
+      # and after `uninstall --purge` both sides are absent, which is agreement.
+      # So compare presence first: identical only when both are gone. One side
+      # gone still differs, via diff's own exit 2.
+      [ -e "$A/home/rowt/$f" ] || [ -e "$B/home/rowt/$f" ] || continue
       diff -q "$A/home/rowt/$f" "$B/home/rowt/$f" >/dev/null 2>&1 || bad="$bad $f"
     done
     # …and everything ELSE the command left on disk, content AND mode. The three
@@ -1171,10 +1176,16 @@ cmd_cli_ledger() {
       total=$((total + 1))
       local has="legacy" g="—"
       printf '%s\n' "$impl" | grep -qx "$c" && { has="**native**"; done_n=$((done_n + 1)); }
-      # The command must be the FIRST word of a case (after any scenario
-      # prefix), or `status` matches the line `proxy status` and reports itself
-      # covered by someone else's test.
-      awk -v c="$c" '$1 ~ /^PARITY_SCENARIO=/ { $1=""; sub(/^ /,"") } $1==c { found=1 }
+      # The command must be the FIRST word of a case (after any leading
+      # VAR=VALUE), or `status` matches the line `proxy status` and reports
+      # itself covered by someone else's test.
+      #
+      # ALL of them, not just PARITY_SCENARIO — cmd_cli_diff strips three, and
+      # stripping one here reported `probe` as ungated while two cases for it
+      # sat in the file behind a PARITY_UNORDERED prefix. A coverage table that
+      # under-reports is the safer direction to be wrong in, and still wrong.
+      awk -v c="$c" '{ while ($1 ~ /^[A-Z_]+=/) { $1=""; sub(/^ +/,"") }
+                       if ($1==c) found=1 }
                      END { exit !found }' "$DIR/cli-cases.txt" 2>/dev/null && g="cli-diff"
       # For a legacy arm, cli-diff compares bash against bash — it proves the
       # front door is TRANSPARENT, which is worth knowing and is not the same

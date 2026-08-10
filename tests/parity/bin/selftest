@@ -39,7 +39,18 @@ DIR="$(cd -P "$SELF/.." && pwd)"
 ROOT="$(cd -P "$DIR/../.." && pwd)"
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/parity-selftest.XXXXXX")"
-trap 'rm -rf "$tmp"' EXIT
+# Every gate below is EXPECTED to fail, and cli-diff keeps both sandboxes of a
+# failing case so a real divergence can be examined. Here the divergence is the
+# point, so those artifacts are litter — a run left several hundred directories
+# behind, and they accumulated across runs. Giving the whole selftest its own
+# TMPDIR puts them somewhere that dies with the throwaway tree.
+#
+# A SIBLING of $tmp, not a directory inside it: `normalize` rewrites the repo
+# copy's root to <REPO>, and a sandbox path nested under it would be rewritten
+# by that rule before the run-scoped one could claim it.
+sandboxes="$(mktemp -d "${TMPDIR:-/tmp}/parity-selftest-tmp.XXXXXX")"
+trap 'rm -rf "$tmp" "$sandboxes"' EXIT
+export TMPDIR="$sandboxes"
 mkdir -p "$tmp/bin" "$tmp/tests"
 cp -R "$DIR" "$tmp/tests/parity"
 cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
