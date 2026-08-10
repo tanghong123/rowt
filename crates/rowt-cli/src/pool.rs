@@ -422,7 +422,7 @@ pub fn sub_count(cfg: &Path) -> usize {
 
 /// `sort -u file -o file`, bytewise — see the module doc's divergence list for
 /// why this does not chase the machine's collation.
-fn sort_unique(body: &str) -> String {
+pub fn sort_unique(body: &str) -> String {
     let mut lines: Vec<&str> = body.lines().collect();
     lines.sort_unstable();
     lines.dedup();
@@ -489,6 +489,32 @@ pub fn remove_subs(ctx: &Ctx, args: &[String]) -> Result<String, String> {
     // divergence to introduce here.
     set_mode(&f, if args.len() == 1 { 0o600 } else { 0o644 });
     info("removed; re-fetching remaining subscription(s)…");
+    rebuild(ctx)?;
+    after_import(ctx)
+}
+
+/// `sub import <file>` where the file is a `sub dump` — one URL per line.
+///
+/// Every space is stripped from a line before it is used, not merely trimmed:
+/// a URL pasted with a line break in the middle would otherwise become two
+/// subscriptions, neither of which resolves.
+pub fn load_sub_dump(ctx: &Ctx, file: &Path) -> Result<String, String> {
+    let cfg = &ctx.cfg;
+    let f = subs_file(cfg);
+    let mut body = read(&f);
+    let mut n = 0usize;
+    for line in read(file).lines() {
+        let e: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+        if e.is_empty() || e.starts_with('#') {
+            continue;
+        }
+        body.push_str(&e);
+        body.push('\n');
+        n += 1;
+    }
+    std::fs::write(&f, sort_unique(&body)).map_err(|e| format!("write: {e}"))?;
+    set_mode(&f, 0o600);
+    info(&format!("loaded {n} subscription URL(s) from {}; fetching…", file.display()));
     rebuild(ctx)?;
     after_import(ctx)
 }

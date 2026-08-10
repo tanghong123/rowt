@@ -26,7 +26,8 @@
 #   19.  take the OLDEST .conf           -> sr-diff must fire
 #   20.  reverse `sub rm 1 2`            -> cli-diff must fire
 #   21.  match a manual server by tag    -> cli-diff must fire
-#   22.  (structural) native() must not claim an arm run() cannot answer
+#   22.  leak _source into manual.json  -> cli-diff must fire
+#   23.  (structural) native() must not claim an arm run() cannot answer
 #
 # Everything happens in a throwaway copy of the repo; the real tree is never
 # touched. Run it after changing the harness itself.
@@ -543,7 +544,30 @@ else
   cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
 fi
 
-echo "22. every name native() claims must be an arm of run()"
+echo "22. let the review file's _source tag reach manual.json"
+cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+if [ ! -x "$ROOT/target/release/rowt-rs" ]; then
+  echo "  skip — no release build"
+else
+  # `_source` says which client an entry came from. It exists so a human can
+  # prune the review file by origin, and it must be stripped on the way into
+  # manual.json — sing-box is handed those objects and an unknown key is not
+  # something to find out about at router start. Dropping the `del` leaves
+  # every applied server carrying it, which changes nothing anyone would SEE
+  # until the config fails to load.
+  perl -0pi -e 's/\(\(\.\[1\]\.servers \/\/ \[\]\) \| map\(del\(\._source\)\)\)/((.[1].servers \/\/ []))/' \
+    "$tmp/bin/rowt"
+  if grep -q 'map(del(._source))' "$tmp/bin/rowt"; then
+    bad "could not drop the _source strip (apply_import moved?)"
+  elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" "$P" cli-diff >/dev/null 2>&1; then
+    bad "cli-diff passed with _source left on applied servers"
+  else
+    ok "cli-diff caught the _source tag reaching the pool"
+  fi
+  cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+fi
+
+echo "23. every name native() claims must be an arm of run()"
 src="$ROOT/crates/rowt-cli/src/main.rs"
 # Command names only. A native() arm line is indented exactly eight spaces and
 # starts with a pattern; the sub-command lists inside `matches!(…)` are indented

@@ -989,7 +989,12 @@ cmd_cli_diff() {
     for f in "$A" "$B"; do
       sed -e 's/^[0-9-]* [0-9:]* [+-][0-9]*  //' -e 's/^pid=[0-9]* ppid=[0-9]* //' \
           -e 's/ ([0-9]*s)$//' \
-          "$f/home/rowt/log/audit.log" 2>/dev/null > "$f/audit.n" || : > "$f/audit.n"
+          "$f/home/rowt/log/audit.log" 2>/dev/null > "$f/audit.raw" || : > "$f/audit.raw"
+      # …and then through `normalize`, like every other stream. An ABORT line
+      # quotes the message that caused it, and those name files — "no review
+      # file at <config>/import-review.json" is the same failure on both sides
+      # and two different strings without this.
+      normalize "$f/audit.raw" "$f" > "$f/audit.n"
     done
     diff -q "$A/audit.n" "$B/audit.n" >/dev/null 2>&1 || bad="$bad audit"
     if [ -n "$bad" ]; then

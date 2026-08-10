@@ -132,7 +132,7 @@ reconcile and the watchdog's decision table. Each has a gate:
 | `sr-diff` | stdout + stderr + exit status, over Shadowrocket installs | 1,200 generated cases |
 | `watch-diff` | decisions, read back from watch.log + trace | 5 cases |
 | `platform-diff` | the argv the platform layer produces | 8 cases |
-| `cli-diff` | stdout, status, the config tree (content + mode), argv trace, audit log | 167 cases |
+| `cli-diff` | stdout, status, the config tree (content + mode), argv trace, audit log | 183 cases |
 
 `merge-diff` is the only gate whose primary artifact is a file written in
 place: `cmd_import` reads the accumulation straight back with jq, and a human
@@ -199,7 +199,7 @@ It found three real divergences the day it was added: `rowt-rs` was writing
 `mktemp`-then-`mv` idiom left them owner-only. `host.json` carries the escape
 server's uuid.
 
-Two limits, stated rather than implied:
+Three limits, stated rather than implied:
 
 * **A successful subscription fetch is not compared.** `bin/rowt` fetches with
   `urllib` inside `vless-parse.py`, which no PATH shim can reach; `rowt-rs`
@@ -207,6 +207,13 @@ Two limits, stated rather than implied:
   at a closed local port so both sides take the fetch-FAILED path, and
   `normalize.sed` drops the one `curl` line only one of them can produce. What
   a real subscription body parses into is `vless-diff`'s job.
+* **`server import --from <client>` is compared on an EMPTY machine.** The
+  sandbox `HOME` contains no VPN client, so what those cases prove is that both
+  sides find nothing and fail identically. What a client tree full of data
+  yields is `foreign-diff`'s and `sr-diff`'s question, over 1,200 synthetic
+  installs each — and `yq` is not on the sandbox PATH, so the Clash YAML path
+  could not be compared here even with a fixture. The half that writes,
+  `--apply`, IS fully compared, from a seeded `import-review.json`.
 * **No case reloads the router.** The `router-up` scenario makes the router
   "running" by writing the harness's own pid into `host.pid`, so any case that
   restarts it would kill the gate. `corp sync` is out of reach for the same

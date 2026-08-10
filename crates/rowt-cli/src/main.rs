@@ -18,6 +18,7 @@ mod diag;
 mod fetch;
 mod help;
 mod lifecycle;
+mod importer;
 mod onboard;
 mod pool;
 mod shell;
@@ -80,10 +81,8 @@ fn native(cmd: &str, sub: &str) -> bool {
         ) || (cmd == "corp" && matches!(sub, "sync" | "suggest")),
         "direct" | "connections" | "conns" | "_complete" => true,
         "proxy" => matches!(sub, "" | "status" | "check" | "env" | "on" | "off"),
-        // Everything but `import`, which is the other clients' workflow and
-        // still drives the Python extractors.
-        "server" => matches!(sub, "" | "list" | "dump" | "add" | "rm" | "remove" | "clear"),
-        "sub" => matches!(sub, "" | "list" | "dump" | "add" | "rm" | "remove" | "update" | "clear"),
+        "server" => matches!(sub, "" | "list" | "dump" | "add" | "rm" | "remove" | "clear" | "import"),
+        "sub" => matches!(sub, "" | "list" | "dump" | "add" | "rm" | "remove" | "update" | "clear" | "import"),
         "use" | "ping" | "run" | "skill" | "report" | "uninstall" | "fetch" | "probe" | "vm" | "watch" | "onboard" => true,
         // `config import` prompts on /dev/tty, which is exactly what this gate
         // cannot compare — porting it would move it out of reach.
@@ -1339,6 +1338,14 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                     pool::remove_servers(&ctx, &rest[1..])
                 }
                 "clear" => pool::clear_servers(&ctx),
+                // A JSON file (not --apply/--from) restores a `server dump`;
+                // anything else is the other-clients workflow.
+                "import" => match rest.get(1) {
+                    Some(f) if f != "--apply" && f != "--from" && Path::new(f).is_file() => {
+                        importer::load_dump(&ctx, Path::new(f))
+                    }
+                    _ => importer::cmd(&ctx, &rest[1.min(rest.len())..]),
+                },
                 _ => die(&cfg, &format!("usage: {PROG} server [list | add <link>… | rm <tag>… | clear | import <--detect|--from SRC [--output FILE]|--apply [--input FILE]> | dump [file]]")),
             }
         }
@@ -1408,6 +1415,14 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                     }
                     pool::update_subs(&Ctx::new(cfg.clone()))
                 }
+                // A file (not --apply) restores a `sub dump`; otherwise this
+                // is the same other-clients workflow as `server import`.
+                "import" => match rest.get(1) {
+                    Some(f) if f != "--apply" && Path::new(f).is_file() => {
+                        pool::load_sub_dump(&Ctx::new(cfg.clone()), Path::new(f))
+                    }
+                    _ => importer::cmd(&Ctx::new(cfg.clone()), &rest[1.min(rest.len())..]),
+                },
                 "clear" => pool::clear_subs(&Ctx::new(cfg.clone())),
                 _ => die(&cfg, &format!("usage: {PROG} sub [list | add <url>… | rm <n|url> | update | clear | import [--apply] | dump [file]]")),
             }

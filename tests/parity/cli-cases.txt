@@ -163,6 +163,37 @@ PARITY_SCENARIO=pool-invalid server clear
 PARITY_SCENARIO=pool-corrupt server list
 PARITY_SCENARIO=pool-corrupt server add vless://00000000-0000-4000-8000-000000000009@203.0.113.20:443#delta
 PARITY_SCENARIO=pool-corrupt server clear
+
+# server import / sub import — the other clients' accumulate → edit → apply
+# workflow. The sandbox HOME contains no VPN client at all, which is itself the
+# case worth having: `--detect` must find nothing on both sides, and each
+# `--from` must fail (or produce an empty review) the same way. What a client
+# tree full of data yields is `foreign-diff`'s and `sr-diff`'s question, over
+# 1,200 synthetic installs each; `yq` is not on the sandbox PATH, so the Clash
+# YAML path could not be compared here even with a fixture.
+server import --detect
+sub import --detect
+server import
+server import --from
+server import --from nosuchclient
+server import --nosuchflag
+server import --apply
+server import --from shadowrocket
+server import --from clash-verge
+server import --from v2box
+server import --from flclash
+# `--path` is appended to whichever dumper was picked, and sr-import.py has no
+# such option — so this combination always fails. Bug-for-bug (PORTING.md §6.7).
+server import --from shadowrocket --path /nonexistent
+server import --from v2box --path /nonexistent
+# The half that WRITES: a review file someone has already edited, applied to the
+# pool. Servers into manual.json deduped by endpoint, subscription URLs appended
+# and sorted, proxy domains merged into the escape lane under a marker — one of
+# them a duplicate of a domain the lane already has, so the dedupe is exercised
+# rather than assumed.
+PARITY_SCENARIO=import-review server import --apply
+PARITY_SCENARIO=import-review sub import --apply
+PARITY_SCENARIO=import-review server import --detect
 # An empty list dumps a bare NEWLINE — `printf '%s\n' ""` — not nothing. Each
 # case gets a fresh sandbox, so emptiness has to come from a scenario rather
 # than from a `clear` in the case before it.
