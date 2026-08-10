@@ -19,6 +19,7 @@ mod fetch;
 mod help;
 mod lifecycle;
 mod onboard;
+mod pool;
 mod shell;
 mod skill;
 mod vm;
@@ -79,9 +80,10 @@ fn native(cmd: &str, sub: &str) -> bool {
         ) || (cmd == "corp" && matches!(sub, "sync" | "suggest")),
         "direct" | "connections" | "conns" | "_complete" => true,
         "proxy" => matches!(sub, "" | "status" | "check" | "env" | "on" | "off"),
-        // read arms only — the rest drive the Python importers
-        "server" => matches!(sub, "" | "list" | "dump"),
-        "sub" => matches!(sub, "" | "list" | "dump"),
+        // Everything but `import`, which is the other clients' workflow and
+        // still drives the Python extractors.
+        "server" => matches!(sub, "" | "list" | "dump" | "add" | "rm" | "remove" | "clear"),
+        "sub" => matches!(sub, "" | "list" | "dump" | "add" | "rm" | "remove" | "update" | "clear"),
         "use" | "ping" | "run" | "skill" | "report" | "uninstall" | "fetch" | "probe" | "vm" | "watch" | "onboard" => true,
         // `config import` prompts on /dev/tty, which is exactly what this gate
         // cannot compare — porting it would move it out of reach.
@@ -1283,11 +1285,9 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                 _ => die(&cfg, &format!("usage: {PROG} metrics [ status | top [seconds] | path | query \"<SQL>\" ]")),
             }
         }
-        // `server` / `sub`: the READ arms only. Everything that changes the pool
-        // — add, import, rm, clear, update — runs the Python importers and
-        // `rebuild_servers`, so it stays with the shell (PORTING.md §5 phase 6:
-        // 1,484 lines of tested parsing Python is the lowest-ROI thing in the
-        // tree to rewrite, and may stay Python indefinitely).
+        // `server` / `sub`: reads here, writes in pool.rs. Only `import` — the
+        // review-file workflow that extracts from other VPN clients — is still
+        // the shell's.
         "server" => {
             let ctx = Ctx::new(cfg.clone());
             let servers: Vec<Value> =
@@ -1326,6 +1326,19 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                         None => { println!("{out}"); Ok(String::new()) }
                     }
                 }
+                "add" => {
+                    if rest.len() < 2 {
+                        die(&cfg, &format!("usage: {PROG} server add '<vless://|vmess://|anytls://|hysteria2://...>' [more...]"));
+                    }
+                    pool::add(&ctx, &rest[1..])
+                }
+                "rm" | "remove" => {
+                    if rest.len() < 2 {
+                        die(&cfg, &format!("usage: {PROG} server rm <tag>..."));
+                    }
+                    pool::remove_servers(&ctx, &rest[1..])
+                }
+                "clear" => pool::clear_servers(&ctx),
                 _ => die(&cfg, &format!("usage: {PROG} server [list | add <link>… | rm <tag>… | clear | import <--detect|--from SRC [--output FILE]|--apply [--input FILE]> | dump [file]]")),
             }
         }
@@ -1372,6 +1385,30 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                         None => { println!("{body}"); Ok(String::new()) }
                     }
                 }
+                "add" => {
+                    if rest.len() < 2 {
+                        die(&cfg, &format!("usage: {PROG} sub add <url> [url2...]"));
+                    }
+                    pool::add_subs(&Ctx::new(cfg.clone()), &rest[1..])
+                }
+                "rm" | "remove" => {
+                    if rest.len() < 2 {
+                        die(&cfg, &format!("usage: {PROG} sub rm <n|url>"));
+                    }
+                    // `[ -s "$SUBS_FILE" ]` — a file of nothing but comments is
+                    // still "some subscriptions" to this check.
+                    if subs.is_empty() {
+                        die(&cfg, "no subscriptions");
+                    }
+                    pool::remove_subs(&Ctx::new(cfg.clone()), &rest[1..])
+                }
+                "update" => {
+                    if subs.is_empty() {
+                        die(&cfg, &format!("no saved subscriptions — use: {PROG} sub add <url>"));
+                    }
+                    pool::update_subs(&Ctx::new(cfg.clone()))
+                }
+                "clear" => pool::clear_subs(&Ctx::new(cfg.clone())),
                 _ => die(&cfg, &format!("usage: {PROG} sub [list | add <url>… | rm <n|url> | update | clear | import [--apply] | dump [file]]")),
             }
         }

@@ -62,10 +62,11 @@ Partial arms — native for some sub-commands, legacy for the rest.
                 "" | "list" | "dump" | "add" | "rm" | "remove" | "clear" | "import"
                     | "errors" | "stats" | "log"
             ) || (cmd == "corp" && matches!(sub, "sync" | "suggest")),
-            "proxy" => matches!(sub, "" | "status" | "check" | "env"),
-            // read arms only — the rest drive the Python importers
-            "server" => matches!(sub, "" | "list" | "dump"),
-            "sub" => matches!(sub, "" | "list" | "dump"),
+            "proxy" => matches!(sub, "" | "status" | "check" | "env" | "on" | "off"),
+            // Everything but `import`, which is the other clients' workflow and
+            // still drives the Python extractors.
+            "server" => matches!(sub, "" | "list" | "dump" | "add" | "rm" | "remove" | "clear"),
+            "sub" => matches!(sub, "" | "list" | "dump" | "add" | "rm" | "remove" | "update" | "clear"),
             "use" | "ping" | "run" | "skill" | "report" | "uninstall" | "fetch" | "probe" | "vm" | "watch" | "onboard" => true,
             // `config import` prompts on /dev/tty, which is exactly what this gate
             // cannot compare — porting it would move it out of reach.

@@ -196,24 +196,22 @@ revertible and gated.
 | **1** ◑ | `rowt-core::render` — replace the giant jq program. bash calls `rowt-rs render` internally. | **render done** — `crates/rowt-render`, 18/18 cases canonically identical on host + vm (`parity render-matrix`), and identical against the real 22-server config. Remaining: throwaway-port outbound oracle, bash cutover, shadow window |
 | **2** ✅ | classify/explain, lane set logic, absorb `corp-sync-reconcile.py` | **done** — classify: 9/9 cases × 92 destinations identical on `(lane, reason)`; lane edits: 12/12 cases identical across all three files + messages; reconcile: 210 generated cases identical to the Python. `selftest` 9/9 |
 | **3** ◑ | watchdog: FSM into core, effects via `PlatformMac`; `cmd_watch` execs the Rust tick | **FSM + shadow done** — `rowt-core::watch`, 17 unit tests replaying §11's decision table; `parity watch-diff` 5/5; `ROWT_WATCH_SHADOW=1` compares the shell's decisions against the FSM's plan on every real tick, feeding it the tick's own captive verdict rather than re-probing. Remaining: `PlatformMac` effects, the `cmd_watch` cutover, and **time** — the shadow window itself |
-| **4** ◑ | CLI. Built as `rowt-rs` alongside the shell first, so each command lands with evidence; only then does bash reduce to a wrapper and get deleted. Formula ships the prebuilt binary (monitor-asset pattern). | **all 37 arms native** — `parity cli-diff` compares stdout, exit status, lane files, the **argv trace** and the **audit log** over 136 cases. Remaining: the sub-arms wrapping the Python importers (below), 5 computed help pages, then the `ROWT_IMPL` cutover |
+| **4** ◑ | CLI. Built as `rowt-rs` alongside the shell first, so each command lands with evidence; only then does bash reduce to a wrapper and get deleted. Formula ships the prebuilt binary (monitor-asset pattern). | **all 37 arms native** — `parity cli-diff` compares stdout, exit status, the **whole config tree** (content and mode), the **argv trace** and the **audit log** over 167 cases. Remaining: `server`/`sub`/`config` `import`, 5 computed help pages, then the `ROWT_IMPL` cutover |
 | **5** | `PlatformLinux` + tun mode + systemd units; CI matrix (macOS + ubuntu — core tests run on both, platform tests feature-gated); linux tar assets | fresh-VM install → onboard → probe → captive drill; VPN-coexistence drill with Tailscale up |
 | 6 ◑ | port the import pipeline (1,302 lines of parsing Python). No longer optional — the 2026-08-09 decision is one language in the repo, and this is what retires `depends_on "python@3.12"`. | **all four done** — `rowt-core::{sharelink,importmerge,foreign,srimport}` (+`bplist`); `parity vless-diff` 2,000 cases, `merge-diff` 1,500 (the review FILE plus the streams), `foreign-diff` 1,200 (synthetic client config TREES), `sr-diff` 1,200 (synthetic Shadowrocket installs). What remains is the CUTOVER: `bin/rowt` still calls the Pythons, which are the reference side of those gates |
 
 #### What still reaches for bash, and the order it comes back in
 
 Every one of the 37 command arms answers natively. What remains are SUB-arms of
-arms that are otherwise ported, and they are all downstream of the same thing —
-the Python import pipeline:
+arms that are otherwise ported:
 
-    server add|rm|clear|import      cmd_import, rebuild_servers, after_import,
-    sub add|rm|update|clear|import  servers_remove, subs_remove
+    server import                   the other clients' review-file workflow
+    sub import                      (same code path — cmd_from_shadowrocket)
     config import                   prompts on /dev/tty
 
-`native()` deliberately does not claim them: `server`, `sub` and `config`
-answer `list`/`dump`/`export` and hand the rest through the §6.6 fallthrough. A
-listed-but-unimplemented arm is worse than an unlisted one, and `selftest` 20
-asserts the two agree.
+`native()` deliberately does not claim them, and hands them through the §6.6
+fallthrough instead. A listed-but-unimplemented arm is worse than an unlisted
+one, and `selftest` 22 asserts the two agree.
 
 So the order is fixed rather than a preference:
 
@@ -221,11 +219,17 @@ So the order is fixed rather than a preference:
    (`rowt-core::sharelink`), `import-merge.py` (`::importmerge`),
    `foreign-import.py` (`::foreign`) and `sr-import.py` (`::srimport`, on
    `::bplist`), each behind its own differential gate.
-2. **the shell around it -> Rust** — `cmd_import`, `rebuild_servers`,
-   `after_import`, `servers_remove`, `subs_remove`. Little logic, but it is
-   what writes `servers.json`, so it lands only once the parser it wraps is
-   trusted by a gate rather than by reading.
-3. **`config import`** — the odd one out, because it prompts on `/dev/tty`;
+2. ~~**the shell around it -> Rust.**~~ Done: `crates/rowt-cli/src/pool.rs` —
+   `rebuild_servers`, `after_import`, `server add|rm|clear`,
+   `sub add|rm|update|clear`. Little logic, but it is what writes
+   `servers.json`, so `parity cli-diff` grew a config-tree comparison
+   (content AND mode) first: every one of those arms is a file writer whose
+   stdout is a courtesy, and the gate could not see the files.
+3. **`server import` / `sub import`** — `cmd_from_shadowrocket`,
+   `apply_import`, `server_load_dump`, `detect_import_sources`. The extractors
+   underneath are ported and gated; what is left is the accumulate → edit →
+   apply orchestration around them.
+4. **`config import`** — the odd one out, because it prompts on `/dev/tty`;
    the gate has no terminal, so this needs a scripted-input case first.
 
 Separately, 5 of the 32 help pages still render in the shell: their heredocs
@@ -252,6 +256,12 @@ translation but CUTOVER: `bin/rowt` still shells out to `config/*.py`, and the
 Pythons stay in the tree until it does not, because they are the reference side
 of every gate. Retiring `depends_on "python@3.12"` from the Formula is the
 concrete prize and it lands with the cutover, not with the last port.
+
+The cutover is happening arm by arm rather than at once. `rowt-rs server add`
+and friends no longer run a Python; `bin/rowt server add` still does, and that
+is what keeps them comparable. The last arm to stop calling a Python is
+`server import`; after that the shell keeps the scripts only until it is itself
+retired.
 
 `vless-parse.py` (421 lines) landed first of that group, as
 `rowt-core::sharelink` behind `parity vless-diff`; `import-merge.py` (172)

@@ -31,3 +31,11 @@ s/diag-[0-9]\{8\}-[0-9]\{6\}\.txt/diag-<TS>.txt/g
 # a file written to the wrong place inside the sandbox would then be invisible.
 s#/tmp/[A-Za-z0-9_.-]*\.[A-Za-z0-9]\{6,\}#<TMP>#g
 s#/var/folders/[^ ]*/T/*[A-Za-z0-9._-]*#<TMP>#g
+
+# A subscription fetch, which the two implementations make with two different
+# HTTP clients: bin/rowt hands the URL to vless-parse.py, which dials it with
+# urllib inside the interpreter and so never touches a PATH shim, while rowt-rs
+# runs curl and is recorded. Same request either way; the client is not what any
+# gate is asking about. Scoped to the FIXTURE URL — a closed local port both
+# sides fail against — so a real curl anywhere else still shows up in the trace.
+/^curl .* -- http:\/\/127\.0\.0\.1:9\//d

@@ -94,8 +94,7 @@ _complete router
 _complete nosuchcommand
 _complete escape add
 
-# server / sub: the read arms. The rest drive the Python importers and stay
-# with the shell, so they are not listed as native.
+# server / sub: the read arms.
 server
 server list
 server dump
@@ -105,6 +104,65 @@ sub dump
 server nosucharm
 sub nosucharm
 PARITY_SCENARIO=router-up server list
+
+# server / sub: the arms that WRITE. What these prove is on disk, not on stdout
+# — manual.json, subs.txt, the rebuilt servers.json and the `selected` line of
+# state — which is why cli-diff compares the config tree (content and mode) and
+# not just the two output streams.
+#
+# The subscriptions in the `pool-seeded` fixture point at a closed local port,
+# so every rebuild here takes the fetch-failed path. That is the only
+# subscription path the two implementations can be compared on: bash fetches
+# with urllib inside vless-parse.py and rowt-rs with curl, so a SUCCESSFUL fetch
+# would differ in the argv trace whatever the bodies were. The parse side of a
+# real subscription body is covered by `parity vless-diff`.
+server add vless://00000000-0000-4000-8000-000000000009@203.0.113.20:443?security=tls&sni=delta.example#delta
+server add
+server add notalink
+server add vless://00000000-0000-4000-8000-000000000009@203.0.113.20:443#d1 vless://00000000-0000-4000-8000-000000000009@203.0.113.20:443#d2
+# Re-importing something the manual set already has must be idempotent on disk,
+# not merely deduped again in servers.json on the next rebuild.
+PARITY_SCENARIO=pool-seeded server add vless://00000000-0000-4000-8000-000000000001@203.0.113.10:443#alpha-again
+server rm alpha
+server rm nosuchtag
+PARITY_SCENARIO=pool-seeded server rm alpha
+PARITY_SCENARIO=pool-seeded server rm alpha gamma
+PARITY_SCENARIO=pool-seeded server rm alpha nosuchtag
+server clear
+PARITY_SCENARIO=pool-seeded server clear
+# No `router-up` case here, and none is possible: the scenario makes the router
+# "running" by writing the HARNESS's own pid into host.pid, so the reload that
+# every pool edit ends with would stop the gate itself. The reload path is
+# shared with `corp sync`, which is unreachable in this gate for the same reason.
+sub add http://127.0.0.1:9/feed-three
+sub add
+PARITY_SCENARIO=pool-seeded sub add http://127.0.0.1:9/feed-three
+# `sort -u` — a URL already in the list must not become a second line.
+PARITY_SCENARIO=pool-seeded sub add http://127.0.0.1:9/feed-one
+sub rm 1
+sub update
+PARITY_SCENARIO=pool-seeded sub rm 1
+# The shell applies the arguments one at a time to the SHRINKING file, so these
+# two numbers do not mean what they look like. Bug-for-bug (PORTING.md §6.7).
+PARITY_SCENARIO=pool-seeded sub rm 1 2
+PARITY_SCENARIO=pool-seeded sub rm feed-two
+PARITY_SCENARIO=pool-seeded sub rm 99
+PARITY_SCENARIO=pool-seeded sub update
+PARITY_SCENARIO=pool-seeded sub clear
+sub clear
+# A manual set that is not a JSON array at all: `jq -s add` fails and the
+# rebuild silently continues without it, so servers.json is rebuilt from the
+# subscriptions alone rather than the command failing.
+PARITY_SCENARIO=pool-invalid server list
+PARITY_SCENARIO=pool-invalid server add vless://00000000-0000-4000-8000-000000000009@203.0.113.20:443#delta
+PARITY_SCENARIO=pool-invalid server clear
+# An array whose elements are not all objects. This one does NOT degrade
+# quietly: the Python calls .get on a string, which is an AttributeError rather
+# than a ValueError, so it escapes its own handler — the rebuild dies, and the
+# audit log gets an ABORT with no END. Both halves of that are compared.
+PARITY_SCENARIO=pool-corrupt server list
+PARITY_SCENARIO=pool-corrupt server add vless://00000000-0000-4000-8000-000000000009@203.0.113.20:443#delta
+PARITY_SCENARIO=pool-corrupt server clear
 # An empty list dumps a bare NEWLINE — `printf '%s\n' ""` — not nothing. Each
 # case gets a fresh sandbox, so emptiness has to come from a scenario rather
 # than from a `clear` in the case before it.

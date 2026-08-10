@@ -24,7 +24,9 @@
 #   17.  unify the two sni precedences   -> foreign-diff must fire
 #   18.  prefer uuid over password       -> sr-diff must fire
 #   19.  take the OLDEST .conf           -> sr-diff must fire
-#   20.  (structural) native() must not claim an arm run() cannot answer
+#   20.  reverse `sub rm 1 2`            -> cli-diff must fire
+#   21.  match a manual server by tag    -> cli-diff must fire
+#   22.  (structural) native() must not claim an arm run() cannot answer
 #
 # Everything happens in a throwaway copy of the repo; the real tree is never
 # touched. Run it after changing the harness itself.
@@ -496,7 +498,52 @@ else
   cp "$ROOT/config/sr-import.py" "$tmp/config/sr-import.py"
 fi
 
-echo "20. every name native() claims must be an arm of run()"
+echo "20. remove subscriptions in one pass instead of one at a time"
+cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+if [ ! -x "$ROOT/target/release/rowt-rs" ]; then
+  echo "  skip — no release build"
+else
+  # `sub rm 1 2` does NOT remove the first two lines: each argument is applied
+  # to the file the previous one left behind, so the second number counts into
+  # an already-shortened list. It reads like a bug and it is one, but it is the
+  # behavior anyone's notes and scripts were written against, so the port keeps
+  # it (PORTING.md §6.7). Reversing the order is the obvious "fix" — and the
+  # exact shape of accidental improvement a port makes — so the gate has to see
+  # it. Reversing changes the outcome without changing which arguments are used.
+  perl -0pi -e 's/local arg tmp; tmp="\$\(mktemp\)"/local arg tmp; tmp="\$(mktemp)"; set -- \$(printf "%s\\n" "\$\@" | tail -r)/' \
+    "$tmp/bin/rowt"
+  if ! grep -q 'tail -r' "$tmp/bin/rowt"; then
+    bad "could not reverse the subscription removal order (subs_remove moved?)"
+  elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" "$P" cli-diff >/dev/null 2>&1; then
+    bad "cli-diff passed with subscription removals applied in reverse"
+  else
+    ok "cli-diff caught the reordered subscription removal"
+  fi
+fi
+
+echo "21. match a manual server by tag instead of by endpoint"
+cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+if [ ! -x "$ROOT/target/release/rowt-rs" ]; then
+  echo "  skip — no release build"
+else
+  # `server rm <tag>` finds the entry in servers.json — the WORKING set, where
+  # tags have been uniquified by combine — and then matches it against the
+  # manual set by server and port, because the manual entry may carry a
+  # different tag for the same endpoint. Matching by tag on both sides looks
+  # like a simplification and quietly refuses every removal whose tag was
+  # rewritten, telling the user it came from a subscription.
+  perl -0pi -e 's/any\(\.server==\$s and \.server_port==\$p\)/any(.tag==\$s)/' "$tmp/bin/rowt"
+  if ! grep -q 'any(.tag==\$s)' "$tmp/bin/rowt"; then
+    bad "could not swap the manual-server match (servers_remove moved?)"
+  elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" "$P" cli-diff >/dev/null 2>&1; then
+    bad "cli-diff passed with manual servers matched by tag"
+  else
+    ok "cli-diff caught the manual server matched by tag"
+  fi
+  cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+fi
+
+echo "22. every name native() claims must be an arm of run()"
 src="$ROOT/crates/rowt-cli/src/main.rs"
 # Command names only. A native() arm line is indented exactly eight spaces and
 # starts with a pattern; the sub-command lists inside `matches!(…)` are indented

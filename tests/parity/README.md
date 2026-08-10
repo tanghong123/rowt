@@ -132,7 +132,7 @@ reconcile and the watchdog's decision table. Each has a gate:
 | `sr-diff` | stdout + stderr + exit status, over Shadowrocket installs | 1,200 generated cases |
 | `watch-diff` | decisions, read back from watch.log + trace | 5 cases |
 | `platform-diff` | the argv the platform layer produces | 8 cases |
-| `cli-diff` | stdout, status, lane files, argv trace, audit log | 136 cases |
+| `cli-diff` | stdout, status, the config tree (content + mode), argv trace, audit log | 167 cases |
 
 `merge-diff` is the only gate whose primary artifact is a file written in
 place: `cmd_import` reads the accumulation straight back with jq, and a human
@@ -177,6 +177,40 @@ is a string, a BLOB in the `ZURL` column — and the invariant worth holding is
 that the SAME inputs crash with the same kind of error and the same inputs
 succeed byte for byte. Matching frame lines would pin the interpreter, not the
 behaviour. Everything printed before the traceback still compares exactly.
+
+### The CLI gate, and why it reads the disk
+
+`cli-diff` compares five things, and the biggest of them is not a stream: after
+both sides run, it snapshots the whole config tree — every file except logs,
+pidfiles, caches and the sing-box binary — as a normalized checksum plus the
+file MODE, and requires the two to match.
+
+That was added for the pool arms (`server add|rm|clear`, `sub add|rm|update|clear`),
+and it is what makes them gateable at all: what those commands DO is write
+`manual.json`, `subs.txt`, the rebuilt `servers.json` and the `selected` line of
+`state`. Their stdout is a summary of the result, so an implementation that
+printed the summary and wrote nothing would have passed. The mode travels with
+the checksum because those files hold credentials and subscription tokens and
+are 0600 on purpose — a checksum cannot see a dropped `chmod`, and getting one
+wrong is a security regression rather than a near-miss.
+
+It found three real divergences the day it was added: `rowt-rs` was writing
+`host.json`, `vm.json` and `state` world-readable where the shell's
+`mktemp`-then-`mv` idiom left them owner-only. `host.json` carries the escape
+server's uuid.
+
+Two limits, stated rather than implied:
+
+* **A successful subscription fetch is not compared.** `bin/rowt` fetches with
+  `urllib` inside `vless-parse.py`, which no PATH shim can reach; `rowt-rs`
+  runs `curl`, which the recorder shim answers. The fixture subscriptions point
+  at a closed local port so both sides take the fetch-FAILED path, and
+  `normalize.sed` drops the one `curl` line only one of them can produce. What
+  a real subscription body parses into is `vless-diff`'s job.
+* **No case reloads the router.** The `router-up` scenario makes the router
+  "running" by writing the harness's own pid into `host.pid`, so any case that
+  restarts it would kill the gate. `corp sync` is out of reach for the same
+  reason.
 
 ### The render gate
 
