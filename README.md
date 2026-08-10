@@ -258,6 +258,31 @@ brew install tanghong123/tap/rowt
 rowt version
 ```
 
+### `rowt-rust` — the same tool, in Rust (preview)
+
+A second command, `rowt-rust`, ships alongside `rowt` on Apple Silicon. It is a
+Rust port of the whole CLI, and it is a **preview you can ignore**: nothing runs
+it for you, `rowt` does not delegate to it, and removing it changes nothing.
+
+It exists so the two can be run side by side on the same config:
+
+```sh
+rowt status          # the shell
+rowt-rust status     # the port, same config, same output
+```
+
+Every one of the 37 command arms answers natively and is compared against the
+shell — stdout, exit status, the config tree with file modes, the argv trace and
+the audit log — over 241 cases (`tests/parity/`). What is NOT yet proven is time
+on real networks, which is what the preview is for. If the two ever disagree on
+your machine, that is worth reporting: the whole design of the port is that they
+should not.
+
+Two smaller binaries ship next to it, `rowt-render` and `rowt-watch-tick`. Those
+are inert unless you turn a comparison on (`ROWT_RENDER_SHADOW=1`,
+`ROWT_WATCH_SHADOW=1`), which makes `rowt` record where the Rust would have
+disagreed with it, and act on its own answer regardless.
+
 The installer is **version-guarded**: re-running it does nothing if the installed
 copy is the same or newer than the source (`--force` overrides; `--uninstall`
 removes it). `--prefix DIR` / `--bindir DIR` change the locations. You can also

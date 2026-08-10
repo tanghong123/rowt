@@ -39,3 +39,34 @@ jobs:
         run: ruff format --check config/
       - name: py_compile
         run: python -m py_compile config/*.py
+
+  # The workspace: rowt-core (pure), rowt-platform (the OS seam) and rowt-cli
+  # (`rowt-rs`). On macOS, because that is what the platform layer talks to —
+  # `networksetup`, `scutil`, `launchctl`, `kern.boottime`. PORTING.md phase 5
+  # calls for a real matrix (core on both, platform tests feature-gated); this
+  # is the half of it that needs no Linux target, and it is the half that has
+  # been missing entirely — `cargo test` has never run in CI.
+  #
+  # NOT `cargo fmt --check`: the tree is deliberately hand-formatted with long
+  # lines and is not fmt-clean, per skills/rowt-dev.
+  rust:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo build --release
+        run: cargo build --release --workspace
+      - name: cargo test
+        run: cargo test --workspace
+      # The monitor is its own workspace (its own Cargo.lock and goldens), so
+      # it needs its own invocation or it is simply not built.
+      - name: monitor tests
+        working-directory: rowt-monitor
+        run: cargo test
+
+  # The differential gates are NOT here. `parity cli-diff` alone runs 241 cases
+  # against a sandboxed bash, takes ~11 minutes, and five of its cases wait on a
+  # router that is designed not to come up; `selftest` adds another ten. They
+  # are the pre-release gate, run locally — see tests/parity/README.md. What CI
+  # is for is catching the change that does not compile.

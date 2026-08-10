@@ -127,11 +127,47 @@ else
 fi
 
 # copy the tool (exclude any local state/binaries that shouldn't ship)
+#
+# The two `target/` trees are excluded because they are BUILD output, not the
+# tool: measured 2026-08-10 they are 406 MB and 774 MB of object files, and
+# copying them made a local install 1.2 GB. They were also, until this change,
+# how a local install found its Rust sidecars — `_render_bin` falls back to
+# `$HERE/target/release` and `_collector_bin` to `$HERE/rowt-monitor/target/
+# release`. So the exclusion and the explicit install below are ONE change:
+# excluding alone would take the sidecars with it.
 mkdir -p "$PREFIX" "$BINDIR"
 if command -v rsync >/dev/null 2>&1; then
-  rsync -a --delete --exclude '.state' --exclude 'bin/sing-box' "$HERE/" "$PREFIX/"
+  rsync -a --delete --exclude '.state' --exclude 'bin/sing-box' \
+        --exclude 'target' --exclude 'rowt-monitor/target' "$HERE/" "$PREFIX/"
 else
-  rm -rf "$PREFIX"; mkdir -p "$PREFIX"; cp -R "$HERE/." "$PREFIX/"
+  rm -rf "$PREFIX"; mkdir -p "$PREFIX"
+  # `cp -R` has no --exclude, so copy the entries and skip the build trees.
+  for e in "$HERE"/* "$HERE"/.[!.]*; do
+    case "${e##*/}" in target|.state) continue ;; esac
+    cp -R "$e" "$PREFIX/" 2>/dev/null || true
+  done
+  rm -rf "$PREFIX/rowt-monitor/target" "$PREFIX/bin/sing-box"
+fi
+
+# The Rust sidecars, into the one place bin/rowt looks first ($HERE/bin). They
+# are copied rather than found in target/ so the installed tree does not depend
+# on a build directory that may be rebuilt, cleaned, or absent.
+#
+# `rowt-render` and `rowt-watch-tick` are INERT unless ROWT_RENDER_SHADOW=1 or
+# ROWT_WATCH_SHADOW=1: bin/rowt stays authoritative and only compares. Shipping
+# them is what makes the shadow window startable at all, and is not a cutover.
+# `rowt-rust` is the Rust CLI, installed under its own name so it can be run
+# side by side; nothing execs it.
+for b in rowt-render rowt-watch-tick; do
+  [ -x "$HERE/target/release/$b" ] && cp "$HERE/target/release/$b" "$PREFIX/bin/$b" || true
+done
+[ -x "$HERE/rowt-monitor/target/release/rowt-collector" ] \
+  && cp "$HERE/rowt-monitor/target/release/rowt-collector" "$PREFIX/bin/rowt-collector" || true
+[ -x "$HERE/rowt-monitor/target/release/rowt-monitor" ] \
+  && cp "$HERE/rowt-monitor/target/release/rowt-monitor" "$PREFIX/bin/rowt-monitor" || true
+if [ -x "$HERE/target/release/rowt-rs" ]; then
+  cp "$HERE/target/release/rowt-rs" "$PREFIX/bin/rowt-rust"
+  ln -sfn "$PREFIX/bin/rowt-rust" "$BINDIR/rowt-rust"
 fi
 
 ln -sfn "$PREFIX/bin/rowt" "$LINK"

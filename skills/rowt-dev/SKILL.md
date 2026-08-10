@@ -34,16 +34,22 @@ Repo `tanghong123/rowt`; tap **`~/personal/homebrew-tap`** (`Formula/rowt.rb`), 
 1. Clean tree at the intended `ROWT_VERSION` (confirm `grep ROWT_VERSION= bin/rowt`).
 2. `git tag -a vX.Y.Z -m "…"` && `git push origin vX.Y.Z`.
 3. `gh release create vX.Y.Z --title "rowt X.Y.Z" --notes "…"`.
-4. **Prebuilt monitor asset (Apple Silicon pours it — the formula's `resource "rowt-monitor"`).** Release-build both bins and tar them **at the archive root** (the formula `stage`s and installs `rowt-monitor` + `rowt-collector`), then attach to the release:
+4. **Prebuilt binary asset (Apple Silicon pours it — the formula's `resource "rowt-monitor"`).** The name says "monitor" for historical reasons; it now carries every prebuilt binary the formula installs, from **two** cargo workspaces. Tar them **at the archive root** and attach:
    ```
-   (cd rowt-monitor && cargo build --release --bins)
+   (cd rowt-monitor && cargo build --release --bins)   # rowt-monitor, rowt-collector
+   cargo build --release --workspace                   # rowt-render, rowt-watch-tick, rowt-rs
    COPYFILE_DISABLE=1 tar --no-mac-metadata -czf /tmp/rowt-monitor-aarch64-apple-darwin.tar.gz \
-     -C rowt-monitor/target/release rowt-monitor rowt-collector
-   tar tzf /tmp/rowt-monitor-aarch64-apple-darwin.tar.gz    # must list exactly the two names
+     -C rowt-monitor/target/release rowt-monitor rowt-collector \
+     -C "$PWD/target/release" rowt-render rowt-watch-tick rowt-rs
+   tar tzf /tmp/rowt-monitor-aarch64-apple-darwin.tar.gz   # must list exactly those five names
    gh release upload vX.Y.Z /tmp/rowt-monitor-aarch64-apple-darwin.tar.gz -R tanghong123/rowt
    MON_SHA=$(shasum -a 256 /tmp/rowt-monitor-aarch64-apple-darwin.tar.gz | awk '{print $1}')
    ```
-   (Build on an `arm64` mac — this is a native, non-cross build.) Intel has no asset; the formula compiles from source (`depends_on "rust" => :build`).
+   The **second `-C` is absolute** on purpose: `tar`'s `-C` is relative to the previous one, so `-C target/release` after `-C rowt-monitor/target/release` would look for `rowt-monitor/target/release/target/release`.
+
+   **Every name in that list is a name the formula calls `.install` on, so a missing one fails the install, not the build.** This step used to tar only `rowt-monitor` and `rowt-collector` while the formula installed four — following it literally produced an asset that `brew install` rejected. If you add or drop a prebuilt binary, change both this command and `Formula/rowt.rb` in the same pass.
+
+   (Build on an `arm64` mac — native, not cross.) Intel gets no asset: the formula builds the monitor from source (`depends_on "rust" => :build`) and skips the sidecars and `rowt-rust` entirely, which is why those are Apple-Silicon-only today.
 5. Source `sha256`: `curl -sL https://github.com/tanghong123/rowt/archive/refs/tags/vX.Y.Z.tar.gz | shasum -a 256` (or download then shasum).
 6. Update `Formula/rowt.rb`: the source `url` (`…/refs/tags/vX.Y.Z.tar.gz`) + its `sha256`, the **`resource "rowt-monitor"` `url` (`…/releases/download/vX.Y.Z/…`) + its `sha256` (`$MON_SHA` from step 4)**, and the `assert_match "rowt X.Y.Z"` test. Keep the `caveats`/`depends_on` current with any new user-facing command. `git pull --rebase` the tap first (it may have other commits), commit `rowt X.Y.Z`, push.
 7. Validate: `brew update && brew fetch tanghong123/tap/rowt` (errors on either sha mismatch) and `brew info tanghong123/tap/rowt` (shows `stable X.Y.Z`).
