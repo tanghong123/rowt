@@ -101,23 +101,16 @@ fn b64(data: &[u8]) -> String {
     out
 }
 
-/// `_boot_id` — `sysctl -n kern.boottime`, reduced to its first run of digits.
+/// `_boot_id` — through the platform seam, not around it.
 ///
 /// Paired with `intent`, this is what lets the watchdog tell a mid-session
-/// crash (same boot, recover it) from a reboot (different boot, leave it).
+/// crash (same boot, recover it) from a reboot (different boot, leave it). It
+/// is also the most platform-specific thing on this path — `kern.boottime` on
+/// a Mac, `/proc/stat`'s `btime` on Linux — so it belongs behind `Platform`
+/// with the rest of Phase 5's seam, and a second reader here would be one more
+/// place for the two to disagree about what boot it is.
 pub fn boot_id() -> String {
-    let Ok(o) = Command::new("sysctl").args(["-n", "kern.boottime"]).output() else {
-        return String::new();
-    };
-    let s = String::from_utf8_lossy(&o.stdout);
-    for line in s.lines() {
-        let d: String = line.chars().skip_while(|c| !c.is_ascii_digit())
-            .take_while(char::is_ascii_digit).collect();
-        if !d.is_empty() {
-            return d;
-        }
-    }
-    String::new()
+    Mac.boot_id().unwrap_or_default()
 }
 
 pub fn env_num(k: &str, d: u16) -> u16 {
@@ -278,6 +271,11 @@ pub fn cmd_render(ctx: &Ctx) -> Result<String, String> {
     if mode != "local" && !has_servers {
         return Err("no servers — run: rowt server add '<vless://...>' or rowt sub add <url>".into());
     }
+    // Before the render, not after: the render VALIDATES what it produced by
+    // running `sing-box check` on it, so a missing binary would surface as
+    // "generated host.json failed validation" — a config problem, on a machine
+    // whose only problem is that it has not downloaded the router yet.
+    crate::fetch::ensure_singbox(&ctx.cfg)?;
     eprintln!("==> rendering configs (mode={mode}, port={}, servers={servers_n})", ctx.port);
     let host = build_host(ctx)?;
 
@@ -1007,4 +1005,38 @@ pub fn cmd_restart(ctx: &Ctx, here: &Path) -> Result<String, String> {
     sset(ctx, "intent", "up");            // a live restart means "should be up"
     sset(ctx, "boot", &boot_id());
     Ok(String::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base64_matches_the_one_in_the_pipeline() {
+        // `head -c N /dev/urandom | base64` — standard alphabet, padded.
+        let n = |k: usize| b64(&(0..k as u8).collect::<Vec<u8>>());
+        assert_eq!(n(1), "AA==");
+        assert_eq!(n(2), "AAE=");
+        assert_eq!(n(3), "AAEC");
+        assert_eq!(n(4), "AAECAw==");
+        // The width `clash_secret` actually asks for: 24 bytes, no padding.
+        assert_eq!(n(24), "AAECAwQFBgcICQoLDA0ODxAREhMUFRYX");
+    }
+
+    #[test]
+    fn a_minted_secret_is_at_most_24_alphanumerics() {
+        // `| tr -dc 'A-Za-z0-9' | cut -c1-24` — the filter runs BEFORE the cut,
+        // so 32 base64 characters yield 24 only when few of them were `+` or
+        // `/`. They usually are few, and the shell has always been willing to
+        // mint a shorter secret rather than draw again.
+        let mint = |raw: &[u8]| -> String {
+            b64(raw).chars().filter(|c| c.is_ascii_alphanumeric()).take(24).collect()
+        };
+        assert_eq!(mint(&(0..24u8).collect::<Vec<u8>>()), "AAECAwQFBgcICQoLDA0ODxAR");
+        // The pathological draw: every sextet lands on `+` or `/` and the
+        // secret comes out EMPTY. Vanishingly unlikely and not impossible, and
+        // an empty secret is an unauthenticated clash API — which is why this
+        // is written down rather than assumed away.
+        assert_eq!(mint(&[0xfb, 0xff, 0xbf].repeat(8)), "");
+    }
 }

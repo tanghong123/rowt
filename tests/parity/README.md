@@ -128,8 +128,10 @@ right lane and passes.
 expanded by each `cmd_*` function's first-argument `case`, so subcommands are
 measured too. Counting only first-level commands would let `watch install` hide
 behind `watch status`. 63 rows, all covered; entries that cannot run
-unattended (`tail -f`, the TUI, `uninstall`'s prompt, and the ones needing an
-import fixture) are skipped with a stated cause. Subcommands reachable only
+unattended (`tail -f` and the TUI) or that MUTATE the machine are skipped with a
+stated cause — `mask` asks whether a read-only command is byte-stable across two
+runs, which is not a question a writer has. Those are `cli-diff`'s, and the
+skip reasons now say which scenario compares each one. Subcommands reachable only
 through a `*` catch-all cannot be enumerated from the source and are not
 listed.
 
@@ -158,7 +160,7 @@ reconcile and the watchdog's decision table. Each has a gate:
 | `sr-diff` | stdout + stderr + exit status, over Shadowrocket installs | 1,200 generated cases |
 | `watch-diff` | decisions, read back from watch.log + trace | 5 cases |
 | `platform-diff` | the argv the platform layer produces | 8 cases |
-| `cli-diff` | stdout, status, the config tree (content + mode), argv trace, audit log | 228 cases |
+| `cli-diff` | stdout, status, the config tree (content + mode), argv trace, audit log | 241 cases |
 
 `merge-diff` is the only gate whose primary artifact is a file written in
 place: `cmd_import` reads the accumulation straight back with jq, and a human

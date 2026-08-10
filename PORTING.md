@@ -1,6 +1,9 @@
 # Porting rowt: bash → Rust, macOS → macOS + Linux
 
-*Investigation and design, 2026-08-08. Status: proposed — nothing here is built.*
+*Investigation and design, 2026-08-08. Status as of 2026-08-10: phases 0, 2 and
+6 done; 1, 3 and 4 are code-complete and gated, waiting on cutovers and on the
+shadow window's fourteen days; phase 5 (Linux) not started. The per-phase table
+in §5 is the authority — this line is a summary and will drift first.*
 
 The question asked: rowt is mostly bash — does it make sense to refactor it
 into a systems language, modularized, so that (a) it can run on both macOS and
@@ -196,7 +199,7 @@ revertible and gated.
 | **1** ◑ | `rowt-core::render` — replace the giant jq program. bash calls `rowt-rs render` internally. | **render done** — `crates/rowt-render`, 18/18 cases canonically identical on host + vm (`parity render-matrix`), and identical against the real 22-server config. Remaining: throwaway-port outbound oracle, bash cutover, shadow window |
 | **2** ✅ | classify/explain, lane set logic, absorb `corp-sync-reconcile.py` | **done** — classify: 9/9 cases × 92 destinations identical on `(lane, reason)`; lane edits: 12/12 cases identical across all three files + messages; reconcile: 210 generated cases identical to the Python. `selftest` 9/9 |
 | **3** ◑ | watchdog: FSM into core, effects via `PlatformMac`; `cmd_watch` execs the Rust tick | **FSM + shadow done** — `rowt-core::watch`, 17 unit tests replaying §11's decision table; `parity watch-diff` 5/5; `ROWT_WATCH_SHADOW=1` compares the shell's decisions against the FSM's plan on every real tick, feeding it the tick's own captive verdict rather than re-probing. **Effects done too** — `perform` drives `PlatformMac`, runs the real `cmd_reload` for a recovery, and re-probes the escape lane through the clash delay test the way the shell does. Remaining: the `cmd_watch` cutover (bash still runs its own tick and merely shadows this one), and **time** — the shadow window itself |
-| **4** ◑ | CLI. Built as `rowt-rs` alongside the shell first, so each command lands with evidence; only then does bash reduce to a wrapper and get deleted. Formula ships the prebuilt binary (monitor-asset pattern). | **all 37 arms native AND gated** — `parity cli-diff` compares stdout, exit status, the **whole config tree** (content and mode), the **argv trace** and the **audit log** over 238 cases. Every arm but the TUI is compared; the lifecycle four were the last to be, and all four diverged when first asked. Remaining: the `ROWT_IMPL` cutover |
+| **4** ◑ | CLI. Built as `rowt-rs` alongside the shell first, so each command lands with evidence; only then does bash reduce to a wrapper and get deleted. Formula ships the prebuilt binary (monitor-asset pattern). | **all 37 arms native AND gated** — `parity cli-diff` compares stdout, exit status, the **whole config tree** (content and mode), the **argv trace** and the **audit log** over 241 cases. Every arm but the TUI is compared; the lifecycle four were the last to be, and all four diverged when first asked. Remaining: the `ROWT_IMPL` cutover |
 | **5** | `PlatformLinux` + tun mode + systemd units; CI matrix (macOS + ubuntu — core tests run on both, platform tests feature-gated); linux tar assets | fresh-VM install → onboard → probe → captive drill; VPN-coexistence drill with Tailscale up |
 | 6 ◑ | port the import pipeline (1,302 lines of parsing Python). No longer optional — the 2026-08-09 decision is one language in the repo, and this is what retires `depends_on "python@3.12"`. | **all four done** — `rowt-core::{sharelink,importmerge,foreign,srimport}` (+`bplist`); `parity vless-diff` 2,000 cases, `merge-diff` 1,500 (the review FILE plus the streams), `foreign-diff` 1,200 (synthetic client config TREES), `sr-diff` 1,200 (synthetic Shadowrocket installs). What remains is the CUTOVER: `bin/rowt` still calls the Pythons, which are the reference side of those gates |
 
@@ -471,19 +474,22 @@ worth writing down as three separate things, none of which is more porting:
    shadow window ships (3.2.6) but a window that was never started produces
    silence, and silence looks exactly like agreement.
 2. **Packaging.** Nothing installs `rowt-rs` today. `install.sh` rsyncs the
-   whole tree minus `.state` and `bin/sing-box`, which since the workspace
-   appeared means ~400 MB of `target/` goes into the prefix — and that is also
-   how a local install currently finds `rowt-render` and `rowt-watch-tick`,
-   since `_render_bin` falls back to `$HERE/target/release`. So excluding
-   `target/` and placing the three binaries in `$PREFIX/bin/` are one change,
-   not two. A switch with nothing to exec is a no-op with a footgun.
+   whole tree minus `.state` and `bin/sing-box`, so a repo install copies BOTH
+   build trees into the prefix — measured 2026-08-10: 406 MB of `target/` and
+   774 MB of `rowt-monitor/target/`, about 1.2 GB of object files. And that is
+   also how a local install currently finds its sidecars: `_render_bin` falls
+   back to `$HERE/target/release`, and `_collector_bin` looks in
+   `$HERE/rowt-monitor/target/release`. So excluding the two `target/` trees
+   and placing the binaries in `$PREFIX/bin/` are one change, not two —
+   excluding them alone would take the sidecars with them. A switch with
+   nothing to exec is a no-op with a footgun.
 3. **The switch itself**, which is small: `exec` before the preamble (rowt-rs
    migrates, rotates and audits for itself, and doing it on both sides doubles
    every audit line), guarded on `ROWT_DELEGATED` so a delegated help page
    cannot bounce back and forth. Worth gating with a cli-diff run whose BASH
    side carries `ROWT_IMPL=rust`: that compares rowt-rs against itself through
    the wrapper, which proves the front door is transparent — not that anything
-   was ported, which is what the other 229 cases are for.
+   was ported, which is what the other 240 cases are for.
 
 ### 6.7 Bash bugs are behavior until deliberately retired
 

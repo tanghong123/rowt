@@ -241,19 +241,23 @@ impl Platform for Mac {
     }
 
     fn boot_id(&self) -> Option<String> {
-        let body = out("sysctl", &["-n", "kern.boottime"])?;
-        // `sed -n 's/[^0-9]*\([0-9][0-9]*\).*/\1/p'` — the first run of digits.
-        let digits: String = body
-            .chars()
-            .skip_while(|c| !c.is_ascii_digit())
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
-        if digits.is_empty() {
-            None
-        } else {
-            Some(digits)
-        }
+        first_digits(&out("sysctl", &["-n", "kern.boottime"])?)
     }
+}
+
+/// `sed -n 's/[^0-9]*\([0-9][0-9]*\).*/\1/p'` — the first run of digits.
+///
+/// Separate from its one caller so it can be tested: this is the value the
+/// watchdog compares against `state`'s `boot` to tell a mid-session crash
+/// (recover it) from a reboot (leave it), and getting it wrong is invisible
+/// until the one morning it matters.
+pub fn first_digits(s: &str) -> Option<String> {
+    let d: String = s
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(char::is_ascii_digit)
+        .collect();
+    (!d.is_empty()).then_some(d)
 }
 
 #[cfg(test)]
@@ -266,6 +270,21 @@ mod tests {
         assert_eq!(PROTOS[0].1, "-setsocksfirewallproxystate");
         assert_eq!(PROTOS[2].0, "-setsecurewebproxy");
         assert_eq!(GETTERS[1], "-getwebproxy");
+    }
+
+    #[test]
+    fn the_boot_id_is_the_first_number_sysctl_prints() {
+        // Verbatim `sysctl -n kern.boottime` output: the seconds are what the
+        // watchdog keys on, and both later numbers must be ignored.
+        assert_eq!(
+            first_digits("{ sec = 1754800000, usec = 123456 } Sat Aug  9 12:26:40 2025\n").as_deref(),
+            Some("1754800000")
+        );
+        // A machine that answers nothing gets no id, not an empty one — the
+        // watchdog compares this against a stored value, and "" == "" would
+        // read a reboot as the same boot.
+        assert_eq!(first_digits(""), None);
+        assert_eq!(first_digits("kern.boottime: unknown oid\n"), None);
     }
 }
 

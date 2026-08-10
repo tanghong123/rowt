@@ -81,10 +81,10 @@ down              mut    down
 lane_log          skip   escape log        # tail -f — never terminates
 monitor           skip   monitor           # execs the TUI
 mon_alias         skip   mon               # same, via the alias
-uninstall         skip   uninstall         # prompts for confirmation; needs a stdin fixture
+uninstall         skip   uninstall         # mutates the machine, so not a mask case; cli-diff compares it
 run_wrapper       skip   run               # exec wrapper, needs a wrapped command
-ping              skip   ping              # dials real servers; belongs to a network-marked suite
-probe             skip   probe             # same
+ping              skip   ping              # dials real servers; belongs to a network-marked suite (cli-diff compares it, shimmed)
+probe             skip   probe             # same (cli-diff compares it, shimmed)
 
 # Second-level coverage, from LEDGER.md's subcommand dimension.
 audit_all         ro     audit all
@@ -113,11 +113,11 @@ direct_log        skip   direct log        # tail -f
 router_log        skip   router log        # tail -f
 # These take a payload (a URL, a server name) that belongs in an import fixture;
 # Phase 2 adds them with the import pipeline.
-server_add        skip   server add        # needs a share-link fixture
-server_rm         skip   server rm         # needs a named server + confirmation
+server_add        skip   server add        # writes; cli-diff compares it from the pool-seeded scenario
+server_rm         skip   server rm         # writes; cli-diff compares it from the pool-seeded scenario
 server_remove     skip   server remove     # alias of the above
-server_import     skip   server import     # needs an import-source fixture
-sub_rm            skip   sub rm            # needs a subscription fixture
+server_import     skip   server import     # writes; cli-diff compares it from the import-review scenario
+sub_rm            skip   sub rm            # writes; cli-diff compares it from the pool-seeded scenario
 sub_remove        skip   sub remove        # alias of the above
 
 # Local mode (no tunnel): the escape lane's rules retarget to direct.

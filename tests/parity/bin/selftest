@@ -51,6 +51,23 @@ tmp="$(mktemp -d "${TMPDIR:-/tmp}/parity-selftest.XXXXXX")"
 sandboxes="$(mktemp -d "${TMPDIR:-/tmp}/parity-selftest-tmp.XXXXXX")"
 trap 'rm -rf "$tmp" "$sandboxes"' EXIT
 export TMPDIR="$sandboxes"
+# A cli-diff over just the cases a mutation can reach.
+#
+# Twice over, this is the right shape. It is faster — the sweep now brings a
+# router up in five of its 241 cases, so a full pass takes minutes and every
+# step below runs one. And it is a sharper claim: a step that says "cli-diff
+# caught the reworded lane description" should be reporting that the explain
+# cases caught it, not that SOMETHING among 241 went red. A subset that no
+# longer covers the mutation fails loudly here, which is the point.
+#
+# Each step passes the cases its mutation touches; the pre-mutation baseline
+# uses the same subset, or it is checking a different question.
+only() {
+  local f="$tmp/only.txt"
+  printf '%s\n' "$@" > "$f"
+  printf '%s' "$f"
+}
+
 mkdir -p "$tmp/bin" "$tmp/tests"
 cp -R "$DIR" "$tmp/tests/parity"
 cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
@@ -333,6 +350,11 @@ if [ ! -x "$rcli" ]; then
   echo "  skip — no release build (cargo build --release -p rowt-cli)"
 else
   export PARITY_RUST_CLI="$rcli"
+  # `unlisted.example` is the load-bearing one: the reworded string is the
+  # DIRECT lane's description, and a subset of escape/corp/block cases watches
+  # three lanes that never print it. (Chosen wrongly the first time, and this
+  # step said so — which is the argument for subsets rather than against them.)
+  export PARITY_CASES="$(only 'explain unlisted.example' 'explain example.com' 'explain intranet.corp.example')"
   if ! "$P" cli-diff >/dev/null 2>&1; then
     bad "cli-diff already fails before the mutation"
   else
@@ -346,6 +368,7 @@ else
       ok "cli-diff caught the reworded lane description"
     fi
   fi
+  unset PARITY_CASES
 fi
 
 echo "13. shift the tag index in the share-link parser"
@@ -527,7 +550,9 @@ else
     "$tmp/bin/rowt"
   if ! grep -q 'tail -r' "$tmp/bin/rowt"; then
     bad "could not reverse the subscription removal order (subs_remove moved?)"
-  elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" "$P" cli-diff >/dev/null 2>&1; then
+  elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" \
+       PARITY_CASES="$(only 'PARITY_SCENARIO=pool-seeded sub rm 1 2' 'PARITY_SCENARIO=pool-seeded sub rm 1')" \
+       "$P" cli-diff >/dev/null 2>&1; then
     bad "cli-diff passed with subscription removals applied in reverse"
   else
     ok "cli-diff caught the reordered subscription removal"
@@ -548,7 +573,11 @@ else
   perl -0pi -e 's/any\(\.server==\$s and \.server_port==\$p\)/any(.tag==\$s)/' "$tmp/bin/rowt"
   if ! grep -q 'any(.tag==\$s)' "$tmp/bin/rowt"; then
     bad "could not swap the manual-server match (servers_remove moved?)"
-  elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" "$P" cli-diff >/dev/null 2>&1; then
+  elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" \
+       PARITY_CASES="$(only 'PARITY_SCENARIO=pool-seeded server rm alpha' \
+                            'PARITY_SCENARIO=pool-seeded server rm alpha gamma' \
+                            'server rm alpha')" \
+       "$P" cli-diff >/dev/null 2>&1; then
     bad "cli-diff passed with manual servers matched by tag"
   else
     ok "cli-diff caught the manual server matched by tag"
@@ -571,7 +600,9 @@ else
     "$tmp/bin/rowt"
   if grep -q 'map(del(._source))' "$tmp/bin/rowt"; then
     bad "could not drop the _source strip (apply_import moved?)"
-  elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" "$P" cli-diff >/dev/null 2>&1; then
+  elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" \
+       PARITY_CASES="$(only 'PARITY_SCENARIO=import-review server import --apply')" \
+       "$P" cli-diff >/dev/null 2>&1; then
     bad "cli-diff passed with _source left on applied servers"
   else
     ok "cli-diff caught the _source tag reaching the pool"
@@ -593,7 +624,9 @@ else
   perl -0pi -e 's/by \\\$SHELL/by \$SHELL/' "$tmp/bin/rowt"
   if grep -qF 'by \$SHELL' "$tmp/bin/rowt"; then
     bad "could not unescape the shell-init page's \$SHELL (help_detail moved?)"
-  elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" "$P" cli-diff >/dev/null 2>&1; then
+  elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" \
+       PARITY_CASES="$(only 'help shell-init')" \
+       "$P" cli-diff >/dev/null 2>&1; then
     bad "cli-diff passed with a help page's escaped dollar expanded"
   else
     ok "cli-diff caught the unescaped dollar in a help page"

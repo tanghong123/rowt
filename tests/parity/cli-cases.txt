@@ -46,6 +46,20 @@ audit path
 audit all
 status
 PARITY_SCENARIO=render-local status
+# …and in vm mode, where the clash API is NOT on 127.0.0.1. It lives on the
+# guest's bridged IP at CLASH_PORT+1, because that is the machine sing-box is
+# running on. rowt-rs answered 127.0.0.1 in every mode, so `status`, `use` and
+# the collector were all asking a port with nothing behind it — invisible to
+# every other case in this file, which run in host mode.
+#
+# `status` is the one that gates it, verified by putting the bug back: its
+# trace carries `http://192.0.2.50:9091/proxies/escape` and the mutant's
+# carries `http://127.0.0.1:9090/…`. The other two are vm-mode coverage of two
+# more arms and NOT a second gate for this — with the router down they both
+# refuse before they reach the API, and the mutation leaves them identical.
+PARITY_SCENARIO=render-vm-mode status
+PARITY_SCENARIO=render-vm-mode use alpha
+PARITY_SCENARIO=render-vm-mode conns escape
 
 # `render` itself. What it WRITES is `render-diff`'s question over the whole
 # scenario matrix; what these two add is the command around it — the summary,
