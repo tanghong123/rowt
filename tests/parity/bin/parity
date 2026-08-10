@@ -1072,7 +1072,10 @@ cmd_cli_diff() {
       echo "[$line] identical"
       rm -rf "$A" "$B"
     fi
-  done < "$DIR/cli-cases.txt"
+  # PARITY_CASES exists to iterate on ONE new case without paying for the
+  # whole sweep. The ledger reads cli-cases.txt directly, so a shortened list
+  # cannot quietly become the published coverage.
+  done < "${PARITY_CASES:-$DIR/cli-cases.txt}"
   echo
   echo "cli surface: $((total - fails))/$total commands identical"
   [ "$fails" -eq 0 ]

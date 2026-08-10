@@ -45,6 +45,14 @@ audit all
 status
 PARITY_SCENARIO=render-local status
 
+# `render` itself. What it WRITES is `render-diff`'s question over the whole
+# scenario matrix; what these two add is the command around it — the summary,
+# the exit status, and which side of the guard a given config falls on. The
+# empty-servers case is the one that matters: the shell asks whether
+# servers.json has bytes, so `[]` renders rather than refusing (PORTING.md §6.7).
+render
+PARITY_SCENARIO=render-empty-servers render
+
 # help routing: the systematic '<cmd> --help' as well as 'help <cmd>'
 --help
 help
@@ -251,6 +259,36 @@ PARITY_SCENARIO=render-local use alpha
 config
 config list
 config nosucharm
+
+# `config import` — unpack a bundle over the config directory. Every refusal
+# comes before the prompt, which is why they are cases at all:
+config import
+config import /nonexistent/bundle.tgz
+config import --nosuchflag
+config import tests/parity/fixtures/import-list.txt
+config import tests/parity/fixtures/not-a-bundle.tgz
+#
+# …and the prompt itself IS comparable, because the harness runs every case in
+# its own session with no controlling terminal: `read </dev/tty` fails, the
+# shell treats that as "no", and both sides must print the same refusal and
+# exit 1. That is the real behavior on a pipe or in cron, not a test artifact.
+config import tests/parity/fixtures/config-bundle.tgz
+#
+# The bundle carries all four secret-bearing files at 0644, so `-y` compares
+# what the shell chmods after extracting as well as what it extracts — and then
+# the re-render, which the import runs quietly and reports one line about.
+config import tests/parity/fixtures/config-bundle.tgz -y
+config import -y tests/parity/fixtures/config-bundle.tgz
+# The flag loop keeps the LAST path it saw, so this imports the second one.
+config import tests/parity/fixtures/not-a-bundle.tgz tests/parity/fixtures/config-bundle.tgz -y
+# Over a config with nothing in its lanes: the bundle's lists replace them.
+PARITY_SCENARIO=lanes-empty config import tests/parity/fixtures/config-bundle.tgz -y
+#
+# A bundle whose servers.json is an empty array. It renders — `render` guards on
+# the FILE having bytes, not on there being a server in it — which is why the
+# import reports ✓ rather than the fresh-box advice. Bug-for-bug, PORTING.md
+# §6.7, and the reason there is now a `render` case for the same fixture below.
+config import tests/parity/fixtures/bundle-no-servers.tgz -y
 metrics
 metrics status
 metrics path

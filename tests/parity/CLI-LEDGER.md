@@ -35,7 +35,7 @@ is not 'does it work' but 'whose code ran, and what proves it'.
 | `probe` | **native** | — |
 | `proxy` | **native** | cli-diff |
 | `reload` | **native** | boot-test |
-| `render` | **native** | boot-test |
+| `render` | **native** | cli-diff + boot-test |
 | `report` | **native** | cli-diff |
 | `restart` | **native** | boot-test |
 | `route` | **native** | — |
@@ -66,9 +66,7 @@ Partial arms — native for some sub-commands, legacy for the rest.
             "server" => matches!(sub, "" | "list" | "dump" | "add" | "rm" | "remove" | "clear" | "import"),
             "sub" => matches!(sub, "" | "list" | "dump" | "add" | "rm" | "remove" | "update" | "clear" | "import"),
             "use" | "ping" | "run" | "skill" | "report" | "uninstall" | "fetch" | "probe" | "vm" | "watch" | "onboard" => true,
-            // `config import` prompts on /dev/tty, which is exactly what this gate
-            // cannot compare — porting it would move it out of reach.
-            "config" => matches!(sub, "" | "list" | "export"),
+            "config" => matches!(sub, "" | "list" | "export" | "import"),
             "router" => matches!(sub, "" | "up" | "down" | "restart" | "status" | "log"),
             _ => false,
         }

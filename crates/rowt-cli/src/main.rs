@@ -48,6 +48,64 @@ pub fn set_audit_op(s: &str) {
     }
 }
 
+/// The `[y/N]` prompt, asked and answered on the terminal rather than on stdin.
+///
+/// `read -r ans </dev/tty 2>/dev/null || ans=""`: a process with no controlling
+/// terminal cannot open it, and the shell treats that failure as "no". So this
+/// is not a question a pipe or a cron job can accidentally answer yes to —
+/// which is also what makes it comparable in a gate, where there is no tty.
+fn confirmed(input: &str, cfg: &Path) -> bool {
+    use std::io::{BufRead, Write};
+    print!("import {input} into {} — overwrites matching config files. Continue? [y/N] ",
+           cfg.display());
+    let _ = std::io::stdout().flush();
+    let ans = std::fs::File::open("/dev/tty")
+        .ok()
+        .and_then(|f| {
+            let mut s = String::new();
+            std::io::BufReader::new(f).read_line(&mut s).ok().map(|_| s)
+        })
+        .unwrap_or_default();
+    // `read` strips the newline and the surrounding IFS whitespace.
+    matches!(ans.trim(), "y" | "Y" | "yes" | "YES")
+}
+
+/// Run `f` with stdout and stderr pointed at /dev/null, which is what
+/// `cmd_render >/dev/null 2>&1` does in the shell. A returned string is still
+/// returned; this only silences what the callee writes to the fds itself.
+fn quietly<T>(f: impl FnOnce() -> T) -> T {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let devnull = std::fs::OpenOptions::new().write(true).open("/dev/null").ok();
+    let saved = devnull.as_ref().and_then(|n| unsafe {
+        use std::os::unix::io::AsRawFd;
+        let (o, e) = (libc::dup(1), libc::dup(2));
+        (o >= 0 && e >= 0).then(|| {
+            libc::dup2(n.as_raw_fd(), 1);
+            libc::dup2(n.as_raw_fd(), 2);
+            (o, e)
+        })
+    });
+    let out = f();
+    if let Some((o, e)) = saved {
+        let _ = std::io::stdout().flush();
+        unsafe {
+            libc::dup2(o, 1);
+            libc::dup2(e, 2);
+            libc::close(o);
+            libc::close(e);
+        }
+    }
+    out
+}
+
+/// A failure the command has already reported itself. The shell has arms that
+/// print their outcome on stdout and `return 1` — `config import`'s "aborted."
+/// is one — which is neither an `error:` line nor a `die`: the audit END must
+/// still record rc=1, so it cannot exit early either. `main` recognizes this
+/// message and only sets the exit status.
+pub const SILENT: &str = "\u{0}already-reported";
+
 /// `die` — the error, an ABORT line if a mutation was in flight, exit 1.
 pub fn die(cfg: &Path, msg: &str) -> ! {
     eprintln!("error: {msg}");
@@ -84,9 +142,7 @@ fn native(cmd: &str, sub: &str) -> bool {
         "server" => matches!(sub, "" | "list" | "dump" | "add" | "rm" | "remove" | "clear" | "import"),
         "sub" => matches!(sub, "" | "list" | "dump" | "add" | "rm" | "remove" | "update" | "clear" | "import"),
         "use" | "ping" | "run" | "skill" | "report" | "uninstall" | "fetch" | "probe" | "vm" | "watch" | "onboard" => true,
-        // `config import` prompts on /dev/tty, which is exactly what this gate
-        // cannot compare — porting it would move it out of reach.
-        "config" => matches!(sub, "" | "list" | "export"),
+        "config" => matches!(sub, "" | "list" | "export" | "import"),
         "metrics" => true,
         "router" => matches!(sub, "" | "up" | "down" | "restart" | "status" | "log"),
         _ => false,
@@ -1204,10 +1260,86 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                         "wrote {out}  ({})\n  packed: {}\n  ⚠ contains server credentials + subscription tokens — move it over an\n    encrypted channel (scp / rsync -e ssh) and delete it afterward.",
                         du_h(Path::new(&out)), names.join(" ")))
                 }
-                // `import` extracts a bundle, chmods the secrets and re-renders,
-                // and asks for confirmation on /dev/tty first. Left with the
-                // shell: an interactive prompt is exactly the thing this gate
-                // cannot compare, so porting it would move it out of reach.
+                // The other direction: unpack a bundle here, tighten what it
+                // brought, and re-render. Overwrites matching files, so it asks
+                // first — on /dev/tty, not stdin, because the answer must come
+                // from a person even when the command was handed a pipe.
+                "import" => {
+                    let mut yes = false;
+                    let mut input = String::new();
+                    for a in &rest[1..] {
+                        match a.as_str() {
+                            "-y" | "--yes" => yes = true,
+                            f if f.starts_with('-') => die(&cfg, &format!("unknown flag: {f}")),
+                            // Last one wins, as the shell's loop leaves it.
+                            f => input = f.to_string(),
+                        }
+                    }
+                    if input.is_empty() {
+                        die(&cfg, &format!("usage: {PROG} config import <file.tgz> [-y]"));
+                    }
+                    if !Path::new(&input).is_file() {
+                        die(&cfg, &format!("no such file: {input}"));
+                    }
+                    // Two questions, in the shell's order: is it a readable
+                    // gzipped tar at all, and does it carry a file only a rowt
+                    // bundle would have? The second stops `config import` from
+                    // unpacking an arbitrary archive over the config directory.
+                    let listing = std::process::Command::new("tar")
+                        .arg("tzf").arg(&input).stderr(std::process::Stdio::null()).output();
+                    let Ok(listing) = listing.ok().filter(|o| o.status.success()).ok_or(()) else {
+                        die(&cfg, &format!("{input} is not a readable .tgz"));
+                    };
+                    // `grep -qE '(^|/)(servers\.json|escape-domains\.txt)$'` —
+                    // the name at the end of a path component, not anywhere in
+                    // the line.
+                    let marks = ["servers.json", "escape-domains.txt"];
+                    let looks_right = String::from_utf8_lossy(&listing.stdout).lines().any(|l| {
+                        marks.iter().any(|m| {
+                            l.strip_suffix(m).is_some_and(|p| p.is_empty() || p.ends_with('/'))
+                        })
+                    });
+                    if !looks_right {
+                        die(&cfg, &format!("{input} doesn't look like a rowt config bundle"));
+                    }
+                    if !yes && !confirmed(&input, &cfg) {
+                        // Not an error: the shell prints this on stdout and
+                        // returns 1, so it must not come back as an `error:`
+                        // line — and it must not exit past the audit END the
+                        // way `die` would.
+                        println!("aborted.");
+                        return Err(SILENT.into());
+                    }
+                    let _ = std::fs::create_dir_all(&cfg);
+                    // `tar` rather than a Rust implementation, as `export` does:
+                    // which modes and ownership come back out of the archive is
+                    // this command's behavior, not an implementation detail.
+                    let ok = std::process::Command::new("tar")
+                        .arg("xzf").arg(&input).arg("-C").arg(&cfg)
+                        .status().map(|s| s.success()).unwrap_or(false);
+                    if !ok {
+                        die(&cfg, "extract failed");
+                    }
+                    // Whatever mode the archive carried, the four files that
+                    // hold credentials and subscription tokens land at 0600.
+                    for f in ["servers.json", "manual.json", "import-review.json", "subs.txt"] {
+                        let p = cfg.join(f);
+                        if p.is_file() {
+                            lifecycle::private(&p);
+                        }
+                    }
+                    let mut o = format!("imported into {}.", cfg.display());
+                    // `cmd_render >/dev/null 2>&1`: the render's progress lines
+                    // belong to `render`, not to the middle of an import report.
+                    let ctx = Ctx::new(cfg.clone());
+                    o.push_str(&match quietly(|| lifecycle::cmd_render(&ctx)).is_ok() {
+                        true => "\n  ✓ regenerated host.json".to_string(),
+                        false => format!("\n  (couldn't render yet — that's fine on a fresh box: '{PROG} fetch' installs sing-box)"),
+                    });
+                    o.push_str(&format!(
+                        "\nnext: '{PROG} up'  (fresh machine) — or '{PROG} restart' if rowt is already running."));
+                    Ok(o)
+                }
                 _ => die(&cfg, &format!("usage: {PROG} config [ list | export [file] | import <file> [-y] ]")),
             }
         }
@@ -1751,7 +1883,9 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("error: {e}");
+            if e != SILENT {
+                eprintln!("error: {e}");
+            }
             ExitCode::FAILURE
         }
     }

@@ -186,7 +186,16 @@ pub fn cmd_render(ctx: &Ctx) -> Result<String, String> {
     let mode = ctx.mode();
     let servers_n = serde_json::from_str::<Vec<Value>>(&read(&ctx.cfg.join("servers.json")))
         .map(|v| v.len()).unwrap_or(0);
-    if mode != "local" && servers_n == 0 {
+    // `[ "$mode" = local ] || [ -s "$SERVERS" ]` — the shell asks whether the
+    // FILE has bytes in it, not whether it holds any servers. `[]` passes, and
+    // the render goes on to emit an `auto` selector with nothing under it.
+    // Counting the array instead is the better check and still the wrong one to
+    // make here (PORTING.md §6.7): `render` succeeding is what `up`, `reload`
+    // and `config import` branch on, so tightening it changes three other
+    // commands' behavior in a commit that is not about them.
+    let has_servers = std::fs::metadata(ctx.cfg.join("servers.json"))
+        .map(|m| m.is_file() && m.len() > 0).unwrap_or(false);
+    if mode != "local" && !has_servers {
         return Err("no servers — run: rowt server add '<vless://...>' or rowt sub add <url>".into());
     }
     eprintln!("==> rendering configs (mode={mode}, port={}, servers={servers_n})", ctx.port);

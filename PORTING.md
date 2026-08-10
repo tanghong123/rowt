@@ -196,7 +196,7 @@ revertible and gated.
 | **1** ◑ | `rowt-core::render` — replace the giant jq program. bash calls `rowt-rs render` internally. | **render done** — `crates/rowt-render`, 18/18 cases canonically identical on host + vm (`parity render-matrix`), and identical against the real 22-server config. Remaining: throwaway-port outbound oracle, bash cutover, shadow window |
 | **2** ✅ | classify/explain, lane set logic, absorb `corp-sync-reconcile.py` | **done** — classify: 9/9 cases × 92 destinations identical on `(lane, reason)`; lane edits: 12/12 cases identical across all three files + messages; reconcile: 210 generated cases identical to the Python. `selftest` 9/9 |
 | **3** ◑ | watchdog: FSM into core, effects via `PlatformMac`; `cmd_watch` execs the Rust tick | **FSM + shadow done** — `rowt-core::watch`, 17 unit tests replaying §11's decision table; `parity watch-diff` 5/5; `ROWT_WATCH_SHADOW=1` compares the shell's decisions against the FSM's plan on every real tick, feeding it the tick's own captive verdict rather than re-probing. Remaining: `PlatformMac` effects, the `cmd_watch` cutover, and **time** — the shadow window itself |
-| **4** ◑ | CLI. Built as `rowt-rs` alongside the shell first, so each command lands with evidence; only then does bash reduce to a wrapper and get deleted. Formula ships the prebuilt binary (monitor-asset pattern). | **all 37 arms native** — `parity cli-diff` compares stdout, exit status, the **whole config tree** (content and mode), the **argv trace** and the **audit log** over 215 cases. Remaining: `config import`, then the `ROWT_IMPL` cutover |
+| **4** ◑ | CLI. Built as `rowt-rs` alongside the shell first, so each command lands with evidence; only then does bash reduce to a wrapper and get deleted. Formula ships the prebuilt binary (monitor-asset pattern). | **all 37 arms native** — `parity cli-diff` compares stdout, exit status, the **whole config tree** (content and mode), the **argv trace** and the **audit log** over 228 cases. Remaining: the `ROWT_IMPL` cutover |
 | **5** | `PlatformLinux` + tun mode + systemd units; CI matrix (macOS + ubuntu — core tests run on both, platform tests feature-gated); linux tar assets | fresh-VM install → onboard → probe → captive drill; VPN-coexistence drill with Tailscale up |
 | 6 ◑ | port the import pipeline (1,302 lines of parsing Python). No longer optional — the 2026-08-09 decision is one language in the repo, and this is what retires `depends_on "python@3.12"`. | **all four done** — `rowt-core::{sharelink,importmerge,foreign,srimport}` (+`bplist`); `parity vless-diff` 2,000 cases, `merge-diff` 1,500 (the review FILE plus the streams), `foreign-diff` 1,200 (synthetic client config TREES), `sr-diff` 1,200 (synthetic Shadowrocket installs). What remains is the CUTOVER: `bin/rowt` still calls the Pythons, which are the reference side of those gates |
 
@@ -228,8 +228,15 @@ So the order is fixed rather than a preference:
    extractors, `--apply`, and the two dump restores. The I/O the extractors
    need moved out of the gate binaries into `rowt-core::{foreignio,srio}`
    first, so the product calls a library rather than exec'ing a gate artifact.
-4. **`config import`** — the odd one out, because it prompts on `/dev/tty`;
-   the gate has no terminal, so this needs a scripted-input case first.
+4. ~~**`config import`.**~~ Done. It looked like the odd one out because it
+   prompts on `/dev/tty` — but that is precisely what makes it gateable: a
+   process with no controlling terminal cannot open one, and the shell reads
+   that failure as "no". The harness now runs every case in its own session,
+   so the refusal is compared like any other output, and it is the same
+   refusal a pipe or a cron job gets rather than a test-only path. The rest —
+   the three ways a bundle is rejected before the prompt, the extract, the
+   0600 applied to the four secret-bearing files, and the quiet re-render — is
+   ordinary cli-diff, over three committed `.tgz` fixtures.
 
 All 32 help pages render in Rust. Three of them only ever LOOKED computed:
 `\$(` in an unquoted heredoc is two literal characters — how a page shows the
@@ -461,6 +468,7 @@ here, and each is a shell-side commit waiting to be written:
 | `resolve_ip` is defined **twice**; the second wins, so `explain` uses dig-then-dscacheutil and `probe` uses a different one | bin/rowt:1843 and :2853 | Two call sites currently depend on the two different behaviors. |
 | A host render probes the interface **twice** — `build_escape_outbounds host` runs `detect_iface`, then `assemble_host` runs it again | bin/rowt:1203, :1304 | Six subprocess calls where three would do. Collapsing them changes the argv trace, which is a gate; it needs its own commit and a golden update. |
 | A domain whose failures tie across two categories gets whichever `for (k in cc)` reaches first | `lane_errors`'s awk | Genuinely unspecified, so there is no behavior to copy. rowt-rs takes the lexicographically first to be repeatable. Do not build a fixture that hits this — it would compare two implementations against a coin flip. |
+| `render` guards on `[ -s "$SERVERS" ]`, so a `servers.json` of `[]` — or of anything unparseable — renders happily, emitting an `auto` selector with no servers under it | `cmd_render`, mirrored in `lifecycle::cmd_render` | Whether `render` succeeds is what `up`, `reload` and `config import` branch on, so a stricter guard changes three other commands in a commit that is not about them. The scenario has existed as `render-empty-servers` all along; what was missing was a cli-diff case, since `render-diff` compares the two renders and not the two REFUSALS. |
 
 ### 6.8 Coverage ledger
 

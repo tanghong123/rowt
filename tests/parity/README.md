@@ -72,6 +72,32 @@ Four artifacts come out of each run: `stdout`, `stderr`, `rc`, `trace` (every
 shimmed call with its argv) and `fsstate` (the config tree afterwards,
 checksummed over *normalized* content).
 
+Each case also runs in its own **session**, with no controlling terminal. That
+is what makes `config import` comparable: it asks for confirmation on
+`/dev/tty` rather than stdin, and a process that cannot open one treats the
+failure as "no". The gate is therefore comparing the same thing a pipe or a
+cron job would get, not a test-only path. The wrapper that arranges this also
+signals the whole process group on timeout, so a `<lane> log` case's `tail -f`
+dies with the case instead of outliving the run.
+
+### The bundle fixtures
+
+Three `.tgz` files under `fixtures/` are what `config import` is pointed at:
+`config-bundle.tgz` (a well-formed bundle, every file stored 0644 so the 0600
+the import applies to the four secret-bearing ones is visible in `fsstate`),
+`not-a-bundle.tgz` (a readable archive carrying neither `servers.json` nor
+`escape-domains.txt`), and `bundle-no-servers.tgz` (`servers.json` is `[]`,
+which still renders — see PORTING.md §6.7). They are binary and committed, so
+the regeneration is written down: stage the files, `chmod 644`, `touch -t
+202608100000`, then
+
+```
+COPYFILE_DISABLE=1 tar cf - --uid 0 --gid 0 <files> | gzip -n > <name>.tgz
+```
+
+— `-n` and the fixed mtime keep the archive byte-stable, and
+`COPYFILE_DISABLE` keeps macOS from adding `._` entries.
+
 ## What Phase 0 established
 
 **The nondeterministic-field mask** — `normalize.sed`. With it, all 49
@@ -132,7 +158,7 @@ reconcile and the watchdog's decision table. Each has a gate:
 | `sr-diff` | stdout + stderr + exit status, over Shadowrocket installs | 1,200 generated cases |
 | `watch-diff` | decisions, read back from watch.log + trace | 5 cases |
 | `platform-diff` | the argv the platform layer produces | 8 cases |
-| `cli-diff` | stdout, status, the config tree (content + mode), argv trace, audit log | 215 cases |
+| `cli-diff` | stdout, status, the config tree (content + mode), argv trace, audit log | 228 cases |
 
 `merge-diff` is the only gate whose primary artifact is a file written in
 place: `cmd_import` reads the accumulation straight back with jq, and a human
