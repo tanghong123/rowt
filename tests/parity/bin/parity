@@ -27,6 +27,7 @@
 #   parity netdetect-diff    scutil --dns parser, Python vs Rust, over generated cases
 #   parity vless-diff        share-link parser, Python vs Rust: stdout+stderr+status
 #   parity merge-diff        import accumulation, Python vs Rust: the review FILE
+#   parity foreign-diff      other clients' config trees, Python vs Rust
 #   parity watch-diff        watchdog tick: bash's effects vs the FSM's plan
 #   parity platform-diff     the platform layer, compared by the argv it produces
 #   parity cli-diff          whole commands through rowt-rs vs the shell
@@ -602,6 +603,71 @@ cmd_merge_diff() { # [count]
   echo "  $fails/$n cases differ — artifacts: $work"; return 1
 }
 
+# Other proxy clients into a review, Python vs Rust. The input is a client
+# config DIRECTORY, so each case is a whole fake $HOME with a Clash profile
+# tree or a V2Box SQLite store inside it — and a PATH that decides whether `yq`
+# is present, missing, failing or answering with something that is not JSON.
+#
+# Tracebacks are normalized to `<EXC:TypeName>` on BOTH sides rather than
+# matched line for line: frame lines and message wording are interpreter
+# version detail, while "did this input crash, and with what kind of error" is
+# the invariant that matters — a port that succeeds where the Python dies
+# imports garbage into a server pool. Everything before the traceback still
+# compares exactly, so the notes printed on the way to the crash are pinned.
+cmd_foreign_diff() { # [count]
+  local rust="${PARITY_RUST_FOREIGN:-$ROOT/target/release/rowt-foreign-import}"
+  local py="$ROOT/config/foreign-import.py"
+  [ -x "$rust" ] || die "no rust importer at $rust — cargo build --release -p rowt-core"
+  local work n fails=0 squashed=0 d
+  local squash='
+    /^Traceback \(most recent call last\):$/ { t = 1; next }
+    t == 1 { if ($0 ~ /^[A-Za-z_][A-Za-z0-9_.]*(:|$)/) last = $0; next }
+    { print }
+    END { if (t == 1) { n = last; sub(/:.*$/, "", n); print "<EXC:" n ">" } }
+  '
+  work="$(mktemp -d "${TMPDIR:-/tmp}/parity-foreign.XXXXXX")"
+  n="$(python3 "$SELF/gen-foreign-cases.py" "$work" "${1:-300}")"
+  for d in "$work"/case*; do
+    local args=() line rc mode p
+    while IFS= read -r line; do args+=("$line"); done < "$d/argv"
+    read -r mode < "$d/path_mode"
+    # `real` is the machine's own PATH (and its own yq); the others are stub
+    # directories carrying python3 and a yq that misbehaves in one way.
+    case "$mode" in real) p="$PATH" ;; *) p="$work/bin-$mode" ;; esac
+    rc=0
+    ( cd "$d" && export HOME="$d/home" PATH="$p" COLUMNS=80
+      python3 "$py" ${args[@]+"${args[@]}"} < stdin > py.out 2> py.err ) || rc=$?
+    echo "$rc" > "$d/py.rc"
+    rc=0
+    ( cd "$d" && export HOME="$d/home" PATH="$p" COLUMNS=80
+      "$rust" ${args[@]+"${args[@]}"} < stdin > rs.out 2> rs.err ) || rc=$?
+    echo "$rc" > "$d/rs.rc"
+    awk "$squash" "$d/py.err" > "$d/py.errn"
+    awk "$squash" "$d/rs.err" > "$d/rs.errn"
+    cmp -s "$d/py.err" "$d/py.errn" || squashed=$((squashed + 1))
+    local bad="" f
+    for f in out errn rc; do
+      cmp -s "$d/py.$f" "$d/rs.$f" || bad="$bad $f"
+    done
+    if [ -n "$bad" ]; then
+      fails=$((fails + 1))
+      if [ "$fails" -le 3 ]; then
+        echo "  DIFFERS ($bad): $d  [yq: $mode]"
+        sed 's/^/    argv: /' "$d/argv"
+        for f in $bad; do
+          diff "$d/py.$f" "$d/rs.$f" | sed 's/^/      /' | head -12 || true
+        done
+      fi
+    fi
+  done
+  if [ "$fails" -eq 0 ]; then
+    echo "  $n client-tree cases: identical (stdout, stderr, status)"
+    echo "  ($squashed of them ended in a traceback, normalized to its type)"
+    rm -rf "$work"; return 0
+  fi
+  echo "  $fails/$n cases differ — artifacts: $work"; return 1
+}
+
 # Lane-list edits, bash vs Rust: the three files afterwards, and the lines the
 # user is told. The shell's surrounding effects (geosite fetch, the coverage
 # hint, the router reload) are filtered out — they are not set logic.
@@ -1075,6 +1141,7 @@ case "${1:-}" in
   netdetect-diff)  shift; cmd_netdetect_diff "$@" ;;
   vless-diff)      shift; cmd_vless_diff "$@" ;;
   merge-diff)      shift; cmd_merge_diff "$@" ;;
+  foreign-diff)    shift; cmd_foreign_diff "$@" ;;
   lanes-diff)      shift; cmd_lanes_diff "$@" ;;
   watch-diff)      shift; cmd_watch_diff "$@" ;;
   platform-diff)   shift; cmd_platform_diff "$@" ;;

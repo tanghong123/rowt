@@ -11,6 +11,13 @@ license = "MIT"
 # which would reorder every object it renders.
 serde_json = { version = "1", features = ["preserve_order"] }
 ipnet = "2"
+# V2Box keeps its share links in a Core Data SQLite file, and the Python's
+# behaviour forks on the STORAGE CLASS of each column: a BLOB `ZURL` reaches
+# `bytes.startswith(str)` and dies, an INTEGER one dies in `.strip()`, and only
+# TEXT gets imported. Nothing short of a real driver reports those apart, so
+# this is a semantics dependency rather than a convenience one. `bundled` so
+# Phase 5 on Linux does not also need libsqlite3-dev.
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [[bin]]
 name = "rowt-render"
@@ -39,3 +46,7 @@ path = "src/bin/rowt-vless.rs"
 [[bin]]
 name = "rowt-import-merge"
 path = "src/bin/rowt-import-merge.rs"
+
+[[bin]]
+name = "rowt-foreign-import"
+path = "src/bin/rowt-foreign-import.rs"

@@ -198,7 +198,7 @@ revertible and gated.
 | **3** ◑ | watchdog: FSM into core, effects via `PlatformMac`; `cmd_watch` execs the Rust tick | **FSM + shadow done** — `rowt-core::watch`, 17 unit tests replaying §11's decision table; `parity watch-diff` 5/5; `ROWT_WATCH_SHADOW=1` compares the shell's decisions against the FSM's plan on every real tick, feeding it the tick's own captive verdict rather than re-probing. Remaining: `PlatformMac` effects, the `cmd_watch` cutover, and **time** — the shadow window itself |
 | **4** ◑ | CLI. Built as `rowt-rs` alongside the shell first, so each command lands with evidence; only then does bash reduce to a wrapper and get deleted. Formula ships the prebuilt binary (monitor-asset pattern). | **all 37 arms native** — `parity cli-diff` compares stdout, exit status, lane files, the **argv trace** and the **audit log** over 136 cases. Remaining: the sub-arms wrapping the Python importers (below), 5 computed help pages, then the `ROWT_IMPL` cutover |
 | **5** | `PlatformLinux` + tun mode + systemd units; CI matrix (macOS + ubuntu — core tests run on both, platform tests feature-gated); linux tar assets | fresh-VM install → onboard → probe → captive drill; VPN-coexistence drill with Tailscale up |
-| 6 ◑ | port the import pipeline (1,302 lines of parsing Python). No longer optional — the 2026-08-09 decision is one language in the repo, and this is what retires `depends_on "python@3.12"`. | **`vless-parse.py` + `import-merge.py` done** — `rowt-core::{sharelink,importmerge}`; `parity vless-diff` 2,000 cases identical on stdout+stderr+status, `parity merge-diff` 1,500 cases identical on the review FILE plus the streams. Remaining: `foreign-import` (456), `sr-import` (253) — the two that read real client config trees, so their corpus is synthetic directories rather than strings |
+| 6 ◑ | port the import pipeline (1,302 lines of parsing Python). No longer optional — the 2026-08-09 decision is one language in the repo, and this is what retires `depends_on "python@3.12"`. | **`vless-parse.py` + `import-merge.py` + `foreign-import.py` done** — `rowt-core::{sharelink,importmerge,foreign}`; `parity vless-diff` 2,000 cases, `merge-diff` 1,500 (the review FILE plus the streams), `foreign-diff` 1,200 (whole synthetic client config TREES). Remaining: `sr-import` (253), which reads Shadowrocket's NSKeyedArchiver plist |
 
 #### What still reaches for bash, and the order it comes back in
 
@@ -212,14 +212,14 @@ the Python import pipeline:
 
 `native()` deliberately does not claim them: `server`, `sub` and `config`
 answer `list`/`dump`/`export` and hand the rest through the §6.6 fallthrough. A
-listed-but-unimplemented arm is worse than an unlisted one, and `selftest` 15
+listed-but-unimplemented arm is worse than an unlisted one, and `selftest` 18
 asserts the two agree.
 
 So the order is fixed rather than a preference:
 
-1. **the import pipeline -> Rust.** `vless-parse.py` is done
-   (`rowt-core::sharelink`); `foreign-import`, `sr-import` and `import-merge`
-   follow, gated the same way.
+1. **the import pipeline -> Rust.** `vless-parse.py` (`rowt-core::sharelink`),
+   `import-merge.py` (`::importmerge`) and `foreign-import.py` (`::foreign`)
+   are done; `sr-import` follows, gated the same way.
 2. **the shell around it -> Rust** — `cmd_import`, `rebuild_servers`,
    `after_import`, `servers_remove`, `subs_remove`. Little logic, but it is
    what writes `servers.json`, so it lands only once the parser it wraps is
@@ -248,18 +248,33 @@ harness stops telling you which side broke.
 
 `vless-parse.py` (421 lines) landed first of that group, as
 `rowt-core::sharelink` behind `parity vless-diff`; `import-merge.py` (172)
-followed as `rowt-core::importmerge` behind `parity merge-diff`. Two notes for
-the two that remain.
+followed as `rowt-core::importmerge` behind `parity merge-diff`;
+`foreign-import.py` (456) as `rowt-core::foreign` behind `parity foreign-diff`.
+Three notes.
 
 The existing tests are a **checklist, not a corpus**: `config/test_parse.py`
 calls the parser functions in-process, so nothing in it can be replayed through
 two binaries, and it never touches `parse_vless` or `parse_anytls` at all — the
 whole Reality path, every transport branch, and the `sni`→`peer`→host fallback
-had no coverage on either side. `config/test_import_merge.py` is the better
-case: it shells out, so its six checks ARE replayable. Either way the
-assertions were carried over as Rust unit tests and the gate's evidence comes
-from a generated corpus, which is what reaches the shapes a hand-written test
-never does.
+had no coverage on either side. `config/test_foreign.py` is the same shape.
+`config/test_import_merge.py` is the better case: it shells out, so its six
+checks ARE replayable. Either way the assertions were carried over as Rust unit
+tests and the gate's evidence comes from a generated corpus, which is what
+reaches the shapes a hand-written test never does.
+
+The importers' inputs are **directories**, which changes what a corpus is. A
+case is a whole synthetic `$HOME` — a Clash profile tree, a V2Box SQLite store —
+plus the PATH the run should see, because whether `yq` is present, missing,
+failing or answering with non-JSON selects between code paths that behave
+completely differently. Nothing is ever seeded from a real client install on
+the machine, even where one exists.
+
+They also **crash on inputs a user can produce**: a `reality-opts:` that is a
+string, a `ZURL` column holding a BLOB, a `profiles.yaml` whose top level is a
+list. Those are reproduced rather than tidied into clean failures — a port that
+succeeds where the Python dies imports garbage into a server pool — but the
+gate compares the exception TYPE and not the traceback, which is interpreter
+detail. Fixing any of them is a separate commit under §6.7.
 
 Most of the work is not the protocol logic but **Python's semantics underneath
 it**, which is why `rowt-core` now carries `pyurl` and `pyjson`. `urlsplit`

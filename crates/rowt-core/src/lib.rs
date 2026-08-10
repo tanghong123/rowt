@@ -8,12 +8,14 @@
 //! `tests/parity` rather than by inspection.
 
 pub mod classify;
+pub mod foreign;
 pub mod geosite;
 pub mod importmerge;
 pub mod laneerr;
 pub mod lanes;
 pub mod netdetect;
 pub mod pyjson;
+pub mod pypath;
 pub mod pyurl;
 pub mod reconcile;
 pub mod render;

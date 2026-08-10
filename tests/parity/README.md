@@ -25,6 +25,7 @@ tests/parity/bin/parity reconcile-diff   # corp reconcile, over generated cases
 tests/parity/bin/parity netdetect-diff   # scutil --dns parser, over generated cases
 tests/parity/bin/parity vless-diff       # share-link parser: stdout + stderr + status
 tests/parity/bin/parity merge-diff       # import accumulation: the review file itself
+tests/parity/bin/parity foreign-diff     # other clients' config trees, over generated cases
 tests/parity/bin/parity watch-diff       # watchdog decisions
 tests/parity/bin/parity platform-diff    # the argv the platform layer produces
 tests/parity/bin/parity cli-diff         # whole commands, rowt-rs vs the shell
@@ -126,6 +127,7 @@ reconcile and the watchdog's decision table. Each has a gate:
 | `netdetect-diff` | stdout BYTES vs the Python (key order is contract) | 800 generated cases |
 | `vless-diff` | stdout + stderr + exit status vs the Python | 2,000 generated cases |
 | `merge-diff` | the review FILE, plus the streams, vs the Python | 1,500 generated cases |
+| `foreign-diff` | stdout + stderr + exit status, over client config TREES | 1,200 generated cases |
 | `watch-diff` | decisions, read back from watch.log + trace | 5 cases |
 | `platform-diff` | the argv the platform layer produces | 8 cases |
 | `cli-diff` | stdout, status, lane files, argv trace, audit log | 136 cases |
@@ -136,13 +138,30 @@ edits it between the extract and the apply, so `_source`'s position inside an
 entry and the top-level key order are compared as bytes. It also runs each case
 twice in two copies of its own directory, since the run mutates its inputs.
 
-`vless-diff` and `merge-diff` are the two that compare stderr, because it is
-where stderr is a result: `server add` and the subscription rebuild run the
-parser with stderr on the user's terminal, so "skipping a link (…)" and "not
-importing 'X' — same server as 'Y'" are what the user learns about their own
-servers. It is also the only gate that normalizes anything — the parenthetical
-of a `JSONDecodeError`, whose wording is interpreter-version-specific — and it
-prints how many cases that touched, so a growing number is visible.
+`foreign-diff` is the only gate whose input is a DIRECTORY: each case is a
+whole fake `$HOME` carrying a Clash profile tree or a V2Box SQLite store, plus
+the PATH the run should see — so the same corpus drives `yq` present, missing,
+failing, and answering with something that is not JSON. That last axis is not
+decoration: with a `profiles.yaml` index a `yq` problem is fatal and without
+one it is `except Exception: continue`, so the same broken `yq` either stops
+the import or silently yields nothing depending on which client wrote the
+directory.
+
+`vless-diff`, `merge-diff` and `foreign-diff` are the gates that compare
+stderr, because it is where stderr is a result: `server add` and the
+subscription rebuild run the parser with stderr on the user's terminal, so
+"skipping a link (…)" and "not importing 'X' — same server as 'Y'" are what the
+user learns about their own servers.
+
+They are also the only gates that normalize anything, and they report how many
+cases it touched so a growing number is visible. `vless-diff` squashes the
+parenthetical of a `JSONDecodeError`, whose wording is interpreter-version
+specific. `foreign-diff` squashes tracebacks to `<EXC:TypeName>` on both sides:
+several inputs really do die rather than fail cleanly — a `reality-opts:` that
+is a string, a BLOB in the `ZURL` column — and the invariant worth holding is
+that the SAME inputs crash with the same kind of error and the same inputs
+succeed byte for byte. Matching frame lines would pin the interpreter, not the
+behaviour. Everything printed before the traceback still compares exactly.
 
 ### The render gate
 

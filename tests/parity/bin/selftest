@@ -20,7 +20,9 @@
 #   13.  shift the share-link tag index -> vless-diff must fire
 #   14.  widen an internal-NS range     -> netdetect-diff must fire
 #   15.  keep a display-only sub name    -> merge-diff must fire
-#   16.  (structural) native() must not claim an arm run() cannot answer
+#   16.  sort a profile scan as strings  -> foreign-diff must fire
+#   17.  unify the two sni precedences   -> foreign-diff must fire
+#   18.  (structural) native() must not claim an arm run() cannot answer
 #
 # Everything happens in a throwaway copy of the repo; the real tree is never
 # touched. Run it after changing the harness itself.
@@ -403,7 +405,52 @@ else
   fi
 fi
 
-echo "16. every name native() claims must be an arm of run()"
+echo "16. sort a profile scan by string instead of by path component"
+if [ ! -x "$ROOT/target/release/rowt-foreign-import" ]; then
+  echo "  skip — no release build"
+else
+  # `sorted(root.rglob(...))` compares PurePath, i.e. the parts tuple — so
+  # `a/b.yaml` comes before `a-x/c.yaml`, while as strings `a-x/…` wins
+  # (`-` is 0x2D and `/` is 0x2F). Sorting the strings instead reverses the
+  # order the servers come out of a profile directory, which renames every
+  # unnamed one. Both orders look sorted; only one is the Python's.
+  perl -0pi -e 's/sorted\(root\.rglob\("\*\.y\*ml"\)\)/sorted(root.rglob("*.y*ml"), key=str)/' \
+    "$tmp/config/foreign-import.py"
+  if ! grep -q 'key=str' "$tmp/config/foreign-import.py"; then
+    bad "could not change the scan order (import_clash_dir moved?)"
+  elif PARITY_RUST_FOREIGN="$ROOT/target/release/rowt-foreign-import" \
+       "$tmp/tests/parity/bin/parity" foreign-diff 150 >/dev/null 2>&1; then
+    bad "foreign-diff passed with the profile scan sorted as strings"
+  else
+    ok "foreign-diff caught the string-sorted profile scan"
+  fi
+fi
+
+echo "17. unify the two sni precedences the Python deliberately disagrees on"
+if [ ! -x "$ROOT/target/release/rowt-foreign-import" ]; then
+  echo "  skip — no release build"
+else
+  # vless reads `servername or sni`; hysteria2 and anytls read `sni or
+  # servername`. A port that notices the asymmetry and "fixes" it changes which
+  # name a Reality handshake presents — with no error anywhere, and agreement on
+  # every proxy that sets only one of the two, which is nearly all of them.
+  cp "$ROOT/config/foreign-import.py" "$tmp/config/foreign-import.py"
+  perl -0pi -e 's/"sni": p\.get\("servername"\) or p\.get\("sni"\),/"sni": p.get("sni") or p.get("servername"),/' \
+    "$tmp/config/foreign-import.py"
+  # hysteria2 and anytls already read in that order, so the mutation is the
+  # THIRD occurrence, not the first.
+  if [ "$(grep -c '"sni": p.get("sni") or p.get("servername")' "$tmp/config/foreign-import.py")" -lt 3 ]; then
+    bad "could not swap the vless sni precedence (clash_proxy_to_link moved?)"
+  elif PARITY_RUST_FOREIGN="$ROOT/target/release/rowt-foreign-import" \
+       "$tmp/tests/parity/bin/parity" foreign-diff 150 >/dev/null 2>&1; then
+    bad "foreign-diff passed with the two sni precedences unified"
+  else
+    ok "foreign-diff caught the unified sni precedence"
+  fi
+  cp "$ROOT/config/foreign-import.py" "$tmp/config/foreign-import.py"
+fi
+
+echo "18. every name native() claims must be an arm of run()"
 src="$ROOT/crates/rowt-cli/src/main.rs"
 # Command names only. A native() arm line is indented exactly eight spaces and
 # starts with a pattern; the sub-command lists inside `matches!(…)` are indented

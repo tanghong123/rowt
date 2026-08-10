@@ -18,6 +18,43 @@ pub fn dumps(v: &Value) -> String {
     s
 }
 
+/// `json.dumps(v)` with no `indent` — the default separators, `", "` and
+/// `": "`, which are NOT serde_json's compact ones. This is what goes inside a
+/// `vmess://` payload before base64, so the difference is a different link.
+pub fn dumps_flat(v: &Value) -> String {
+    let mut s = String::new();
+    write_flat(&mut s, v);
+    s
+}
+
+fn write_flat(out: &mut String, v: &Value) {
+    match v {
+        Value::Array(a) => {
+            out.push('[');
+            for (i, item) in a.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                write_flat(out, item);
+            }
+            out.push(']');
+        }
+        Value::Object(m) => {
+            out.push('{');
+            for (i, (k, val)) in m.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                escape(out, k);
+                out.push_str(": ");
+                write_flat(out, val);
+            }
+            out.push('}');
+        }
+        scalar => write(out, scalar, 0),
+    }
+}
+
 fn write(out: &mut String, v: &Value, level: usize) {
     match v {
         Value::Null => out.push_str("null"),

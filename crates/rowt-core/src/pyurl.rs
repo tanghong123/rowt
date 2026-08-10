@@ -144,6 +144,31 @@ fn quote_plus(s: &str) -> String {
     out
 }
 
+/// `quote(s, safe="/")` — the OTHER encoder. It differs from `quote_plus` in
+/// two ways that both show up in a share link: a space becomes `%20` rather than
+/// `+`, and the characters in `safe` survive — so a `/` inside a node name or a
+/// password is left alone.
+///
+/// `foreign-import.py` builds its URIs with this one and its query strings with
+/// `urlencode` (i.e. `quote_plus`), in the same f-string. Using either for both
+/// produces a link that still parses and still connects, with a different
+/// password.
+pub fn quote(s: &str, safe: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        // A non-ASCII byte in `safe` is dropped by Python (`safe.encode('ascii',
+        // 'ignore')`), so only ASCII members of it can keep a byte literal.
+        let kept = matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.' | b'-' | b'~')
+            || (b.is_ascii() && safe.as_bytes().contains(&b));
+        if kept {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 /// `urlencode(pairs)`.
 pub fn urlencode(pairs: &[(String, String)]) -> String {
     pairs
