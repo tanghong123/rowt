@@ -1,25 +1,16 @@
 //! `rowt-sr-import` — argv-for-argv what `config/sr-import.py` is, so the two
 //! can be run against each other by `parity sr-diff`.
 //!
-//! The semantics live in `rowt_core::srimport` and the container format in
-//! `rowt_core::bplist`; this is the discovery — which store, which `.conf` —
-//! and the argparse surface.
-//!
-//! Discovery is the part that is easy to get subtly wrong, because it is two
-//! different globbers. The store is a plain "first of these paths that is a
-//! file". The rule file is `glob.glob(..., recursive=True)`, which skips hidden
-//! entries (unlike `pathlib`'s, which `foreign-import.py` uses two files over),
-//! tries three patterns in order and stops at the first that matches anything,
-//! then takes the NEWEST hit by mtime.
-//!
-//! `--detect` deliberately does not run the expensive one unless it has to:
-//! the iCloud pattern walks `com~apple~CloudDocs/**`, which can stall on
-//! dataless files, and `bin/rowt` gives detection a six-second budget.
+//! The semantics live in `rowt_core::srimport`, the container format in
+//! `rowt_core::bplist`, and the discovery in `rowt_core::srio`. What is left
+//! here is the argparse surface — which is part of the contract, since
+//! `bin/rowt` reads the exit status and passes stderr straight through — plus
+//! the two ways the Python fails: a traceback, and the one refusal this reader
+//! adds.
 
-use rowt_core::bplist::{self, PlErr};
 use rowt_core::foreign::Exc;
-use rowt_core::pypath;
 use rowt_core::srimport;
+use rowt_core::srio::{self, SrErr};
 
 const PROG: &str = "sr-import.py";
 
@@ -116,196 +107,24 @@ fn parse_args() -> Args {
 }
 
 // ---------------------------------------------------------------------------
-// Where Shadowrocket keeps things
-// ---------------------------------------------------------------------------
-
-fn home() -> String {
-    std::env::var("HOME").unwrap_or_default()
-}
-
-fn gc() -> String {
-    format!("{}/Library/Group Containers/group.com.liguangming.Shadowrocket", home())
-}
-
-fn icloud() -> String {
-    format!(
-        "{}/Library/Mobile Documents/iCloud~com~liguangming~Shadowrocket/Documents",
-        home()
-    )
-}
-
-fn store_candidates() -> Vec<String> {
-    vec![format!("{}/ServerManager", gc()), format!("{}/shadowrocket.v2.model", icloud())]
-}
-
-fn is_file(p: &str) -> bool {
-    std::path::Path::new(p).is_file()
-}
-
-/// `_find` — the first candidate that is a regular file.
-fn find(paths: &[String]) -> Option<String> {
-    paths.iter().find(|p| is_file(p)).cloned()
-}
-
-/// `_find_conf` — three patterns in order; the first with any hits wins, and
-/// within it the newest file by mtime.
-fn find_conf() -> Option<String> {
-    let patterns: [(String, &str, bool); 3] = [
-        (
-            format!("{}/Library/Mobile Documents/com~apple~CloudDocs", home()),
-            "default.conf",
-            true,
-        ),
-        (icloud(), "*.conf", true),
-        (gc(), "*.conf", false),
-    ];
-    for (base, tail, recursive) in patterns {
-        let mut hits: Vec<String> = Vec::new();
-        if recursive {
-            let mut dirs = vec![base.clone()];
-            walk_dirs(&base, &mut dirs);
-            for d in dirs {
-                collect(&d, tail, &mut hits);
-            }
-        } else {
-            collect(&base, tail, &mut hits);
-        }
-        hits.retain(|h| is_file(h));
-        if hits.is_empty() {
-            continue;
-        }
-        // `max(hits, key=os.path.getmtime)` keeps the FIRST of equal maxima, in
-        // glob's directory order. Equal mtimes therefore make the answer
-        // filesystem-dependent on both sides alike; the corpus gives every
-        // candidate a distinct one.
-        let mut best = hits[0].clone();
-        let mut best_m = mtime(&best);
-        for h in &hits[1..] {
-            let m = mtime(h);
-            if m > best_m {
-                best_m = m;
-                best = h.clone();
-            }
-        }
-        return Some(best);
-    }
-    None
-}
-
-fn mtime(p: &str) -> std::time::SystemTime {
-    std::fs::metadata(p).and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH)
-}
-
-/// `**` with `recursive=True`: every directory under `base`, `base` included,
-/// skipping hidden names — `glob` does not match a leading dot.
-fn walk_dirs(dir: &str, out: &mut Vec<String>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
-    let mut kids: Vec<String> = Vec::new();
-    for e in rd.flatten() {
-        let name = e.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') {
-            continue;
-        }
-        if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            kids.push(format!("{dir}/{name}"));
-        }
-    }
-    kids.sort();
-    for k in kids {
-        out.push(k.clone());
-        walk_dirs(&k, out);
-    }
-}
-
-/// The last component of the pattern: either a literal name or `*.conf`.
-fn collect(dir: &str, tail: &str, out: &mut Vec<String>) {
-    if let Some(ext) = tail.strip_prefix('*') {
-        let Ok(rd) = std::fs::read_dir(dir) else { return };
-        let mut names: Vec<String> = Vec::new();
-        for e in rd.flatten() {
-            let name = e.file_name().to_string_lossy().to_string();
-            if !name.starts_with('.') && name.ends_with(ext) {
-                names.push(name);
-            }
-        }
-        names.sort();
-        out.extend(names.into_iter().map(|n| format!("{dir}/{n}")));
-    } else {
-        let p = format!("{dir}/{tail}");
-        if std::path::Path::new(&p).exists() {
-            out.push(p);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 
 fn main() {
     let args = parse_args();
-    // `args.store or _find(...)` is Python's `or`, so `--store ""` falls
-    // through to auto-detection rather than naming a file called "".
-    let given = |o: &Option<String>| o.clone().filter(|s| !s.is_empty());
-    let store = given(&args.store).or_else(|| find(&store_candidates()));
+    let store = srio::resolve_store(args.store.as_deref());
 
     if args.detect {
-        // The store check is one stat; `_find_conf` is a recursive glob over
-        // the whole of iCloud Drive. Only pay for it when there is no store.
-        if store.is_some() || given(&args.conf).is_some() || find_conf().is_some() {
+        if srio::detect(&store, args.conf.as_deref()) {
             println!("shadowrocket");
         }
         return;
     }
 
-    let conf = given(&args.conf).or_else(find_conf);
-
-    let root = match store.as_deref().filter(|s| is_file(s)) {
-        Some(path) => match std::fs::read(path) {
-            Ok(bytes) => match bplist::load(&bytes) {
-                Ok(v) => Some(v),
-                Err(PlErr::Invalid) => die(&Exc::new("plistlib.InvalidFileException", "Invalid file")),
-                // Named rather than guessed at: `plistlib` would parse this and
-                // this reader will not. Unreachable through rowt, which never
-                // passes --store, and Shadowrocket writes binary.
-                Err(PlErr::NotBinary) => {
-                    eprintln!(
-                        "error: {} is an XML plist; only the binary format is read",
-                        pypath::path_str(path)
-                    );
-                    std::process::exit(1)
-                }
-            },
-            Err(e) => die(&Exc::new("OSError", e.to_string())),
-        },
-        None => None,
-    };
-
-    // The store is scanned, and its warning printed, BEFORE the rule file is
-    // opened — so a missing store and an unreadable .conf give a warning and
-    // then a traceback, in that order.
-    let scan = match &root {
-        Some(r) => match srimport::scan_store(r) {
-            Ok(s) => Some(s),
-            Err(e) => die(&e),
-        },
-        None => {
-            eprintln!("warning: no Shadowrocket server store found");
-            None
+    match srio::extract(store.as_deref(), args.conf.as_deref()) {
+        Ok(x) => print!("{}", srimport::render(&x)),
+        Err(SrErr::Exc(e)) => die(&e),
+        Err(SrErr::Xml(path)) => {
+            eprintln!("error: {path} is an XML plist; only the binary format is read");
+            std::process::exit(1)
         }
-    };
-
-    // `open(conf, encoding="utf-8", errors="replace")` — undecodable bytes
-    // become U+FFFD rather than ending the run.
-    let domains = match conf.as_deref().filter(|c| is_file(c)) {
-        Some(path) => match std::fs::read(path) {
-            Ok(bytes) => srimport::parse_rules(&String::from_utf8_lossy(&bytes)),
-            Err(e) => die(&Exc::new("OSError", e.to_string())),
-        },
-        None => {
-            eprintln!("warning: no Shadowrocket .conf rule file found");
-            Vec::new()
-        }
-    };
-
-    let x = srimport::assemble(scan, domains);
-    print!("{}", srimport::render(&x));
+    }
 }

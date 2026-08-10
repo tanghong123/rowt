@@ -10,6 +10,7 @@
 pub mod bplist;
 pub mod classify;
 pub mod foreign;
+pub mod foreignio;
 pub mod geosite;
 pub mod importmerge;
 pub mod laneerr;
@@ -22,6 +23,7 @@ pub mod reconcile;
 pub mod render;
 pub mod sharelink;
 pub mod srimport;
+pub mod srio;
 pub mod watch;
 
 pub use classify::{classify, Classification, ClassifyInput, Lane};
