@@ -48,11 +48,49 @@ PARITY_SCENARIO=render-local status
 # help routing: the systematic '<cmd> --help' as well as 'help <cmd>'
 --help
 help
-help up
-help escape
 help nosuchcommand
 escape --help
 watch --help
+
+# Every page in the registry, one case each. Not thoroughness for its own sake:
+# the pages share one renderer, and it processes the heredoc escapes the shell
+# would. A page that gets that wrong still LOOKS like a page — `\$SHELL` coming
+# out as the value of $SHELL rather than the literal reads perfectly well — so
+# nothing but a comparison catches it. Seven cases used to stand for 32 pages.
+help audit
+help block
+help completion
+help config
+help connections
+help corp
+help direct
+help down
+help escape
+help explain
+help fetch
+help metrics
+help monitor
+help onboard
+help ping
+help probe
+help proxy
+help reload
+help render
+help report
+help restart
+help router
+help run
+help server
+help shell-init
+help skill
+help status
+help sub
+help uninstall
+help up
+help use
+help version
+help vm
+help watch
 
 # lane sub-arms — a gated arm is not a gated COMMAND. These are the forms
 # `escape|corp|block|direct` take that are not list edits.

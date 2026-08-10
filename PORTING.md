@@ -196,7 +196,7 @@ revertible and gated.
 | **1** ◑ | `rowt-core::render` — replace the giant jq program. bash calls `rowt-rs render` internally. | **render done** — `crates/rowt-render`, 18/18 cases canonically identical on host + vm (`parity render-matrix`), and identical against the real 22-server config. Remaining: throwaway-port outbound oracle, bash cutover, shadow window |
 | **2** ✅ | classify/explain, lane set logic, absorb `corp-sync-reconcile.py` | **done** — classify: 9/9 cases × 92 destinations identical on `(lane, reason)`; lane edits: 12/12 cases identical across all three files + messages; reconcile: 210 generated cases identical to the Python. `selftest` 9/9 |
 | **3** ◑ | watchdog: FSM into core, effects via `PlatformMac`; `cmd_watch` execs the Rust tick | **FSM + shadow done** — `rowt-core::watch`, 17 unit tests replaying §11's decision table; `parity watch-diff` 5/5; `ROWT_WATCH_SHADOW=1` compares the shell's decisions against the FSM's plan on every real tick, feeding it the tick's own captive verdict rather than re-probing. Remaining: `PlatformMac` effects, the `cmd_watch` cutover, and **time** — the shadow window itself |
-| **4** ◑ | CLI. Built as `rowt-rs` alongside the shell first, so each command lands with evidence; only then does bash reduce to a wrapper and get deleted. Formula ships the prebuilt binary (monitor-asset pattern). | **all 37 arms native** — `parity cli-diff` compares stdout, exit status, the **whole config tree** (content and mode), the **argv trace** and the **audit log** over 183 cases. Remaining: `config import`, 5 computed help pages, then the `ROWT_IMPL` cutover |
+| **4** ◑ | CLI. Built as `rowt-rs` alongside the shell first, so each command lands with evidence; only then does bash reduce to a wrapper and get deleted. Formula ships the prebuilt binary (monitor-asset pattern). | **all 37 arms native** — `parity cli-diff` compares stdout, exit status, the **whole config tree** (content and mode), the **argv trace** and the **audit log** over 215 cases. Remaining: `config import`, then the `ROWT_IMPL` cutover |
 | **5** | `PlatformLinux` + tun mode + systemd units; CI matrix (macOS + ubuntu — core tests run on both, platform tests feature-gated); linux tar assets | fresh-VM install → onboard → probe → captive drill; VPN-coexistence drill with Tailscale up |
 | 6 ◑ | port the import pipeline (1,302 lines of parsing Python). No longer optional — the 2026-08-09 decision is one language in the repo, and this is what retires `depends_on "python@3.12"`. | **all four done** — `rowt-core::{sharelink,importmerge,foreign,srimport}` (+`bplist`); `parity vless-diff` 2,000 cases, `merge-diff` 1,500 (the review FILE plus the streams), `foreign-diff` 1,200 (synthetic client config TREES), `sr-diff` 1,200 (synthetic Shadowrocket installs). What remains is the CUTOVER: `bin/rowt` still calls the Pythons, which are the reference side of those gates |
 
@@ -231,9 +231,19 @@ So the order is fixed rather than a preference:
 4. **`config import`** — the odd one out, because it prompts on `/dev/tty`;
    the gate has no terminal, so this needs a scripted-input case first.
 
-Separately, 5 of the 32 help pages still render in the shell: their heredocs
-contain `$(… && echo … || echo …)`, so the text is computed, not interpolated.
-`help.rs` marks those `Detail::Shell` and delegates rather than pretending.
+All 32 help pages render in Rust. Three of them only ever LOOKED computed:
+`\$(` in an unquoted heredoc is two literal characters — how a page shows the
+reader a command to type — and the build-time classifier tested for `$(`
+without checking the backslash. The two that really are computed (`escape|corp`
+is one page for two lanes, `block` names its log through `$(lane_log block)`)
+go through a small evaluator that understands exactly the two shapes the text
+uses. Anything else still returns `Detail::Shell` and delegates: a page the
+evaluator does not understand is better rendered by the one interpreter that
+certainly agrees with the shell.
+
+Getting the escapes wrong is invisible without a comparison — a page with
+`\$SHELL` expanded to the value of `$SHELL` still reads perfectly well — so the
+gate now has a case per page rather than the seven that stood for 32.
 
 The fallthrough is guarded against recursion (`ROWT_DELEGATED`), because
 bin/rowt already reaches for Rust binaries and §6.6 has it becoming a wrapper.

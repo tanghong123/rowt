@@ -132,7 +132,7 @@ reconcile and the watchdog's decision table. Each has a gate:
 | `sr-diff` | stdout + stderr + exit status, over Shadowrocket installs | 1,200 generated cases |
 | `watch-diff` | decisions, read back from watch.log + trace | 5 cases |
 | `platform-diff` | the argv the platform layer produces | 8 cases |
-| `cli-diff` | stdout, status, the config tree (content + mode), argv trace, audit log | 183 cases |
+| `cli-diff` | stdout, status, the config tree (content + mode), argv trace, audit log | 215 cases |
 
 `merge-diff` is the only gate whose primary artifact is a file written in
 place: `cmd_import` reads the accumulation straight back with jq, and a human

@@ -60,14 +60,17 @@ fn main() {
         let pats = rest[..i].rsplit('\n').next().unwrap_or("").trim().to_string();
         let after = &rest[i + ") cat <<EOF\n".len()..];
         let (text, tail) = after.split_once("\nEOF\n").unwrap_or((after, ""));
-        // Five of the 32 arms interpolate more than a variable — `$1` for the
-        // lane name, and inline `$(… && echo … || echo …)` conditionals. Rather
-        // than grow a shell evaluator to render five help pages, they are marked
-        // and handed to the shell at runtime; the text still has exactly one
-        // home, which is the whole point.
-        let dynamic = text.contains("$(") || text.contains("$1");
+        // Two of the 32 arms say more than a variable: `escape|corp` is one page
+        // written twice by `$1` and a pair of conditionals, and `block` names
+        // its log through `$(lane_log block)`. They are marked so help.rs runs
+        // its small evaluator on them instead of printing them raw.
+        //
+        // The mark is about UNESCAPED substitution. Three more pages contain
+        // `\$(`, which is not one — that is how a page shows the reader a
+        // command to type (`eval "\$($PROG shell-init)"`). Testing for the two
+        // characters called all five dynamic and sent them to the shell.
         recs.push_str(&format!("{pats}\u{1f}{}\u{1f}{text}\n\u{1e}",
-                               if dynamic { "shell" } else { "text" }));
+                               if needs_eval(text) { "dyn" } else { "text" }));
         rest = tail;
     }
     std::fs::write(out.join("help_detail.txt"), recs).unwrap();
@@ -103,6 +106,26 @@ fn main() {
 /// A heredoc body: everything up to the closing `EOF` line. The terminator may
 /// be the last line with no newline after it, when the caller already trimmed
 /// at the enclosing `}`.
+/// Does this heredoc body need more than variable expansion — an unescaped
+/// `$(…)` or a positional `$1`?
+///
+/// A backslash escapes the next character in an unquoted heredoc, so `\$(` is
+/// two literal characters and not a command substitution. Answering this with
+/// `contains("$(")` marked three pages dynamic that are entirely static once
+/// their `\$` are unescaped.
+fn needs_eval(text: &str) -> bool {
+    let b: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            '\\' => i += 2,
+            '$' if matches!(b.get(i + 1), Some('(') | Some('1')) => return true,
+            _ => i += 1,
+        }
+    }
+    false
+}
+
 fn upto_eof(s: &str) -> String {
     let end = s.split('\n').scan(0usize, |at, l| {
         let start = *at;

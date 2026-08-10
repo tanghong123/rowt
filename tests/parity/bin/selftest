@@ -27,7 +27,8 @@
 #   20.  reverse `sub rm 1 2`            -> cli-diff must fire
 #   21.  match a manual server by tag    -> cli-diff must fire
 #   22.  leak _source into manual.json  -> cli-diff must fire
-#   23.  (structural) native() must not claim an arm run() cannot answer
+#   23.  unescape a help page's \$      -> cli-diff must fire
+#   24.  (structural) native() must not claim an arm run() cannot answer
 #
 # Everything happens in a throwaway copy of the repo; the real tree is never
 # touched. Run it after changing the harness itself.
@@ -567,7 +568,29 @@ else
   cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
 fi
 
-echo "23. every name native() claims must be an arm of run()"
+echo "23. unescape the \$SHELL the shell-init page shows the reader"
+cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+if [ ! -x "$ROOT/target/release/rowt-rs" ]; then
+  echo "  skip — no release build"
+else
+  # The help pages are unquoted heredocs, so `\$` is a literal dollar — how a
+  # page prints a command for the reader to type rather than the value of a
+  # variable. Dropping that one backslash makes bash expand $SHELL, and the
+  # page still reads perfectly well either way, which is the whole problem: it
+  # is invisible to review and invisible to a gate that spot-checks seven pages
+  # out of 32. This is the mutation the per-page cases exist for.
+  perl -0pi -e 's/by \\\$SHELL/by \$SHELL/' "$tmp/bin/rowt"
+  if grep -qF 'by \$SHELL' "$tmp/bin/rowt"; then
+    bad "could not unescape the shell-init page's \$SHELL (help_detail moved?)"
+  elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" "$P" cli-diff >/dev/null 2>&1; then
+    bad "cli-diff passed with a help page's escaped dollar expanded"
+  else
+    ok "cli-diff caught the unescaped dollar in a help page"
+  fi
+  cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+fi
+
+echo "24. every name native() claims must be an arm of run()"
 src="$ROOT/crates/rowt-cli/src/main.rs"
 # Command names only. A native() arm line is indented exactly eight spaces and
 # starts with a pattern; the sub-command lists inside `matches!(…)` are indented
