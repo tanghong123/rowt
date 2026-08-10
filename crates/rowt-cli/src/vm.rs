@@ -143,7 +143,7 @@ fn networks_setup(cfg: &Path) {
 
 /// The bridged address. Lima's added interface is lima0/lima1/… — eth0 is its
 /// internal NAT (192.168.x), unreachable from the host, and emphatically not it.
-fn vm_ip_detect() -> String {
+pub fn vm_ip_detect() -> String {
     let body = out("limactl", &["shell", VM_NAME, "ip", "-4", "-o", "addr", "show"]);
     for l in body.lines() {
         let f: Vec<&str> = l.split_whitespace().collect();
@@ -264,8 +264,12 @@ pub fn cmd(ctx: &Ctx, here: &Path, action: &str) -> Result<String, String> {
             } else {
                 "  VM already stopped"
             };
+            // Printed before the limbo check, not returned past it: the check
+            // clears a stranded system proxy and says so, and the shell's order
+            // is VM-line-then-proxy-line. A returned string would arrive after.
+            println!("{msg}");
             lifecycle::ensure_no_limbo(ctx);
-            Ok(msg.into())
+            Ok(String::new())
         }
         "restart" => {
             if vm_running()

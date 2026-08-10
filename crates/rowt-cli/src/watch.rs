@@ -254,35 +254,26 @@ fn perform(ctx: &Ctx, actions: &[Action]) {
             Action::ClearStaleProxy(svc) => {
                 let _ = Mac.proxy_states_off(svc, true);
             }
+            // Both of these are the real `cmd_reload`, with its output
+            // appended to the watch log the way the shell redirects it. Not an
+            // inlined render-stop-start: the watchdog's whole job is to leave
+            // the machine in the state a hands-on reload would, and that
+            // includes the guard it refuses on, the vm branch, and the three
+            // state stamps (`proxy_intent`, `intent`, `boot`) the NEXT tick
+            // reads to decide whether any of this was deliberate.
             Action::Recover(_) => {
-                // `cmd_reload`, with its output appended to the watch log the
-                // way the shell redirects it.
-                let _ = lifecycle::cmd_render(ctx);
-                lifecycle::router_stop(ctx);
-                match lifecycle::router_up(ctx) {
-                    Ok(_) => {
-                        let _ = lifecycle::proxy_on(ctx, false);
-                        watch_log(ctx, "reload ok");
-                        let _ = std::fs::remove_file(ctx.cfg.join("watch.health"));
-                    }
-                    Err(_) => watch_log(ctx, "reload FAILED"),
-                }
+                let _ = crate::redirected(&watch_log_path(ctx), || lifecycle::cmd_reload(ctx, &crate::here_dir()));
             }
             Action::Reload(_) => {
                 crate::shell::audit(&ctx.cfg, "BEGIN watchdog reload — network change");
-                let _ = lifecycle::cmd_render(ctx);
-                lifecycle::router_stop(ctx);
-                match lifecycle::router_up(ctx) {
-                    Ok(_) => {
-                        let _ = lifecycle::proxy_on(ctx, false);
-                        watch_log(ctx, "reload ok");
-                        let _ = std::fs::remove_file(ctx.cfg.join("watch.health"));
-                        crate::shell::audit(&ctx.cfg, "END   watchdog reload — ok");
-                    }
-                    Err(_) => {
-                        watch_log(ctx, "reload FAILED");
-                        crate::shell::audit(&ctx.cfg, "END   watchdog reload — FAILED");
-                    }
+                let r = crate::redirected(&watch_log_path(ctx), || lifecycle::cmd_reload(ctx, &crate::here_dir()));
+                if r.is_ok() {
+                    watch_log(ctx, "reload ok");
+                    let _ = std::fs::remove_file(ctx.cfg.join("watch.health"));
+                    crate::shell::audit(&ctx.cfg, "END   watchdog reload — ok");
+                } else {
+                    watch_log(ctx, "reload FAILED");
+                    crate::shell::audit(&ctx.cfg, "END   watchdog reload — FAILED");
                 }
             }
             Action::CorpSync => {

@@ -2,6 +2,8 @@
 # lane files identical to what the shell leaves.
 
 explain example.com
+# `route` is the same arm under a second name, and the ledger counts names.
+route example.com
 explain intranet.corp.example
 explain ads.example
 explain unlisted.example
@@ -340,6 +342,48 @@ watch nosucharm
 onboard
 PARITY_SCENARIO=router-up onboard
 PARITY_SCENARIO=lanes-empty onboard
+
+# `uninstall` — it was claimed native and gated by nothing, which the ledger
+# has been saying all along. It is a COMPOSITION of arms already gated here
+# (revert, proxy off, watch uninstall) plus the rc-file edit, so what these add
+# is the order it does them in — visible in the argv trace — and that the two
+# implementations agree about what is left behind. Effects stay inside the
+# sandbox: every command it calls out to is shimmed, and the rc files and the
+# config directory it touches are the sandbox's own.
+uninstall
+# `--purge` removes the config directory it just finished writing to, audit log
+# included. Both sides must agree on that too.
+uninstall --purge
+
+# The lifecycle arms — up, down, reload, restart. The ledger called these
+# "proven by boot-test", and the boot test does run them: against a REAL
+# sing-box, checking that the tunnel comes up. What it never does is compare
+# them to the shell, and every one of them diverged when first asked to.
+#
+# They are safe here for the same reason the rest of the sweep is: sing-box is
+# the fixture's fake, `networksetup` and `limactl` are shims, and the only
+# process either side actually spawns dies immediately — which is precisely
+# what makes the failure path the one being compared. `up` is the slowest case
+# in the file (two 5s readiness waits and a settle, per side) and worth it: the
+# failure path is where the proxy gets cleared, the intent gets stamped and the
+# exit status is decided.
+#
+# NOTE the trap that keeps these ungatable under `PARITY_SCENARIO=router-up`:
+# that scenario writes the HARNESS's own pid into host.pid so the router reads
+# as running, and every one of these arms would then kill the gate. It is the
+# same documented hazard as `reload`, and it applies to `down`, `restart`,
+# `up` and `uninstall` too — not just the two it was first written for.
+up host
+up local
+# Bare `up` chooses its own mode: no target named means `_direct_reaches_escape`
+# curls the GFW canaries (the shim answers, so this is deterministic here) and
+# then `probe` decides. Probe fans out one resolver call per server, so the
+# trace is in whatever order the scheduler produced — compared as a SET, like
+# every other case that forks.
+PARITY_UNORDERED=1 up
+down
+reload
+restart
 
 # proxy on/off — safe to gate because BOTH sides funnel every system-proxy
 # write through one guarded choke point, and the sandbox has no service anyway.

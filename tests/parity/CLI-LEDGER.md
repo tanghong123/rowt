@@ -23,7 +23,7 @@ is not 'does it work' but 'whose code ran, and what proves it'.
 | `conns` | **native** | cli-diff |
 | `corp` | **native** | cli-diff |
 | `direct` | **native** | cli-diff |
-| `down` | **native** | boot-test |
+| `down` | **native** | cli-diff + boot-test |
 | `escape` | **native** | cli-diff |
 | `explain` | **native** | cli-diff |
 | `fetch` | **native** | cli-diff |
@@ -32,13 +32,13 @@ is not 'does it work' but 'whose code ran, and what proves it'.
 | `monitor` | **native** | — |
 | `onboard` | **native** | cli-diff |
 | `ping` | **native** | cli-diff |
-| `probe` | **native** | — |
+| `probe` | **native** | cli-diff |
 | `proxy` | **native** | cli-diff |
-| `reload` | **native** | boot-test |
+| `reload` | **native** | cli-diff + boot-test |
 | `render` | **native** | cli-diff + boot-test |
 | `report` | **native** | cli-diff |
-| `restart` | **native** | boot-test |
-| `route` | **native** | — |
+| `restart` | **native** | cli-diff + boot-test |
+| `route` | **native** | cli-diff |
 | `router` | **native** | cli-diff + boot-test |
 | `run` | **native** | cli-diff |
 | `server` | **native** | cli-diff |
@@ -46,8 +46,8 @@ is not 'does it work' but 'whose code ran, and what proves it'.
 | `skill` | **native** | cli-diff |
 | `status` | **native** | cli-diff |
 | `sub` | **native** | cli-diff |
-| `uninstall` | **native** | — |
-| `up` | **native** | boot-test |
+| `uninstall` | **native** | cli-diff |
+| `up` | **native** | cli-diff + boot-test |
 | `use` | **native** | cli-diff |
 | `vm` | **native** | cli-diff |
 | `watch` | **native** | cli-diff |

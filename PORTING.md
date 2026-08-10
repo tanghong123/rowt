@@ -462,6 +462,39 @@ alongside as `rowt-legacy` for one full release cycle and the Formula carries
 both. Rollback is an env var, not a reinstall. Phase 4 deletes the bash only
 after a release cycle in which the fallback was never needed.
 
+**Not yet built.** Every command arm is now native AND compared against the
+shell, the lifecycle arms included — they were the last ones carrying the
+ledger's "proven by boot-test" note, which turned out to mean "run against a
+real sing-box", never "compared to bash". What is left is worth writing down as
+four separate things, only the first of which is more porting:
+
+0. **The watchdog's recovery bookkeeping.** `Action::Recover` now runs the real
+   `cmd_reload`, so the state stamps and the guard match. What it still does not
+   reproduce is what the shell wraps around that call: the post-recovery settle
+   and re-probe, and the "recovery ok — escape tunnel answering" /
+   "recovery INCOMPLETE" pair that follows from it, plus their audit lines. The
+   cooldown that decides *whether* to recover is already in `rowt-core`'s pure
+   tick and is gated; this is the reporting after the fact, so a recovery that
+   silently half-worked currently reads in watch.log as one that worked.
+1. **Data.** §6.5's promotion rule — 14 days of real use with zero unexplained
+   divergences, including a corp-network day and a foreign-network day. The
+   shadow window ships (3.2.6) but a window that was never started produces
+   silence, and silence looks exactly like agreement.
+2. **Packaging.** Nothing installs `rowt-rs` today. `install.sh` rsyncs the
+   whole tree minus `.state` and `bin/sing-box`, which since the workspace
+   appeared means ~400 MB of `target/` goes into the prefix — and that is also
+   how a local install currently finds `rowt-render` and `rowt-watch-tick`,
+   since `_render_bin` falls back to `$HERE/target/release`. So excluding
+   `target/` and placing the three binaries in `$PREFIX/bin/` are one change,
+   not two. A switch with nothing to exec is a no-op with a footgun.
+3. **The switch itself**, which is small: `exec` before the preamble (rowt-rs
+   migrates, rotates and audits for itself, and doing it on both sides doubles
+   every audit line), guarded on `ROWT_DELEGATED` so a delegated help page
+   cannot bounce back and forth. Worth gating with a cli-diff run whose BASH
+   side carries `ROWT_IMPL=rust`: that compares rowt-rs against itself through
+   the wrapper, which proves the front door is transparent — not that anything
+   was ported, which is what the other 229 cases are for.
+
 ### 6.7 Bash bugs are behavior until deliberately retired
 
 If the Rust version "fixes" something the bash did wrong, that is still a
@@ -479,6 +512,8 @@ here, and each is a shell-side commit waiting to be written:
 | A host render probes the interface **twice** — `build_escape_outbounds host` runs `detect_iface`, then `assemble_host` runs it again | bin/rowt:1203, :1304 | Six subprocess calls where three would do. Collapsing them changes the argv trace, which is a gate; it needs its own commit and a golden update. |
 | A domain whose failures tie across two categories gets whichever `for (k in cc)` reaches first | `lane_errors`'s awk | Genuinely unspecified, so there is no behavior to copy. rowt-rs takes the lexicographically first to be repeatable. Do not build a fixture that hits this — it would compare two implementations against a coin flip. |
 | `render` guards on `[ -s "$SERVERS" ]`, so a `servers.json` of `[]` — or of anything unparseable — renders happily, emitting an `auto` selector with no servers under it | `cmd_render`, mirrored in `lifecycle::cmd_render` | Whether `render` succeeds is what `up`, `reload` and `config import` branch on, so a stricter guard changes three other commands in a commit that is not about them. The scenario has existed as `render-empty-servers` all along; what was missing was a cli-diff case, since `render-diff` compares the two renders and not the two REFUSALS. |
+| `up` never checks whether the router came up: it sets the system proxy and prints "done — mode=host. Listed domains now route through your escape VPN." over a router that is not there, and **exits 0** | `cmd_setup`, mirrored in `lifecycle::cmd_setup` | Its two siblings already do the right thing — `restart` and `reload` both require the clash API to answer before they touch the proxy, and say so when it does not. `up` is the one that forgot, and the fix is a two-line gate on the shell side. Nothing is stranded meanwhile (the router's own no-limbo step clears the proxy first); what lies is the exit status, which is exactly what a script or a `&&` chain reads. |
+| `down` turns the system proxy off **three times** and says so each time — once itself, once inside `router down`'s no-limbo check, once more inside `vm down`'s | `cmd_revert`, mirrored in `lifecycle::cmd_revert` | Harmless and idempotent, and the repetition is the visible half of a real invariant: every teardown step independently refuses to leave a proxy pointing at a dead port. Collapsing it means deciding which step owns the guarantee, which is a design change, not a tidy-up. |
 
 ### 6.8 Coverage ledger
 

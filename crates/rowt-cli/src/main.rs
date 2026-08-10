@@ -73,10 +73,17 @@ fn confirmed(input: &str, cfg: &Path) -> bool {
 /// Run `f` with stdout and stderr pointed at /dev/null, which is what
 /// `cmd_render >/dev/null 2>&1` does in the shell. A returned string is still
 /// returned; this only silences what the callee writes to the fds itself.
-fn quietly<T>(f: impl FnOnce() -> T) -> T {
+pub fn quietly<T>(f: impl FnOnce() -> T) -> T {
+    redirected(Path::new("/dev/null"), f)
+}
+
+/// `>>"$FILE" 2>&1` around a whole function — the shape the watchdog uses to
+/// send a reload's output to watch.log. Both streams, because the shell merges
+/// them: half a reload's story in the log is worse than none.
+pub fn redirected<T>(path: &Path, f: impl FnOnce() -> T) -> T {
     use std::io::Write;
     let _ = std::io::stdout().flush();
-    let devnull = std::fs::OpenOptions::new().write(true).open("/dev/null").ok();
+    let devnull = std::fs::OpenOptions::new().create(true).append(true).open(path).ok();
     let saved = devnull.as_ref().and_then(|n| unsafe {
         use std::os::unix::io::AsRawFd;
         let (o, e) = (libc::dup(1), libc::dup(2));
@@ -231,7 +238,7 @@ fn strip_rc_files() {
 /// `$HERE` — the tree bin/rowt sits under (repo checkout or brew prefix). The
 /// shell derives it from its own path; this binary lives one level deeper in a
 /// checkout (target/release) and beside it once installed, so both are tried.
-fn here_dir() -> PathBuf {
+pub fn here_dir() -> PathBuf {
     let exe = std::env::current_exe().unwrap_or_default();
     let d = exe.parent().unwrap_or(Path::new("."));
     for up in ["..", "../.."] {
@@ -241,6 +248,71 @@ fn here_dir() -> PathBuf {
         }
     }
     d.join("..").canonicalize().unwrap_or_else(|_| d.to_path_buf())
+}
+
+/// `cmd_probe` — which escape mode works here?
+///
+/// Reaches every server BOTH via the default route and bound to the physical
+/// NIC. default ok + bind FAIL is the signal that matters: the corp VPN is
+/// enforcing with a packet filter, so `bind_interface` cannot get out and only
+/// the VM can. Extracted from its arm because `up` calls it too, and there it
+/// must be able to FAIL without ending the process — the shell spells that
+/// `cmd_probe || true`.
+pub fn cmd_probe(ctx: &Ctx) -> Result<String, String> {
+    let cfg = &ctx.cfg;
+    let servers: Vec<Value> =
+        serde_json::from_str(&read(&cfg.join("servers.json"))).unwrap_or_default();
+    if servers.is_empty() {
+        die(cfg, &format!("import/subscribe servers first: {PROG} server add '<vless://...>'"));
+    }
+    let Some(iface) = Mac.detect_iface() else {
+        die(cfg, "no physical interface detected");
+    };
+    eprintln!("==> probing {} server(s) in parallel via default route and via {iface} (corp VPN should be up)…",
+              servers.len());
+    let handles: Vec<_> = servers.iter().map(|s| {
+        let g = |k: &str| s.get(k).map(|v| match v {
+            Value::String(x) => x.clone(), o => o.to_string(),
+        }).unwrap_or_default();
+        let (tag, host, port, ifc) = (g("tag"), g("server"), g("server_port"), iface.clone());
+        std::thread::spawn(move || {
+            let ip = rowt_platform::resolve_ip(&host);
+            if ip.is_empty() {
+                return (tag, format!("DNS-FAIL ({host})"), "-".to_string(), "-".to_string());
+            }
+            let d = if diag::tcp_reaches("", &ip, &port) { "ok" } else { "✗" };
+            let b = if diag::tcp_reaches(&ifc, &ip, &port) { "ok" } else { "✗" };
+            (tag, format!("{ip}:{port}"), d.to_string(), b.to_string())
+        })
+    }).collect();
+    // Collected in SERVER order, not completion order — the shell writes one
+    // file per index and reads them back by glob.
+    let rows: Vec<_> = handles.into_iter().filter_map(|h| h.join().ok()).collect();
+    let mut o = Vec::new();
+    let (mut any_default, mut any_bind) = (false, false);
+    for (tag, ipp, d, b) in &rows {
+        if d == "ok" { any_default = true; }
+        if b == "ok" { any_bind = true; }
+        o.push(format!("  {} {} default:{} {iface}:{b}", pad(tag, 18), pad(ipp, 24), pad(d, 3)));
+    }
+    o.push(String::new());
+    if !any_default {
+        o.push("  ✗ no server reachable via the default route — check connectivity/servers".into());
+        o.push(format!("  (or skip probing: {PROG} up host / {PROG} up vm)"));
+        // Printed here, not returned: the rows are the answer whether or not
+        // the probe succeeded, and a caller that tolerates the failure still
+        // wants them on screen.
+        println!("{}", o.join("\n"));
+        return Err(SILENT.into());
+    }
+    if any_bind {
+        lifecycle::sset(ctx, "mode", "host");
+        o.push("→ mode HOST works (bind_interface bypasses the corp tunnel).".into());
+    } else {
+        lifecycle::sset(ctx, "mode", "vm");
+        o.push("→ bind failed while default works → corp enforces via packet filter → mode VM.".into());
+    }
+    Ok(o.join("\n"))
 }
 
 fn config_dir() -> PathBuf {
@@ -808,59 +880,7 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
         // route and bound to the physical NIC. default ok + bind FAIL is the
         // signal that matters: the corp VPN is enforcing with a packet filter,
         // so bind_interface cannot get out and only the VM can.
-        "probe" => {
-            let ctx = Ctx::new(cfg.clone());
-            let servers: Vec<Value> =
-                serde_json::from_str(&read(&cfg.join("servers.json"))).unwrap_or_default();
-            if servers.is_empty() {
-                die(&cfg, &format!("import/subscribe servers first: {PROG} server add '<vless://...>'"));
-            }
-            let Some(iface) = Mac.detect_iface() else {
-                die(&cfg, "no physical interface detected");
-            };
-            eprintln!("==> probing {} server(s) in parallel via default route and via {iface} (corp VPN should be up)…",
-                      servers.len());
-            let handles: Vec<_> = servers.iter().map(|s| {
-                let g = |k: &str| s.get(k).map(|v| match v {
-                    Value::String(x) => x.clone(), o => o.to_string(),
-                }).unwrap_or_default();
-                let (tag, host, port, ifc) = (g("tag"), g("server"), g("server_port"), iface.clone());
-                std::thread::spawn(move || {
-                    let ip = rowt_platform::resolve_ip(&host);
-                    if ip.is_empty() {
-                        return (tag, format!("DNS-FAIL ({host})"), "-".to_string(), "-".to_string());
-                    }
-                    let d = if diag::tcp_reaches("", &ip, &port) { "ok" } else { "✗" };
-                    let b = if diag::tcp_reaches(&ifc, &ip, &port) { "ok" } else { "✗" };
-                    (tag, format!("{ip}:{port}"), d.to_string(), b.to_string())
-                })
-            }).collect();
-            // Collected in SERVER order, not completion order — the shell writes
-            // one file per index and reads them back by glob.
-            let rows: Vec<_> = handles.into_iter().filter_map(|h| h.join().ok()).collect();
-            let mut o = Vec::new();
-            let (mut any_default, mut any_bind) = (false, false);
-            for (tag, ipp, d, b) in &rows {
-                if d == "ok" { any_default = true; }
-                if b == "ok" { any_bind = true; }
-                o.push(format!("  {} {} default:{} {iface}:{b}", pad(tag, 18), pad(ipp, 24), pad(d, 3)));
-            }
-            o.push(String::new());
-            if !any_default {
-                o.push("  ✗ no server reachable via the default route — check connectivity/servers".into());
-                o.push(format!("  (or skip probing: {PROG} up host / {PROG} up vm)"));
-                println!("{}", o.join("\n"));
-                std::process::exit(1);
-            }
-            if any_bind {
-                lifecycle::sset(&ctx, "mode", "host");
-                o.push("→ mode HOST works (bind_interface bypasses the corp tunnel).".into());
-            } else {
-                lifecycle::sset(&ctx, "mode", "vm");
-                o.push("→ bind failed while default works → corp enforces via packet filter → mode VM.".into());
-            }
-            Ok(o.join("\n"))
-        }
+        "probe" => cmd_probe(&Ctx::new(cfg.clone())),
         // The full diagnostic. Written to a timestamped file AND echoed, and
         // only the five most recent are kept — a report you forgot to delete
         // should not become a directory of them.
@@ -904,8 +924,13 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                 }
             }
             eprintln!("==> uninstalling rowt — reversing setup…");
-            let _ = lifecycle::proxy_off(&ctx);
-            lifecycle::router_stop(&ctx);
+            // The teardown, then a second proxy-off as belt-and-suspenders on
+            // the active service. Both silenced the way the shell redirects
+            // them — but only their OUTPUT: they still stop the router, stop
+            // the VM and clear the proxy, which is the whole point of running
+            // them before anything gets removed.
+            let _ = quietly(|| lifecycle::cmd_revert(&ctx, &here_dir()));
+            let _ = quietly(|| lifecycle::cmd_proxy_off(&ctx));
             let _ = run(&cfg, "watch", &["uninstall".to_string()]);
             strip_rc_files();
             if purge {
@@ -1035,7 +1060,7 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                     .collect(),
             };
             let now = lifecycle::clash_selected(&ctx).unwrap_or_default();
-            let secret = ctx.sget("clash_secret");
+            let secret = lifecycle::clash_secret(&ctx);
             let url = env_or("ROWT_PING_URL", "https://www.gstatic.com/generate_204");
             let timeout: u32 = env_or("ROWT_PING_TIMEOUT", "8").parse().unwrap_or(8);
             let enc = urlencode(&url);
@@ -1781,36 +1806,10 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                 _ => Err(format!("usage: {PROG} router up|down|restart|status|log")),
             }
         }
-        "reload" => {
-            let ctx = Ctx::new(cfg);
-            lifecycle::cmd_render(&ctx)?;
-            lifecycle::router_stop(&ctx);
-            let r = lifecycle::router_up(&ctx)?;
-            let p = lifecycle::proxy_on(&ctx, false);
-            eprintln!("==> reloaded (mode={}).", ctx.mode());
-            Ok(format!("{r}\n{p}"))
-        }
-        "restart" => {
-            let ctx = Ctx::new(cfg);
-            lifecycle::router_stop(&ctx);
-            lifecycle::router_up(&ctx)
-        }
-        "up" => {
-            let ctx = Ctx::new(cfg);
-            lifecycle::sset(&ctx, "intent", "up");
-            lifecycle::cmd_render(&ctx)?;
-            lifecycle::router_stop(&ctx);
-            let r = lifecycle::router_up(&ctx)?;
-            let p = lifecycle::proxy_on(&ctx, false);
-            Ok(format!("{r}\n{p}"))
-        }
-        "down" => {
-            let ctx = Ctx::new(cfg);
-            lifecycle::sset(&ctx, "intent", "down");
-            let p = lifecycle::proxy_off(&ctx);
-            let r = lifecycle::router_down(&ctx);
-            Ok(format!("{p}\n{r}"))
-        }
+        "reload" => lifecycle::cmd_reload(&Ctx::new(cfg), &here_dir()),
+        "restart" => lifecycle::cmd_restart(&Ctx::new(cfg), &here_dir()),
+        "up" => lifecycle::cmd_setup(&Ctx::new(cfg), &here_dir(), &rest),
+        "down" => lifecycle::cmd_revert(&Ctx::new(cfg), &here_dir()),
         "proxy" => {
             let action = rest.first().map(|s| s.as_str()).unwrap_or("status");
             // on/off record the user's INTENT, which the watchdog reads: a
@@ -1819,12 +1818,11 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
             // status/check do not touch intent — asking is not deciding.
             if matches!(action, "on" | "off") {
                 let ctx = Ctx::new(cfg.clone());
-                lifecycle::sset(&ctx, "proxy_intent", action);
                 if action == "off" {
-                    return Ok(lifecycle::proxy_off(&ctx));
+                    return Ok(lifecycle::cmd_proxy_off(&ctx));
                 }
                 let force = rest.iter().any(|a| a == "--force" || a == "-f");
-                return Ok(lifecycle::proxy_on(&ctx, force));
+                return Ok(lifecycle::cmd_proxy_on(&ctx, force));
             }
             let (out, ok) = cmd_proxy(action, rest.get(1).map(|s| s.as_str()))?;
             if !ok {

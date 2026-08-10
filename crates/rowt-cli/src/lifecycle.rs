@@ -37,7 +37,87 @@ impl Ctx {
         let m = self.sget("mode");
         if m.is_empty() { "host".into() } else { m }
     }
-    pub fn controller(&self) -> String { format!("127.0.0.1:{}", self.clash_port) }
+    /// Empty when mode=vm and no vm_ip is known — the shell's `controller`
+    /// returns non-zero there, and every caller reads that as "no API".
+    pub fn controller(&self) -> String { controller(self).unwrap_or_default() }
+}
+
+/// `controller` — where the clash API lives, which in vm mode is the GUEST's.
+///
+/// The API answers on the machine sing-box runs on: 127.0.0.1 for host and
+/// local mode, but the VM's bridged IP on CLASH_PORT+1 when the tunnel lives in
+/// the guest. Reading 127.0.0.1 there talks to nothing, which is how `use`,
+/// `status` and the collector would all quietly stop working in vm mode.
+pub fn controller(ctx: &Ctx) -> Option<String> {
+    if ctx.mode() == "vm" {
+        let ip = ctx.sget("vm_ip");
+        if ip.is_empty() { return None; }
+        return Some(format!("{ip}:{}", ctx.clash_port + 1));
+    }
+    Some(format!("127.0.0.1:{}", ctx.clash_port))
+}
+
+/// `clash_secret` — read it, or mint one and remember it.
+///
+/// Generate-on-first-use, exactly as the shell does. Reading the key without
+/// the mint looks equivalent because every config that has ever been rendered
+/// already carries one — but on a FRESH config it renders a clash API with an
+/// empty secret, which is an unauthenticated control plane that can switch
+/// outbounds and list every live connection. No gate can see this: the parity
+/// fixtures pin `clash_secret` precisely because minting is nondeterministic
+/// (tests/parity/README.md), so both sides read the pinned value and agree.
+pub fn clash_secret(ctx: &Ctx) -> String {
+    let s = ctx.sget("clash_secret");
+    if !s.is_empty() {
+        return s;
+    }
+    // `head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c1-24`
+    let mut raw = [0u8; 24];
+    if fs::File::open("/dev/urandom")
+        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut raw))
+        .is_err()
+    {
+        return String::new();
+    }
+    let s: String = b64(&raw).chars().filter(|c| c.is_ascii_alphanumeric()).take(24).collect();
+    sset(ctx, "clash_secret", &s);
+    s
+}
+
+fn b64(data: &[u8]) -> String {
+    const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for c in data.chunks(3) {
+        let b = [c[0], *c.get(1).unwrap_or(&0), *c.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        for i in 0..4 {
+            if i <= c.len() {
+                out.push(A[(n >> (18 - 6 * i)) as usize & 63] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// `_boot_id` — `sysctl -n kern.boottime`, reduced to its first run of digits.
+///
+/// Paired with `intent`, this is what lets the watchdog tell a mid-session
+/// crash (same boot, recover it) from a reboot (different boot, leave it).
+pub fn boot_id() -> String {
+    let Ok(o) = Command::new("sysctl").args(["-n", "kern.boottime"]).output() else {
+        return String::new();
+    };
+    let s = String::from_utf8_lossy(&o.stdout);
+    for line in s.lines() {
+        let d: String = line.chars().skip_while(|c| !c.is_ascii_digit())
+            .take_while(char::is_ascii_digit).collect();
+        if !d.is_empty() {
+            return d;
+        }
+    }
+    String::new()
 }
 
 pub fn env_num(k: &str, d: u16) -> u16 {
@@ -156,7 +236,7 @@ pub fn build_host(ctx: &Ctx) -> Result<Value, String> {
         port: ctx.port as u64,
         iface: iface.to_string(),
         clash,
-        secret: ctx.sget("clash_secret"),
+        secret: clash_secret(ctx),
         log_level: env_or("ROWT_LOG_LEVEL", "warn"),
         final_route: env_or("ROWT_FINAL", "direct"),
         dns_direct: if local { env_or("ROWT_DNS_LOCAL", "1.1.1.1") } else { env_or("ROWT_DNS_DIRECT", "223.5.5.5") },
@@ -207,7 +287,7 @@ pub fn cmd_render(ctx: &Ctx) -> Result<String, String> {
     let guest = group(&servers, "", &selected, &env_or("ROWT_AUTO_INTERVAL", "20m"));
     let vm = render_vm(&guest, "0.0.0.0", (ctx.port + 1) as u64,
                        &format!("0.0.0.0:{}", ctx.clash_port + 1),
-                       &ctx.sget("clash_secret"), &env_or("ROWT_LOG_LEVEL", "warn"));
+                       &clash_secret(ctx), &env_or("ROWT_LOG_LEVEL", "warn"));
 
     // Written to a temp file and moved into place: a plain truncate-then-write
     // lets a concurrent reader — sing-box starting while this re-renders — see
@@ -362,7 +442,7 @@ pub fn start_router(ctx: &Ctx, split: bool) -> Result<std::process::Child, Strin
 /// imply) because `cli-diff` compares the trace: a call that behaves the same but
 /// is spelled differently is still a difference, and the next one might not be.
 pub fn clash_curl(ctx: &Ctx, method: &str, path: &str, body: Option<&str>) -> Option<String> {
-    let secret = ctx.sget("clash_secret");
+    let secret = clash_secret(ctx);
     let auth = format!("Authorization: Bearer {secret}");
     let url = format!("http://{}{path}", ctx.controller());
     let mut c = Command::new("curl");
@@ -375,7 +455,7 @@ pub fn clash_curl(ctx: &Ctx, method: &str, path: &str, body: Option<&str>) -> Op
 }
 
 fn clash_ok(ctx: &Ctx) -> bool {
-    let secret = ctx.sget("clash_secret");
+    let secret = clash_secret(ctx);
     Command::new("curl")
         .args(["--noproxy", "*", "-sS", "-m", "2", "-H", &format!("Authorization: Bearer {secret}"),
                &format!("http://{}/version", ctx.controller())])
@@ -418,6 +498,46 @@ fn repo_root() -> PathBuf {
         .unwrap_or_default()
 }
 
+fn collector_running(ctx: &Ctx) -> bool {
+    match read(&ctx.cfg.join("collector.pid")).trim().parse::<i32>() {
+        Ok(p) => p > 0 && unsafe { libc::kill(p, 0) } == 0,
+        Err(_) => false,
+    }
+}
+
+/// `_start_collector` — the metrics sidecar, tied to the router's lifetime.
+///
+/// Best-effort at every step: metrics turned off, no collector built, no clash
+/// API to poll — each is a reason to do nothing, never a reason to fail the
+/// `up` that called it. Without this the router comes up and `rowt mon` stays
+/// empty forever, which reads as a broken monitor rather than an absent feed.
+pub fn start_collector(ctx: &Ctx) {
+    if env_or("ROWT_METRICS", "on") == "off" || collector_running(ctx) {
+        return;
+    }
+    let (Some(bin), Some(ep)) = (collector_bin(ctx), controller(ctx)) else { return };
+    let sec = clash_secret(ctx);
+    fs::create_dir_all(ctx.logdir()).ok();
+    let Ok(log) = fs::OpenOptions::new().create(true).append(true)
+        .open(ctx.logdir().join("collector.log")) else { return };
+    let Ok(log2) = log.try_clone() else { return };
+    let mut cmd = Command::new(&bin);
+    cmd.env("ROWT_COLLECT_EP", &ep).env("ROWT_COLLECT_SECRET", &sec).env("ROWT_CFG", &ctx.cfg)
+        .stdin(Stdio::null()).stdout(Stdio::from(log)).stderr(Stdio::from(log2));
+    // `nohup` — the collector outlives the shell that started it, so a hangup
+    // on the terminal `rowt up` was typed into must not reach it.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            libc::signal(libc::SIGHUP, libc::SIG_IGN);
+            Ok(())
+        });
+    }
+    if let Ok(c) = cmd.spawn() {
+        let _ = fs::write(ctx.cfg.join("collector.pid"), format!("{}\n", c.id()));
+    }
+}
+
 pub fn stop_collector(ctx: &Ctx) {
     let pf = ctx.cfg.join("collector.pid");
     if let Ok(p) = read(&pf).trim().parse::<i32>() {
@@ -444,9 +564,40 @@ pub fn router_stop(ctx: &Ctx) {
 
 /// The router must never be left down with the system proxy still pointing at
 /// it — that strands the network.
+/// Prints, because the shell's `( cmd_proxy off )` prints: this fires in the
+/// MIDDLE of `router down`'s output, and a caller that swallowed the line would
+/// leave "  router stopped" as the only trace of a system proxy that was just
+/// switched off underneath it.
 pub fn ensure_no_limbo(ctx: &Ctx) {
     if host_running(ctx).is_some() { return; }
-    let _ = proxy_off(ctx);
+    say(&cmd_proxy_off(ctx));
+}
+
+/// `cmd_proxy off` — the stamp, then the write.
+///
+/// The shell has no un-stamped proxy-off on this path: `cmd_revert`,
+/// `cmd_restart`, `cmd_uninstall` and `_ensure_no_limbo` all go through
+/// `cmd_proxy`, which records the intent before it touches anything. Stamping
+/// only at the CLI arm and calling the raw `proxy_off` everywhere else leaves
+/// `proxy_intent=on` behind a `rowt down` — and that flag is exactly what the
+/// watchdog reads to decide whether an off proxy was deliberate, so the next
+/// tick would helpfully turn it back on.
+///
+/// The one deliberate exception stays raw: the captive-portal drop, which the
+/// shell spells `_captive_proxy_off` and documents as "intent stays on".
+pub fn cmd_proxy_off(ctx: &Ctx) -> String {
+    sset(ctx, "proxy_intent", "off");
+    proxy_off(ctx)
+}
+
+/// `cmd_proxy on` — the stamp, then the write.
+///
+/// Stamped BEFORE the router-running guard, like the shell: `rowt proxy on`
+/// with the router down still records that you asked for it, and the no-op
+/// path that prints "router not running" leaves `proxy_intent=on` behind.
+pub fn cmd_proxy_on(ctx: &Ctx, force: bool) -> String {
+    sset(ctx, "proxy_intent", "on");
+    proxy_on(ctx, force)
 }
 
 fn guarded() -> bool {
@@ -537,35 +688,323 @@ pub fn curl_code(proxy: &str, url: &str) -> String {
     }
 }
 
+/// `tail -8 "$HOST_LOG" >&2` — the last thing sing-box said before it gave up.
+///
+/// Spelled as the external command the shell runs, not read in-process: the
+/// point of showing it is the same either way, but `cli-diff` compares the argv
+/// trace, and a `tail` that never happens is a difference.
+fn tail_host_log(ctx: &Ctx) {
+    let _ = Command::new("tail").arg("-8").arg(ctx.host_log())
+        .stdout(Stdio::inherit()).stderr(Stdio::inherit()).status();
+}
+
 pub fn router_up(ctx: &Ctx) -> Result<String, String> {
     if let Some(pid) = host_running(ctx) {
         return Ok(format!("  router already running (pid {pid})"));
     }
     if !ctx.host_cfg().is_file() {
-        cmd_render(ctx)?;
+        // Printed, not swallowed: `cmd_router up` renders inline when there is
+        // no config yet and the shell shows where it put it. Only the caller
+        // that spells it `cmd_render >/dev/null` gets to be quiet.
+        say(&cmd_render(ctx)?);
     }
+    // A missing or too-old sing-box is the single most common reason a fresh
+    // machine cannot come up, and it is fixable here: fetch it before the start
+    // rather than reporting a spawn failure the user cannot act on.
+    crate::fetch::ensure_singbox(&ctx.cfg)?;
     eprintln!("==> starting rule-router on 127.0.0.1:{}", ctx.port);
     let mut child = start_router(ctx, true)?;
     let pid = child.id();
     if router_ready(ctx, 5, &mut child) {
+        start_collector(ctx);
         return Ok(format!("  ✓ running (pid {pid})"));
     }
-    eprintln!("error: router did not come up healthy within 5s — retrying once (plain log)");
+    eprintln!("error: router did not come up healthy within 5s (exited or API wedged) — see {}",
+              ctx.host_log().display());
+    tail_host_log(ctx);
+    eprintln!("==> retrying once (plain log, after a short settle)…");
     router_stop(ctx);
     let _ = child.try_wait();
     std::thread::sleep(std::time::Duration::from_secs(2));
     let mut child = start_router(ctx, false)?;
     let pid = child.id();
     if router_ready(ctx, 5, &mut child) {
+        start_collector(ctx);
         return Ok(format!("  ✓ running (pid {pid})  [plain log]"));
     }
     let _ = child.try_wait();
+    // Reported here rather than through the error string, because the shell
+    // prints the message, THEN the log tail, THEN clears the proxy — and an
+    // error that surfaces only at the top level would land after all of it.
+    eprintln!("error: router failed to come up healthy — see {}", ctx.host_log().display());
+    tail_host_log(ctx);
     ensure_no_limbo(ctx);
-    Err(format!("router failed to come up healthy — see {}", ctx.host_log().display()))
+    Err(crate::SILENT.into())
 }
 
 pub fn router_down(ctx: &Ctx) -> String {
     router_stop(ctx);
     ensure_no_limbo(ctx);
     "  router stopped".into()
+}
+
+// ---------------------------------------------------------------- the arms
+//
+// `up`, `down`, `reload` and `restart` are COMPOSITIONS: each one drives the
+// same handful of steps — render, router, proxy, VM — in a particular order,
+// and the order is the behaviour. They print as they go rather than returning
+// one assembled string, because that is what the shell does and what the
+// interleaving has to match: `router down` clears a stranded proxy in the
+// middle of its own output, so a caller that buffered its pieces would report
+// them in an order that never happened.
+//
+// `[ -s "$SERVERS" ]` is the shell's guard and stays byte-shaped (PORTING.md
+// §6.7): `[]` is two bytes, so a config whose server list is an empty array
+// passes it and then renders a selector with nothing under it.
+/// `echo` only when there is something to echo. An arm that already printed as
+/// it went returns an empty string, and a blank line where the shell emits
+/// nothing is a difference like any other.
+fn say(s: &str) {
+    if !s.is_empty() {
+        println!("{s}");
+    }
+}
+
+fn has_servers(ctx: &Ctx) -> bool {
+    fs::metadata(ctx.cfg.join("servers.json")).map(|m| m.is_file() && m.len() > 0).unwrap_or(false)
+}
+
+fn pkill(pattern: &str) {
+    let _ = Command::new("pkill").arg("-f").arg(pattern)
+        .stdout(Stdio::null()).stderr(Stdio::null()).status();
+}
+
+/// `cmd_revert` — what `rowt down` runs.
+///
+/// Every step is best-effort and the order is defensive: intent goes down FIRST
+/// so a watchdog tick landing mid-teardown treats this as deliberate instead of
+/// resurrecting what is being torn down, and each step is isolated so a failure
+/// with no active network service (a plane, a captive portal) cannot abort the
+/// teardown before sing-box is actually killed.
+pub fn cmd_revert(ctx: &Ctx, here: &Path) -> Result<String, String> {
+    sset(ctx, "intent", "down");
+    say(&cmd_proxy_off(ctx));
+    say(&router_down(ctx));
+    match crate::vm::cmd(ctx, here, "down") {
+        Ok(s) => say(&s),
+        Err(e) => eprintln!("error: {e}"),
+    }
+    // Last resort, and deliberately broader than `router_stop`'s: that one
+    // pkills the exact `<sb> run -c <host.json>` line, which misses a stray
+    // started against some other config — the high-CPU orphan this is for.
+    pkill(&format!("{} run", ctx.sb().display()));
+    let _ = fs::remove_file(ctx.pidfile());
+    eprintln!("==> stopped — system proxy off, sing-box down (servers kept at {}).",
+              ctx.cfg.join("servers.json").display());
+    Ok(String::new())
+}
+
+/// `cmd_reload` — re-detect the network, re-render, bounce, re-apply the proxy.
+pub fn cmd_reload(ctx: &Ctx, here: &Path) -> Result<String, String> {
+    if !has_servers(ctx) {
+        return Err(format!("nothing to reload — run '{} up' first", crate::PROG));
+    }
+    eprintln!("==> reloading for the current network…");
+    if ctx.sget("mode") == "vm" && crate::vm::vm_running() {
+        // re-detects the VM's bridged IP, re-renders, re-pushes the guest
+        say(&crate::vm::cmd(ctx, here, "up")?);
+    } else {
+        say(&cmd_render(ctx)?);   // re-detects the physical NIC
+    }
+    // Require the router to be HEALTHY (clash API answering, not merely a live
+    // process) before touching the proxy: a wedged start must fail honestly
+    // rather than report "reloaded" over a dead tunnel.
+    let mode = ctx.mode();
+    let up_ok = if host_running(ctx).is_some() {
+        router_stop(ctx);
+        router_up(ctx)
+    } else {
+        // No stop when nothing is running — the shell calls plain `router up`
+        // here, and a `pkill` for a router that was never started is a step
+        // that did not happen.
+        router_up(ctx)
+    };
+    let healthy = match up_ok {
+        Ok(s) => { say(&s); true }
+        Err(e) => { if e != crate::SILENT { eprintln!("error: {e}"); } false }
+    };
+    // host: the router's own API-readiness gate decides. vm: health is the VM's
+    // business, so fall back to the process check.
+    if mode == "host" {
+        if !healthy {
+            eprintln!("error: reload: router did not come up healthy — proxy left OFF (no limbo). See '{} router log'.",
+                      crate::PROG);
+            ensure_no_limbo(ctx);
+            return Err(crate::SILENT.into());
+        }
+    } else if host_running(ctx).is_none() {
+        eprintln!("error: reload: router did not come up — proxy left OFF (no limbo).");
+        ensure_no_limbo(ctx);
+        return Err(crate::SILENT.into());
+    }
+    say(&cmd_proxy_on(ctx, false));
+    sset(ctx, "intent", "up");
+    sset(ctx, "boot", &boot_id());
+    eprintln!("==> reloaded (mode={mode}).");
+    Ok(String::new())
+}
+
+/// `cmd_setup` — what `rowt up` runs: choose a mode, render, start, proxy.
+pub fn cmd_setup(ctx: &Ctx, here: &Path, args: &[String]) -> Result<String, String> {
+    let (mut forced, mut force) = (String::new(), false);
+    for a in args {
+        match a.as_str() {
+            "--force" | "-f" => force = true,
+            "host" | "vm" | "local" => forced = a.clone(),
+            "" => {}
+            _ => return Err(format!("usage: {} up [host|vm|local] [--force]", crate::PROG)),
+        }
+    }
+    // No target named: ask the network whether the escape lane is needed at
+    // all. Only here — an explicit `up host` must never be second-guessed.
+    if forced.is_empty() {
+        let canaries: Vec<String> = env_or("ROWT_GFW_CANARIES",
+            "https://www.google.com/generate_204 https://www.youtube.com/generate_204")
+            .split_whitespace().map(str::to_string).collect();
+        if Mac.direct_reaches_escape(&canaries, env_or("ROWT_GFW_TIMEOUT", "3").parse().unwrap_or(3)) {
+            forced = "local".into();
+            eprintln!("==> escape-lane hosts answer directly on this network — choosing local mode (no tunnel)");
+        }
+    }
+    if forced != "local" && !has_servers(ctx) {
+        return Err(format!("first import servers: {p} server add '<vless://...>' or {p} sub add <url>",
+                           p = crate::PROG));
+    }
+    // Recorded BEFORE the work, so a setup that FAILS still reads as "wanted
+    // up" and the watchdog keeps trying — which is the point of the flag.
+    sset(ctx, "intent", "up");
+    sset(ctx, "boot", &boot_id());
+    // Already fully set up in the requested mode? Then nothing to do — except
+    // in vm mode, where the bridged DHCP lease can move under us (reboot, new
+    // lease, network switch), so re-detect and re-wire before saying so.
+    if !force && !forced.is_empty() && ctx.sget("mode") == forced && host_running(ctx).is_some()
+        && (forced != "vm" || crate::vm::vm_running())
+    {
+        if forced == "vm" {
+            let cur = crate::vm::vm_ip_detect();
+            if !cur.is_empty() && cur != ctx.sget("vm_ip") {
+                eprintln!("==> VM bridged IP changed ({} -> {cur}) — re-wiring", ctx.sget("vm_ip"));
+                say(&crate::vm::cmd(ctx, here, "up")?);
+                say(&cmd_render(ctx)?);
+                router_stop(ctx);
+                say(&router_up(ctx)?);
+                say(&cmd_proxy_on(ctx, false));
+                eprintln!("==> re-wired to {cur}.");
+                return Ok(String::new());
+            }
+        }
+        eprintln!("==> already set up in '{forced}' mode (router running) — nothing to do.");
+        return Ok(format!("  re-detect/re-wire: {p} reload   (or '{p} vm up' to refresh the VM)",
+                          p = crate::PROG));
+    }
+    // sing-box up front (may need internet); fails fast with guidance if offline
+    crate::fetch::ensure_singbox(&ctx.cfg)?;
+    // Best-effort: grab the ad-block rule-set while a VPN is (probably) still
+    // up. Non-fatal — the block hand-list works without it, and `fetch host`
+    // retries later.
+    if !ctx.cfg.join("cache/geosite-category-ads-all.srs").is_file() {
+        let _ = crate::fetch::ads_ruleset(&ctx.cfg, false);
+    }
+    crate::fetch::all_geosites(&ctx.cfg);
+    match forced.as_str() {
+        "host" => {
+            sset(ctx, "mode", "host");
+            eprintln!("==> mode forced to 'host' (skipping probe)");
+        }
+        "local" => {
+            sset(ctx, "mode", "local");
+            eprintln!("==> mode: local — the escape lane routes direct; no tunnel, no server needed");
+        }
+        "vm" => {
+            eprintln!("==> mode: vm (skipping probe) — bringing up the VM first");
+            // sets mode=vm + vm_ip only on success; fails otherwise, mode unchanged
+            say(&crate::vm::cmd(ctx, here, "up")?);
+        }
+        // `cmd_probe || true` — a probe that reaches nothing has already said
+        // so, and the render below will fail honestly on its own.
+        _ => if let Ok(s) = crate::cmd_probe(ctx) { say(&s); },
+    }
+    let mode = ctx.mode();
+    if mode == "vm" && !crate::vm::vm_running() {   // probe may have chosen vm
+        say(&crate::vm::cmd(ctx, here, "up")?);
+    }
+    say(&cmd_render(ctx)?);
+    router_stop(ctx);                    // restart, not up, so a mode switch takes
+    // …and the result is NOT propagated, because the shell does not check it:
+    // `cmd_router restart` failing leaves `up` to go on and set the proxy and
+    // print "done", exiting 0 over a router that never came up. That is a bug
+    // (PORTING.md §6.7) — `restart` and `reload` both gate on health and refuse
+    // to touch the proxy — and it is bash's bug to fix on the bash side. The
+    // router's own no-limbo step has already cleared the proxy by now, so the
+    // machine is not stranded; only the exit status lies.
+    match router_up(ctx) {               // effect on a router that is already live
+        Ok(s) => say(&s),
+        Err(e) => if e != crate::SILENT { eprintln!("error: {e}"); },
+    }
+    say(&cmd_proxy_on(ctx, false));
+    // Switched to host mode: the VM is now dead weight (RAM/CPU/battery) and
+    // its Lima port-forwards would clash with the router — so power it down.
+    if mode == "host" && crate::vm::vm_running() {
+        eprintln!("==> stopping the '{}' VM — unused in host mode", crate::vm::VM_NAME);
+        match crate::vm::cmd(ctx, here, "down") {
+            Ok(s) => say(&s),
+            Err(e) => eprintln!("error: {e}"),
+        }
+    }
+    println!();
+    let mut out = Vec::new();
+    if mode == "local" {
+        eprintln!("==> done — mode=local. The escape lane routes direct; block and corp are unchanged.");
+        out.push(format!("  back to the tunnel: {} up host", crate::PROG));
+    } else {
+        eprintln!("==> done — mode={mode}. Listed domains now route through your escape VPN.");
+        out.push(format!("  switch anytime: {p} up host / {p} up vm / {p} up local", p = crate::PROG));
+    }
+    out.push(format!("  edit lanes:     {p} escape add <domain> / {p} corp add <domain>", p = crate::PROG));
+    Ok(out.join("\n"))
+}
+
+/// `cmd_restart` — bounce the tunnel in place: no re-render, no mode change.
+///
+/// Strict order so a mid-way failure never leaves an inconsistent state: the
+/// system proxy goes OFF first, the components bounce, and it comes back ON
+/// only once the router is confirmed up. A failed bounce leaves the proxy off,
+/// which is safe; leaving it on would point the machine at a dead port.
+pub fn cmd_restart(ctx: &Ctx, here: &Path) -> Result<String, String> {
+    if !has_servers(ctx) {
+        return Err(format!("nothing to restart — run '{} up' first", crate::PROG));
+    }
+    eprintln!("==> restart: turning the system proxy off first…");
+    say(&cmd_proxy_off(ctx));
+    let up_ok = if ctx.sget("mode") == "vm" {
+        match crate::vm::cmd(ctx, here, "restart") {
+            Ok(s) => { say(&s); host_running(ctx).is_some() }
+            Err(e) => { eprintln!("error: {e}"); false }
+        }
+    } else {
+        router_stop(ctx);
+        match router_up(ctx) {
+            Ok(s) => { say(&s); true }
+            Err(e) => { if e != crate::SILENT { eprintln!("error: {e}"); } false }
+        }
+    };
+    if !up_ok {
+        eprintln!("error: router did not come back up healthy (exited or clash API wedged) — leaving the system proxy OFF (no limbo). Check '{p} status' / '{p} router log'.",
+                  p = crate::PROG);
+        return Err(crate::SILENT.into());
+    }
+    say(&cmd_proxy_on(ctx, false));
+    sset(ctx, "intent", "up");            // a live restart means "should be up"
+    sset(ctx, "boot", &boot_id());
+    Ok(String::new())
 }

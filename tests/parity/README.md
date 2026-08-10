@@ -240,10 +240,18 @@ Three limits, stated rather than implied:
   installs each — and `yq` is not on the sandbox PATH, so the Clash YAML path
   could not be compared here even with a fixture. The half that writes,
   `--apply`, IS fully compared, from a seeded `import-review.json`.
-* **No case reloads the router.** The `router-up` scenario makes the router
-  "running" by writing the harness's own pid into `host.pid`, so any case that
-  restarts it would kill the gate. `corp sync` is out of reach for the same
-  reason.
+* **No case runs a lifecycle arm under `router-up`.** That scenario makes the
+  router "running" by writing the harness's own pid into `host.pid`, so any
+  case that stops or restarts it kills the gate. It rules out
+  `PARITY_SCENARIO=router-up` for `up`, `down`, `reload`, `restart` and
+  `uninstall` alike — the arms themselves ARE gated, from a router-down start,
+  which is the state whose failure path decides the exit status and clears the
+  proxy. `corp sync` is out of reach for the same reason.
+* **A purge leaves nothing to compare, and that is agreement.** `diff -q` on
+  two files that are both absent exits 2, which reads like "differs" — so the
+  lane-file check asks whether either side still has the file before it
+  compares. `uninstall --purge` removes the config directory on both sides,
+  and for a while that looked like three diverging lane files.
 
 ### The render gate
 
