@@ -382,6 +382,10 @@ vm nosucharm
 
 # corp sync / suggest, and the watchdog's read arms
 corp sync --dry-run
+# A tunnel whose route table holds two routes with the SAME network address
+# and different prefixes. bash's dedup keyed only the octets and dropped one.
+PARITY_SCENARIO=corp-vpn corp sync --dry-run
+PARITY_SCENARIO=corp-vpn corp sync --no-reload --quiet
 corp sync --no-reload --quiet
 corp suggest
 corp sync --nosuchflag

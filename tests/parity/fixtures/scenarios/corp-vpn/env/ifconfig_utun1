@@ -1,0 +1,2 @@
+utun1: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1380
+	inet 198.18.0.1 --> 198.18.0.1 netmask 0xffffffff

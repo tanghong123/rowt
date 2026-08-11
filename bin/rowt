@@ -53,7 +53,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.3.7"
+ROWT_VERSION="3.3.8"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -769,6 +769,18 @@ _sync_labels() {
 # The CIDRs a tunnel routes: its non-default routes, normalized from netstat's
 # shorthand (47.88/16 -> 47.88.0.0/16, 30 -> 30.0.0.0/8), minus the tunnel's own
 # host route.
+#
+# The sort carries the PREFIX as a key, and that is the whole point of the
+# awkward tab-delimited middle step. It used to be
+# `sort -t. -k1,1n -k2,2n -k3,3n -k4,4n -u`, whose keys are the four octets and
+# nothing else — so two routes with the same network address and different
+# prefixes compared EQUAL, and `-u` threw one away. A corp VPN advertising both
+# `119.42.224.0/19` and `119.42.224.0/20` therefore contributed one of them,
+# and which one was not even stable: the live network dropped the /19, the
+# fixture drops the /20. Everything in the half that lost was routed into the
+# tunnel by the OS and classified DIRECT by rowt — bound to en0, bypassing the
+# route, timing out. Found 2026-08-11 by rowt-rs counting 107 routes to this
+# function's 106.
 _vpn_cidrs() {
   local ifc="$1" gw; gw="$(ifconfig "$ifc" 2>/dev/null | awk '/inet /{print $2; exit}')"
   netstat -rn -f inet 2>/dev/null | awk -v i="$ifc" -v gw="$gw" '
@@ -776,8 +788,8 @@ _vpn_cidrs() {
       d=$1; p=""; k=index(d,"/"); if(k){ p=substr(d,k+1); d=substr(d,1,k-1) }
       n=split(d,a,"."); if(p==""){ p=(n==4)?"32":(n*8) }
       while(n<4){ a[++n]="0" }
-      print a[1]"."a[2]"."a[3]"."a[4]"/"p
-    }' | sort -t. -k1,1n -k2,2n -k3,3n -k4,4n -u
+      print a[1]"."a[2]"."a[3]"."a[4]"/"p"\t"a[1]" "a[2]" "a[3]" "a[4]" "p
+    }' | sort -k2,2n -k3,3n -k4,4n -k5,5n -k6,6n -u | cut -f1
 }
 
 # An IPv4 address or CIDR, on its own line (optionally indented). Used to tell the

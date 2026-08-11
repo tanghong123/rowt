@@ -1,0 +1,22 @@
+A machine with a corp VPN up, which the base fixture has no way to express:
+`ifconfig -l` lists utun0/utun1 but nothing gives them routes, so `_vpn_iface`
+finds no tunnel and every corp-sync case runs against an empty route table.
+
+The point of the route table is the PAIR:
+
+    198.18/19    ->  198.18.0.0/19
+    198.18/20    ->  198.18.0.0/20
+
+Two routes with the same network address and different prefix lengths, which a
+real corp VPN advertises and no fixture did. `_vpn_cidrs` deduped with
+`sort -t. -k1,1n -k2,2n -k3,3n -k4,4n -u`, whose keys are the four octets — the
+prefix is in NO key, so `-u` called these duplicates and dropped the wider one.
+On the live corp network that silently left 119.42.240.0-119.42.255.255 out of
+the corp lane while the OS routed it into the tunnel: classified DIRECT, bound
+to en0, timing out. Found 2026-08-11 by rowt-rs counting 107 routes where bash
+counted 106.
+
+198.18/15 is RFC 2544/6890 benchmarking space — reserved and non-routable, and
+unlike RFC 5737's /24s it is big enough to hold an overlapping /19 and /20.
+The shorthand forms are deliberate too: netstat writes `198.18/19`, not
+`198.18.0.0/19`, so the normalization runs on the way through.

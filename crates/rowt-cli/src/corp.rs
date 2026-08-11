@@ -233,12 +233,19 @@ fn vpn_cidrs(ifc: &str) -> Vec<String> {
             v.push(c);
         }
     }
-    // `sort -t. -k1,1n -k2,2n -k3,3n -k4,4n -u` — numeric by octet, not lexical.
+    // Numeric by octet AND THEN BY PREFIX — a total order, so nothing here
+    // depends on sort stability. The shell keys the prefix too now; before
+    // 2026-08-11 it did not, which made `sort -u` drop one of an overlapping
+    // pair like `119.42.224.0/19` + `/20`. This side already kept both (it
+    // dedups whole strings), which is how the disagreement was noticed — but
+    // it left the ORDER of such a pair to insertion order, and two
+    // implementations agreeing by luck is not agreement.
     v.sort_by_key(|c| {
-        let a = c.split('/').next().unwrap_or("");
+        let (a, p) = c.split_once('/').unwrap_or((c.as_str(), "0"));
         let o: Vec<u32> = a.split('.').map(|x| x.parse().unwrap_or(0)).collect();
         (o.first().copied().unwrap_or(0), o.get(1).copied().unwrap_or(0),
-         o.get(2).copied().unwrap_or(0), o.get(3).copied().unwrap_or(0))
+         o.get(2).copied().unwrap_or(0), o.get(3).copied().unwrap_or(0),
+         p.parse::<u32>().unwrap_or(0))
     });
     v.dedup();
     v
