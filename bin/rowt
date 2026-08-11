@@ -53,7 +53,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.3.2"
+ROWT_VERSION="3.3.3"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -3194,17 +3194,23 @@ _watch_bin() { # the Rust tick planner, located like the other companions
 # different instant, double the traffic to the four probe hosts, and fill the log
 # with divergences that are timing artifacts — a log you learn to ignore is worse
 # than no log.
-_watch_shadow() {
-  local wb; wb="$(_watch_bin)" || return 0
-  [ -n "$wb" ] || return 0
+# Record one guard-phase action, in `rowt-watch-tick`'s vocabulary. No-op unless
+# the shadow armed `_SH_ACTS`, so the authoritative path pays nothing and cannot
+# fail because of it.
+_wact() { [ -n "${_SH_ACTS:-}" ] && printf '%s\n' "$*" >> "$_SH_ACTS" 2>/dev/null; return 0; }
+
+# Snapshot the guard-phase observation, at guard time. $1=captive $2=intent
+# $3=proxy_intent. Handed to the Rust tick verbatim, so both sides decide from
+# the same instant — the point §6.5 makes about never letting the shadow observe
+# for itself.
+_wobs() {
+  [ -n "${_SH_ACTS:-}" ] || return 0
   have jq || return 0
-  local svc ifc obs plan actual
-  svc="$(active_service 2>/dev/null || true)"
-  ifc="$(detect_iface 2>/dev/null || true)"
-  obs="$(mktemp)"; plan="$(mktemp)"; actual="$(mktemp)"
+  local svc ifc; svc="$(active_service 2>/dev/null || true)"; ifc="$(detect_iface 2>/dev/null || true)"
+  _SH_OBS="$(mktemp)"
   jq -n \
-    --arg pi "$_SH_PROXY_INTENT" --arg cap "$_SH_CAP" --arg svc "$svc" \
-    --arg intent "$_SH_INTENT" --arg ifc "$ifc" \
+    --arg pi "$3" --arg cap "$1" --arg svc "$svc" --arg intent "$2" --arg ifc "$ifc" \
+    --arg mode "$(sget mode 2>/dev/null || true)" \
     --argjson any "$( { [ -n "$svc" ] && _proxy_any_on "$svc"; } && echo true || echo false)" \
     --argjson running "$(host_running && echo true || echo false)" \
     --argjson boot "$([ "$(sget boot)" = "$(_boot_id)" ] && echo true || echo false)" \
@@ -3212,12 +3218,31 @@ _watch_shadow() {
     --argjson flag "$([ "$_SH_CAPTIVE0" = 1 ] && echo true || echo false)" \
     '{obs:{proxy_intent:$pi, captive:$cap, active_service:$svc, proxy_any_on:$any,
            host_running:$running, intent:$intent, boot_matches:$boot, iface:$ifc,
-           proxy_pointing_ok:$pointing, mode:"host"},
-      state:{captive_flag:$flag}}' > "$obs" 2>/dev/null
-  "$wb" --obs "$obs" 2>/dev/null | sed -n 's/^log //p' > "$plan" || true
-  # what the shell actually decided this tick, timestamps stripped
-  tail -n "+$(( _SH_LOG0 + 1 ))" "$WATCH_LOG" 2>/dev/null \
-    | sed -e 's/^[0-9-]* [0-9:]*  //' > "$actual" || true
+           proxy_pointing_ok:$pointing, mode:(if $mode == "" then "host" else $mode end)},
+      state:{captive_flag:$flag}}' > "$_SH_OBS" 2>/dev/null
+}
+
+_watch_shadow() {
+  local wb; wb="$(_watch_bin)" || return 0
+  [ -n "$wb" ] || return 0
+  have jq || return 0
+  local obs plan actual
+  # The observation was snapshotted by `_wobs` at guard time, BEFORE the tick
+  # acted. Rebuilding it here would read the world the tick has already changed
+  # — `_proxy_any_on` is false once `_captive_proxy_off` has run — and every
+  # captive episode would "diverge" on nothing but the order of events.
+  obs="${_SH_OBS:-}"; [ -s "$obs" ] || return 0
+  plan="$(mktemp)"; actual="$(mktemp)"
+  # The WHOLE plan, not `sed -n 's/^log //p'`. Filtering to `log` threw away
+  # every decision that was not a message — journal, corp-sync, recover,
+  # clear-stale-proxy, the phase verdict — and then compared what was left
+  # against the shell's raw prose, which is a different vocabulary AND a
+  # different scope. That comparison could only ever report "identical" for a
+  # tick where both sides said nothing.
+  "$wb" --obs "$obs" --phase guard 2>/dev/null > "$plan" || true
+  # …against the shell's own actions, recorded by `_wact` in that same
+  # vocabulary as it took them.
+  cp "${_SH_ACTS:-/dev/null}" "$actual" 2>/dev/null || : > "$actual"
   local verdict sig
   if diff -q "$plan" "$actual" >/dev/null 2>&1; then verdict="identical"; else verdict="DIVERGED"; fi
   sig="$(printf '%s %s' "$_SH_CAP" "$verdict" | cksum | awk '{print $1}')"
@@ -3457,8 +3482,14 @@ PLIST
       _SH_CAPTIVE0="$(sget captive 2>/dev/null || true)"
       _SH_LOG0="$(wc -l < "$WATCH_LOG" 2>/dev/null || echo 0)"; _SH_LOG0="${_SH_LOG0// /}"
       _SH_CAP=""
+      # The guard phase's ACTION trace, in the Rust tick's own vocabulary. Armed
+      # only under shadow, so the normal tick path is untouched — `_wact` is a
+      # no-op with `_SH_ACTS` unset.
+      _SH_ACTS=""
+      [ "${ROWT_WATCH_SHADOW:-$(sget shadow_watch)}" = 1 ] && _SH_ACTS="$(mktemp)"
       trap 'rmdir "$CFG/watch.lock" 2>/dev/null || true
-            [ "${ROWT_WATCH_SHADOW:-$(sget shadow_watch)}" = 1 ] && [ -n "$_SH_CAP" ] && _watch_shadow || true' EXIT
+            [ "${ROWT_WATCH_SHADOW:-$(sget shadow_watch)}" = 1 ] && [ -n "$_SH_CAP" ] && _watch_shadow || true
+            rm -f "${_SH_ACTS:-}" "${_SH_OBS:-}" 2>/dev/null || true' EXIT
 
       local intent proxy_intent
       intent="$(sget intent 2>/dev/null || true)"
@@ -3478,35 +3509,46 @@ PLIST
       # network join, so the drop typically lands seconds after connecting.
       local cap; cap="$(_captive_state)"
       _SH_CAP="$cap"; _SH_INTENT="$intent"; _SH_PROXY_INTENT="$proxy_intent"
+      _wobs "$cap" "$intent" "$proxy_intent"
       # Journal what this network/VPN advertises whenever it CHANGES (no-op in
       # steady state) — includes the captive state, so portal episodes and their
       # advertised domains land in the same line (log/discovery.log).
       _discovery_journal "$cap" || true
+      _wact "journal $cap"
       if [ "$cap" = captive ]; then
         if [ "$(sget captive)" != 1 ]; then
           sset captive 1
           local csvc; csvc="$(active_service 2>/dev/null || true)"
           if [ -n "$csvc" ] && _proxy_any_on "$csvc"; then
             _watch_log "captive portal detected — dropping system proxy on '$csvc' so the login page can load (auto-restores after login)"
+            _wact "log captive portal detected — dropping system proxy on '$csvc' so the login page can load (auto-restores after login)"
             _audit "watchdog: captive portal — system proxy off on '$csvc' (intent stays on; auto-restore on clear)"
+            _wact "audit watchdog: captive portal — system proxy off on '$csvc' (intent stays on; auto-restore on clear)"
+            _wact "captive-proxy-off $csvc"
             _captive_proxy_off "$csvc" \
               || _watch_log "captive: could not drop the proxy (sudoers missing?) — log in after a manual '$PROG proxy off'"
           else
             _watch_log "captive portal detected — proxy already off; waiting for login"
+            _wact "log captive portal detected — proxy already off; waiting for login"
           fi
         fi
+        _wact "next stop"
         exit 0
       fi
       if [ "$(sget captive)" = 1 ]; then
-        [ "$cap" = clear ] || exit 0    # not provably clear yet — stay hands-off
+        if [ "$cap" != clear ]; then _wact "next stop"; exit 0; fi   # not provably clear — hands off
         sset captive ""
         local csvc2; csvc2="$(active_service 2>/dev/null || true)"
         if [ -n "$csvc2" ] && host_running; then
           _watch_log "captive portal cleared — restoring system proxy on '$csvc2'"
+          _wact "log captive portal cleared — restoring system proxy on '$csvc2'"
           _audit "watchdog: captive portal cleared — system proxy restored on '$csvc2'"
+          _wact "audit watchdog: captive portal cleared — system proxy restored on '$csvc2'"
+          _wact "captive-proxy-on $csvc2"
           _captive_proxy_on "$csvc2" || true
         elif [ -n "$csvc2" ]; then
           _watch_log "captive portal cleared but the router is down — leaving the proxy off for recovery to handle"
+          _wact "log captive portal cleared but the router is down — leaving the proxy off for recovery to handle"
         fi
       fi
       # rowt is a user tool with no auto-start, so after a reboot/login it won't be
@@ -3524,22 +3566,32 @@ PLIST
           # resolver-change tick fires and recovers cleanly. detect_iface is empty
           # when no interface has both an IP and a gateway = offline.
           if [ -n "$(detect_iface 2>/dev/null || true)" ]; then
+            _wact "recover router is DOWN but marked up (crashed?)"
             _watch_recover "router is DOWN but marked up (crashed?)" cmd_reload || true
           else
             _watch_log "router down + marked up, but OFFLINE — deferring recovery until the network returns"
+            _wact "log router down + marked up, but OFFLINE — deferring recovery until the network returns"
           fi
+          _wact "next stop"
           exit 0
         fi
         local gsvc; gsvc="$(active_service 2>/dev/null || true)"
         if [ -n "$gsvc" ] && _proxy_pointing_ok "$gsvc"; then
           _watch_log "rowt not running but '$gsvc' proxy still set to 127.0.0.1:$PORT — clearing (stale, no-limbo)"
+          _wact "log rowt not running but '$gsvc' proxy still set to 127.0.0.1:$PORT — clearing (stale, no-limbo)"
           _audit "watchdog: cleared stale system proxy on '$gsvc' (router down, intent=${intent:-unset})"
+          _wact "audit watchdog: cleared stale system proxy on '$gsvc' (router down, intent=${intent:-unset})"
+          _wact "clear-stale-proxy $gsvc"
           _ns_write 1 -setsocksfirewallproxystate "$gsvc" off 2>/dev/null || true
           _ns_write 1 -setwebproxystate       "$gsvc" off 2>/dev/null || true
           _ns_write 1 -setsecurewebproxystate "$gsvc" off 2>/dev/null || true
         fi
+        _wact "next stop"
         exit 0
       fi
+      # Guard phase ends here: everything past this point is `netcheck`, which
+      # this shadow does not yet model (see PORTING.md §6.5).
+      _wact "next settle"
       sleep 2                                     # let the network settle
       host_running || exit 0                      # may have gone down while we waited
       # Corp-lane sync: mirror the physical NIC's DHCP search domains AND any

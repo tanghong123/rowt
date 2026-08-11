@@ -500,24 +500,47 @@ coexistence questions live.
 unexplained divergences — suggest 14 days including at least one corp-network
 day and one foreign-network day.
 
-**The comparator's scope must be fixed before that clock is worth starting.**
-As built, `_watch_shadow` diffs two things that are not the same kind:
+**The first comparator did not compare anything.** Worth recording in full,
+because it looked like it was working for two days:
 
 ```bash
-"$wb" --obs "$obs" | sed -n 's/^log //p' > "$plan"     # the pure FSM's decisions
+"$wb" --obs "$obs" | sed -n 's/^log //p' > "$plan"            # ONLY the Log actions
 tail -n "+$((_SH_LOG0+1))" "$WATCH_LOG" | sed … > "$actual"  # EVERY line the tick logged
 ```
 
-`actual` includes whatever the shell logged around the FSM — `corp sync`'s
-summary, the "moved network … no reload needed, skip" note — none of which the
-FSM emits, and none of which is a divergence. First real window bore this out:
-82 entries, 50 identical, **5 DIVERGED, all five explained and none a
-functional gap** (corp sync is ported — `rowt-cli/src/watch.rs` calls
-`corp::sync`; it just does not surface through the `log ` channel). Any tick
-that runs a sync or sees a network move diverges forever, which is this
-section's own stated failure mode: a log you have learned to ignore is worse
-than no log. Narrow `actual` to FSM-owned lines — the FSM's job is decisions,
-not reproducing the shell's prose — then start the 14 days.
+Three faults, each enough on its own:
+
+* **The plan was filtered to `log `.** The tick prints one line per action —
+  `journal`, `audit`, `corp-sync`, `recover`, `clear-stale-proxy`,
+  `write-net-id`, `reload`, `next`. Every decision that was not a *message* was
+  discarded before the diff. `Action::CorpSync` exists and was being decided
+  correctly; it simply never reached the comparison.
+* **The two sides spoke different languages.** What survived the filter was
+  compared against the shell's human prose (`==> corp sync: updated corp lane…`),
+  which no vocabulary of actions will ever equal.
+* **The observation was built at EXIT**, after the tick had acted — so
+  `proxy_any_on` was read *after* `_captive_proxy_off` had already run — and
+  `mode` was hardcoded `"host"`, lying to the FSM on any machine in local mode.
+
+Net effect: `identical` meant "both sides produced nothing", and any tick that
+logged a sentence meant `DIVERGED`. The first window read 82 entries, 50
+identical, 5 DIVERGED — and all five were artifacts, none a functional gap.
+Exactly the failure this section warns about: a log you have learned to ignore.
+
+**Now:** `_wact` records the shell's own actions in the tick's vocabulary as it
+takes them, `_wobs` snapshots the observation at guard time (so both sides
+decide from the same instant, per the rule above), and the full plan is compared
+against the full trace. Proven both ways — a clean tick agrees on
+`journal clear` / `next stop`, and mutating the shell to record `journal bogus`
+is caught with a readable diff.
+
+**Scope: the guard phase only.** `netcheck` — settle, `corp_sync`, the
+net-change reload, the health probe — is not shadowed yet; the shell marks the
+boundary with `next settle` and stops recording. That half needs its own
+observation snapshot taken after the settle (its `health_ok` is not known until
+`_watch_health` has run), which is why it is a separate step rather than a
+larger version of this one. **The 14 days should not start until it lands** —
+half a tick shadowed is not the evidence the promotion rule is asking for.
 
 ### 6.6 Cutover keeps a live escape hatch
 
