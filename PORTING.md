@@ -534,13 +534,30 @@ against the full trace. Proven both ways — a clean tick agrees on
 `journal clear` / `next stop`, and mutating the shell to record `journal bogus`
 is caught with a readable diff.
 
-**Scope: the guard phase only.** `netcheck` — settle, `corp_sync`, the
-net-change reload, the health probe — is not shadowed yet; the shell marks the
-boundary with `next settle` and stops recording. That half needs its own
-observation snapshot taken after the settle (its `health_ok` is not known until
-`_watch_health` has run), which is why it is a separate step rather than a
-larger version of this one. **The 14 days should not start until it lands** —
-half a tick shadowed is not the evidence the promotion rule is asking for.
+**Both phases are now shadowed.** `netcheck` gets its own snapshot, assembled
+at the end of the tick from values captured as it read them, because two of its
+inputs cannot be known up front: `health_ok` only after `_watch_health` probes,
+and the streak counters only *before* the shell touches them —
+`_watch_health` increments `watch.health` and `_watch_recover` stamps
+`watch.restart`, so reading either at EXIT would hand the FSM the shell's own
+result and it would count the same failure twice.
+
+Two lessons from getting it wrong first:
+
+* **Record the decision where it is made, not at the call site.** The first
+  attempt recorded `recover` before calling `_watch_recover`, which also has a
+  cooldown branch that logs "holding off" and recovers nothing — so every
+  held-off recovery would have diverged. `_watch_recover` and `_watch_health`
+  now record their own outcomes.
+* **Say nothing about a phase that did not finish.** `corp_sync` can take the
+  router down, and the tick then exits before the net-id is known — leaving a
+  trace claiming netcheck actions against a plan containing only the guard. Both
+  netcheck openers are therefore recorded at the point where phase two is known
+  to be comparable, so the shadow stays silent about ticks it cannot judge.
+
+With that, the 14-day window is worth starting: a real-use window with zero
+unexplained divergences, including at least one corp-network day and one
+foreign-network day.
 
 ### 6.6 Cutover keeps a live escape hatch
 

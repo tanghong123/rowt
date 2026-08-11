@@ -53,7 +53,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.3.3"
+ROWT_VERSION="3.3.4"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -3240,6 +3240,32 @@ _watch_shadow() {
   # different scope. That comparison could only ever report "identical" for a
   # tick where both sides said nothing.
   "$wb" --obs "$obs" --phase guard 2>/dev/null > "$plan" || true
+  # If guard handed off, replay netcheck too, from ITS own snapshot — the tick
+  # settles and runs corp_sync in between, so the guard observation is stale by
+  # then. `health_ok` is not knowable until `_watch_health` has probed, which is
+  # why this observation is assembled at the end rather than up front.
+  if grep -qx 'next settle' "$plan" 2>/dev/null && [ -n "${_SH2_NID+x}" ]; then
+    local obs2; obs2="$(mktemp)"
+    jq -n \
+      --arg svc "$_SH2_SVC" --arg ifc "$_SH2_IFC" --arg cur "$_SH2_CUR" \
+      --arg nid "$_SH2_NID" --arg last "$_SH2_LAST" \
+      --arg mode "$(sget mode 2>/dev/null || true)" \
+      --argjson pointing "$( { [ -n "$_SH2_SVC" ] && _proxy_pointing_ok "$_SH2_SVC"; } && echo true || echo false)" \
+      --argjson bypass "$( { [ -n "$_SH2_SVC" ] && _proxy_bypass_ok "$_SH2_SVC"; } && echo true || echo false)" \
+      --argjson health "$([ "${_SH2_HEALTH:-ok}" = ok ] && echo true || echo false)" \
+      --argjson fails "${_SH_FAILS0:-0}" \
+      --argjson lastrec "${_SH_LASTREC0:-0}" \
+      --argjson now "$(date +%s)" \
+      '{obs:{proxy_intent:"", captive:"clear", active_service:$svc, proxy_any_on:true,
+             host_running:true, intent:"up", boot_matches:true, iface:$ifc,
+             proxy_pointing_ok:$pointing, proxy_bypass_ok:$bypass,
+             bound_iface:$cur, net_id:$nid, health_ok:$health, now:$now,
+             mode:(if $mode == "" then "host" else $mode end)},
+        state:{captive_flag:false, health_fails:$fails, last_net_id:$last,
+               last_recovery:$lastrec}}' > "$obs2" 2>/dev/null
+    "$wb" --obs "$obs2" --phase netcheck 2>/dev/null >> "$plan" || true
+    rm -f "$obs2"
+  fi
   # …against the shell's own actions, recorded by `_wact` in that same
   # vocabulary as it took them.
   cp "${_SH_ACTS:-/dev/null}" "$actual" 2>/dev/null || : > "$actual"
@@ -3292,11 +3318,21 @@ _watch_recover() {
   local now last; now="$(date +%s)"; last="$(cat "$WATCH_RESTART" 2>/dev/null || echo 0)"
   if [ "$(( now - last ))" -lt "$HEALTH_COOLDOWN" ]; then
     _watch_log "$reason — last recovery $(( now - last ))s ago (< ${HEALTH_COOLDOWN}s cooldown), holding off"
+    # Recorded HERE rather than at the call site, because only this function
+    # knows which of `recover_or_hold`'s two branches was taken. A call site
+    # that assumed "recover" would diverge every time the cooldown held.
+    _wact "log $reason — last recovery $(( now - last ))s ago (< ${HEALTH_COOLDOWN}s cooldown), holding off"
     return 1
   fi
   printf '%s\n' "$now" > "$WATCH_RESTART" 2>/dev/null || true
   rm -f "$WATCH_HEALTH"
   _watch_log "$reason — recovering ($*)"
+  # The FSM logs before it acts, so the decision is visible even if the reload
+  # then fails; the lines that follow the action (`recovery ok`, `recovery
+  # INCOMPLETE`) are the CALLER's, not the plan's, and are deliberately not
+  # recorded.
+  _wact "log $reason — recovering ($*)"
+  _wact "recover $reason"
   # Attribute this mutation (and any die() inside it) to the watchdog in the
   # audit log, so a watchdog reload is never mistaken for a hands-on one.
   _AUDIT_OP="watchdog: $* ($reason)"
@@ -3319,12 +3355,16 @@ _watch_health() {
   # Offline (no interface IP) — a restart can't help and a returning network
   # fires its own resolver-change reload, so just reset the streak and bail.
   local ip; ip="$(ipconfig getifaddr "${1:-}" 2>/dev/null || true)"
-  [ -n "$ip" ] || { rm -f "$WATCH_HEALTH"; return 0; }
-  if _watch_probe; then rm -f "$WATCH_HEALTH"; return 0; fi   # healthy — clear streak
+  # Offline and healthy both reset the streak and plan nothing, so neither
+  # records an action — matching the FSM, which only changes state there.
+  [ -n "$ip" ] || { rm -f "$WATCH_HEALTH"; _SH2_HEALTH=offline; return 0; }
+  if _watch_probe; then rm -f "$WATCH_HEALTH"; _SH2_HEALTH=ok; return 0; fi  # healthy — clear streak
+  _SH2_HEALTH=fail
   local fails; fails="$(( $(cat "$WATCH_HEALTH" 2>/dev/null || echo 0) + 1 ))"
   printf '%s\n' "$fails" > "$WATCH_HEALTH" 2>/dev/null || true
   if [ "$fails" -lt "$HEALTH_FAILS" ]; then
     _watch_log "escape tunnel probe failed ($fails/$HEALTH_FAILS)"
+    _wact "log escape tunnel probe failed ($fails/$HEALTH_FAILS)"
     return 0
   fi
   _watch_recover "tunnel wedged ($fails consecutive probe failures)" cmd_reload
@@ -3487,6 +3527,13 @@ PLIST
       # no-op with `_SH_ACTS` unset.
       _SH_ACTS=""
       [ "${ROWT_WATCH_SHADOW:-$(sget shadow_watch)}" = 1 ] && _SH_ACTS="$(mktemp)"
+      # The two counters netcheck reasons about, as they were BEFORE the tick.
+      # `_watch_health` increments the streak and `_watch_recover` stamps the
+      # restart time, so reading either at EXIT would hand the FSM the shell's
+      # own result and it would count the same failure twice.
+      _SH_FAILS0="$(cat "$WATCH_HEALTH" 2>/dev/null || echo 0)"
+      _SH_LASTREC0="$(cat "$WATCH_RESTART" 2>/dev/null || echo 0)"
+      _SH2_HEALTH=ok
       trap 'rmdir "$CFG/watch.lock" 2>/dev/null || true
             [ "${ROWT_WATCH_SHADOW:-$(sget shadow_watch)}" = 1 ] && [ -n "$_SH_CAP" ] && _watch_shadow || true
             rm -f "${_SH_ACTS:-}" "${_SH_OBS:-}" 2>/dev/null || true' EXIT
@@ -3566,7 +3613,6 @@ PLIST
           # resolver-change tick fires and recovers cleanly. detect_iface is empty
           # when no interface has both an IP and a gateway = offline.
           if [ -n "$(detect_iface 2>/dev/null || true)" ]; then
-            _wact "recover router is DOWN but marked up (crashed?)"
             _watch_recover "router is DOWN but marked up (crashed?)" cmd_reload || true
           else
             _watch_log "router down + marked up, but OFFLINE — deferring recovery until the network returns"
@@ -3608,6 +3654,16 @@ PLIST
       nid="$(net_id "$ifc")"                       # e.g. "MyWifi 192.168.1.42/192.168.1.1"
       last="$(cat "$WATCH_NET" 2>/dev/null || true)"
       printf '%s\n' "$nid" > "$WATCH_NET" 2>/dev/null || true
+      # Both netcheck openers are recorded HERE, not where each happens.
+      # `corp_sync` can take the router down and the tick then exits before this
+      # point — leaving a trace that claims a phase it never finished, against a
+      # plan that has only the guard in it. Recording once phase two is known to
+      # be comparable keeps the shadow silent about ticks it cannot judge.
+      _wact "corp-sync"
+      _wact "write-net-id $nid"
+      # What the netcheck observation is built from, captured as the tick reads
+      # it rather than re-read at EXIT — same rule as the guard snapshot.
+      _SH2_IFC="$ifc"; _SH2_CUR="$cur"; _SH2_SVC="$svc"; _SH2_NID="$nid"; _SH2_LAST="$last"
       [ -n "$ifc" ] && [ "$ifc" != "$cur" ] && need=1
       [ -n "$svc" ] && { _proxy_pointing_ok "$svc" && _proxy_bypass_ok "$svc" || need=1; }
       if [ "$need" -eq 0 ]; then
@@ -3617,6 +3673,7 @@ PLIST
         # silent so the periodic liveness poll doesn't fill the log.
         if [ -n "$last" ] && [ "$last" != "$nid" ]; then
           _watch_log "moved network [$last -> $nid] but iface=$ifc + proxy '$svc' unchanged — no reload needed, skip"
+          _wact "log moved network [$last -> $nid] but iface=$ifc + proxy '$svc' unchanged — no reload needed, skip"
         fi
         # Network is fine — but is the tunnel actually carrying traffic? This is
         # the self-heal for a wedge that doesn't move the network (server-side
@@ -3625,11 +3682,16 @@ PLIST
         # local mode has no tunnel to probe; leaving this on would fail every
         # tick and drive _watch_recover into a permanent reload loop.
         [ "$(sget mode)" = "local" ] || _watch_health "$ifc" || true
+        _wact "next stop"
         exit 0
       fi
       _watch_log "network change (iface '$cur' -> '$ifc', [$nid], service '$svc') — reloading"
+      _wact "log network change (iface '$cur' -> '$ifc', [$nid], service '$svc') — reloading"
       _AUDIT_OP="watchdog: reload (network change '$cur'->'$ifc')"
       _audit "BEGIN watchdog reload — network change (iface '$cur' -> '$ifc', [$nid])"
+      _wact "audit BEGIN watchdog reload — network change (iface '$cur' -> '$ifc', [$nid])"
+      _wact "reload network change '$cur'->'$ifc'"
+      _wact "next stop"
       cmd_reload >>"$WATCH_LOG" 2>&1 && { _watch_log "reload ok"; rm -f "$WATCH_HEALTH"; _audit "END   watchdog reload — ok"; } || { _watch_log "reload FAILED"; _audit "END   watchdog reload — FAILED"; }
       _AUDIT_OP=""
       ;;
