@@ -198,8 +198,8 @@ revertible and gated.
 | **0** ✅ | Characterization: generate + harvest the corpus (§6.1), build the differential harness (§6.2) and platform shims (§6.4), write the coverage ledger (§6.8), commit synthetic fixtures | **done** — `tests/parity/`. Mask makes all 38 read-only commands byte-stable across runs; 92-verdict classifier golden; ledger green on all 37 command arms; containment verified (sandboxed `proxy on` / `up` / `down` leave the live system untouched) |
 | **1** ◑ | `rowt-core::render` — replace the giant jq program. bash calls `rowt-rs render` internally. | **render done** — `crates/rowt-render`, 18/18 cases canonically identical on host + vm (`parity render-matrix`), and identical against the real 22-server config. Remaining: throwaway-port outbound oracle, bash cutover, shadow window |
 | **2** ✅ | classify/explain, lane set logic, absorb `corp-sync-reconcile.py` | **done** — classify: 9/9 cases × 92 destinations identical on `(lane, reason)`; lane edits: 12/12 cases identical across all three files + messages; reconcile: 210 generated cases identical to the Python. `selftest` 9/9 |
-| **3** ◑ | watchdog: FSM into core, effects via `PlatformMac`; `cmd_watch` execs the Rust tick | **FSM + shadow done** — `rowt-core::watch`, 17 unit tests replaying §11's decision table; `parity watch-diff` 5/5; `ROWT_WATCH_SHADOW=1` compares the shell's decisions against the FSM's plan on every real tick, feeding it the tick's own captive verdict rather than re-probing. **Effects done too** — `perform` drives `PlatformMac`, runs the real `cmd_reload` for a recovery, and re-probes the escape lane through the clash delay test the way the shell does. Remaining: the `cmd_watch` cutover (bash still runs its own tick and merely shadows this one), and **time** — the shadow window itself |
-| **4** ◑ | CLI. Built as `rowt-rs` alongside the shell first, so each command lands with evidence; only then does bash reduce to a wrapper and get deleted. Formula ships the prebuilt binary (monitor-asset pattern). | **all 37 arms native AND gated** — `parity cli-diff` compares stdout, exit status, the **whole config tree** (content and mode), the **argv trace** and the **audit log** over 241 cases. Every arm but the TUI is compared; the lifecycle four were the last to be, and all four diverged when first asked. Remaining: the `ROWT_IMPL` cutover |
+| **3** ◑ | watchdog: FSM into core, effects via `PlatformMac`; `cmd_watch` execs the Rust tick | **FSM + shadow done** — `rowt-core::watch`, 18 unit tests replaying §11's decision table; `parity watch-diff` 5/5; `ROWT_WATCH_SHADOW=1` compares the shell's decisions against the FSM's plan on every real tick, feeding it the tick's own captive verdict rather than re-probing. **Effects done too** — `perform` drives `PlatformMac`, runs the real `cmd_reload` for a recovery, and re-probes the escape lane through the clash delay test the way the shell does. Remaining: the `cmd_watch` cutover (bash still runs its own tick and merely shadows this one), and **time** — the shadow window itself |
+| **4** ◑ | CLI. Built as `rowt-rs` alongside the shell first, so each command lands with evidence; only then does bash reduce to a wrapper and get deleted. Formula ships the prebuilt binary (monitor-asset pattern). | **all 37 arms native AND gated** — `parity cli-diff` compares stdout, exit status, the **whole config tree** (content and mode), the **argv trace** and the **audit log** over 249 cases. Every arm but the TUI is compared; the lifecycle four were the last to be, and all four diverged when first asked. Remaining: the `ROWT_IMPL` cutover |
 | **5** | `PlatformLinux` + tun mode + systemd units; CI matrix (macOS + ubuntu — core tests run on both, platform tests feature-gated); linux tar assets | fresh-VM install → onboard → probe → captive drill; VPN-coexistence drill with Tailscale up |
 | 6 ◑ | port the import pipeline (1,302 lines of parsing Python). No longer optional — the 2026-08-09 decision is one language in the repo, and this is what retires `depends_on "python@3.12"`. | **all four done** — `rowt-core::{sharelink,importmerge,foreign,srimport}` (+`bplist`); `parity vless-diff` 2,000 cases, `merge-diff` 1,500 (the review FILE plus the streams), `foreign-diff` 1,200 (synthetic client config TREES), `sr-diff` 1,200 (synthetic Shadowrocket installs). What remains is the CUTOVER: `bin/rowt` still calls the Pythons, which are the reference side of those gates |
 
@@ -584,6 +584,73 @@ commands I remembered to test" from masquerading as the command surface.
   which the shell tried first and abandoned, because that target is routed by
   the normal rules and usually goes DIRECT, so a flaky CDN read as a wedged
   tunnel. Both are fixed; the gap that let them through is not.
+
+#### 6.9.1 What the unit tests are for
+
+Not coverage. `cli-diff` compares 249 whole commands against the shell — stdout,
+exit status, the config tree with modes, the argv trace, the audit log — and no
+`#[test]` competes with that. Unit tests earn their place only where a gate
+**structurally cannot look**, and the three that paid for the whole exercise
+were all of that kind:
+
+| what | why no gate saw it |
+|---|---|
+| `vm.rs` rebuilt a YAML **list item** from its leading whitespace, dropping the `- ` and producing a Lima config that will not parse | every `limactl` is shimmed and the arm needs a real VM |
+| the log splitter panicked on `[`/`]` out of order, and again on a byte offset inside a multibyte character (an IDN domain is enough) | the sandbox's sing-box is a fake that logs nothing, so the splitter never runs |
+| `clash_secret` was read and never minted, rendering an unauthenticated clash API on a fresh config | the fixtures PIN the secret, precisely because minting is nondeterministic |
+
+Both splitter bugs are silent in production: the splitter is a separate
+long-lived process, so it dies while the router keeps running and the only
+symptom is lane logs that stop.
+
+So the rule for adding one: prefer an assertion about a DECISION or an
+invariant over an assertion about a string. "The sudoers rule names seven verbs
+and no bare `networksetup *`", "sing-box is only ever fetched from upstream or
+an explicitly trusted URL", "a delay of 0 counts as an answer" — each of those
+fails loudly under a plausible rewrite. A test that restates the implementation
+line for line fails only when someone edits the line, which the diff already
+told them.
+
+Where a subprocess is in the way, split the decision out of the call — the shape
+`first_digits`, `probe_verdict`, `bridged_ip` and `download_sources` all have.
+The wrapper stays one line and the judgement becomes testable.
+
+#### 6.9.2 When the gate could have looked and didn't, widen the gate
+
+The rule above cuts both ways, and the more valuable half is the second: if a
+gap is something a gate *could* see, the fix is the gate, not a `#[test]`.
+
+`shell-init --install` shipped in 3.3.0 answering with a usage error and doing
+nothing. bin/rowt appends an eval block to the user's rc; rowt-rs had no arm for
+`--install` at all. Every gate stayed green, and each reason is worth naming:
+
+* No case ran it. `cli-cases.txt` had `shell-init`, `help shell-init` and
+  `shell-init nosucharm` — the text and the two error paths, never the one arm
+  that writes.
+* `snapshot_fs` walked `$XDG_CONFIG_HOME/rowt` only. The rc files live in `$HOME`
+  *beside* that tree, so the one artifact the command produces was outside
+  everything the harness compared.
+* Nothing else could stand in. stdout is empty on both sides, `info` goes to
+  stderr and cli-diff discards it, and the exit status is 0 whether or not the
+  work happened.
+
+So: `snapshot_fs` now also walks `$HOME` at depth 1 and reports the dotfiles as
+`~/.zshrc`; scenarios grew a `home/` overlay so "the rc already has integration"
+is reachable as a fixture; and selftest #24 mutates the shell's rc target to
+prove the new coverage actually bites. Same principle as §6.4 — a side effect
+that is not turned into diffable data is not gated, however many cases run.
+
+Two other things fell out of writing the cases, both invisible for the same
+structural reason rather than by anyone's oversight:
+
+| what | why it was invisible |
+|---|---|
+| `sub import <file>` fetched schemeless subs.txt lines. urllib raises `unknown url type` without opening a socket; `curl -- example.com` assumes http and dials. rowt-rs made requests bin/rowt never made | `normalize.sed` drops the curl trace line for the fixture URL — deliberately, since the two use different HTTP clients — and every existing case used that URL. Fixed in `pool::has_scheme`, not recorded as a quirk: it is a defect |
+| `server import <file>` and `sub import <file>` — the restore-a-dump half of a shared arm — had no case at all, valid or invalid | the arm's other half (`--from`, `--apply`, `--detect`) was well covered, which reads as coverage of the arm |
+
+The `onboard` / `--install` / `uninstall` rc lists disagree — four files vs five
+— in bin/rowt itself (`:2774` vs `:2502`, `:3553`). That one IS a quirk, kept,
+and now pinned by test in both modules rather than silently re-typed in each.
 
 ## 7. Risks
 

@@ -1733,6 +1733,7 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
         }
         "shell-init" => match rest.first().map(|s| s.as_str()) {
             None | Some("") => Ok(include_str!(concat!(env!("OUT_DIR"), "/shell_init.txt")).trim_end().to_string()),
+            Some("--install") => shell::init_install(rest.get(1).map(|s| s.as_str())),
             Some("-h") | Some("--help") => Ok(format!("usage: {PROG} shell-init [--install [<rc-file>]]")),
             Some(_) => Err(format!("usage: {PROG} shell-init [--install [<rc-file>]]")),
         },

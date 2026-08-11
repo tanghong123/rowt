@@ -137,6 +137,12 @@ make_sandbox() { # $1=outdir  [$2=scenario]
     [ -d "$DIR/fixtures/scenarios/$scenario" ] || die "no such scenario: $scenario"
     [ -d "$DIR/fixtures/scenarios/$scenario/config" ] && cp -R "$DIR/fixtures/scenarios/$scenario/config/." "$cfg/"
     [ -d "$DIR/fixtures/scenarios/$scenario/env" ]    && cp -R "$DIR/fixtures/scenarios/$scenario/env/." "$out/env/"
+    # …and `home/`, for the dotfiles that live beside the config tree rather
+    # than inside it. Only the rc files so far, which is enough: an rc that
+    # ALREADY has shell integration is the branch where `--install` must decline
+    # to add a second copy, and there is no way to reach it from a config
+    # fixture.
+    [ -d "$DIR/fixtures/scenarios/$scenario/home" ]   && cp -R "$DIR/fixtures/scenarios/$scenario/home/." "$out/home/"
   fi
   # "The router is running" cannot be a static fixture: `host_running` reads a
   # pidfile and then `kill -0`s it, so any pid committed to the repo is either
@@ -228,6 +234,21 @@ snapshot_fs() {  # $1=outdir — the config tree, minus what is volatile by desi
             "$f"
         done
   ) > "$out/fsstate"
+  # The rc files are NOT in the config tree — they live in $HOME beside it — and
+  # two commands write them: `shell-init --install` appends the eval block and
+  # `uninstall` strips it. Everything above is blind to that, which is precisely
+  # how `shell-init --install` reached a release doing nothing at all on the
+  # Rust side while every gate stayed green. Depth 1, so the config tree below
+  # is not walked a second time; named `~/x` so a divergence reads as the
+  # dotfile it is.
+  ( cd "$out/home" 2>/dev/null || exit 0
+    find . -maxdepth 1 -type f | sort | while read -r f; do
+        printf '%s %s  ~%s\n' \
+          "$(normalize "$f" "$out" | cksum | awk '{print $1}')" \
+          "$(stat -f %Lp "$f" 2>/dev/null || stat -c %a "$f" 2>/dev/null || echo '?')" \
+          "${f#.}"
+      done
+  ) >> "$out/fsstate"
 }
 
 # ---------------------------------------------------------------- normalize
@@ -1067,6 +1088,9 @@ cmd_cli_diff() {
         { diff "$A/fsstate" "$B/fsstate" 2>/dev/null || true; } \
           | sed -n 's/^[<>] *[0-9]* *[0-9?]*  //p' | sort -u \
           | while IFS= read -r f; do
+              # `~/.zshrc` names a file in $HOME, everything else one in the
+              # config tree — the two roots snapshot_fs walks.
+              case "$f" in "~/"*) f="../${f#\~/}" ;; esac
               { diff <(normalize "$A/home/rowt/$f" "$A") <(normalize "$B/home/rowt/$f" "$B") 2>/dev/null || true; } \
                 | sed "s#^#    F $f: #" | head -8
             done ;;

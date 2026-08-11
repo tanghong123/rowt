@@ -1,0 +1,4 @@
+{
+  "note": "a 'server dump' is a JSON ARRAY of outbounds; this object must be refused",
+  "servers": []
+}

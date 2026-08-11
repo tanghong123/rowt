@@ -83,6 +83,56 @@ pub fn workflow_msg(cfg: &Path) -> String {
     o
 }
 
+/// The escape lane after an import: the existing file, a marker, then the
+/// client's proxy domains — deduped.
+///
+/// ```text
+/// { cat "$DOMAINS"; echo "# --- imported ---"; jq -r '.proxy_domains[]? // empty' "$j"; } \
+///   | awk '!/^[[:space:]]*#/ && NF {if(seen[$0]++)next} {print}'
+/// ```
+///
+/// The awk guard is the whole behaviour and it is narrower than "dedupe the
+/// file": only lines that are neither comment nor blank are candidates, they
+/// are keyed on the WHOLE line so indentation makes two spellings distinct, and
+/// the FIRST occurrence is the one kept. Comments and blanks are therefore
+/// copied through however often they repeat — which is why applying twice
+/// leaves two `# --- imported ---` markers rather than one. That is bash's
+/// behaviour, not an oversight here; see §6.7.
+fn merge_domains(existing: &str, j: &Value) -> String {
+    let mut merged = String::from(existing);
+    // `cat` of a file with no trailing newline would run its last line into the
+    // marker; the shell's `echo` starts a line of its own regardless.
+    if !merged.is_empty() && !merged.ends_with('\n') {
+        merged.push('\n');
+    }
+    merged.push_str("# --- imported ---\n");
+    if let Some(list) = j.get("proxy_domains").and_then(Value::as_array) {
+        for d in list {
+            if let Some(s) = d.as_str() {
+                merged.push_str(s);
+                merged.push('\n');
+            }
+        }
+    }
+    let mut seen: Vec<&str> = Vec::new();
+    let mut kept = String::new();
+    for line in merged.lines() {
+        let t = line.trim_start();
+        // awk's `NF` counts whitespace-separated fields, so a line of only
+        // spaces has none and is passed through like a blank.
+        let comment_or_blank = t.starts_with('#') || line.split_whitespace().next().is_none();
+        if !comment_or_blank {
+            if seen.contains(&line) {
+                continue;
+            }
+            seen.push(line);
+        }
+        kept.push_str(line);
+        kept.push('\n');
+    }
+    kept
+}
+
 /// `apply_import` — merge an edited review file into the pool.
 ///
 /// Three destinations, and they are deliberately different kinds of merge: the
@@ -137,41 +187,11 @@ pub fn apply(ctx: &Ctx, file: &Path) -> Result<String, String> {
     // Same `sort -u file -o file` rename that `sub add` goes through.
     set_mode(&subs_path, 0o600);
 
-    // The escape lane: the existing file, a marker, then the client's domains —
-    // and then a dedupe that keeps the FIRST occurrence of each non-comment
-    // line. Comments and blanks are passed through untouched, so the marker and
-    // the original header survive and only repeats disappear.
     let domains_path = cfg.join("escape-domains.txt");
-    let mut merged = read(&domains_path);
-    if !merged.is_empty() && !merged.ends_with('\n') {
-        merged.push('\n');
-    }
-    merged.push_str("# --- imported ---\n");
-    if let Some(list) = j.get("proxy_domains").and_then(Value::as_array) {
-        for d in list {
-            if let Some(s) = d.as_str() {
-                merged.push_str(s);
-                merged.push('\n');
-            }
-        }
-    }
-    let mut seen: Vec<&str> = Vec::new();
-    let mut kept = String::new();
-    for line in merged.lines() {
-        let t = line.trim_start();
-        let comment_or_blank = t.starts_with('#') || line.split_whitespace().next().is_none();
-        if !comment_or_blank {
-            if seen.contains(&line) {
-                continue;
-            }
-            seen.push(line);
-        }
-        kept.push_str(line);
-        kept.push('\n');
-    }
     // A plain `> "$DOMAINS"` redirect, NOT mktemp+mv: the lane file keeps
     // whatever mode it already had, unlike the lane-edit path.
-    std::fs::write(&domains_path, kept).map_err(|e| format!("write: {e}"))?;
+    std::fs::write(&domains_path, merge_domains(&read(&domains_path), &j))
+        .map_err(|e| format!("write: {e}"))?;
 
     info("importing… rebuilding server set (this fetches the subscriptions)");
     pool::rebuild(ctx)?;
@@ -335,6 +355,53 @@ fn accumulate(ctx: &Ctx, source: &str, path: Option<&str>, file: &Path) -> Resul
     Ok(o)
 }
 
+/// What the flag loop decided: which client to read, which file to read or
+/// write, and whether this is the extract half or the apply half.
+#[derive(Debug, Default, PartialEq)]
+struct Flags {
+    source: String,
+    path: String,
+    apply_it: bool,
+    file: String,
+}
+
+#[derive(Debug, PartialEq)]
+enum FlagErr {
+    /// A flag that takes a value was last on the line.
+    MissingValue,
+    Unknown(String),
+}
+
+/// The flag loop, which is a decision and not a formatting detail: it picks the
+/// file that gets WRITTEN. Two properties come from the shell rather than from
+/// intent, and both are pinned by test — every flag is last-wins (the loop just
+/// assigns), and `--output`/`--input` are the SAME variable, so mixing them is
+/// legal and the later one takes the file.
+fn parse_flags(args: &[String]) -> Result<Flags, FlagErr> {
+    let mut f = Flags::default();
+    let mut i = 0;
+    while i < args.len() {
+        let need = |i: &mut usize| -> Result<String, FlagErr> {
+            *i += 1;
+            args.get(*i).cloned().ok_or(FlagErr::MissingValue)
+        };
+        match args[i].as_str() {
+            "--apply" => f.apply_it = true,
+            "--from" => f.source = need(&mut i)?,
+            "--output" | "--input" | "-o" | "-i" => f.file = need(&mut i)?,
+            "--path" => f.path = need(&mut i)?,
+            x if x.starts_with("--from=") => f.source = x["--from=".len()..].to_string(),
+            x if x.starts_with("--output=") || x.starts_with("--input=") => {
+                f.file = x.split_once('=').map(|(_, v)| v.to_string()).unwrap_or_default()
+            }
+            x if x.starts_with("--path=") => f.path = x["--path=".len()..].to_string(),
+            x => return Err(FlagErr::Unknown(x.to_string())),
+        }
+        i += 1;
+    }
+    Ok(f)
+}
+
 /// `server import` / `sub import` — the whole arm.
 pub fn cmd(ctx: &Ctx, args: &[String]) -> Result<String, String> {
     let cfg = &ctx.cfg;
@@ -343,38 +410,18 @@ pub fn cmd(ctx: &Ctx, args: &[String]) -> Result<String, String> {
         return Ok(workflow_msg(cfg));
     }
 
-    let (mut source, mut path, mut apply_it, mut file) =
-        (String::new(), String::new(), false, String::new());
-    let mut i = 0;
-    while i < args.len() {
+    let Flags { source, path, apply_it, file } = match parse_flags(args) {
+        Ok(f) => f,
         // `${1:?msg}` — a flag whose value is missing ends the shell with 1 and
         // a parameter-expansion complaint, not a usage message.
-        let need = |i: &mut usize| -> String {
-            *i += 1;
-            match args.get(*i) {
-                Some(v) => v.clone(),
-                None => std::process::exit(1),
-            }
-        };
-        match args[i].as_str() {
-            "--apply" => apply_it = true,
-            "--from" => source = need(&mut i),
-            "--output" | "--input" | "-o" | "-i" => file = need(&mut i),
-            "--path" => path = need(&mut i),
-            x if x.starts_with("--from=") => source = x["--from=".len()..].to_string(),
-            x if x.starts_with("--output=") || x.starts_with("--input=") => {
-                file = x.split_once('=').map(|(_, v)| v.to_string()).unwrap_or_default()
-            }
-            x if x.starts_with("--path=") => path = x["--path=".len()..].to_string(),
-            x => crate::die(
-                cfg,
-                &format!(
-                    "unknown option: {x}  (use --from <src> [--output <file>], or --apply [--input <file>])"
-                ),
+        Err(FlagErr::MissingValue) => std::process::exit(1),
+        Err(FlagErr::Unknown(x)) => crate::die(
+            cfg,
+            &format!(
+                "unknown option: {x}  (use --from <src> [--output <file>], or --apply [--input <file>])"
             ),
-        }
-        i += 1;
-    }
+        ),
+    };
     let target = if file.is_empty() { review_file(cfg) } else { PathBuf::from(&file) };
 
     if apply_it {
@@ -394,4 +441,128 @@ pub fn cmd(ctx: &Ctx, args: &[String]) -> Result<String, String> {
             p = crate::PROG));
     }
     accumulate(ctx, &source, Some(path.as_str()).filter(|p| !p.is_empty()), &target)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn f(args: &[&str]) -> Result<Flags, FlagErr> {
+        parse_flags(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn output_and_input_are_one_variable_and_the_last_one_wins() {
+        // The consequence worth having a test for: this decides which file gets
+        // WRITTEN. `--output a --input b` is not a contradiction the shell
+        // catches, it is two assignments to the same slot.
+        assert_eq!(f(&["--output", "a", "--input", "b"]).unwrap().file, "b");
+        assert_eq!(f(&["--input", "b", "--output", "a"]).unwrap().file, "a");
+        assert_eq!(f(&["-o", "a", "-i", "b"]).unwrap().file, "b");
+        // …and so is repeating one flag.
+        assert_eq!(f(&["--from", "v2box", "--from", "flclash"]).unwrap().source, "flclash");
+    }
+
+    #[test]
+    fn the_equals_spelling_reaches_the_same_slot_as_the_spaced_one() {
+        for (spaced, joined) in [
+            (vec!["--from", "v2box"], "--from=v2box"),
+            (vec!["--output", "/tmp/r.json"], "--output=/tmp/r.json"),
+            (vec!["--input", "/tmp/r.json"], "--input=/tmp/r.json"),
+            (vec!["--path", "/tmp/p"], "--path=/tmp/p"),
+        ] {
+            assert_eq!(f(&spaced).unwrap(), f(&[joined]).unwrap(), "{joined}");
+        }
+        // An empty value is a value, not a missing one — `--from=` leaves the
+        // source empty, which `cmd` then reports as the usage error rather than
+        // as an unknown option.
+        assert_eq!(f(&["--from="]).unwrap(), Flags::default());
+    }
+
+    #[test]
+    fn a_flag_last_on_the_line_is_a_missing_value_not_an_unknown_option() {
+        // The shell's `${1:?}` exits 1 silently here; an unknown option prints
+        // a message and dies. Different exits, so the gate can tell them apart.
+        for flag in ["--from", "--output", "--input", "-o", "-i", "--path"] {
+            assert_eq!(f(&[flag]), Err(FlagErr::MissingValue), "{flag}");
+        }
+        // `--apply` takes no value, so it is fine alone.
+        assert!(f(&["--apply"]).unwrap().apply_it);
+    }
+
+    #[test]
+    fn only_the_documented_flags_are_accepted() {
+        assert_eq!(f(&["--nosuchflag"]), Err(FlagErr::Unknown("--nosuchflag".into())));
+        // A bare positional is NOT a file argument here: `cmd` is only reached
+        // after main.rs has already ruled out the restore-a-dump path, so
+        // anything left over is a typo.
+        assert_eq!(f(&["backup.json"]), Err(FlagErr::Unknown("backup.json".into())));
+        // The value of a flag is never re-examined as a flag itself.
+        assert_eq!(f(&["--from", "--nosuchflag"]).unwrap().source, "--nosuchflag");
+        // `-o=x` is not a spelling the loop knows — the `=` forms are long-only.
+        assert_eq!(f(&["-o=x"]), Err(FlagErr::Unknown("-o=x".into())));
+    }
+
+    #[test]
+    fn the_marker_is_a_comment_so_re_applying_grows_the_file() {
+        // Comments are not deduped, so each apply leaves another marker behind.
+        // Bug-for-bug with the awk; recorded so a "tidy-up" that dedupes
+        // comments has to argue with a test instead of a diff.
+        let j = json!({"proxy_domains": ["a.example"]});
+        let once = merge_domains("", &j);
+        let twice = merge_domains(&once, &j);
+        assert_eq!(once, "# --- imported ---\na.example\n");
+        assert_eq!(twice, "# --- imported ---\na.example\n# --- imported ---\n");
+        // The DOMAINS themselves stay unique across applies, which is the part
+        // that actually matters for the lane.
+        assert_eq!(twice.lines().filter(|l| *l == "a.example").count(), 1);
+    }
+
+    #[test]
+    fn the_first_spelling_of_a_domain_is_the_one_kept() {
+        // `seen[$0]++` keys on the whole line, so indentation makes two lines
+        // distinct — and the survivor is the FIRST, which means an existing
+        // lane entry always outlives an imported duplicate of itself.
+        let j = json!({"proxy_domains": ["keep.example", "  keep.example", "keep.example"]});
+        assert_eq!(
+            merge_domains("keep.example\n", &j),
+            "keep.example\n# --- imported ---\n  keep.example\n"
+        );
+    }
+
+    #[test]
+    fn comments_and_blanks_survive_however_often_they_repeat() {
+        let j = json!({"proxy_domains": []});
+        // Two identical comments, an indented one, a blank, and a whitespace-only
+        // line — awk's NF is zero for the last, so it is passed through too.
+        let body = "# head\n# head\n   # indented\n\n   \nx.example\nx.example\n";
+        assert_eq!(
+            merge_domains(body, &j),
+            "# head\n# head\n   # indented\n\n   \nx.example\n# --- imported ---\n"
+        );
+    }
+
+    #[test]
+    fn a_lane_file_with_no_trailing_newline_does_not_swallow_the_marker() {
+        // `cat` would run the last line straight into the `echo`; the shell's
+        // marker always starts its own line, so this must too.
+        let j = json!({"proxy_domains": []});
+        assert_eq!(merge_domains("a.example", &j), "a.example\n# --- imported ---\n");
+        // An empty lane file gets no leading blank line.
+        assert_eq!(merge_domains("", &j), "# --- imported ---\n");
+    }
+
+    #[test]
+    fn proxy_domains_that_are_not_strings_are_skipped_not_stringified() {
+        // `jq -r '.proxy_domains[]? // empty'` would render a number, but the
+        // review file is hand-edited and a non-string there is a mistake; the
+        // lane must not gain a line reading `null` or `123`.
+        let j = json!({"proxy_domains": ["ok.example", 123, null, {"a": 1}]});
+        assert_eq!(merge_domains("", &j), "# --- imported ---\nok.example\n");
+        // A missing key, or a wrong-typed one, leaves the lane alone but for
+        // the marker — `[]?` swallows both.
+        assert_eq!(merge_domains("", &json!({})), "# --- imported ---\n");
+        assert_eq!(merge_domains("", &json!({"proxy_domains": "a.example"})), "# --- imported ---\n");
+    }
 }

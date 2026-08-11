@@ -56,15 +56,39 @@ fn detect_import_sources(here: &Path) -> Vec<String> {
     out
 }
 
+/// How many of `shell::RC_FILES` this checklist looks at — FOUR, where
+/// `shell-init --install` and `uninstall` look at all five. bin/rowt:2774 omits
+/// `.zprofile` where :2502 and :3553 include it, so integration living there is
+/// installed and stripped correctly but never ticks this box. Sliced off the
+/// shared list rather than spelled out again, so the gap stays visible.
+const RC_SEEN: usize = 4;
+
 fn rc_has_shell_init() -> bool {
     let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
-    for rc in [".zshrc", ".bashrc", ".bash_profile", ".profile"] {
+    crate::shell::RC_FILES[..RC_SEEN].iter().any(|rc| {
         let b = read(&home.join(rc));
-        if b.contains("rowt shell integration") || b.contains("rowt shell-init") {
-            return true;
-        }
+        b.contains("rowt shell integration") || b.contains("rowt shell-init")
+    })
+}
+
+/// The last line, which is the one a reader (or the AI skill) acts on.
+///
+/// A running router wins outright: it reports success even with unchecked boxes
+/// still above it, because several of them are optional by design (the escape
+/// pick, the watchdog, the shell aliases, the skill link, the corp lane) and
+/// none of them is counted into `pending`. Only the four that genuinely block a
+/// working router do — install, sing-box, a server, and `up` itself.
+fn closing(running: bool, pending: usize) -> Vec<String> {
+    if running {
+        vec![
+            "🎉 rowt is running — chosen sites via escape, corp intranet via the corp VPN, the rest direct.".into(),
+            format!("   Open a NEW terminal and run  '{PROG} monitor'  to watch connections/throughput/health live."),
+        ]
+    } else if pending == 0 {
+        vec![format!("✓ Core setup complete — run  '{PROG} up'  to start.")]
+    } else {
+        vec![format!("→ do the first unchecked [ ] above, then re-run '{PROG} onboard'.")]
     }
-    false
 }
 
 pub fn run(ctx: &Ctx, here: &Path) -> String {
@@ -193,14 +217,7 @@ pub fn run(ctx: &Ctx, here: &Path) -> String {
     }
 
     o.push(String::new());
-    if lifecycle::host_running(ctx).is_some() {
-        o.push("🎉 rowt is running — chosen sites via escape, corp intranet via the corp VPN, the rest direct.".into());
-        o.push(format!("   Open a NEW terminal and run  '{PROG} monitor'  to watch connections/throughput/health live."));
-    } else if pending == 0 {
-        o.push(format!("✓ Core setup complete — run  '{PROG} up'  to start."));
-    } else {
-        o.push(format!("→ do the first unchecked [ ] above, then re-run '{PROG} onboard'."));
-    }
+    o.extend(closing(lifecycle::host_running(ctx).is_some(), pending));
 
     // The always-on reference, so this doubles as the guide.
     o.push(crate::help::onboard_reference(cfg));
@@ -215,4 +232,58 @@ pub fn run(ctx: &Ctx, here: &Path) -> String {
     }
     o.push(format!("Config lives in: {}", cfg.display()));
     o.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_running_router_reports_success_over_any_unfinished_box() {
+        // Deliberate, and the reason `pending` is not simply "unchecked boxes":
+        // once the router is up the optional items are advice, not blockers, so
+        // the closing line must not tell someone with a working setup to go
+        // finish something. A checklist item added later with `pending += 1`
+        // where it does not belong would break exactly this.
+        for pending in [0, 1, 9] {
+            let c = closing(true, pending);
+            assert!(c[0].starts_with("🎉 rowt is running"), "pending={pending}");
+        }
+    }
+
+    #[test]
+    fn nothing_pending_and_not_running_is_the_only_ready_to_start_state() {
+        let ready = closing(false, 0);
+        assert_eq!(ready.len(), 1);
+        assert!(ready[0].contains("Core setup complete"));
+        // One blocker is enough to withhold it.
+        assert!(closing(false, 1)[0].starts_with("→ do the first unchecked"));
+    }
+
+    #[test]
+    fn the_running_message_points_at_a_second_terminal() {
+        // The AI skill reads this line to tell someone where `monitor` goes; it
+        // is a full-screen TUI and running it in the same shell as `up` is the
+        // most common way a first run appears to hang.
+        let c = closing(true, 0);
+        assert_eq!(c.len(), 2);
+        assert!(c[1].contains("NEW terminal"));
+        assert!(c[1].contains("monitor"));
+    }
+
+    #[test]
+    fn this_checklist_is_blind_to_the_last_rc_file_on_purpose() {
+        // `shell-init --install` and `uninstall` walk five rc files, this walks
+        // four. Integration in `.zprofile` therefore stays invisible here while
+        // being installed and stripped correctly — bin/rowt does the same, and
+        // the slice is what keeps the two lists from drifting further apart.
+        assert_eq!(RC_SEEN, 4);
+        assert_eq!(crate::shell::RC_FILES.len(), 5);
+        assert!(!crate::shell::RC_FILES[..RC_SEEN].contains(&".zprofile"));
+        // The four it does check are the four bin/rowt:2774 greps.
+        assert_eq!(
+            crate::shell::RC_FILES[..RC_SEEN],
+            [".zshrc", ".bashrc", ".bash_profile", ".profile"]
+        );
+    }
 }

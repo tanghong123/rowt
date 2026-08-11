@@ -16,6 +16,8 @@ fn env_num(k: &str, d: u64) -> u64 {
     std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
 }
 
+fn info(msg: &str) { eprintln!("==> {msg}"); }
+
 // ---------------------------------------------------------------- audit
 
 /// `_audit_ctx` — pid/parent/tty/version, the field that distinguishes a
@@ -215,9 +217,140 @@ where
     r
 }
 
+// ------------------------------------------------- shell-init --install
+
+/// The rc files every one of these three operations walks — EXCEPT that
+/// `onboard` walks only the first four.
+///
+/// That is bash's asymmetry, not a transcription slip (bin/rowt:2502 and :3553
+/// list five, :2774 lists four), and it has a consequence: integration living
+/// in `.zprofile` is found by `--install`, which then declines to add it again,
+/// and stripped by `uninstall` — but never seen by `onboard`, which goes on
+/// reporting the box unchecked forever. Kept because changing it would change
+/// which file a real user's rc gets a second copy of.
+pub const RC_FILES: [&str; 5] = [".zshrc", ".bashrc", ".bash_profile", ".profile", ".zprofile"];
+
+/// The line pair `--install` appends. Both halves contain `rowt shell-init`,
+/// which is what lets `strip_shell_init` take them out again — the comment is
+/// load-bearing, not decoration.
+fn init_block(prog: &str) -> String {
+    format!(
+        "\n# rowt shell integration — aliases + tab-completion (rowt shell-init --install)\neval \"$({prog} shell-init)\"\n"
+    )
+}
+
+/// Which rc file `--install` writes to when not told: by the login shell,
+/// falling back to zsh — macOS's default — for anything unrecognised.
+///
+/// The shell it is asked about must come from `diag::login_shell`, not from
+/// `$SHELL` directly. bash assigns `$SHELL` the passwd entry's login shell when
+/// it starts without one, so bin/rowt sees `/bin/zsh` in a context this binary
+/// would see nothing at all — a launchd job, or the `env -i` parity sandbox.
+/// Reading the bare variable put the rc file somewhere else than the shell put
+/// it, for the same user on the same machine.
+fn default_rc(shell: &str) -> &'static str {
+    if shell.ends_with("zsh") {
+        ".zshrc"
+    } else if shell.ends_with("bash") {
+        ".bashrc"
+    } else {
+        ".zshrc"
+    }
+}
+
+/// `shell_init_install` — append the eval line to the user's rc, idempotently.
+pub fn init_install(rc_arg: Option<&str>) -> Result<String, String> {
+    let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    // `grep -qs` over each candidate in turn: the FIRST file that already has
+    // integration wins, and finding one means doing nothing at all.
+    let found = RC_FILES.iter().map(|f| home.join(f)).find(|p| {
+        let b = crate::read(p);
+        b.contains("rowt shell integration") || b.contains("rowt shell-init")
+    });
+    if let Some(f) = found {
+        info(&format!(
+            "shell integration already enabled in {} — nothing to do (run a new shell to pick it up)",
+            f.display()
+        ));
+        return Ok(String::new());
+    }
+    let rc = match rc_arg.filter(|s| !s.is_empty()) {
+        Some(p) => PathBuf::from(p),
+        None => home.join(default_rc(&crate::diag::login_shell())),
+    };
+    let mut f = fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&rc)
+        .map_err(|_| format!("could not write to {}", rc.display()))?;
+    use std::io::Write;
+    f.write_all(init_block(crate::PROG).as_bytes())
+        .map_err(|_| format!("could not write to {}", rc.display()))?;
+    info(&format!("added shell integration to {}", rc.display()));
+    info(&format!(
+        "open a new terminal (or 'source {}') to enable rowt-proxy-on/-off + tab-completion",
+        rc.display()
+    ));
+    Ok(String::new())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_install_writes_is_what_uninstall_strips() {
+        // The round trip nobody would notice breaking: `--install` appends a
+        // block, `uninstall` removes it, and `onboard` ticks its box — three
+        // call sites that agree only by both matching the literal text
+        // "rowt shell-init". Change the appended line without changing the
+        // matchers and integration becomes permanently un-removable and
+        // un-detectable, with no gate to say so.
+        let rc = format!("export PATH=/x\n{}", init_block("rowt"));
+        let stripped = crate::skill::strip_shell_init(&rc).unwrap();
+        // Both appended lines are gone…
+        assert!(!stripped.contains("rowt shell-init"));
+        assert!(!stripped.contains("rowt shell integration"));
+        // …and nothing of the user's went with them. The separating blank line
+        // DOES survive: `--install` writes a leading "\n" and the awk only
+        // drops lines that match, so each install/uninstall cycle leaves one
+        // blank behind. Cosmetic, bash does it too, pinned so it is not
+        // mistaken for this port's litter.
+        assert_eq!(stripped, "export PATH=/x\n\n");
+        // The same text is what onboard's check looks for.
+        assert!(rc.contains("rowt shell integration") || rc.contains("rowt shell-init"));
+        // Re-stripping is a no-op — nothing of ours is left to find.
+        assert!(crate::skill::strip_shell_init(&stripped).is_none());
+        // Both appended lines carry the marker, so neither can be orphaned by a
+        // strip that only catches the other.
+        for line in init_block("rowt").lines().filter(|l| !l.trim().is_empty()) {
+            assert!(line.contains("rowt shell-init"), "orphanable line: {line}");
+        }
+    }
+
+    #[test]
+    fn onboard_cannot_see_integration_in_zprofile_but_install_can() {
+        // bin/rowt:2774 checks four rc files where :2502 and :3553 check five.
+        // Pinned as the §6.7 quirk it is: if these are ever reconciled it
+        // should be on purpose, and this test is where the argument happens.
+        let onboard_sees = &RC_FILES[..4];
+        assert!(!onboard_sees.contains(&".zprofile"));
+        assert!(RC_FILES.contains(&".zprofile"));
+    }
+
+    #[test]
+    fn the_target_rc_follows_shell_and_falls_back_to_zsh() {
+        assert_eq!(default_rc("/bin/zsh"), ".zshrc");
+        assert_eq!(default_rc("/usr/local/bin/bash"), ".bashrc");
+        assert_eq!(default_rc("/bin/sh"), ".zshrc");
+        // Empty only ever reaches here if even getpwuid had no shell to give —
+        // `init_install` asks `diag::login_shell`, not `$SHELL`, precisely so
+        // that an unset variable resolves to the passwd entry the way bash's
+        // own startup does rather than falling through to this default.
+        assert_eq!(default_rc(""), ".zshrc");
+        // `*zsh` is a suffix match in the shell's `case`, so this counts.
+        assert_eq!(default_rc("/opt/homebrew/bin/zsh"), ".zshrc");
+    }
 
     /// The audit log records mutations, so a wrong answer here is either a
     /// mutation that leaves no trace or a read that fills the trail with noise.

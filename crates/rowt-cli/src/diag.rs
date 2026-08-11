@@ -272,7 +272,7 @@ pub fn body(ctx: &Ctx, here: &Path) -> String {
 /// sandbox runs under `env -i`, so without this the report would print an empty
 /// field where the shell prints /bin/zsh — and which rc file matters is exactly
 /// what a reader of this report wants to know.
-fn login_shell() -> String {
+pub fn login_shell() -> String {
     if let Ok(s) = std::env::var("SHELL") {
         if !s.is_empty() {
             return s;

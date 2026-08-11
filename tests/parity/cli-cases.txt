@@ -39,6 +39,15 @@ corp import tests/parity/fixtures/import-list.txt
 
 # static text and log readers, extracted from the shell at build time
 shell-init
+# `--install` is the one arm here that WRITES, and it writes outside the config
+# tree — into $HOME/.zshrc — so it stayed invisible to this gate until
+# snapshot_fs learned to walk the dotfiles too. It shipped in 3.3.0 doing
+# nothing but printing a usage error. Three branches: append to a clean rc,
+# decline when integration is already there (any of the five rc files counts),
+# and honour an explicitly named target.
+shell-init --install
+PARITY_SCENARIO=rc-integrated shell-init --install
+shell-init --install /dev/null
 completion zsh
 completion bash
 audit
@@ -248,6 +257,18 @@ server import --from flclash
 # such option — so this combination always fails. Bug-for-bug (PORTING.md §6.7).
 server import --from shadowrocket --path /nonexistent
 server import --from v2box --path /nonexistent
+# The OTHER meaning of the same arm, and nothing above reaches it: a positional
+# that is an EXISTING FILE restores a dump instead of driving the other-clients
+# workflow. `server import` wants a JSON array of outbounds; `sub import` wants
+# a line list, no --from guard on that side. The switch is bin/rowt's
+# `[ -f "$1" ]`, so a path that does not exist falls through to the flag loop
+# and comes back as "unknown option" — the boundary is worth pinning because
+# the two halves share an arm and print nothing alike.
+server import tests/parity/fixtures/server-dump.json
+server import tests/parity/fixtures/not-a-dump.json
+server import /nonexistent/dump.json
+sub import tests/parity/fixtures/import-list.txt
+sub import /nonexistent/subs.txt
 # The half that WRITES: a review file someone has already edited, applied to the
 # pool. Servers into manual.json deduped by endpoint, subscription URLs appended
 # and sorted, proxy domains merged into the escape lane under a marker — one of

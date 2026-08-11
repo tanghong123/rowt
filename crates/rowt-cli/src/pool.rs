@@ -32,6 +32,15 @@
 //!   `parity cli-diff`. The cases there use a refused local port so that both
 //!   implementations take the failure path; the parse side of a real
 //!   subscription body is covered by `vless-diff`.
+//!
+//!   One place the two clients disagreed on more than the trace, and that one
+//!   is CLOSED rather than recorded: urllib refuses a schemeless URL without
+//!   opening a socket, where curl assumes http and dials it. A subs.txt line
+//!   that is not a URL — `sub import` pointed at a lane list is the easy way to
+//!   get one — therefore had rowt-rs sending requests bin/rowt never sent.
+//!   `has_scheme` now rejects those before the process starts. Recorded here
+//!   because it is the one divergence in this module that was a defect rather
+//!   than a choice.
 //! * `sub add` sorts and dedupes the list bytewise, where the shell's
 //!   `sort -u` uses the machine's collation. Under a UTF-8 locale `sort -u`
 //!   drops lines that merely COLLATE equally, which for a subscription list
@@ -130,6 +139,22 @@ fn combine(outbounds: &[Value]) -> Result<sharelink::Batch, ()> {
     Ok(sharelink::combine(outbounds))
 }
 
+/// `urlparse`'s rule, which is the one that decides whether a request happens
+/// at all: a scheme is a letter followed by letters, digits, `+`, `-` or `.`,
+/// ending at the first `:`. Anything else has "unknown url type" and never
+/// reaches the network.
+///
+/// Deliberately NOT a check for `http`/`https`: bin/rowt would hand `file://`
+/// to urllib and curl reads it too, so narrowing to the two web schemes would
+/// trade one divergence for another.
+fn has_scheme(url: &str) -> bool {
+    let Some(i) = url.find(':') else { return false };
+    let (s, _) = url.split_at(i);
+    !s.is_empty()
+        && s.starts_with(|c: char| c.is_ascii_alphabetic())
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
+}
+
 /// `curl` a subscription and parse it — the IO half of `--sub`.
 ///
 /// Every failure the Python turns into a non-zero exit collapses to `Err`
@@ -137,6 +162,18 @@ fn combine(outbounds: &[Value]) -> Result<sharelink::Batch, ()> {
 /// undecodable body, and a body that yielded no usable links are three
 /// different messages on a stderr the caller sends to /dev/null.
 fn fetch_sub(url: &str) -> Result<Vec<Value>, ()> {
+    // urllib refuses a URL with no scheme outright — `ValueError: unknown url
+    // type: 'example.com'` — WITHOUT opening a socket, and the shell reads that
+    // non-zero exit as "subscription fetch failed". curl is the opposite: given
+    // a bare host it assumes http and fetches. So a subs.txt line that is not a
+    // URL (a lane list imported into the wrong arm is the easy way to get one)
+    // would have rowt-rs sending plaintext requests to every entry that
+    // bin/rowt never contacts at all. Refused here instead — the scheme check
+    // has to come BEFORE the process, since by the time curl runs the request
+    // is already out.
+    if !has_scheme(url) {
+        return Err(());
+    }
     let ua = crate::env_or(
         "ROWT_SUB_UA",
         "Shadowrocket/2.2.28 (iPhone; iOS 17.5.1; Scale/3.00)",
@@ -636,5 +673,36 @@ mod tests {
     fn combine_refuses_a_non_object_element() {
         assert!(combine(&[json!(1)]).is_err());
         assert!(combine(&[json!({"type": "vless"})]).is_ok());
+    }
+
+    #[test]
+    fn a_subscription_line_with_no_scheme_is_never_fetched() {
+        // The consequence is a request, not a message: curl given a bare host
+        // assumes http and dials it, where urllib raises before opening a
+        // socket. `sub import <a lane list>` is the realistic way to get such a
+        // line into subs.txt, and rowt-rs must not be the implementation that
+        // phones home to every domain in it.
+        assert!(!has_scheme("example.com"));
+        assert!(!has_scheme("new-one.example"));
+        assert!(!has_scheme(""));
+        assert!(!has_scheme("//example.com/feed"));
+        // A leading digit is not a scheme, so this is a host:port, not a URL.
+        assert!(!has_scheme("127.0.0.1:9"));
+        assert!(!has_scheme(":no-scheme"));
+    }
+
+    #[test]
+    fn every_scheme_both_clients_understand_still_goes_through() {
+        // Narrowing this to http/https would trade one divergence for another:
+        // bin/rowt hands file:// to urllib and it reads it.
+        for u in [
+            "http://127.0.0.1:9/feed",
+            "https://example.com/sub?token=x",
+            "file:///tmp/feed.txt",
+            "ftp://example.com/feed",
+            "s3+http://example.com/feed",
+        ] {
+            assert!(has_scheme(u), "{u}");
+        }
     }
 }

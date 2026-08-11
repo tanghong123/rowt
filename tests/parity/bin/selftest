@@ -634,7 +634,38 @@ else
   cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
 fi
 
-echo "24. every name native() claims must be an arm of run()"
+echo "24. write the shell integration block to the wrong rc file"
+cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+if [ ! -x "$ROOT/target/release/rowt-rs" ]; then
+  echo "  skip — no release build"
+else
+  # `shell-init --install` is the only arm that writes OUTSIDE the config tree,
+  # and until snapshot_fs walked $HOME too there was nothing here to see it:
+  # stdout is empty, stderr is discarded, the exit status is 0 either way. That
+  # is how the Rust side shipped in 3.3.0 answering `--install` with a usage
+  # error while every gate stayed green. Sending the block to .bashrc instead of
+  # the $SHELL-chosen .zshrc is the smallest change that is still wrong, and it
+  # is invisible to everything except the dotfile snapshot.
+  #
+  # The `*zsh)` branch, which is the one the sandbox actually enters: cases run
+  # under `env -i`, but bash assigns $SHELL the passwd entry's login shell when
+  # it starts without one, so it sees /bin/zsh and never reaches the fallback.
+  # (rowt-rs matches that via `diag::login_shell` rather than reading the bare
+  # variable — which is what this mutation would catch if it stopped doing so.)
+  perl -0pi -e 's/\*zsh\)  rc="\$HOME\/\.zshrc"/*zsh)  rc="\$HOME\/.bashrc"/' "$tmp/bin/rowt"
+  if grep -qF '*zsh)  rc="$HOME/.zshrc"' "$tmp/bin/rowt"; then
+    bad "could not repoint the zsh rc target (shell_init_install moved?)"
+  elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" \
+       PARITY_CASES="$(only 'shell-init --install')" \
+       "$P" cli-diff >/dev/null 2>&1; then
+    bad "cli-diff passed with the integration block written to the wrong rc"
+  else
+    ok "cli-diff caught the integration block in the wrong rc file"
+  fi
+  cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+fi
+
+echo "25. every name native() claims must be an arm of run()"
 src="$ROOT/crates/rowt-cli/src/main.rs"
 # Command names only. A native() arm line is indented exactly eight spaces and
 # starts with a pattern; the sub-command lists inside `matches!(…)` are indented
