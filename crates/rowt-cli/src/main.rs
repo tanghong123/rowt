@@ -1860,6 +1860,31 @@ fn main() -> ExitCode {
         lifecycle::run_splitter(Path::new(hl), Path::new(ld));
         return ExitCode::SUCCESS;
     }
+    // The `config/*.py` surfaces (PORTING.md §5 phase 6). `bin/rowt` runs these
+    // instead of `python3 config/<tool>.py`, which is what lets the Formula drop
+    // its python dependency; `ROWT_PY=1` on the shell side puts the Python back,
+    // so `parity cli-diff` keeps comparing an extractor against an extractor
+    // rather than comparing this binary with itself.
+    //
+    // Before the preamble for the same reason `_splitter` is, plus one of its
+    // own: these reproduce argparse, so they EXIT from deep inside on a bad
+    // flag. An exit that skipped an audit END would leave a BEGIN dangling in
+    // the trail — the fix is to not have one open. Nothing is lost by it: the
+    // caller is a bash command that is already inside its own BEGIN/END pair,
+    // and a helper subprocess is not a command anyone typed.
+    if args.first().map(|s| s.as_str()) == Some("_py") {
+        let Some(tool) = args.get(1) else {
+            eprintln!("usage: {PROG} _py <{}> [args…]", rowt_core::pycli::TOOLS.join("|"));
+            return ExitCode::FAILURE;
+        };
+        return match rowt_core::pycli::dispatch(tool, &args[2..]) {
+            Some(code) => code,
+            None => {
+                eprintln!("error: {PROG} _py: unknown tool: {tool}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     match args.first() {
         // No args: the onboarding checklist, then the full command list. Handled
         // before the preamble only because there is no command to route.

@@ -1,40 +1,11 @@
-//! `rowt-netdetect` — the Rust half of the net-detect differential gate.
+//! `rowt-netdetect` — the gate's half of `config/net-detect.py`, for `parity netdetect-diff`.
 //!
-//! Prints the same JSON `config/net-detect.py` prints, from the same input, so
-//! `parity netdetect-diff` can replay both over identical fixtures. Kept as its
-//! own binary rather than folded into the CLI for exactly that reason: the gate
-//! needs to run the parser with no config directory and no machine around it.
+//! A shim on purpose. The surface itself is `rowt_core::pycli::net_detect`,
+//! which is also what `rowt-rs _py` runs, so the gate replays the Python
+//! against the code the product uses rather than against a second parser
+//! written to match it.
 
-use rowt_core::netdetect::parse;
-use std::process::ExitCode;
-
-fn main() -> ExitCode {
-    let mut args = std::env::args().skip(1);
-    let mut input: Option<String> = None;
-    while let Some(a) = args.next() {
-        match a.as_str() {
-            "--input" => input = args.next(),
-            other => {
-                eprintln!("rowt-netdetect: unknown argument: {other}");
-                return ExitCode::FAILURE;
-            }
-        }
-    }
-    let text = match input {
-        Some(p) => std::fs::read_to_string(p).unwrap_or_default(),
-        None => std::process::Command::new("scutil").arg("--dns")
-            .output().ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-            .unwrap_or_default(),
-    };
-    let d = parse(&text);
-    // `json.dump(..., indent=2)` then a trailing newline — matched so the gate
-    // can compare bytes rather than re-parse and lose the ordering guarantee.
-    let v = serde_json::json!({
-        "internal_domains": d.internal_domains,
-        "physical_search": d.physical_search,
-        "corp_nameservers": d.corp_nameservers,
-    });
-    println!("{}", serde_json::to_string_pretty(&v).unwrap());
-    ExitCode::SUCCESS
+fn main() -> std::process::ExitCode {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    rowt_core::pycli::net_detect::main(&argv)
 }

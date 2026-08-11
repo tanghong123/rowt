@@ -16,6 +16,7 @@ pub mod importmerge;
 pub mod laneerr;
 pub mod lanes;
 pub mod netdetect;
+pub mod pycli;
 pub mod pyjson;
 pub mod pypath;
 pub mod pyurl;

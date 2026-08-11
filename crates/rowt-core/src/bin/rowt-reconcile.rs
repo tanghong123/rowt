@@ -1,25 +1,11 @@
-//! `rowt-reconcile` — the corp-lane superset reconcile, drop-in for
-//! `config/corp-sync-reconcile.py`. Same flags, same stdout contract.
+//! `rowt-reconcile` — the gate's half of `config/corp-sync-reconcile.py`, for `parity the corp-sync reconcile gate`.
+//!
+//! A shim on purpose. The surface itself is `rowt_core::pycli::corp_sync_reconcile`,
+//! which is also what `rowt-rs _py` runs, so the gate replays the Python
+//! against the code the product uses rather than against a second parser
+//! written to match it.
 
-use rowt_core::reconcile::{load, reconcile, render_outcome};
-use std::process::ExitCode;
-
-fn read(p: Option<&String>) -> String {
-    p.and_then(|x| std::fs::read_to_string(x).ok()).unwrap_or_default()
-}
-
-fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let get = |flag: &str| -> Option<String> {
-        args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned()
-    };
-    let (a, h, b, p) = (get("--active"), get("--handadded"), get("--block"), get("--private"));
-    let out = reconcile(
-        &load(&read(a.as_ref())),
-        &load(&read(h.as_ref())),
-        &load(&read(b.as_ref())),
-        &load(&read(p.as_ref())),
-    );
-    println!("{}", render_outcome(&out));
-    ExitCode::SUCCESS
+fn main() -> std::process::ExitCode {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    rowt_core::pycli::corp_sync_reconcile::main(&argv)
 }
