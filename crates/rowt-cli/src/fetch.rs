@@ -52,8 +52,29 @@ pub fn sb_ok(p: &Path) -> bool {
     }
     let v = Command::new(p).arg("version").stderr(Stdio::null()).output().ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
-    let v = v.lines().next().unwrap_or("").split_whitespace().nth(2).unwrap_or("");
-    ver_ge(v, "1.12.0")
+    ver_ge(version_of(&v), "1.12.0")
+}
+
+/// `awk 'NR==1{print $3}'` on `sing-box version` — the THIRD field of the FIRST
+/// line, since the output continues with build tags and a Go version.
+fn version_of(out: &str) -> &str {
+    out.lines().next().unwrap_or("").split_whitespace().nth(2).unwrap_or("")
+}
+
+/// Where a sing-box may be downloaded from, in order.
+///
+/// Deliberately only two: whatever the user explicitly trusted via
+/// `SINGBOX_URL`, then the official SagerNet release. NO third-party GitHub
+/// mirrors, however convenient they are behind the GFW — this binary carries
+/// every byte of the user's traffic, so "fetch it while another VPN is on" is
+/// the right answer and a mirror is not. Split out so that stays assertable.
+fn download_sources(ver: &str, tgz: &str, custom: &str) -> Vec<String> {
+    let mut v = Vec::new();
+    if !custom.is_empty() {
+        v.push(custom.to_string());
+    }
+    v.push(format!("https://github.com/SagerNet/sing-box/releases/download/v{ver}/{tgz}"));
+    v
 }
 
 /// `sort -V | tail -1` — a numeric-component compare, so 1.13.14 beats 1.12.0
@@ -109,13 +130,9 @@ pub fn ensure_singbox(cfg: &Path) -> Result<(), String> {
         eprintln!("==> fetching sing-box {ver} (needs internet — e.g. Shadowrocket on)");
         let mut got = false;
         let custom = std::env::var("SINGBOX_URL").unwrap_or_default();
-        let gh = format!("https://github.com/SagerNet/sing-box/releases/download/v{ver}/{tgz}");
-        for b in [custom.as_str(), gh.as_str()] {
-            if b.is_empty() {
-                continue;
-            }
+        for b in download_sources(&ver, &tgz, &custom) {
             eprintln!("==>   ↓ {b}");
-            if download(b, &tmp.join(&tgz)) {
+            if download(&b, &tmp.join(&tgz)) {
                 got = true;
                 break;
             }
@@ -273,5 +290,45 @@ mod tests {
         assert!(ver_ge("1.12.0", "1.12.0"));
         assert!(ver_ge("2.0.0", "1.99.99"));
         assert!(!ver_ge("", "1.12.0"), "an unparseable version must never pass the gate");
+    }
+
+    /// `sing-box version` prints more than a version — the first line's third
+    /// field is the number, and the lines after it are build tags.
+    #[test]
+    fn the_version_is_the_third_field_of_the_first_line() {
+        let real = "sing-box version 1.13.14\n\nEnvironment: go1.24.0 darwin/arm64\n\
+                    Tags: with_gvisor,with_quic\nRevision: abc123\n";
+        assert_eq!(version_of(real), "1.13.14");
+        // Anything that is not that shape yields "", and `ver_ge("")` is false
+        // — so an unrecognisable binary is REPLACED rather than trusted.
+        assert_eq!(version_of(""), "");
+        assert_eq!(version_of("not a version line\n"), "version");
+        assert!(!ver_ge(version_of(""), "1.12.0"));
+    }
+
+    /// sing-box carries every byte of the user's traffic, so where the binary
+    /// comes from is a security property, not a convenience one. Exactly two
+    /// sources: what the user explicitly trusted, then the official SagerNet
+    /// release. A third-party GitHub mirror is tempting behind the GFW and is
+    /// precisely what must not be added — the documented answer is to fetch it
+    /// with another VPN on.
+    #[test]
+    fn a_singbox_is_only_ever_fetched_from_upstream_or_an_explicit_url() {
+        let s = download_sources("1.13.14", "sing-box-1.13.14-darwin-arm64.tar.gz", "");
+        assert_eq!(s, vec![
+            "https://github.com/SagerNet/sing-box/releases/download/v1.13.14/\
+             sing-box-1.13.14-darwin-arm64.tar.gz"
+        ]);
+        // SINGBOX_URL is tried FIRST — it is the user overriding us on purpose
+        // — and upstream stays as the fallback.
+        let s = download_sources("1.13.14", "x.tar.gz", "file:///tmp/mine.tar.gz");
+        assert_eq!(s.len(), 2);
+        assert_eq!(s[0], "file:///tmp/mine.tar.gz");
+        assert!(s[1].starts_with("https://github.com/SagerNet/sing-box/"));
+        // Nothing else, ever.
+        for url in &s {
+            assert!(url.starts_with("https://github.com/SagerNet/") || url == "file:///tmp/mine.tar.gz",
+                    "unexpected download source: {url}");
+        }
     }
 }

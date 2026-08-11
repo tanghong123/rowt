@@ -272,6 +272,75 @@ mod tests {
         assert_eq!(GETTERS[1], "-getwebproxy");
     }
 
+    /// `dig +short` prints a CNAME chain before the address, one name per
+    /// line. Taking the first line hands `probe` a hostname where it expects an
+    /// address; taking the first dotted quad is the shell's `awk` behaviour.
+    #[test]
+    fn a_cname_chain_does_not_get_mistaken_for_an_address() {
+        assert_eq!(first_ipv4("203.0.113.10\n").as_deref(), Some("203.0.113.10"));
+        // Verbatim `dig +short` for a CDN-fronted name.
+        assert_eq!(
+            first_ipv4("edge.example.net.\nedge-geo.example.net.\n198.51.100.7\n").as_deref(),
+            Some("198.51.100.7")
+        );
+        // NXDOMAIN prints nothing at all.
+        assert_eq!(first_ipv4(""), None);
+        // A CNAME with no address is not an address.
+        assert_eq!(first_ipv4("alias.example.net.\n"), None);
+        // Shape only, like the awk: four dotted groups of up to three digits.
+        assert_eq!(first_ipv4("1.2.3\n"), None);
+        assert_eq!(first_ipv4("1.2.3.4.5\n"), None);
+        assert_eq!(first_ipv4("1.2.3.4444\n"), None);
+        assert_eq!(first_ipv4("1.2.3.\n"), None);
+        // AAAA output is not a dotted quad, so it is skipped rather than
+        // returned to a caller that will try to dial it as IPv4.
+        assert_eq!(first_ipv4("2001:db8::1\n"), None);
+    }
+
+    /// `awk '/ip_address/{print $2; exit}'` — the second FIELD. The line is
+    /// `ip_address: 203.0.113.10`, so splitting on the colon would return
+    /// " 203.0.113.10" with a leading space, and dialling that fails.
+    #[test]
+    fn the_resolver_cache_answer_is_the_second_field() {
+        let body = "name: host.example\nalias: h\nip_address: 203.0.113.10\n";
+        assert_eq!(dscache_ip(body), "203.0.113.10");
+        // Only the FIRST match, and only lines that mention it.
+        let two = "ip_address: 203.0.113.10\nip_address: 203.0.113.11\n";
+        assert_eq!(dscache_ip(two), "203.0.113.10");
+        assert_eq!(dscache_ip("name: host.example\n"), "");
+        assert_eq!(dscache_ip(""), "");
+    }
+
+    /// The proxy bypass list. Two halves, both load-bearing: the private
+    /// ranges and `*.local` keep Bonjour traffic off the proxy (it fails to
+    /// resolve there and apps retry in a tight loop that pegs the CPU), and the
+    /// captive-probe hosts are what let a hotspot's login page load AT ALL
+    /// while the proxy is on.
+    #[test]
+    fn the_bypass_list_covers_mdns_private_space_and_the_captive_probes() {
+        let want = bypass_want();
+        for entry in ["*.local", "*.arpa", "localhost", "127.0.0.1", "169.254/16"] {
+            assert!(want.contains(&entry), "missing {entry}");
+        }
+        for cidr in ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"] {
+            assert!(want.contains(&cidr), "missing {cidr}");
+        }
+        // One per OS that probes for a portal — drop any and that OS's captive
+        // sheet never appears while rowt is up.
+        for probe in ["captive.apple.com", "connectivitycheck.gstatic.com",
+                      "detectportal.firefox.com", "www.msftconnecttest.com"] {
+            assert!(want.contains(&probe), "missing captive probe {probe}");
+        }
+        // No duplicates: the comparison in `bypass_ok` sorts both sides and
+        // tests for equality, so a repeat would make it permanently unequal to
+        // what `networksetup` reports back.
+        let mut sorted = want.to_vec();
+        sorted.sort_unstable();
+        let n = sorted.len();
+        sorted.dedup();
+        assert_eq!(sorted.len(), n, "bypass_want has a duplicate");
+    }
+
     #[test]
     fn the_boot_id_is_the_first_number_sysctl_prints() {
         // Verbatim `sysctl -n kern.boottime` output: the seconds are what the
@@ -295,19 +364,31 @@ mod tests {
 /// `explain` therefore calls. (The duplicate is a characterized bash bug, listed
 /// in PORTING.md §6.7 to fix on the shell side rather than to replicate here.)
 pub fn resolve_ip(d: &str) -> String {
+    if which("dig") {
+        if let Some(ip) = first_ipv4(&out("dig", &["+short", "+time=2", "+tries=1", "A", d]).unwrap_or_default()) {
+            return ip;
+        }
+    }
+    dscache_ip(&out("dscacheutil", &["-q", "host", "-a", "name", d]).unwrap_or_default())
+}
+
+/// The first line of `dig +short` that is a dotted quad.
+///
+/// Split out to be tested: `dig +short` for a CNAME chain prints the aliases
+/// FIRST, one per line, and only then the address. Taking line one would hand
+/// `probe` a hostname where it expects an address, and `explain` would report
+/// the wrong lane for a domain that resolves perfectly well.
+fn first_ipv4(body: &str) -> Option<String> {
     fn ipv4(s: &str) -> bool {
         let p: Vec<&str> = s.split('.').collect();
         p.len() == 4 && p.iter().all(|x| !x.is_empty() && x.len() <= 3 && x.chars().all(|c| c.is_ascii_digit()))
     }
-    if which("dig") {
-        let body = out("dig", &["+short", "+time=2", "+tries=1", "A", d]).unwrap_or_default();
-        if let Some(l) = body.lines().map(str::trim).find(|l| ipv4(l)) {
-            return l.to_string();
-        }
-    }
-    // `awk '/ip_address/{print $2; exit}'` — matched anywhere in the line, and
-    // the SECOND whitespace field, not the text after the colon.
-    let body = out("dscacheutil", &["-q", "host", "-a", "name", d]).unwrap_or_default();
+    body.lines().map(str::trim).find(|l| ipv4(l)).map(str::to_string)
+}
+
+/// `awk '/ip_address/{print $2; exit}'` — matched anywhere in the line, and the
+/// SECOND whitespace field, not the text after the colon.
+fn dscache_ip(body: &str) -> String {
     body.lines()
         .find(|l| l.contains("ip_address"))
         .and_then(|l| l.split_whitespace().nth(1))
