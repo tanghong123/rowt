@@ -181,7 +181,14 @@ fn restore() -> Result<()> {
     Ok(())
 }
 
-fn event_loop<B: Backend>(term: &mut Terminal<B>, app: &mut App) -> Result<()> {
+// ratatui 0.30 made `Backend::Error` an associated type, so `term.draw(…)?`
+// only converts into `anyhow::Error` when that type is Send + Sync. Naming the
+// bound is the whole of the upgrade for us; `CrosstermBackend`'s error is
+// `io::Error`, which satisfies it.
+fn event_loop<B: Backend>(term: &mut Terminal<B>, app: &mut App) -> Result<()>
+where
+    <B as Backend>::Error: Send + Sync + 'static,
+{
     let mut last_data = Instant::now();
     let mut hit = ui::Hit::default();
     loop {

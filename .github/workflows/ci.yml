@@ -31,8 +31,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # PINNED. Unpinned, this installed whatever was newest and the gate moved
+      # under the repo: ruff 0.16 widened its implicit default rule set, and
+      # main went red on 31 findings in files nobody had touched. ruff.toml now
+      # declares the selection so any version agrees, and the pin means the
+      # FORMATTER cannot drift either — `ruff format --check` has no rule set to
+      # declare, so its output is only reproducible if the version is fixed.
       - name: install ruff
-        run: pipx install ruff
+        run: pipx install ruff==0.16.2
       - name: ruff check
         run: ruff check config/
       - name: ruff format --check

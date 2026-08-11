@@ -1,0 +1,22 @@
+# Ruff's rule SELECTION, declared rather than inherited.
+#
+# `ruff check` with no configuration enforces whatever the installed version
+# considers default, and that set grows between releases. CI installed ruff
+# unpinned, so it moved from 0.13 to 0.16 on its own and `main` went red with
+# 31 findings across files that had not changed — a linter upgrade nobody made,
+# reported as if the code had broken. Verified directly: `--isolated` with no
+# selection, 0.13.1 finds nothing here and 0.16.2 finds 31; give both the
+# selection below and they agree.
+#
+# This is the set that has actually been enforced all along — ruff's own
+# documented default of pycodestyle errors plus pyflakes. Declaring it does not
+# change what passes today; it means WIDENING the gate is a deliberate edit with
+# its own commit, rather than something a `pipx install` decides for you.
+#
+# The findings a broader set reports here are worth reading before adopting
+# (SIM115 in particular — files opened without a context manager). They are not
+# adopted in the same breath as fixing CI, because `config/*.py` is the
+# REFERENCE side of `parity foreign-diff` and `sr-diff` — 2,400 cases that ask
+# whether the Rust matches the Python. Rewriting the Python moves the oracle.
+[lint]
+select = ["E4", "E7", "E9", "F"]
