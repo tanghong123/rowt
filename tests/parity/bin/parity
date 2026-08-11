@@ -1123,6 +1123,13 @@ cmd_cli_diff() {
   _rv="$("$rs" version 2>/dev/null | awk '{print $2}')"
   [ -z "$_sv" ] || [ -z "$_rv" ] || [ "$_sv" = "$_rv" ] || \
     die "rowt-rs is v$_rv but bin/rowt is v$_sv — rebuild (cargo build --release) or the audit lines will differ on every case"
+  # curl is shimmed in this sandbox and urllib is NOT, so with ROWT_PY=1 the
+  # bash side's geosite hint was making real requests to github.com — twelve
+  # umbrella categories per `<lane> add`, from a gate. Slow, non-hermetic, and
+  # it timed out `corp-synced escape add` often enough to look like a real
+  # divergence while passing on the retry. Nothing listens on port 1, so both
+  # sides now fail fast and identically.
+  local DEAD_URL="http://127.0.0.1:1"
   local fails=0 total=0 line
   while IFS= read -r line; do
     case "$line" in ''|'#'*) continue ;; esac
@@ -1183,6 +1190,7 @@ cmd_cli_diff() {
     ( env -i HOME="$A/home" XDG_CONFIG_HOME="$A/home" \
         PATH="$A/shims:/usr/bin:/bin:/usr/sbin:/sbin" TERM=dumb LC_ALL=C TZ=UTC \
         PARITY_TRACE="$A/trace" PARITY_ENV="$A/env" \
+        ROWT_GEOSITE_BASE="$DEAD_URL" \
         ROWT_PY="${PARITY_BASH_PY:-1}" \
         ${PARITY_BASH_IMPL:+ROWT_IMPL="$PARITY_BASH_IMPL"} \
         perl -e "$TMO" "$tmo" \
@@ -1196,6 +1204,7 @@ cmd_cli_diff() {
     ( env -i HOME="$B/home" XDG_CONFIG_HOME="$B/home" \
         PATH="$B/shims:/usr/bin:/bin:/usr/sbin:/sbin" TERM=dumb LC_ALL=C TZ=UTC \
         PARITY_TRACE="$B/trace" PARITY_ENV="$B/env" \
+        ROWT_GEOSITE_BASE="$DEAD_URL" \
         perl -e "$TMO" "$tmo" \
         "$rs" $cmdline > "$B/out" 2>/dev/null < /dev/null ) 2>/dev/null || brc=$?
     echo "$arc" > "$A/rc"; echo "$brc" > "$B/rc"
@@ -1231,7 +1240,23 @@ cmd_cli_diff() {
     # external: what it PRINTS is nearly nothing, what it RUNS is the whole
     # behavior. Without this, "identical stdout" would certify an empty stub.
     [ -f "$A/trace" ] || : > "$A/trace"; [ -f "$B/trace" ] || : > "$B/trace"
-    normalize "$A/trace" "$A" > "$A/trace.n"; normalize "$B/trace" "$B" > "$B/trace.n"
+    # The geosite HINT's rule-set fetches come out of the trace, and only those.
+    #
+    # They cannot be compared here, in either direction: the hint reaches the
+    # network through curl in Rust and through urllib in the Python, curl is
+    # shimmed and urllib is not, and cli-diff's default mode deliberately runs
+    # the Python on the bash side. So these lines record WHICH HTTP CLIENT ran
+    # rather than whether rowt tried to fetch — the same thing pool.rs says
+    # about subscriptions. What the fetch actually DID is compared by
+    # `geosite-diff`, which diffs the cache directory afterwards.
+    #
+    # Matched on the hint's exact argv shape. `fetch_geosite` — the explicit
+    # `<lane> add geosite:<name>` download — spells it
+    # `curl -fL -# --connect-timeout 12 …`, so it does not match this and stays
+    # fully compared.
+    _geo_fetch='/^curl -fsSL -o .*geosite-.*\.srs -- .*geosite-.*\.srs$/d'
+    normalize "$A/trace" "$A" | sed "$_geo_fetch" > "$A/trace.n"
+    normalize "$B/trace" "$B" | sed "$_geo_fetch" > "$B/trace.n"
     # A command that fans out (ping, probe) writes its trace from concurrent
     # processes, so the ORDER is whatever the scheduler chose — on both sides.
     # Marked cases compare the trace as a SET. Not the default: for the proxy

@@ -4,10 +4,14 @@
 //! what notices that `geosite:google` would cover it and every other Google
 //! domain including the ccTLDs, and says so.
 //!
-//! The IO half — fetching a rule-set, decompiling it with sing-box, globbing the
-//! cache — is the caller's (see `rowt-cli`). Everything here is a pure decision
-//! over already-loaded category contents, which is what makes the interesting
-//! parts testable without a network or a sing-box binary.
+//! Most of this file is a pure decision over already-loaded category contents,
+//! which is what makes the interesting parts testable without a network or a
+//! sing-box binary. `lookup` at the bottom is the IO half around it — the cache
+//! glob, the fetch, the sing-box decompile — and it lives here rather than in
+//! either caller because there are two: `pycli::geosite_lookup`, which is the
+//! `geosite-lookup.py` command surface that `bin/rowt` runs, and `rowt-rs`'s own
+//! lane-add hint. Splitting them is how the hint went missing from rowt-rs
+//! entirely for as long as it did.
 
 /// Labels that identify nothing: TLDs, ccTLDs, and the host prefixes that show
 /// up in front of everything. A brand guess of "com" or "www" would fetch a
@@ -139,9 +143,153 @@ pub fn candidates(domain: &str, cached: &[String], have: &[String]) -> Vec<(Stri
     out
 }
 
+// ---------------------------------------------------------------- the IO half
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+/// Where the categories live and what can read them.
+pub struct Env {
+    pub cache: PathBuf,
+    /// The sing-box binary. Nothing happens without it — decompiling a `.srs`
+    /// is the only way to find out what a category contains.
+    pub sb: String,
+    pub base: String,
+}
+
+pub const BASE: &str = "https://github.com/SagerNet/sing-geosite/raw/rule-set";
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Lookup {
+    /// A category already on this lane covers the domain — nothing to suggest.
+    Have(String),
+    /// Categories that would cover it, most relevant first, capped at
+    /// `MAX_SHOWN`. Possibly empty.
+    Suggest(Vec<String>),
+}
+
+/// `load(name, allow_fetch)`. `None` for every failure — a missing set, a fetch
+/// that did not happen or did not work, a decompile that failed, JSON that will
+/// not parse. The Python catches all four the same way and so does this.
+fn load(env: &Env, name: &str, allow_fetch: bool) -> Option<Coverage> {
+    let js = env.cache.join(format!("geosite-{name}.json"));
+    let srs = env.cache.join(format!("geosite-{name}.srs"));
+    if !js.exists() {
+        if !srs.exists() {
+            if !allow_fetch {
+                return None;
+            }
+            fetch(env, name, &srs)?;
+        }
+        let out = Command::new(&env.sb)
+            .args(["rule-set", "decompile"])
+            .arg(&srs)
+            .arg("-o")
+            .arg(&js)
+            // `capture_output=True` — sing-box's chatter belongs to nobody here.
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .ok()?;
+        if !out.success() {
+            return None;
+        }
+    }
+    let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&js).ok()?).ok()?;
+    Some(parse_ruleset(&doc))
+}
+
+/// `urllib.request.urlretrieve(url, srs)`, as curl — writing straight to the
+/// destination, which is what `urlretrieve` does.
+///
+/// Straight-to-destination looks like the careless choice and is deliberate.
+/// Measured, not assumed: `curl -fsSL -o dst` leaves NO file behind on a
+/// refused connection, an unresolvable host, or an HTTP error, and neither does
+/// `urlretrieve` — it raises before it opens the destination. So the two agree
+/// on every failure that ends the request.
+///
+/// Where they would differ is a transfer INTERRUPTED after a 200, which leaves
+/// a partial `geosite-<name>.srs` in the cache — and that file is not inert:
+/// `cached()` globs `*.srs`, so the truncated set is offered as
+/// already-downloaded from then on, and the hint for that category is dead
+/// until someone clears the cache by hand. A `.part` file renamed on success
+/// fixes it in three lines. It is not done here because it is a FIX, and the
+/// commit that moved this was a port — §6.7, and the row is in the table.
+fn fetch(env: &Env, name: &str, srs: &Path) -> Option<()> {
+    Command::new("curl")
+        .args(["-fsSL", "-o"])
+        .arg(srs)
+        .arg("--")
+        .arg(format!("{}/geosite-{name}.srs", env.base))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .ok()
+        .filter(|s| s.success())
+        .map(|_| ())
+}
+
+/// `sorted(p.name[len("geosite-"):-len(".srs")] for p in cache.glob("geosite-*.srs"))`.
+fn cached(cache: &Path) -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir(cache) else { return vec![] };
+    let mut out: Vec<String> = rd
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter_map(|n| {
+            n.strip_prefix("geosite-").and_then(|r| r.strip_suffix(".srs")).map(String::from)
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// Which categories cover `domain`? `None` means "decline, say nothing" — no
+/// sing-box, or an input that cannot be a domain.
+///
+/// Every failure inside is silent by design. This runs inside `rowt escape
+/// add`, and a cold cache, a dead network or an unreadable rule-set must cost
+/// the user a hint, never the add.
+pub fn lookup(env: &Env, domain: &str, have: &[String]) -> Option<Lookup> {
+    let domain = normalize(domain)?;
+    if !Path::new(&env.sb).exists() {
+        return None;
+    }
+    let _ = std::fs::create_dir_all(&env.cache);
+
+    // `allow_fetch` is false here: a set that is not already cached cannot be
+    // the reason this domain is covered TODAY.
+    for name in have {
+        if load(env, name, false).is_some_and(|c| c.covers(&domain)) {
+            return Some(Lookup::Have(name.clone()));
+        }
+    }
+    let mut out: Vec<String> = vec![];
+    for (name, allow) in candidates(&domain, &cached(&env.cache), have) {
+        if load(env, &name, allow).is_some_and(|c| c.covers(&domain)) {
+            out.push(name);
+        }
+    }
+    out.truncate(MAX_SHOWN);
+    Some(Lookup::Suggest(out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_lists_only_srs_and_sorts() {
+        // `.json` is deliberately not counted: the candidate list is built from
+        // the .srs glob, so a cache holding only decompiled JSON offers nothing.
+        // The corpus made that mistake first and the cap went untested for it.
+        let d = std::env::temp_dir().join(format!("rowt-geosite-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&d);
+        for f in ["geosite-zzz.srs", "geosite-aaa.srs", "geosite-aaa.json", "other.srs"] {
+            std::fs::write(d.join(f), "").unwrap();
+        }
+        assert_eq!(cached(&d), ["aaa", "zzz"]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn a_brand_guess_skips_generic_labels() {

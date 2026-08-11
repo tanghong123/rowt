@@ -381,6 +381,35 @@ fn load_lanes(cfg: &Path) -> Lanes {
     }
 }
 
+/// `_geosite_hint` — the two shapes it prints, or nothing.
+///
+/// Nothing is the common answer and every failure inside `geosite::lookup`
+/// produces it: the add already happened, and a cold cache or a dead network
+/// must not turn a successful edit into a failed command.
+fn geosite_hint(cfg: &Path, label: &str, domain: &str, have: &[String]) -> Vec<String> {
+    let env = rowt_core::geosite::Env {
+        cache: cfg.join("cache"),
+        sb: Ctx::new(cfg.to_path_buf()).sb().to_string_lossy().into_owned(),
+        base: std::env::var("ROWT_GEOSITE_BASE")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| rowt_core::geosite::BASE.to_string()),
+    };
+    match rowt_core::geosite::lookup(&env, domain, have) {
+        Some(rowt_core::geosite::Lookup::Have(name)) => {
+            vec![format!("    (already covered by geosite:{name} on this lane)")]
+        }
+        Some(rowt_core::geosite::Lookup::Suggest(names)) if !names.is_empty() => {
+            let mut o = vec![format!(
+                "    {domain} is also covered by these geosite categories — add a whole service if you want:"
+            )];
+            o.extend(names.iter().map(|c| format!("        {PROG} {label} add geosite:{c}")));
+            o
+        }
+        _ => vec![],
+    }
+}
+
 /// `geosites_of` over a lane list — used for explain's rule-set note.
 fn geosites(body: &str) -> Vec<String> {
     rowt_core::render::geosites_of(body)
@@ -726,6 +755,14 @@ fn cmd_lane_log(cfg: &Path, lane: &str) -> Result<String, String> {
 
 fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<String, String> {
     let label = lane.as_str();
+    // `edit_list` sifts `--no-reload` out of the argument list before it looks
+    // at anything else, from ANY position — it is what the TUI passes for a
+    // batched edit. Without this it reaches the entry list and gets added as a
+    // literal `--no-reload` line, which is a lane entry that matches nothing
+    // and that the user then has to find and remove by hand.
+    let no_reload = args.iter().any(|a| a == "--no-reload");
+    let args: Vec<String> = args.iter().filter(|a| *a != "--no-reload").cloned().collect();
+    let args = args.as_slice();
     let lanes = load_lanes(cfg);
     let body = match lane {
         Lane::Escape => &lanes.escape,
@@ -794,7 +831,53 @@ fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<Str
                     }
                 }
             }
-            Ok(e.messages.join("\n"))
+            // The "also covered by geosite:…" hint, which rowt-rs did not print
+            // at all until the Phase 6 cutover made the omission visible: the
+            // shell reached it through urllib, which the argv trace cannot see,
+            // so `escape add` compared clean while one side silently did less.
+            //
+            // `have` comes from the POST-edit lane, matching `_geosite_hint`'s
+            // position after `_lane_append` and `_lane_dedupe` — so it includes
+            // the entry just added and excludes whatever dedupe pulled out of
+            // the other two lanes.
+            let mut out = e.messages.clone();
+            if let Op::Add(entries) = &op {
+                // `geosite:` is escape/block only — corp routes internal names —
+                // and on those two lanes an add splits two ways, exactly as the
+                // shell's `case "$e"` does.
+                if lane != Lane::Corp {
+                    let after = match lane {
+                        Lane::Escape => &e.lanes.escape,
+                        _ => &e.lanes.block,
+                    };
+                    let have = geosites(after);
+                    for entry in entries {
+                        let entry = entry.trim();
+                        if entry.is_empty() {
+                            continue;
+                        }
+                        match entry.strip_prefix("geosite:") {
+                            // An explicit whole-service add downloads its
+                            // rule-set, so the next render actually has it.
+                            // rowt-rs wrote the lane line and skipped this, which
+                            // leaves the config naming a set that is not on disk;
+                            // `fetch::geosite` existed the whole time with no
+                            // caller. NOT gated on --no-reload: the shell fetches
+                            // either way, because the alternative is a lane entry
+                            // that silently does nothing.
+                            Some(name) => fetch::geosite(&cfg, name),
+                            // A plain domain shows (never applies) the categories
+                            // that also cover it. Skipped for the TUI's batched
+                            // edits so it never blocks on the network.
+                            None if !no_reload => {
+                                out.extend(geosite_hint(&cfg, label, entry, &have))
+                            }
+                            None => {}
+                        }
+                    }
+                }
+            }
+            Ok(out.join("\n"))
         }
         _ => Err(format!(
             "usage: {PROG} {label} [list | add <e>… | rm <e>… | import <file> | clear | dump [file]]"
