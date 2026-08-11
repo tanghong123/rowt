@@ -30,6 +30,7 @@
 #   parity foreign-diff      other clients' config trees, Python vs Rust
 #   parity sr-diff           Shadowrocket's plist + rules, Python vs Rust
 #   parity geosite-diff      the `add` hint's category lookup, Python vs Rust
+#   parity splitter-diff     sing-box's log stream -> per-lane logs, Python vs Rust
 #   parity watch-diff        watchdog tick: bash's effects vs the FSM's plan
 #   parity platform-diff     the platform layer, compared by the argv it produces
 #   parity cli-diff          whole commands through rowt-rs vs the shell
@@ -894,6 +895,74 @@ cmd_geosite_diff() { # [count]
   echo "  $fails/$n cases differ — artifacts: $work"; return 1
 }
 
+# sing-box's log stream split into per-lane logs, Python vs Rust.
+#
+# The splitter is the one ported piece no command-level gate can reach: `up`
+# starts it inside a process substitution, it outlives the CLI, and the sandbox's
+# fake sing-box exits without printing, so not one cli-diff case has ever made it
+# write a line. Driving it directly is also the only way to compare it WITHOUT a
+# race — fed a file, each side reads to EOF and exits, and the logs are on disk
+# when it does.
+#
+# The Python half is extracted from bin/rowt rather than kept as a fixture: it
+# lives in a heredoc, and a copy would drift the first time someone edited the
+# original.
+cmd_splitter_diff() { # [count]
+  local rs="${PARITY_RUST_CLI:-$ROOT/target/release/rowt-rs}"
+  [ -x "$rs" ] || die "no rust cli at $rs — cargo build --release -p rowt-cli"
+  local work n fails=0 d
+  work="$(mktemp -d "${TMPDIR:-/tmp}/parity-splitter.XXXXXX")"
+  awk '/^read -r -d .. SPLITTER_PY <</{f=1;next} f&&/^PY$/{exit} f' "$ROWT" > "$work/splitter.py"
+  [ -s "$work/splitter.py" ] || die "could not extract SPLITTER_PY from $ROWT (heredoc moved?)"
+  n="$(python3 "$SELF/gen-splitter-cases.py" "$work" "${1:-120}")"
+  for d in "$work"/case*; do
+    local side
+    for side in py rs; do
+      rm -rf "$d/$side"; mkdir -p "$d/$side"
+      if [ "$side" = py ]; then
+        PYTHONUTF8=1 python3 "$work/splitter.py" "$d/py/host.log" "$d/py" \
+          < "$d/stdin" > /dev/null 2>&1 || true
+      else
+        "$rs" _splitter "$d/rs/host.log" "$d/rs" < "$d/stdin" > /dev/null 2>&1 || true
+      fi
+      # Sizes as well as names: a log the splitter created but never wrote to is
+      # a different outcome from one it never opened, and `rowt <lane> errors`
+      # reads both the same way only by accident.
+      ( cd "$d/$side" && find . -type f | LC_ALL=C sort | while IFS= read -r f; do
+          printf '%s %s\n' "$(wc -c < "$f" | tr -d ' ')" "$f"
+        done ) > "$d/$side.tree"
+    done
+    local bad=""
+    cmp -s "$d/py.tree" "$d/rs.tree" || bad="tree"
+    local f
+    for f in host escape block direct corp; do
+      local a="$d/py/$f.log" b="$d/rs/$f.log"
+      [ "$f" = host ] || { a="$d/py/lane-$f.log"; b="$d/rs/lane-$f.log"; }
+      if [ -e "$a" ] || [ -e "$b" ]; then
+        cmp -s "$a" "$b" 2>/dev/null || bad="$bad $f"
+      fi
+    done
+    if [ -n "$bad" ]; then
+      fails=$((fails + 1))
+      if [ "$fails" -le 3 ]; then
+        echo "  DIFFERS ($bad): $d"
+        diff "$d/py.tree" "$d/rs.tree" 2>/dev/null | sed 's/^/      /' | head -6 || true
+        for f in $bad; do
+          [ "$f" = tree ] && continue
+          local a="$d/py/$f.log" b="$d/rs/$f.log"
+          [ "$f" = host ] || { a="$d/py/lane-$f.log"; b="$d/rs/lane-$f.log"; }
+          diff "$a" "$b" 2>/dev/null | cat -vet | sed 's/^/      /' | head -8 || true
+        done
+      fi
+    fi
+  done
+  if [ "$fails" -eq 0 ]; then
+    echo "  $n log-stream cases: identical (host.log and every lane log, byte for byte)"
+    rm -rf "$work"; return 0
+  fi
+  echo "  $fails/$n cases differ — artifacts: $work"; return 1
+}
+
 # Lane-list edits, bash vs Rust: the three files afterwards, and the lines the
 # user is told. The shell's surrounding effects (geosite fetch, the coverage
 # hint, the router reload) are filtered out — they are not set logic.
@@ -1043,6 +1112,17 @@ cmd_platform_diff() {
 cmd_cli_diff() {
   local rs="${PARITY_RUST_CLI:-$ROOT/target/release/rowt-rs}"
   [ -x "$rs" ] || die "no rust cli at $rs — cargo build --release -p rowt-cli"
+  # The version is baked into rowt-rs at build time from bin/rowt, and it goes
+  # into every audit line — so a stale binary fails most of the sweep on
+  # `v3.3.5` vs `v3.3.6` and looks exactly like a real regression. The trap is
+  # structural, not carelessness: the pre-commit hook BUMPS bin/rowt, so the
+  # binary is stale the instant a commit lands and the next run is the one that
+  # pays. One comparison turns a confusing red sweep into a sentence.
+  local _sv _rv
+  _sv="$(sed -n 's/^ROWT_VERSION="\(.*\)"/\1/p' "$ROWT" | head -1)"
+  _rv="$("$rs" version 2>/dev/null | awk '{print $2}')"
+  [ -z "$_sv" ] || [ -z "$_rv" ] || [ "$_sv" = "$_rv" ] || \
+    die "rowt-rs is v$_rv but bin/rowt is v$_sv — rebuild (cargo build --release) or the audit lines will differ on every case"
   local fails=0 total=0 line
   while IFS= read -r line; do
     case "$line" in ''|'#'*) continue ;; esac
@@ -1452,6 +1532,7 @@ case "${1:-}" in
   foreign-diff)    shift; cmd_foreign_diff "$@" ;;
   sr-diff)         shift; cmd_sr_diff "$@" ;;
   geosite-diff)    shift; cmd_geosite_diff "$@" ;;
+  splitter-diff)   shift; cmd_splitter_diff "$@" ;;
   lanes-diff)      shift; cmd_lanes_diff "$@" ;;
   watch-diff)      shift; cmd_watch_diff "$@" ;;
   platform-diff)   shift; cmd_platform_diff "$@" ;;

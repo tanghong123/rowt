@@ -53,7 +53,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.3.6"
+ROWT_VERSION="3.3.7"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -200,6 +200,28 @@ warn() { echo "warning: $*" >&2; }
 # exec'd process). Prints the command's output, or nothing if it exceeds N sec.
 _tmo() { local s="$1"; shift; perl -e 'alarm shift; exec @ARGV' "$s" "$@"; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# `urllib.parse.quote(s, safe="")` — every byte outside the unreserved set is
+# percent-encoded, INCLUDING `/` and `:`, because the result is a query-string
+# VALUE inside the clash delay URL.
+#
+# Byte-wise under LC_ALL=C, which is the whole trick: `${#s}` and `${s:i:1}`
+# count characters under a UTF-8 locale, and a multi-byte character has to come
+# out as one escape per byte. The `& 0xFF` is not decoration either — bash's
+# `printf "'$c"` sign-extends a byte over 0x7F, so `中` encodes as
+# %FFFFFFFFFFFFFFE4 without it. Checked against the Python over the URL shapes
+# these two callers can actually see, multibyte and empty included.
+_urlencode() {
+  local LC_ALL=C s="$1" out="" i c n
+  for (( i=0; i<${#s}; i++ )); do
+    c="${s:i:1}"
+    case "$c" in
+      [A-Za-z0-9._~-]) out="$out$c" ;;
+      *) printf -v n '%d' "'$c"; printf -v c '%%%02X' "$(( n & 0xFF ))"; out="$out$c" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
 
 # state get/set — one key=value per line in $STATE
 sget() { [ -f "$STATE" ] && sed -n "s/^$1=//p" "$STATE" | tail -1 || true; }
@@ -1855,7 +1877,7 @@ cmd_ping() {
   now="$(clash_selected)"
   ep="$(controller)" || die "clash API endpoint unknown (is the router/VM up?)"
   sec="$(clash_secret)"
-  enc="$(python3 -c 'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=""))' "$PING_URL" 2>/dev/null || echo "$PING_URL")"
+  enc="$(_urlencode "$PING_URL")"
   info "testing latency to $PING_URL through the tunnel (parallel, ${PING_TIMEOUT}s each)…"
   local dir; dir="$(mktemp -d)" pids=""
   for t in $tags; do
@@ -1997,14 +2019,14 @@ for line in sys.stdin:
 PY
 
 # Start sing-box in the background, recording ITS pid (not the splitter's).
-#   $1=1 -> divert block noise via the python splitter (if python3 is available)
-#   $1=0 -> plain append to host.log (fallback: no python, or a retry)
+#   $1=1 -> divert block noise via the splitter (if there is one to run)
+#   $1=0 -> plain append to host.log (fallback: no splitter, or a retry)
 _start_host_router() {
   mkdir -p "$LOGDIR"; rotate_log "$HOST_LOG"
   local _l; for _l in $LANE_NAMES; do rotate_log "$(lane_log "$_l")"; done
-  if [ "${1:-1}" = 1 ] && command -v python3 >/dev/null 2>&1; then
+  if [ "${1:-1}" = 1 ] && _py_ok; then
     # process substitution keeps $! = sing-box; append (>>) inside the splitter
-    "$SB" run -c "$HOST_CFG" > >(exec python3 -c "$SPLITTER_PY" "$HOST_LOG" "$LOGDIR") 2>&1 &
+    "$SB" run -c "$HOST_CFG" > >(exec "${PY_SPLITTER[@]}" "$HOST_LOG" "$LOGDIR") 2>&1 &
   else
     "$SB" run -c "$HOST_CFG" >>"$HOST_LOG" 2>&1 &
   fi
@@ -3117,7 +3139,7 @@ _watch_probe() {
   ep="$(controller 2>/dev/null || true)"; [ -n "$ep" ] || return 1   # API gone = wedged
   sec="$(clash_secret)"
   sel="$(sget selected)"; sel="${sel:-auto}"                          # concrete server, or 'auto' (urltest)
-  enc="$(python3 -c 'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=""))' "$HEALTH_URL" 2>/dev/null || echo "$HEALTH_URL")"
+  enc="$(_urlencode "$HEALTH_URL")"
   for t in 1 2; do
     # curl max-time must exceed the clash delay timeout or it cuts the test early.
     out="$(curl --noproxy '*' -sS -m "$(( HEALTH_TIMEOUT + 3 ))" -H "Authorization: Bearer $sec" \
@@ -4780,6 +4802,12 @@ _setup_py_helpers() {
     PY_NETDETECT=("$rb" _py net-detect)
     PY_MERGE=("$rb" _py import-merge)
     PY_RECONCILE=("$rb" _py corp-sync-reconcile)
+    # Not a `_py` tool: the splitter is a long-lived daemon `up` starts inside a
+    # process substitution, so rowt-rs answers it on its own arm, ahead of the
+    # preamble — rotating logs from inside the process about to write them would
+    # be wrong, and a BEGIN/END pair per router start is noise in the one record
+    # that exists to be read.
+    PY_SPLITTER=("$rb" _splitter)
     PY_HAVE=1
   else
     PY_VLESS=(python3 "$PARSER")
@@ -4789,6 +4817,7 @@ _setup_py_helpers() {
     PY_NETDETECT=(python3 "$NET_DETECT")
     PY_MERGE=(python3 "$IMPORT_MERGE")
     PY_RECONCILE=(python3 "$CORP_SYNC_RECONCILE")
+    PY_SPLITTER=(python3 -c "$SPLITTER_PY")
     PY_HAVE=0; have python3 && PY_HAVE=1
   fi
 }

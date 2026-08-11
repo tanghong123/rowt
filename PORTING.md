@@ -1,9 +1,11 @@
 # Porting rowt: bash → Rust, macOS → macOS + Linux
 
-*Investigation and design, 2026-08-08. Status as of 2026-08-10: phases 0, 2 and
-6 done; 1, 3 and 4 are code-complete and gated, waiting on cutovers and on the
-shadow window's fourteen days; phase 5 (Linux) not started. The per-phase table
-in §5 is the authority — this line is a summary and will drift first.*
+*Investigation and design, 2026-08-08. Status as of 2026-08-11: phases 0, 2, 4
+and 6 done — the repo has no Python on any runtime path and `ROWT_IMPL=rust`
+runs the whole CLI; 1 and 3 are code-complete and gated, waiting on their
+cutovers and on the shadow window's fourteen days; phase 5 (Linux) not started.
+The per-phase table in §5 is the authority — this line is a summary and will
+drift first.*
 
 The question asked: rowt is mostly bash — does it make sense to refactor it
 into a systems language, modularized, so that (a) it can run on both macOS and
@@ -199,9 +201,9 @@ revertible and gated.
 | **1** ◑ | `rowt-core::render` — replace the giant jq program. bash calls `rowt-rs render` internally. | **render done** — `crates/rowt-render`, 18/18 cases canonically identical on host + vm (`parity render-matrix`), and identical against the real 22-server config. Remaining: throwaway-port outbound oracle, bash cutover, shadow window |
 | **2** ✅ | classify/explain, lane set logic, absorb `corp-sync-reconcile.py` | **done** — classify: 9/9 cases × 92 destinations identical on `(lane, reason)`; lane edits: 12/12 cases identical across all three files + messages; reconcile: 210 generated cases identical to the Python. `selftest` 9/9 |
 | **3** ◑ | watchdog: FSM into core, effects via `PlatformMac`; `cmd_watch` execs the Rust tick | **FSM + shadow done** — `rowt-core::watch`, 18 unit tests replaying §11's decision table; `parity watch-diff` 5/5; `ROWT_WATCH_SHADOW=1` compares the shell's decisions against the FSM's plan on every real tick, feeding it the tick's own captive verdict rather than re-probing. **Effects done too** — `perform` drives `PlatformMac`, runs the real `cmd_reload` for a recovery, and re-probes the escape lane through the clash delay test the way the shell does. Remaining: the `cmd_watch` cutover (bash still runs its own tick and merely shadows this one), and **time** — the shadow window itself |
-| **4** ◑ | CLI. Built as `rowt-rs` alongside the shell first, so each command lands with evidence; only then does bash reduce to a wrapper and get deleted. Formula ships the prebuilt binary (monitor-asset pattern). | **all 37 arms native AND gated** — `parity cli-diff` compares stdout, exit status, the **whole config tree** (content and mode), the **argv trace** and the **audit log** over 253 cases. Every arm but the TUI is compared; the lifecycle four were the last to be, and all four diverged when first asked. Remaining: the `ROWT_IMPL` cutover |
+| **4** ◑ | CLI. Built as `rowt-rs` alongside the shell first, so each command lands with evidence; only then does bash reduce to a wrapper and get deleted. Formula ships the prebuilt binary (monitor-asset pattern). | **all 37 arms native AND gated** — `parity cli-diff` compares stdout, exit status, the **whole config tree** (content and mode), the **argv trace** and the **audit log** over 253 cases. Every arm but the TUI is compared; the lifecycle four were the last to be, and all four diverged when first asked. `ROWT_IMPL=rust` hands the whole invocation to rowt-rs and is off by default (§6.6). **Done** |
 | **5** | `PlatformLinux` + tun mode + systemd units; CI matrix (macOS + ubuntu — core tests run on both, platform tests feature-gated); linux tar assets | fresh-VM install → onboard → probe → captive drill; VPN-coexistence drill with Tailscale up |
-| 6 ◑ | port the import pipeline (1,302 lines of parsing Python). No longer optional — the 2026-08-09 decision is one language in the repo, and this is what retires `depends_on "python@3.12"`. | **all four done** — `rowt-core::{sharelink,importmerge,foreign,srimport}` (+`bplist`); `parity vless-diff` 2,000 cases, `merge-diff` 1,500 (the review FILE plus the streams), `foreign-diff` 1,200 (synthetic client config TREES), `sr-diff` 1,200 (synthetic Shadowrocket installs). What remains is the CUTOVER: `bin/rowt` still calls the Pythons, which are the reference side of those gates |
+| 6 ✅ | port the import pipeline (1,302 lines of parsing Python). No longer optional — the 2026-08-09 decision is one language in the repo, and this is what retires `depends_on "python@3.12"`. | **ported AND cut over** — `rowt-core::{sharelink,importmerge,foreign,srimport}` (+`bplist`), plus `pycli` (the seven `config/*.py` command surfaces) and the log splitter. `bin/rowt` runs the Rust: every `python3 config/*.py` call site is `rowt-rs _py <tool>`, and `ROWT_PY=1` puts the Pythons back so `cli-diff` still compares an extractor against an extractor. Gates: `vless-diff` 2,000, `merge-diff` 1,500, `foreign-diff` 1,200, `sr-diff` 1,200, `netdetect-diff`, and two the cutover forced into existence — `geosite-diff` and `splitter-diff` |
 
 #### What still reaches for bash, and the order it comes back in
 
@@ -277,19 +279,37 @@ outbound rather than an error. Sequenced AFTER the bash port finished: two
 rewrites converging on the same files is how a differential harness stops
 telling you which side broke.
 
-**All of it now has a Rust counterpart** — the last, `sr-import.py`, as
-`rowt-core::{srimport,bplist}` behind `parity sr-diff`. What is left is not
-translation but CUTOVER: `bin/rowt` still shells out to `config/*.py`, and the
-Pythons stay in the tree until it does not, because they are the reference side
-of every gate. Retiring `depends_on "python@3.12"` from the Formula is the
-concrete prize and it lands with the cutover, not with the last port.
+**All of it is ported AND cut over.** `bin/rowt` runs no Python: the twenty-two
+`python3 config/*.py` call sites are `rowt-rs _py <tool>`, the log splitter is
+`rowt-rs _splitter`, and the two inline `urllib.parse.quote` one-liners are a
+bash function checked against the Python byte for byte.
 
-The cutover is happening arm by arm rather than at once. `rowt-rs` no longer
-runs a Python for anything; `bin/rowt` still does, and that is what keeps the
-two comparable. The scripts stay in the tree until the shell itself is retired,
-because they are the reference side of every gate — and
-`depends_on "python@3.12"` stays with them, since bin/rowt is what the Formula
-installs.
+An earlier draft of this section argued the two were the same thing — that the
+scripts had to stay CALLED because they are the reference side of every gate.
+They do not, and the distinction is worth keeping: `vless-diff` and its
+siblings run `python3 config/X.py` against the gate binary DIRECTLY, never
+through `bin/rowt`. All 5,900-odd cases are untouched by the cutover.
+
+What the cutover really costs is narrower: `cli-diff`'s view of extractor
+output. `ROWT_PY=1` buys that back — the shell takes the Python path, the gate
+sets it, and the comparison is exactly what it was. The same shape as
+`ROWT_IMPL`, one layer down, and a field escape hatch besides.
+
+The scripts stay in the tree as the gates' reference side, and that is now their
+only job. `depends_on "python@3.12"` no longer follows them: it followed
+bin/rowt, and bin/rowt no longer needs it — on Apple Silicon, where the Formula
+ships `rowt-rs`. On Intel it does not (the `elsif` branch builds only the
+monitor), so the dependency is conditional on the architecture rather than
+dropped outright, and it disappears there the day Intel gets the binary.
+
+**One implementation, two callers.** The seven `config/*.py` command surfaces
+live in `rowt_core::pycli`, and the gate binaries (`rowt-vless` and friends) are
+three-line shims over it — the same code the product runs. This is not tidiness.
+The cutover's first honest run failed 249/253, and both failures were one shape:
+a check that existed in `pool.rs` and had never reached `pycli::vless_parse`,
+which until that moment was a gate artifact whose stdout went nowhere. Two
+parsers written to match each other is precisely what no differential gate can
+see.
 
 `vless-parse.py` (421 lines) landed first of that group, as
 `rowt-core::sharelink` behind `parity vless-diff`; `import-merge.py` (172)
@@ -422,6 +442,34 @@ A `parity` script runs both implementations against the *same* sandboxed
 command surface, split exactly where the harness needs it: read-only commands
 (24 families) run live and unshimmed on both sides — roughly half the surface
 covered for free — while mutating ones go through §6.4's shims.
+
+The gates, and what each one's other side is:
+
+| gate | compares | against |
+|---|---|---|
+| `cli-diff` | stdout, status, config tree (content + mode), argv trace, audit log — 253 cases | `bin/rowt` |
+| `render-diff` / `render-matrix` | the rendered sing-box config, canonically | the jq render |
+| `classify-matrix`, `lanes-diff`, `watch-diff`, `platform-diff` | verdicts, lane files, tick plans, argv | `bin/rowt` |
+| `vless-diff`, `merge-diff`, `foreign-diff`, `sr-diff`, `netdetect-diff`, `reconcile-diff`, `geosite-diff` | three streams, plus the files each writes | `config/*.py`, run **directly** |
+| `splitter-diff` | host.log and every lane log, byte for byte | the `SPLITTER_PY` heredoc, extracted from bin/rowt |
+
+That "directly" is the load-bearing word, and it is why the Phase 6 cutover cost
+nothing: the extractor gates never went through `bin/rowt`, so what bin/rowt
+shells out to does not touch them.
+
+Two gates exist because the cutover created callers for code nothing had been
+running. `geosite-lookup.py` was the only `config/*.py` whose Rust counterpart
+stopped at the pure half, and `splitter-diff` reaches the one piece no
+command-level gate can: `up` starts the splitter inside a process substitution,
+it outlives the CLI, and the sandbox's fake sing-box exits without printing, so
+no cli-diff case has ever made it write a line. Driving it from a file is also
+the only way to compare it without a race.
+
+`cli-diff` also checks that `rowt-rs`'s baked-in version matches `bin/rowt`'s
+before it runs a single case. The pre-commit hook BUMPS that version, so the
+binary is stale the moment a commit lands and the next sweep is the one that
+pays — as a 137/253 that looks exactly like a catastrophic regression and is
+entirely `v3.3.5` vs `v3.3.6` in the audit line.
 
 ### 6.3 Gating the render — and why `explain` cannot do it
 
@@ -688,6 +736,16 @@ commands I remembered to test" from masquerading as the command surface.
 - **Interactive flows** (`onboard` prompts) — manual checklist, not automated.
 - **Environments never visited during the shadow window.** Mitigated by
   fail-open design (§4.1.2) and the journal, not by tests.
+- **A byte the log splitter cannot decode.** Python's decode happens in the
+  `for` header, outside the per-line `try`, so one bad byte kills the splitter
+  and sing-box's output stops being recorded at all; the Rust reads lossily and
+  carries on. Staging that would be testing the harness — sing-box writes UTF-8
+  — but "the port is more robust here" is still a difference, and an unrecorded
+  one is how it later reads as a bug. Everything else about the splitter IS
+  gated: `splitter-diff` feeds both halves the same stream and compares
+  host.log and every lane log byte for byte, which is how the `.lines()` port
+  was caught rewriting `\r\n` as `\n` and inventing a trailing newline on a
+  final line that never had one.
 - **The watchdog's EFFECTS.** `watch-diff` compares the pure tick — what the
   watchdog decides, given an observation — over the recorded episodes, and that
   is the half where the logic lives. What no gate reaches is `perform`: the

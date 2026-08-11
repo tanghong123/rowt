@@ -315,11 +315,37 @@ pub fn cmd_render(ctx: &Ctx) -> Result<String, String> {
 /// Split sing-box's output the way the shell's python splitter does: per-lane
 /// connection failures into lane-*.log, everything else into host.log, with the
 /// block flood kept out of host.log entirely.
+/// Read by BYTES, not by `.lines()`, and the difference is the whole promise of
+/// this function: a line it does not understand goes to host.log VERBATIM.
+/// `.lines()` cannot keep that promise — it eats the terminator, so
+/// `writeln!` had to put one back, which silently rewrote `\r\n` as `\n` and
+/// appended a newline to a final line that never had one. Both showed up the
+/// moment `splitter-diff` existed to look.
+///
+/// `for line in sys.stdin` splits on `\n` ALONE and hands back the terminator
+/// as part of the line — verified, because the obvious guess is wrong: this is
+/// a TextIOWrapper and universal-newline translation would have turned `\r\n`
+/// into `\n`, and it does not. A lone `\r` is not a line break either.
+///
+/// One divergence left standing: an undecodable byte raises inside Python's
+/// `for` — outside the per-line `try` — so the splitter dies and sing-box's
+/// output stops being recorded at all. `from_utf8_lossy` keeps going here.
+/// Not gated, because sing-box writes UTF-8 and staging a bad byte would be
+/// testing the harness; named because "the port is more robust" is still a
+/// difference.
 pub fn run_splitter(host_log: &Path, logdir: &Path) {
     let mut h = fs::OpenOptions::new().create(true).append(true).open(host_log).ok();
     let mut lanes: std::collections::HashMap<String, fs::File> = Default::default();
     let stdin = std::io::stdin();
-    for line in BufReader::new(stdin.lock()).lines().map_while(Result::ok) {
+    let mut reader = BufReader::new(stdin.lock());
+    let mut raw: Vec<u8> = Vec::new();
+    loop {
+        raw.clear();
+        match reader.read_until(b'\n', &mut raw) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        let line = String::from_utf8_lossy(&raw);
         let clean = strip_ansi(&line);
         if let Some((dom, tag, reason)) = parse_conn(&clean) {
             let lane = match tag.as_str() {
@@ -331,12 +357,15 @@ pub fn run_splitter(host_log: &Path, logdir: &Path) {
                 fs::OpenOptions::new().create(true).append(true)
                     .open(logdir.join(format!("lane-{lane}.log"))).unwrap()
             });
+            // `m.group(3).rstrip("\n")` — `\n` only. With CRLF input the reason
+            // keeps its `\r`, and so does the lane log.
+            let reason = reason.trim_end_matches('\n');
             let _ = writeln!(f, "{ts}\t{dom}\t{reason}");
             if lane != "block" {
-                if let Some(h) = h.as_mut() { let _ = writeln!(h, "{line}"); }
+                if let Some(h) = h.as_mut() { let _ = h.write_all(&raw); }
             }
         } else if let Some(h) = h.as_mut() {
-            let _ = writeln!(h, "{line}");
+            let _ = h.write_all(&raw);
         }
     }
 }
