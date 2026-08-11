@@ -1899,3 +1899,88 @@ fn main() -> ExitCode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `native()` decides whose code runs. It is exercised end-to-end by
+    /// cli-diff, but only for the arms that have cases; this pins the
+    /// CLASSIFICATION itself, including the two answers that are easy to get
+    /// backwards — an unlisted sub-command, and a name bin/rowt does not have.
+    #[test]
+    fn the_dispatch_table_claims_what_it_can_answer() {
+        // Whole commands.
+        assert!(native("status", ""));
+        assert!(native("up", ""));
+        assert!(native("explain", ""));
+        assert!(native("uninstall", ""));
+        // Partial arms: named sub-commands only.
+        assert!(native("router", "up"));
+        assert!(native("router", "status"));
+        assert!(!native("router", "nosucharm"));
+        assert!(native("config", "import"));
+        assert!(!native("config", "nosucharm"));
+        assert!(native("corp", "sync"));      // corp-only, not escape/block
+        assert!(!native("escape", "sync"));
+        assert!(native("escape", "add"));
+        // An empty sub-command is the arm's own default, and it is claimed.
+        assert!(native("router", ""));
+        assert!(native("proxy", ""));
+    }
+
+    /// A name the shell does not document is a TYPO, and the typo's error is
+    /// the shell's own — which needs no shell to print. A name it DOES
+    /// document but this binary has no arm for is the §6.6 escape hatch and
+    /// must fall through. The registry, extracted from bin/rowt at build time,
+    /// is what tells them apart.
+    #[test]
+    fn an_unknown_name_is_claimed_but_an_undocumented_one_is_not() {
+        assert!(native("nosuchcommand", ""), "a typo is ours to reject");
+        assert!(native("zzzz", ""));
+        // Everything bin/rowt documents is either implemented above or handed
+        // through; nothing documented may be claimed by the fallback.
+        for cmd in ["status", "up", "down", "reload", "restart", "render", "watch"] {
+            assert!(help::is_registered(cmd), "{cmd} should be in the registry");
+        }
+    }
+
+    /// `printf '%-18s'` under LC_ALL=C — BYTES, not characters. The parity
+    /// sandbox runs in C, and a multibyte tag that padded by character count
+    /// would put every following column one place out.
+    #[test]
+    fn padding_counts_bytes_the_way_the_shell_does() {
+        assert_eq!(pad("ab", 5), "ab   ");
+        assert_eq!(pad("abcdef", 3), "abcdef", "never truncates, only pads");
+        assert_eq!(pad("", 3), "   ");
+        // 中 is three bytes, so it consumes three columns' worth of padding.
+        assert_eq!(pad("中", 5).len(), 5);
+    }
+
+    /// `urllib.parse.quote(s, safe="")` — the clash delay URL carries the
+    /// target as a QUERY VALUE, so `/` and `:` have to be encoded too. Values
+    /// taken from Python.
+    #[test]
+    fn urlencoding_matches_pythons_quote_with_no_safe_characters() {
+        assert_eq!(urlencode("https://www.gstatic.com/generate_204"),
+                   "https%3A%2F%2Fwww.gstatic.com%2Fgenerate_204");
+        assert_eq!(urlencode("a b"), "a%20b");
+        // The unreserved set, which stays literal.
+        assert_eq!(urlencode("~._-"), "~._-");
+        // Percent-encoded per BYTE, uppercase hex.
+        assert_eq!(urlencode("中文"), "%E4%B8%AD%E6%96%87");
+        assert_eq!(urlencode("a/b:c?d=e&f"), "a%2Fb%3Ac%3Fd%3De%26f");
+    }
+
+    /// awk's `hb()`. The boundaries are where a rounding difference would show,
+    /// and `%.0f`/`%.1f` round half-to-even in C — which is what Rust does.
+    #[test]
+    fn bytes_are_humanised_at_the_same_boundaries_as_the_awk() {
+        assert_eq!(human_bytes(0), "0B");
+        assert_eq!(human_bytes(1023), "1023B");
+        assert_eq!(human_bytes(1024), "1K");
+        assert_eq!(human_bytes(1_048_575), "1024K");
+        assert_eq!(human_bytes(1_048_576), "1.0M");
+        assert_eq!(human_bytes(1_073_741_823), "1024.0M");
+    }
+}

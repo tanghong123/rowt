@@ -358,24 +358,50 @@ fn strip_ansi(s: &str) -> String {
 }
 
 /// `open connection to (.+?):\d+ using outbound/\w+\[([^\]]+)\]: (.*)`
+///
+/// Every guard below is one of the regex's own, and each was missing: a line
+/// this declines to parse is written to host.log verbatim, which is the
+/// fail-safe. Inventing a lane entry out of a line that is not a connection
+/// failure is worse than passing it through.
 fn parse_conn(s: &str) -> Option<(String, String, String)> {
     let i = s.find("open connection to ")? + "open connection to ".len();
     let rest = &s[i..];
     let marker = rest.find(" using outbound/")?;
-    let hostport = &rest[..marker];
-    let dom = hostport.rsplit_once(':')?.0.to_string();
+    // `:\d+` — the port is DIGITS. Splitting on the last colon regardless
+    // turns `host:abc using outbound/…` into a lane entry the shell never
+    // writes.
+    let (dom, port) = rest[..marker].rsplit_once(':')?;
+    if dom.is_empty() || port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
     let after = &rest[marker + " using outbound/".len()..];
+    // `\w+\[` — the outbound TYPE, then the tag. Finding `[` and `]`
+    // independently finds them in the wrong ORDER on a line like
+    // `outbound/x]weird[tag]`, and slicing between them then PANICS. The
+    // splitter is a separate long-lived process, so that death is silent: the
+    // router keeps running and every lane log simply stops.
     let lb = after.find('[')?;
-    let rb = after.find(']')?;
+    if lb == 0 || !after[..lb].chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return None;
+    }
+    let rb = lb + 1 + after[lb + 1..].find(']')?;
     let tag = after[lb + 1..rb].to_string();
-    let reason = after[rb + 1..].strip_prefix(": ")?.trim_end().to_string();
-    Some((dom, tag, reason))
+    if tag.is_empty() {
+        return None;                       // `[^\]]+` — at least one character
+    }
+    // `(.*)` then `.rstrip("\n")` — NEWLINES only. A trailing space is part of
+    // what sing-box said, and the lane log is tab-separated, so it cannot run
+    // into the next field.
+    let reason = after[rb + 1..].strip_prefix(": ")?.trim_end_matches('\n').to_string();
+    Some((dom.to_string(), tag, reason))
 }
 
 fn find_ts(s: &str) -> Option<String> {
-    let b = s.as_bytes();
-    for i in 0..b.len().saturating_sub(18) {
-        let w = &s[i..i + 19];
+    for i in 0..s.len() {
+        // `s.get()` rather than `&s[..]`: a byte offset that lands inside a
+        // multibyte character makes the slice panic, and an IDN domain earlier
+        // in the line is enough to put it there. Returning None just moves on.
+        let Some(w) = s.get(i..i + 19) else { continue };
         let ok = w.as_bytes().iter().enumerate().all(|(j, c)| match j {
             4 | 7 => *c == b'-',
             10 => *c == b' ',
@@ -1010,6 +1036,136 @@ pub fn cmd_restart(ctx: &Ctx, here: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------------------------------------------------------- the splitter
+    //
+    // sing-box logs one line per failed connection, naming the outbound TAG,
+    // and the splitter turns that into per-lane logs that `<lane> stats`
+    // summarizes. It is the one part of rowt that reads sing-box's output, so
+    // `cli-diff` cannot reach it at all — the sandbox's sing-box is a fake that
+    // logs nothing. The oracle is the shell's Python splitter (bin/rowt,
+    // SPLITTER_PY); every expectation below was taken from running it.
+
+    #[test]
+    fn a_failure_line_is_split_into_domain_tag_and_reason() {
+        let l = "2026-08-10 14:00:00 ERROR open connection to example.com:443 \
+                 using outbound/direct[direct]: refused";
+        assert_eq!(parse_conn(l), Some(("example.com".into(), "direct".into(), "refused".into())));
+        assert_eq!(find_ts(l).as_deref(), Some("2026-08-10 14:00:00"));
+    }
+
+    #[test]
+    fn an_ipv6_literal_keeps_every_colon_but_the_port() {
+        // `(.+?):\d+` is anchored by ` using outbound/`, so the port is the
+        // LAST colon-number — everything before it is the host, colons and all.
+        let l = "2026-08-10 14:00:00 ERROR open connection to 2001:db8::1:443 \
+                 using outbound/vless[escape]: timeout";
+        assert_eq!(parse_conn(l), Some(("2001:db8::1".into(), "escape".into(), "timeout".into())));
+    }
+
+    #[test]
+    fn a_unicode_host_survives_the_split() {
+        // rowt routes IDN domains (there is a whole render-unicode scenario),
+        // so they reach the log too.
+        let l = "open connection to 中文.example:443 using outbound/direct[block]: unicode host";
+        assert_eq!(parse_conn(l),
+                   Some(("中文.example".into(), "block".into(), "unicode host".into())));
+    }
+
+    #[test]
+    fn a_non_numeric_port_is_not_a_connection_line() {
+        // `:\d+` — the Python declines to match and the raw line goes to
+        // host.log untouched. Splitting on the last colon regardless would
+        // invent a lane entry out of a line that is not one.
+        let l = "open connection to host:abc using outbound/direct[direct]: nonnumeric port";
+        assert_eq!(parse_conn(l), None);
+    }
+
+    #[test]
+    fn a_reasons_trailing_space_is_kept() {
+        // `(.*)` then `.rstrip("\n")` — newlines only. Trailing spaces are part
+        // of what sing-box said, and the lane log is TAB-separated, so they
+        // cannot corrupt a field.
+        let l = "open connection to a.example:443 using outbound/direct[direct]: spaces   ";
+        assert_eq!(parse_conn(l).unwrap().2, "spaces   ");
+    }
+
+    #[test]
+    fn colour_codes_are_stripped_before_anything_is_parsed() {
+        let l = "\x1b[31mopen connection to a.example:443 \
+                 using outbound/direct[corp]: colored\x1b[0m";
+        let clean = strip_ansi(l);
+        assert!(!clean.contains('\x1b'));
+        assert_eq!(parse_conn(&clean),
+                   Some(("a.example".into(), "corp".into(), "colored".into())));
+    }
+
+    #[test]
+    fn a_bracket_before_the_outbound_is_not_a_tag() {
+        // `outbound/\w+\[` — the type is word characters, so a `]` sitting
+        // between "outbound/" and the real `[` means this is not a connection
+        // line. Searching for the first `[` and the first `]` independently
+        // finds them in the wrong ORDER here, which is a panic, not a mismatch:
+        // the splitter is a long-lived process, and a panic stops every lane
+        // log until the router is restarted.
+        let l = "garbage ] before [ open connection to a.example:443 \
+                 using outbound/x]weird[tag]: r";
+        assert_eq!(parse_conn(l), None);
+    }
+
+    #[test]
+    fn a_timestamp_after_a_multibyte_character_is_still_found() {
+        // The scan walks BYTE offsets and slices the string at them; a domain
+        // with a multibyte character earlier in the line puts those offsets off
+        // a character boundary. Slicing there panics — and the splitter dying
+        // is silent, because it is a separate process from the router.
+        let l = "ERROR 中文 2026-08-10 14:00:00 open connection to a.example:443 \
+                 using outbound/direct[direct]: x";
+        assert_eq!(find_ts(l).as_deref(), Some("2026-08-10 14:00:00"));
+    }
+
+    #[test]
+    fn only_the_three_named_lanes_keep_their_tag() {
+        // `tag if tag in ("block","direct","corp") else "escape"` — every
+        // server tag is an escape-lane failure, whatever the server is called.
+        let lane = |tag: &str| match tag {
+            "block" | "direct" | "corp" => tag.to_string(),
+            _ => "escape".to_string(),
+        };
+        assert_eq!(lane("block"), "block");
+        assert_eq!(lane("direct"), "direct");
+        assert_eq!(lane("corp"), "corp");
+        assert_eq!(lane("hk-01"), "escape");
+        assert_eq!(lane("escape"), "escape");
+        // Not a prefix match: a server called "blocky" is still the escape lane.
+        assert_eq!(lane("blocky"), "escape");
+    }
+
+    /// The router is started through `sh -c "exec <sb> run -c <cfg> 2>&1"`, so
+    /// both paths are quoted into a shell command line. XDG_CONFIG_HOME can put
+    /// the config anywhere, including a directory with a space or an
+    /// apostrophe, and a quoting slip there is not a cosmetic bug: it is either
+    /// a router that will not start or a shell that runs whatever the path
+    /// says. Verified through a real `sh`, which is the only authority.
+    #[test]
+    fn every_path_survives_the_shell_it_is_pasted_into() {
+        for raw in [
+            "/Users/me/.config/rowt/host.json",
+            "/Users/me/Application Support/rowt/host.json",
+            "/tmp/it's mine/host.json",
+            "/tmp/$(touch /tmp/pwned)/host.json",
+            "/tmp/`id`/host.json",
+            "/tmp/a\"b/host.json",
+            "/tmp/back\\slash/host.json",
+            "/tmp/semi;colon/host.json",
+        ] {
+            let out = Command::new("sh")
+                .arg("-c").arg(format!("printf %s {}", shell_quote(raw)))
+                .output().expect("sh");
+            assert_eq!(String::from_utf8_lossy(&out.stdout), raw,
+                       "sh did not give back {raw:?} from {}", shell_quote(raw));
+        }
+    }
 
     #[test]
     fn base64_matches_the_one_in_the_pipeline() {
