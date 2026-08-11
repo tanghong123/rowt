@@ -1,0 +1,14 @@
+# Synthetic parity fixture — documentation ranges (RFC 5737) only.
+# A corp lane that `corp sync` has already written into: the hand-kept region
+# on top, then the two generated blocks it rebuilds on every watchdog tick.
+# `add` must land ABOVE the first marker, or the next sync deletes it.
+corp.example
+intranet.corp.example
+198.51.100.0/24
+10.99.0.0/16
+
+# --- rowt corp sync: DHCP search domains (auto-managed, do not edit below) ---
+synced.corp.example
+
+# --- rowt corp sync (auto-managed; superset of live tunnel routes — do not edit below) ---
+203.0.113.0/24

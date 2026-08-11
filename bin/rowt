@@ -53,7 +53,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.3.1"
+ROWT_VERSION="3.3.2"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -508,6 +508,46 @@ _lane_dedupe() { # $1=keep-file $2=entry
   done
 }
 
+# Append entry $2 to lane file $1 — ABOVE any auto-managed block.
+#
+# `corp sync` rebuilds the corp lane from its marker down on EVERY watchdog
+# tick, keeping only what sits above it. A plain `>> "$file"` therefore reports
+# "added", reloads the router with the entry, and then loses it minutes later
+# without a word — which is exactly what happened to three hand-added corp
+# entries before this existed. The entry goes at the end of the hand-kept
+# region instead: after its last real line, before the blank that separates it
+# from the marker.
+#
+# Keyed on the marker's SIGNATURE — "auto-managed" and "do not edit below" on
+# one line — rather than on the corp markers by name, so a block added to any
+# other lane later is protected by the same rule. Both halves are required:
+# "auto-managed" alone also turns up in prose, and a header comment merely
+# describing the blocks below would otherwise become the boundary. The escape
+# lane's "# --- imported from Shadowrocket ---" is NOT such a block — nothing
+# regenerates it — and is deliberately not matched.
+#
+# `cat > "$file"` rather than `mv`: the lane files are 0600 and a mktemp'd
+# replacement would carry ITS mode onto the file. Truncating in place keeps both
+# the mode and the inode.
+_lane_append() { # $1=file $2=entry
+  local file="$1" e="$2" n tmp
+  n="$(grep -nE 'auto-managed.*do not edit below' "$file" 2>/dev/null | head -1 | cut -d: -f1)"
+  if [ -z "$n" ]; then printf '%s\n' "$e" >> "$file"; return 0; fi
+  tmp="$(mktemp)"
+  awk -v n="$n" -v e="$e" '
+    NR <  n { buf[NR] = $0; next }
+    NR == n {
+      last = n - 1
+      while (last >= 1 && buf[last] ~ /^[[:space:]]*$/) last--
+      for (i = 1; i <= last; i++) print buf[i]
+      print e
+      for (i = last + 1; i < n; i++) print buf[i]
+    }
+    { print }
+  ' "$file" > "$tmp" && cat "$tmp" > "$file"
+  rm -f "$tmp"
+}
+
 # list/add/rm entries in a routing list file, then hot-reload.
 #   $1=file  $2=label(escape|corp)  $3=action  $4..=entries
 # Read one entry per non-comment line of a file into $file, deduped. Echoes counts.
@@ -581,7 +621,7 @@ edit_list() {
           geosite:*) [ "$label" = corp ] && { echo "  skipped $e — geosite: is only for the escape and block lanes"; continue; } ;;
         esac
         if grep -qxF "$e" "$file" 2>/dev/null; then echo "  already present: $e"
-        else printf '%s\n' "$e" >> "$file"; echo "  added: $e"; fi
+        else _lane_append "$file" "$e"; echo "  added: $e"; fi
         _lane_dedupe "$file" "$e"  # single-lane invariant: pull it from the other lanes
         case "$e" in
           # An explicit `geosite:<name>` add fetches its rule-set so the next render

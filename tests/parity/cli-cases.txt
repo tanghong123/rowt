@@ -16,6 +16,16 @@ block list
 escape dump
 escape add new.example
 corp add example.com
+# A corp lane `corp sync` has already written into. `add` appended at EOF until
+# this scenario existed — inside the region sync rebuilds on every watchdog
+# tick — so the entry was reported added, rendered into the router, and deleted
+# minutes later with nothing in any log. The fsstate diff is what sees it: the
+# stdout is "added:" either way. Both a domain and a CIDR, since corp takes
+# both, plus escape as the control — it has no auto block and must be unchanged.
+PARITY_SCENARIO=corp-synced corp add new.corp.example
+PARITY_SCENARIO=corp-synced corp add 192.0.2.0/24
+PARITY_SCENARIO=corp-synced corp add new.corp.example second.corp.example
+PARITY_SCENARIO=corp-synced escape add new.example
 escape rm example.com
 escape rm absent.example
 block clear

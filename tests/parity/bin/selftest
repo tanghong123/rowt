@@ -665,7 +665,31 @@ else
   cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
 fi
 
-echo "25. every name native() claims must be an arm of run()"
+echo "25. append a lane entry at EOF instead of above the auto-managed block"
+cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+if [ ! -x "$ROOT/target/release/rowt-rs" ]; then
+  echo "  skip — no release build"
+else
+  # The original bug, restored: `corp sync` rebuilds the corp lane from its
+  # marker down on every watchdog tick, so an entry appended at EOF is reported
+  # added, rendered into the router, and deleted minutes later with nothing in
+  # any log. Invisible to stdout — "added: x" either way — and invisible to the
+  # base fixture, whose corp lane has no markers at all. Only the corp-synced
+  # scenario plus the fsstate diff can see it.
+  perl -0pi -e 's/_lane_append "\$file" "\$e"/printf '"'"'%s\\n'"'"' "\$e" >> "\$file"/' "$tmp/bin/rowt"
+  if grep -qF '_lane_append "$file" "$e"' "$tmp/bin/rowt"; then
+    bad "could not restore the EOF append (edit_list moved?)"
+  elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" \
+       PARITY_CASES="$(only 'PARITY_SCENARIO=corp-synced corp add new.corp.example')" \
+       "$P" cli-diff >/dev/null 2>&1; then
+    bad "cli-diff passed with a lane entry appended into the regenerated region"
+  else
+    ok "cli-diff caught the lane entry appended below the sync marker"
+  fi
+  cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+fi
+
+echo "26. every name native() claims must be an arm of run()"
 src="$ROOT/crates/rowt-cli/src/main.rs"
 # Command names only. A native() arm line is indented exactly eight spaces and
 # starts with a pattern; the sub-command lists inside `matches!(…)` are indented

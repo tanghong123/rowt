@@ -72,12 +72,57 @@ fn drop_line(body: &str, entry: &str) -> String {
     }
 }
 
+/// The first line of an auto-managed block, if the lane has one.
+///
+/// Matched on the marker's SIGNATURE — "auto-managed" and "do not edit below"
+/// on one comment line — rather than on `corp sync`'s two markers by name, so a
+/// block introduced into any other lane later is protected by the same rule
+/// without touching this code.
+///
+/// Both halves are required because "auto-managed" alone also appears in prose:
+/// a header comment merely *describing* the blocks below would otherwise become
+/// the boundary and push every later entry above it. Harmless — anything above
+/// the real marker survives — but it moves entries somewhere nobody asked for.
+///
+/// The escape lane's `# --- imported from Shadowrocket ---` is deliberately NOT
+/// such a block: nothing regenerates it, `apply` only ever appends and dedupes.
+fn auto_block_start(body: &str) -> Option<usize> {
+    body.lines().position(|l| {
+        l.trim_start().starts_with('#')
+            && l.contains("auto-managed")
+            && l.contains("do not edit below")
+    })
+}
+
+/// Add `entry` to a lane body — ABOVE any auto-managed block.
+///
+/// Appending at the end is the obvious implementation and it silently loses the
+/// entry: `corp sync` rebuilds the corp lane from its marker down on every
+/// watchdog tick, keeping only what is above it. The entry is reported as
+/// added, is rendered into the router, and then disappears minutes later with
+/// nothing in any log to say why. So it goes at the end of the hand-kept region
+/// instead — after its last real line, before the blank separating it from the
+/// marker.
 fn append_line(body: &str, entry: &str) -> String {
-    if body.is_empty() || body.ends_with('\n') {
-        format!("{body}{entry}\n")
-    } else {
-        format!("{body}\n{entry}\n")
+    let Some(marker) = auto_block_start(body) else {
+        return if body.is_empty() || body.ends_with('\n') {
+            format!("{body}{entry}\n")
+        } else {
+            format!("{body}\n{entry}\n")
+        };
+    };
+    let lines: Vec<&str> = body.lines().collect();
+    let mut last = marker;
+    while last > 0 && lines[last - 1].trim().is_empty() {
+        last -= 1;
     }
+    let mut out: Vec<&str> = Vec::with_capacity(lines.len() + 1);
+    out.extend_from_slice(&lines[..last]);
+    out.push(entry);
+    out.extend_from_slice(&lines[last..]);
+    let mut s = out.join("\n");
+    s.push('\n');
+    s
 }
 
 /// The result of an edit: the new lane contents plus the lines the shell prints.
@@ -296,5 +341,67 @@ mod tests {
     #[test]
     fn dump_drops_comments_and_blanks() {
         assert_eq!(dump("# h\n\na.example\n"), vec!["a.example"]);
+    }
+
+    const SYNCED: &str = "# hand\nalibaba-inc.com\n\n# --- rowt corp sync: DHCP search domains (auto-managed, do not edit below) ---\nhz.ali.com\n\n# --- rowt corp sync (auto-managed; superset of live tunnel routes — do not edit below) ---\n47.110.90.146/32\n";
+
+    #[test]
+    fn an_entry_goes_above_the_auto_managed_block_not_at_the_end() {
+        // The bug this replaced was silent and cost three hand-added corp
+        // entries: `corp sync` rebuilds from its marker down on every watchdog
+        // tick, so an appended entry is reported added, routed, and then gone.
+        let got = append_line(SYNCED, "dev.g.alicdn.com");
+        let lines: Vec<&str> = got.lines().collect();
+        let entry = lines.iter().position(|l| *l == "dev.g.alicdn.com").unwrap();
+        let marker = lines.iter().position(|l| l.contains("auto-managed")).unwrap();
+        assert!(entry < marker, "entry landed inside the regenerated region:\n{got}");
+        // It joins the hand region's last real line, keeping the blank that
+        // separates that region from the marker.
+        assert_eq!(lines[entry - 1], "alibaba-inc.com");
+        assert_eq!(lines[entry + 1], "");
+        // Nothing else moved.
+        assert_eq!(lines.iter().filter(|l| l.contains("auto-managed")).count(), 2);
+        assert!(got.contains("hz.ali.com") && got.contains("47.110.90.146/32"));
+    }
+
+    #[test]
+    fn a_lane_with_no_auto_block_still_appends_at_the_end() {
+        // escape and block have no regenerating writer, so nothing changes for
+        // them — including the no-trailing-newline case.
+        assert_eq!(append_line("a.com\n", "b.com"), "a.com\nb.com\n");
+        assert_eq!(append_line("a.com", "b.com"), "a.com\nb.com\n");
+        assert_eq!(append_line("", "b.com"), "b.com\n");
+    }
+
+    #[test]
+    fn an_imported_marker_is_not_an_auto_managed_block() {
+        // `server import --apply` writes this into the escape lane, and it only
+        // ever appends + dedupes — treating it as regenerated would put every
+        // later entry above someone's imported domains for no reason.
+        let body = "a.com\n# --- imported ---\nb.com\n";
+        assert_eq!(append_line(body, "c.com"), "a.com\n# --- imported ---\nb.com\nc.com\n");
+    }
+
+    #[test]
+    fn a_marker_on_the_very_first_line_puts_the_entry_above_it() {
+        // The FULL marker text — the signature needs both halves, so an
+        // abbreviated one is correctly not treated as a boundary.
+        let body = "# --- rowt corp sync (auto-managed, do not edit below) ---\n10.0.0.0/8\n";
+        let got = append_line(body, "x.example");
+        assert!(got.starts_with("x.example\n"), "{got}");
+    }
+
+    #[test]
+    fn prose_mentioning_auto_managed_is_not_a_marker() {
+        // A header comment DESCRIBING the blocks below is not the boundary —
+        // the real markers also say "do not edit below". Caught by a fixture
+        // whose own header said "auto-managed" and pushed the entry to line 3.
+        let body = "# two auto-managed blocks follow\na.com\n\n# --- rowt corp sync (auto-managed, do not edit below) ---\n10.0.0.0/8\n";
+        let got = append_line(body, "b.com");
+        let lines: Vec<&str> = got.lines().collect();
+        let entry = lines.iter().position(|l| *l == "b.com").unwrap();
+        // Below the prose, above the real marker.
+        assert_eq!(lines[entry - 1], "a.com");
+        assert!(entry < lines.iter().position(|l| l.contains("do not edit below")).unwrap());
     }
 }

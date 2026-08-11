@@ -199,7 +199,7 @@ revertible and gated.
 | **1** ◑ | `rowt-core::render` — replace the giant jq program. bash calls `rowt-rs render` internally. | **render done** — `crates/rowt-render`, 18/18 cases canonically identical on host + vm (`parity render-matrix`), and identical against the real 22-server config. Remaining: throwaway-port outbound oracle, bash cutover, shadow window |
 | **2** ✅ | classify/explain, lane set logic, absorb `corp-sync-reconcile.py` | **done** — classify: 9/9 cases × 92 destinations identical on `(lane, reason)`; lane edits: 12/12 cases identical across all three files + messages; reconcile: 210 generated cases identical to the Python. `selftest` 9/9 |
 | **3** ◑ | watchdog: FSM into core, effects via `PlatformMac`; `cmd_watch` execs the Rust tick | **FSM + shadow done** — `rowt-core::watch`, 18 unit tests replaying §11's decision table; `parity watch-diff` 5/5; `ROWT_WATCH_SHADOW=1` compares the shell's decisions against the FSM's plan on every real tick, feeding it the tick's own captive verdict rather than re-probing. **Effects done too** — `perform` drives `PlatformMac`, runs the real `cmd_reload` for a recovery, and re-probes the escape lane through the clash delay test the way the shell does. Remaining: the `cmd_watch` cutover (bash still runs its own tick and merely shadows this one), and **time** — the shadow window itself |
-| **4** ◑ | CLI. Built as `rowt-rs` alongside the shell first, so each command lands with evidence; only then does bash reduce to a wrapper and get deleted. Formula ships the prebuilt binary (monitor-asset pattern). | **all 37 arms native AND gated** — `parity cli-diff` compares stdout, exit status, the **whole config tree** (content and mode), the **argv trace** and the **audit log** over 249 cases. Every arm but the TUI is compared; the lifecycle four were the last to be, and all four diverged when first asked. Remaining: the `ROWT_IMPL` cutover |
+| **4** ◑ | CLI. Built as `rowt-rs` alongside the shell first, so each command lands with evidence; only then does bash reduce to a wrapper and get deleted. Formula ships the prebuilt binary (monitor-asset pattern). | **all 37 arms native AND gated** — `parity cli-diff` compares stdout, exit status, the **whole config tree** (content and mode), the **argv trace** and the **audit log** over 253 cases. Every arm but the TUI is compared; the lifecycle four were the last to be, and all four diverged when first asked. Remaining: the `ROWT_IMPL` cutover |
 | **5** | `PlatformLinux` + tun mode + systemd units; CI matrix (macOS + ubuntu — core tests run on both, platform tests feature-gated); linux tar assets | fresh-VM install → onboard → probe → captive drill; VPN-coexistence drill with Tailscale up |
 | 6 ◑ | port the import pipeline (1,302 lines of parsing Python). No longer optional — the 2026-08-09 decision is one language in the repo, and this is what retires `depends_on "python@3.12"`. | **all four done** — `rowt-core::{sharelink,importmerge,foreign,srimport}` (+`bplist`); `parity vless-diff` 2,000 cases, `merge-diff` 1,500 (the review FILE plus the streams), `foreign-diff` 1,200 (synthetic client config TREES), `sr-diff` 1,200 (synthetic Shadowrocket installs). What remains is the CUTOVER: `bin/rowt` still calls the Pythons, which are the reference side of those gates |
 
@@ -500,6 +500,25 @@ coexistence questions live.
 unexplained divergences — suggest 14 days including at least one corp-network
 day and one foreign-network day.
 
+**The comparator's scope must be fixed before that clock is worth starting.**
+As built, `_watch_shadow` diffs two things that are not the same kind:
+
+```bash
+"$wb" --obs "$obs" | sed -n 's/^log //p' > "$plan"     # the pure FSM's decisions
+tail -n "+$((_SH_LOG0+1))" "$WATCH_LOG" | sed … > "$actual"  # EVERY line the tick logged
+```
+
+`actual` includes whatever the shell logged around the FSM — `corp sync`'s
+summary, the "moved network … no reload needed, skip" note — none of which the
+FSM emits, and none of which is a divergence. First real window bore this out:
+82 entries, 50 identical, **5 DIVERGED, all five explained and none a
+functional gap** (corp sync is ported — `rowt-cli/src/watch.rs` calls
+`corp::sync`; it just does not surface through the `log ` channel). Any tick
+that runs a sync or sees a network move diverges forever, which is this
+section's own stated failure mode: a log you have learned to ignore is worse
+than no log. Narrow `actual` to FSM-owned lines — the FSM's job is decisions,
+not reproducing the shell's prose — then start the 14 days.
+
 ### 6.6 Cutover keeps a live escape hatch
 
 `ROWT_IMPL=bash|rust` selects the implementation at runtime; the bash ships
@@ -555,6 +574,37 @@ here, and each is a shell-side commit waiting to be written:
 | `up` never checks whether the router came up: it sets the system proxy and prints "done — mode=host. Listed domains now route through your escape VPN." over a router that is not there, and **exits 0** | `cmd_setup`, mirrored in `lifecycle::cmd_setup` | Its two siblings already do the right thing — `restart` and `reload` both require the clash API to answer before they touch the proxy, and say so when it does not. `up` is the one that forgot, and the fix is a two-line gate on the shell side. Nothing is stranded meanwhile (the router's own no-limbo step clears the proxy first); what lies is the exit status, which is exactly what a script or a `&&` chain reads. |
 | `down` turns the system proxy off **three times** and says so each time — once itself, once inside `router down`'s no-limbo check, once more inside `vm down`'s | `cmd_revert`, mirrored in `lifecycle::cmd_revert` | Harmless and idempotent, and the repetition is the visible half of a real invariant: every teardown step independently refuses to leave a proxy pointing at a dead port. Collapsing it means deciding which step owns the guarantee, which is a design change, not a tidy-up. |
 
+#### 6.7.1 Retired: `add` appended a lane entry into the region `corp sync` owns
+
+The first bug found and retired in the same pass, rather than recorded and left
+alone — because unlike every row above, reproducing it *lost user data*.
+
+`edit_list`'s add did `printf '%s\n' "$e" >> "$file"`, and `append_line` in
+`lanes.rs` did the same. The corp lane's last lines are two auto-managed blocks,
+and `corp sync` — which the watchdog runs on **every tick** — rebuilds the file
+as `head + domains + cidrs`, where `head` is everything above the first marker.
+So an entry appended at EOF was reported `added:`, was rendered into the router,
+and was deleted minutes later with nothing in any log to say why. Observed in
+the wild: three hand-added corp entries lost across 21:05, 21:57 and 22:08 on
+2026-08-10, each wiped by the next sync.
+
+Nothing could see it. stdout is `added: x` either way; the exit status is 0; the
+base fixture's corp lane has no markers at all, so even the fsstate diff had
+nothing to compare. It took a new scenario (`corp-synced`) to make the file
+shaped like a real one.
+
+Both sides now insert at the end of the hand-kept region, keyed on the marker's
+SIGNATURE — `auto-managed` **and** `do not edit below` on one comment line.
+Requiring both halves is not fussiness: the first fixture's own header comment
+said "auto-managed", became the boundary, and pushed the entry three lines up.
+Prose that merely describes the blocks is not a marker, and escape's
+`# --- imported ---` is deliberately excluded — nothing regenerates it.
+
+Retired rather than recorded because §6.7's premise does not hold here. The rule
+protects behavior something might *depend on*; nothing can depend on an entry
+that disappears, and the shell was not "right" in a way the port had to match —
+it was losing writes it had already acknowledged.
+
 ### 6.8 Coverage ledger
 
 Every arm of `run_command`'s `case` plus every entry in `_is_readonly` becomes
@@ -587,7 +637,7 @@ commands I remembered to test" from masquerading as the command surface.
 
 #### 6.9.1 What the unit tests are for
 
-Not coverage. `cli-diff` compares 249 whole commands against the shell — stdout,
+Not coverage. `cli-diff` compares 253 whole commands against the shell — stdout,
 exit status, the config tree with modes, the argv trace, the audit log — and no
 `#[test]` competes with that. Unit tests earn their place only where a gate
 **structurally cannot look**, and the three that paid for the whole exercise
