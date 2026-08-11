@@ -743,6 +743,53 @@ else
   ok "native() and run() agree on every claimed arm"
 fi
 
+CASE_ADD='server add vless://00000000-0000-4000-8000-000000000009@203.0.113.20:443?security=tls&sni=delta.example#delta'
+
+echo "28. cli-diff must still be reaching the Pythons on the bash side"
+cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+cp "$ROOT/config/vless-parse.py" "$tmp/config/vless-parse.py"
+# bin/rowt runs the RUST helpers now. cli-diff sets ROWT_PY=1 to put the Pythons
+# back, so that its import cases still compare an extractor against an extractor
+# instead of comparing rowt-rs with itself — and a switch that silently stopped
+# working would leave a gate that passes about nothing.
+#
+# So: break the Python. If ROWT_PY=1 is reaching it, cli-diff goes red. If the
+# bash side has quietly moved to the Rust helper, the broken Python is
+# unreachable and the case passes — which is the failure this step exists to
+# catch, and the reason it asserts on a PASS rather than on a diff.
+{ echo 'raise SystemExit(3)'; cat "$ROOT/config/vless-parse.py"; } > "$tmp/config/vless-parse.py"
+if PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" \
+   PARITY_CASES="$(only "$CASE_ADD")" "$P" cli-diff >/dev/null 2>&1; then
+  bad "cli-diff passed with config/vless-parse.py broken — ROWT_PY=1 is not reaching it"
+else
+  ok "cli-diff still runs the Python extractor on the bash side"
+fi
+cp "$ROOT/config/vless-parse.py" "$tmp/config/vless-parse.py"
+
+echo "29. the Rust helper wiring must be exercised, not just present"
+cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+if [ ! -x "$ROOT/target/release/rowt-rs" ]; then
+  echo "  skip — no release build"
+else
+  # The other half of step 28. `PARITY_BASH_PY=0` lets bin/rowt use the Rust
+  # helpers, which is what actually ships; point one of them at the wrong tool
+  # and the run must notice. Without this, an array naming a tool that does not
+  # exist — or the right tool with a dropped flag — would only ever be found by
+  # a user, because every OTHER pass either forces the Pythons back (cli-diff)
+  # or replays the gate binaries directly (vless-diff and friends).
+  perl -0pi -e 's/PY_VLESS=\("\$rb" _py vless-parse\)/PY_VLESS=("\$rb" _py net-detect)/' \
+    "$tmp/bin/rowt"
+  if grep -qF 'PY_VLESS=("$rb" _py vless-parse)' "$tmp/bin/rowt"; then
+    bad "could not repoint PY_VLESS (_setup_py_helpers moved?)"
+  elif PARITY_BASH_PY=0 PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" \
+       PARITY_CASES="$(only "$CASE_ADD")" "$P" cli-diff >/dev/null 2>&1; then
+    bad "cli-diff passed with PY_VLESS pointed at the wrong tool"
+  else
+    ok "cli-diff catches a helper wired to the wrong tool"
+  fi
+  cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+fi
+
 echo
 echo "selftest: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

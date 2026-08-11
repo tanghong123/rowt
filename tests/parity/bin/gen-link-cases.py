@@ -221,6 +221,21 @@ def case(r: random.Random, d: str) -> None:
         with open(body, "w", encoding="utf-8") as fh:
             fh.write(sub_body(r))
         argv = ["--sub", "file://" + body]
+        if r.random() < 0.25:
+            # A URL urlopen refuses to build a Request from. Every --sub case
+            # used to be a well-formed file:// one, which meant the gate never
+            # asked what happens to a URL with no scheme — and the answer had
+            # diverged: the Python raises before opening a socket, while curl
+            # invents `http://` and goes and fetches it. Found by cli-diff's
+            # argv trace on `sub import`, which is a long way from here.
+            argv = ["--sub", r.choice([
+                "example.com",          # no scheme at all
+                "//example.com/feed",   # scheme-relative
+                "/tmp/not-a-url",       # a path
+                ":443/feed",            # empty scheme
+                "1http://example.com",  # scheme must start with a letter
+                "",
+            ])]
     elif roll < 0.96:                             # --combine over an array
         argv = ["--combine"]
         outs = [outbound(r) for _ in range(r.randint(0, 6))]
@@ -228,12 +243,24 @@ def case(r: random.Random, d: str) -> None:
             outs.append(dict(outs[0], tag="Alias"))
         stdin = json.dumps(outs, ensure_ascii=False)
         if r.random() < 0.06:
-            # Only inputs whose failure is a first-token one. A well-formed but
-            # non-object element (`[1, 2]`) makes the Python die inside
-            # `key_of` with an AttributeError traceback; the Rust reports it
-            # cleanly instead, which is the better behaviour and is pinned by a
-            # unit test rather than by this gate.
             stdin = r.choice(["", "not json"])
+        elif r.random() < 0.10:
+            # A well-formed array with an element that is not an object. The
+            # Python dies inside `key_of` with an AttributeError traceback,
+            # because `.get` on a str is not a ValueError and escapes the
+            # script's `except`.
+            #
+            # This shape was deliberately EXCLUDED here once, on the grounds
+            # that reporting it cleanly was better behaviour and the gate
+            # binary's stdout went nowhere. bin/rowt runs that code now, and
+            # the exclusion turned into `server add` accepting a hand-corrupted
+            # manual.json instead of refusing it — found by cli-diff, not here,
+            # which is the whole argument for generating the shape.
+            # `junk` is the module-level link mangler; this is a different thing.
+            bad_elem = r.choice(["hand-edited into nonsense", 42, 4.5, None, True, [1, 2]])
+            outs_bad = list(outs)
+            outs_bad.insert(r.randint(0, len(outs_bad)), bad_elem)
+            stdin = json.dumps(outs_bad, ensure_ascii=False)
     else:                                         # argument errors
         argv = r.choice([[], ["--tag"], ["--nope"], ["a.link", "b.link"]])
     with open(os.path.join(d, "argv"), "w", encoding="utf-8") as fh:

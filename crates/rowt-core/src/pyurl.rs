@@ -305,6 +305,47 @@ impl Split {
 /// ASCII is exact. A non-ASCII char is passed through, which is what Python does
 /// for every printable one; an unprintable one would be escaped there and is not
 /// here — a divergence confined to error text for a port or a bracketed host.
+/// `urllib.parse._splittype` — the regex `^([^/:]+):`, lowercased.
+///
+/// This is the rule that decides whether `urlopen` will even build a Request,
+/// and it is NOT `urlparse`'s stricter scheme rule. Measured, because guessing
+/// gets it wrong in both directions: `1http://x` and `ht tp://x` both HAVE a
+/// type here (`1http`, `ht tp`) though neither is a legal URI scheme, while
+/// `:443/x` has none because the regex needs at least one character before the
+/// colon.
+///
+/// The distinction is not academic — it selects between two different failures.
+/// No type is a `ValueError`, which `vless-parse.py` catches and turns into a
+/// message and exit 1. A type with no handler is a `URLError`, which it does
+/// not catch, so the user gets a traceback.
+pub fn url_type(url: &str) -> Option<String> {
+    let i = url.find(':')?;
+    let head = &url[..i];
+    // No `:` can be in `head` — it ends at the first one — so `/` is the only
+    // character `[^/:]+` still has to exclude.
+    if head.is_empty() || head.contains('/') {
+        return None;
+    }
+    Some(head.to_ascii_lowercase())
+}
+
+/// The schemes a default `urlopen` has a handler for. Anything else raises
+/// URLError before a socket opens.
+pub const URL_HANDLERS: [&str; 5] = ["http", "https", "file", "ftp", "data"];
+
+/// Would `urlopen(url)` actually make a request? Both halves must hold: a type
+/// the regex can extract, and a handler for it.
+///
+/// Lives here rather than beside a caller because it has two, and the last two
+/// bugs in this area were the same shape — the check existed in one place and
+/// the other place grew a caller. `pool.rs` had a version of this and
+/// `pycli::vless_parse` did not, so a schemeless subscription URL that urllib
+/// refuses without a packet was handed to curl, which invents `http://` and
+/// goes and fetches it.
+pub fn opens_a_request(url: &str) -> bool {
+    url_type(url).is_some_and(|t| URL_HANDLERS.contains(&t.as_str()))
+}
+
 pub fn repr(s: &str) -> String {
     let q = if s.contains('\'') && !s.contains('"') { '"' } else { '\'' };
     let mut out = String::with_capacity(s.len() + 2);

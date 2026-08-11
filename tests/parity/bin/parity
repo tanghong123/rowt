@@ -574,7 +574,17 @@ cmd_vless_diff() { # [count]
   local py="$ROOT/config/vless-parse.py"
   [ -x "$rust" ] || die "no rust parser at $rust — cargo build --release -p rowt-core"
   local work n fails=0 squashed=0 d
-  local squash='s/is not base64-JSON (.*)$/is not base64-JSON (<json-error>)/'
+  # Two normalizations, both for the same reason — the part that is interpreter
+  # detail rather than contract. The parenthetical is Python's JSONDecodeError
+  # wording; the traceback collapses to `<EXC:Name>`, since frame lines and
+  # message phrasing move between point releases while "did this input crash,
+  # and with what kind of error" is what keeps a corrupt pool out of the router.
+  local squash='
+    /^Traceback \(most recent call last\):$/ { t = 1; next }
+    t == 1 { if ($0 ~ /^[A-Za-z_][A-Za-z0-9_.]*(:|$)/) last = $0; next }
+    { sub(/is not base64-JSON \(.*\)$/, "is not base64-JSON (<json-error>)"); print }
+    END { if (t == 1) { n = last; sub(/:.*$/, "", n); print "<EXC:" n ">" } }
+  '
   work="$(mktemp -d "${TMPDIR:-/tmp}/parity-vless.XXXXXX")"
   n="$(python3 "$SELF/gen-link-cases.py" "$work" "${1:-400}")"
   for d in "$work"/case*; do
@@ -594,8 +604,8 @@ cmd_vless_diff() { # [count]
     COLUMNS=80 "$rust" ${args[@]+"${args[@]}"} < "$d/stdin" \
       > "$d/rs.out" 2> "$d/rs.err" || rc=$?
     echo "$rc" > "$d/rs.rc"
-    sed "$squash" "$d/py.err" > "$d/py.errn"
-    sed "$squash" "$d/rs.err" > "$d/rs.errn"
+    awk "$squash" "$d/py.err" > "$d/py.errn"
+    awk "$squash" "$d/rs.err" > "$d/rs.errn"
     cmp -s "$d/py.err" "$d/py.errn" || squashed=$((squashed + 1))
     local bad="" f
     for f in out errn rc; do
@@ -616,7 +626,7 @@ cmd_vless_diff() { # [count]
   done
   if [ "$fails" -eq 0 ]; then
     echo "  $n share-link cases: identical (stdout, stderr, status)"
-    echo "  ($squashed of them had a JSONDecodeError parenthetical normalized)"
+    echo "  ($squashed of them had a traceback or JSONDecodeError normalized)"
     rm -rf "$work"; return 0
   fi
   echo "  $fails/$n cases differ — artifacts: $work"; return 1
@@ -1079,9 +1089,21 @@ cmd_cli_diff() {
     # wrong answer. What it can catch is a wrapper that drops an argument,
     # mangles the exit status, doubles an audit line, or fails to exec at all.
     # selftest 27 breaks the wrapper on purpose and requires this to notice.
+    #
+    # ROWT_PY=1 keeps the PYTHONS on the bash side. bin/rowt runs the Rust
+    # helpers now, and without this every import case would compare rowt-rs's
+    # extractor against rowt-rs's extractor — green, and about nothing. The
+    # dedicated gates (vless/merge/foreign/sr/netdetect/geosite-diff) replay the
+    # Pythons directly and are unaffected either way; what this preserves is the
+    # part only cli-diff sees, which is the extractor's output as it reaches the
+    # jq around it, the .tmp→mv, the 0600 and the audit line.
+    # PARITY_BASH_IMPL=rust deliberately wins over it: that mode is asking for
+    # the wrapper, and the wrapper execs a binary that has no Pythons to go back
+    # to. selftest 28 requires this to be the way round it is.
     ( env -i HOME="$A/home" XDG_CONFIG_HOME="$A/home" \
         PATH="$A/shims:/usr/bin:/bin:/usr/sbin:/sbin" TERM=dumb LC_ALL=C TZ=UTC \
         PARITY_TRACE="$A/trace" PARITY_ENV="$A/env" \
+        ROWT_PY="${PARITY_BASH_PY:-1}" \
         ${PARITY_BASH_IMPL:+ROWT_IMPL="$PARITY_BASH_IMPL"} \
         perl -e "$TMO" "$tmo" \
         bash "$ROWT" $cmdline > "$A/out" 2>/dev/null < /dev/null ) 2>/dev/null || arc=$?

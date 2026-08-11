@@ -53,7 +53,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.3.5"
+ROWT_VERSION="3.3.6"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -571,11 +571,11 @@ _list_add_file() { # $1=list-file $2=source-file $3=label
 # the other. Best-effort + offline-safe (prints nothing if the lookup can't run).
 #   $1=lane-file  $2=label  $3=domain
 _geosite_hint() {
-  have python3 && [ -x "$SB" ] || return 0
+  _py_ok && [ -x "$SB" ] || return 0
   local sug have_cats
   have_cats="$(geosites_of "$1" | paste -sd, - 2>/dev/null)"
   sug="$(ROWT_CACHE="$CACHE" ROWT_SB="$SB" ROWT_GEOSITE_BASE="$GEOSITE_BASE" \
-         python3 "$GEOSITE_LOOKUP" "$3" --have "$have_cats" 2>/dev/null)" || return 0
+         "${PY_GEOSITE[@]}" "$3" --have "$have_cats" 2>/dev/null)" || return 0
   [ -n "$sug" ] || return 0
   case "$sug" in
     have:*) echo "    (already covered by geosite:${sug#have:} on this lane)" ;;
@@ -796,7 +796,7 @@ _corp_block_domains() {
 # DHCP search domains the physical NIC advertises (corp/internal by definition).
 _dhcp_search_domains() {
   [ "$AUTO_CORP_DOMAINS" = 1 ] || return 0
-  _tmo 5 python3 "$NET_DETECT" 2>/dev/null | jq -r '.physical_search[]?' 2>/dev/null || true
+  _tmo 5 "${PY_NETDETECT[@]}" 2>/dev/null | jq -r '.physical_search[]?' 2>/dev/null || true
 }
 
 # Domain suffixes the user has explicitly put in escape or block — their choice
@@ -849,7 +849,7 @@ corp_sync() {
 
   # ---- CIDR side: superset reconcile (NOCHANGE keeps the block verbatim) ----
   local out status body_cidr cur_cidr; cur_cidr="$(_corp_block_cidrs)"
-  out="$(python3 "$CORP_SYNC_RECONCILE" --active "$af" --handadded "$hf" --block "$bf" --private "$pf")" \
+  out="$("${PY_RECONCILE[@]}" --active "$af" --handadded "$hf" --block "$bf" --private "$pf")" \
     || { rm -f "$af" "$hf" "$bf" "$pf"; die "corp sync: reconcile failed"; }
   rm -f "$af" "$hf" "$bf" "$pf"
   status="$(printf '%s\n' "$out" | head -1)"
@@ -902,7 +902,7 @@ corp_sync() {
 # the human picks). Only sees anything when the signal is live: on the corp LAN or
 # with the corp VPN up. Nothing is added automatically.
 corp_suggest() {
-  local j; j="$(python3 "$NET_DETECT" 2>/dev/null || echo '{}')"
+  local j; j="$("${PY_NETDETECT[@]}" 2>/dev/null || echo '{}')"
   local doms phys ns
   doms="$(printf '%s' "$j" | jq -r '.internal_domains[]?' 2>/dev/null)"
   phys="$(printf '%s' "$j" | jq -r '.physical_search[]?' 2>/dev/null)"
@@ -1530,21 +1530,21 @@ cmd_render() {
 # The working set ($SERVERS) is rebuilt from two sources: manually-imported
 # servers ($MANUAL) plus every subscription in $SUBS_FILE, deduped + retagged.
 rebuild_servers() {
-  have python3 || die "python3 not found"
+  _py_ok || die "python3 not found"
   local acc; acc="$(mktemp)"; echo '[]' > "$acc"
   [ -s "$MANUAL" ] && jq -s 'add' "$acc" "$MANUAL" > "$acc.n" && mv "$acc.n" "$acc"
   if [ -f "$SUBS_FILE" ]; then
     local url out
     while IFS= read -r url; do
       case "$url" in ''|\#*) continue ;; esac
-      if out="$(python3 "$PARSER" --sub "$url" 2>/dev/null)"; then
+      if out="$("${PY_VLESS[@]}" --sub "$url" 2>/dev/null)"; then
         jq -s 'add' "$acc" <(printf '%s' "$out") > "$acc.n" && mv "$acc.n" "$acc"
       else
         err "subscription fetch failed: ${url%%\?*}…"
       fi
     done < "$SUBS_FILE"
   fi
-  python3 "$PARSER" --combine < "$acc" > "$SERVERS.tmp" || { rm -f "$SERVERS.tmp" "$acc"; die "combine failed"; }
+  "${PY_VLESS[@]}" --combine < "$acc" > "$SERVERS.tmp" || { rm -f "$SERVERS.tmp" "$acc"; die "combine failed"; }
   mv "$SERVERS.tmp" "$SERVERS"; chmod 600 "$SERVERS"; rm -f "$acc"
   # keep the selection valid; default to the first real server (manual mode has no "auto")
   local sel; sel="$(sget selected)"
@@ -1565,12 +1565,12 @@ after_import() {
 
 cmd_import() {
   [ "$#" -ge 1 ] || die "usage: $PROG server add '<vless://|vmess://|anytls://|hysteria2://...>' [more...]"
-  have python3 || die "python3 not found"
-  local new; new="$(printf '%s\n' "$@" | python3 "$PARSER" --multi)" || exit 1
+  _py_ok || die "python3 not found"
+  local new; new="$(printf '%s\n' "$@" | "${PY_VLESS[@]}" --multi)" || exit 1
   # append to the manual set and dedupe it in place (so re-importing the same
   # link is idempotent, not just deduped in the final servers.json)
   [ -s "$MANUAL" ] || echo '[]' > "$MANUAL"
-  jq -s 'add' "$MANUAL" <(printf '%s' "$new") | python3 "$PARSER" --combine > "$MANUAL.n" \
+  jq -s 'add' "$MANUAL" <(printf '%s' "$new") | "${PY_VLESS[@]}" --combine > "$MANUAL.n" \
     && mv "$MANUAL.n" "$MANUAL"
   chmod 600 "$MANUAL"
   rebuild_servers; after_import
@@ -1582,7 +1582,7 @@ server_load_dump() {
   local f="$1"
   jq -e 'type=="array"' "$f" >/dev/null 2>&1 || die "not a 'server dump' (expected a JSON array): $f"
   [ -s "$MANUAL" ] || echo '[]' > "$MANUAL"
-  jq -s 'add' "$MANUAL" "$f" | python3 "$PARSER" --combine > "$MANUAL.n" && mv "$MANUAL.n" "$MANUAL"
+  jq -s 'add' "$MANUAL" "$f" | "${PY_VLESS[@]}" --combine > "$MANUAL.n" && mv "$MANUAL.n" "$MANUAL"
   chmod 600 "$MANUAL"
   info "loaded $(jq length "$f") server(s) from $f"
   rebuild_servers; after_import
@@ -1652,7 +1652,7 @@ subs_remove() {
 detect_import_sources() {
   # Time-boxed: these scan client config dirs (incl. iCloud paths that can stall
   # on a dataless volume), so cap them so `onboard` can never hang.
-  { _tmo 6 python3 "$SR_IMPORT" --detect 2>/dev/null; _tmo 6 python3 "$FOREIGN_IMPORT" --detect 2>/dev/null; } | grep -vE '^[[:space:]]*$' || true
+  { _tmo 6 "${PY_SR[@]}" --detect 2>/dev/null; _tmo 6 "${PY_FOREIGN[@]}" --detect 2>/dev/null; } | grep -vE '^[[:space:]]*$' || true
 }
 
 # Import servers from another client in two steps: dump an editable, source-
@@ -1674,7 +1674,7 @@ _import_workflow_msg() {
 }
 
 cmd_from_shadowrocket() {
-  have python3 || die "python3 not found"
+  _py_ok || die "python3 not found"
   # --detect: list the clients found + the accumulate→edit→apply commands.
   if [ "${1:-}" = "--detect" ]; then _import_workflow_msg "$IMPORT_REVIEW"; return 0; fi
 
@@ -1707,10 +1707,10 @@ cmd_from_shadowrocket() {
   # Extract step — pick the source dumper (raw; import-merge does all dedup).
   local dumper label
   case "$source" in
-    shadowrocket|sr) dumper=(python3 "$SR_IMPORT"); label="Shadowrocket" ;;
-    clash-verge|clashverge|verge) dumper=(python3 "$FOREIGN_IMPORT" --from clash-verge); label="Clash Verge" ;;
-    v2box) dumper=(python3 "$FOREIGN_IMPORT" --from v2box); label="V2Box" ;;
-    flclash) dumper=(python3 "$FOREIGN_IMPORT" --from flclash); label="FlClash" ;;
+    shadowrocket|sr) dumper=("${PY_SR[@]}"); label="Shadowrocket" ;;
+    clash-verge|clashverge|verge) dumper=("${PY_FOREIGN[@]}" --from clash-verge); label="Clash Verge" ;;
+    v2box) dumper=("${PY_FOREIGN[@]}" --from v2box); label="V2Box" ;;
+    flclash) dumper=("${PY_FOREIGN[@]}" --from flclash); label="FlClash" ;;
     *) die "unknown source: $source  (want: shadowrocket | clash-verge | v2box | flclash)" ;;
   esac
   [ -n "$path" ] && dumper+=(--path "$path")
@@ -1721,7 +1721,7 @@ cmd_from_shadowrocket() {
   local raw err; raw="$(mktemp)"; err="$(mktemp)"
   if ! "${dumper[@]}" > "$raw" 2>"$err"; then cat "$err" >&2; rm -f "$raw" "$err"; die "could not read $label data"; fi
   cat "$err" >&2 2>/dev/null; rm -f "$err"
-  python3 "$IMPORT_MERGE" --into "$file" --add "$raw" --source "$source" \
+  "${PY_MERGE[@]}" --into "$file" --add "$raw" --source "$source" \
     --pool "$SERVERS" --pool "$MANUAL" --pool-subs "$SUBS_FILE" \
     || { rm -f "$raw"; die "merge into $file failed"; }
   rm -f "$raw"; chmod 600 "$file" 2>/dev/null || true
@@ -1738,14 +1738,14 @@ cmd_from_shadowrocket() {
 
 apply_import() {
   local j="$1"
-  have python3 || die "python3 not found"
+  _py_ok || die "python3 not found"
   [ -s "$MANUAL" ] || echo '[]' > "$MANUAL"
   # Strip the review-only "_source" tag (never reaches manual.json / sing-box),
   # then dedupe the manual set in place by endpoint identity — existing servers
   # come first so they win — so re-applying a review file (or one whose entries
   # are already in the pool) is idempotent, not just deduped in servers.json.
   jq -s '.[0] + ((.[1].servers // []) | map(del(._source)))' "$MANUAL" "$j" \
-    | python3 "$PARSER" --combine > "$MANUAL.n" && mv "$MANUAL.n" "$MANUAL"
+    | "${PY_VLESS[@]}" --combine > "$MANUAL.n" && mv "$MANUAL.n" "$MANUAL"
   chmod 600 "$MANUAL"
   jq -r '.subscriptions[]?.url // empty' "$j" >> "$SUBS_FILE"
   sort -u "$SUBS_FILE" -o "$SUBS_FILE"
@@ -2404,7 +2404,7 @@ _captive_proxy_on() { # $1 = network service
 _discovery_journal() { # $1 = captive state (clear|captive|unknown|"")
   [ "${ROWT_DISCOVERY_LOG:-1}" = 1 ] || return 0
   local j nid vpn line sig
-  j="$(_tmo 5 python3 "$NET_DETECT" 2>/dev/null || echo '{}')"
+  j="$(_tmo 5 "${PY_NETDETECT[@]}" 2>/dev/null || echo '{}')"
   nid="$(net_id "$(detect_iface 2>/dev/null || true)" 2>/dev/null || true)"
   vpn="$(_vpn_iface 2>/dev/null || true)"
   line="$(printf '%s' "$j" | jq -c --arg net "$nid" --arg vpn "$vpn" --arg cap "${1:-}" \
@@ -4751,6 +4751,53 @@ _rust_cli() {
   command -v rowt-rust 2>/dev/null
 }
 
+# --- the ported config/*.py helpers -----------------------------------------
+# Every one of these has a Rust counterpart in rowt-core behind its own
+# differential gate (PORTING.md §5 phase 6), reached as `rowt-rs _py <tool>`.
+# That is what runs by default, and it is what lets the Formula drop
+# python@3.12 — bin/rowt is the file the Formula installs, so the dependency
+# lives and dies with these call sites and not with the scripts in config/.
+#
+# ROWT_PY=1 puts the Pythons back. `parity cli-diff` sets it on this side, so
+# the gate keeps comparing an extractor against an extractor rather than
+# comparing rowt-rs with itself — the same reasoning as ROWT_IMPL's, one layer
+# down — and it is the field escape hatch if a helper ever disagrees.
+#
+# Resolved into ARRAYS rather than behind a dispatch function because `_tmo`
+# runs its command through `perl -e 'exec @ARGV'`, and exec cannot see a shell
+# function. Every array stays non-empty even when nothing can run it: `set -u`
+# rejects an empty "${a[@]}" on bash 3.2, and leaving the python3 words in
+# place keeps the old failure exactly as it was — "command not found", from the
+# same call site.
+_setup_py_helpers() {
+  local rb=""
+  [ "${ROWT_PY:-0}" = 1 ] || { rb="$(_rust_cli)" || true; }
+  if [ -n "$rb" ]; then
+    PY_VLESS=("$rb" _py vless-parse)
+    PY_SR=("$rb" _py sr-import)
+    PY_FOREIGN=("$rb" _py foreign-import)
+    PY_GEOSITE=("$rb" _py geosite-lookup)
+    PY_NETDETECT=("$rb" _py net-detect)
+    PY_MERGE=("$rb" _py import-merge)
+    PY_RECONCILE=("$rb" _py corp-sync-reconcile)
+    PY_HAVE=1
+  else
+    PY_VLESS=(python3 "$PARSER")
+    PY_SR=(python3 "$SR_IMPORT")
+    PY_FOREIGN=(python3 "$FOREIGN_IMPORT")
+    PY_GEOSITE=(python3 "$GEOSITE_LOOKUP")
+    PY_NETDETECT=(python3 "$NET_DETECT")
+    PY_MERGE=(python3 "$IMPORT_MERGE")
+    PY_RECONCILE=(python3 "$CORP_SYNC_RECONCILE")
+    PY_HAVE=0; have python3 && PY_HAVE=1
+  fi
+}
+
+# Can the ported helpers run at all? Stands where `have python3` stood, and
+# still says "python3 not found" when it cannot: with no rowt-rs the Pythons
+# are what would have run, so that is the true and actionable half.
+_py_ok() { [ "${PY_HAVE:-0}" = 1 ]; }
+
 main() {
   # §6.6 — ROWT_IMPL=rust hands the whole invocation to rowt-rs. BEFORE the
   # preamble: rowt-rs migrates, rotates and audits for itself, and doing it on
@@ -4771,6 +4818,7 @@ main() {
     [ -n "$_rb" ] || { echo "error: ROWT_IMPL=rust but no rowt-rs found — build it (cargo build --release -p rowt-cli) or install it" >&2; exit 1; }
     exec "$_rb" "$@"
   fi
+  _setup_py_helpers
   migrate
   rotate_log "$HOST_LOG"
   rotate_log "$LOGDIR/watch.log"

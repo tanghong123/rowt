@@ -38,6 +38,41 @@ fn stdin_string() -> String {
     s
 }
 
+/// What `type(x).__name__` prints for a value that came out of `json.loads`.
+fn py_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "NoneType",
+        Value::Bool(_) => "bool",
+        Value::Number(n) => {
+            if n.is_f64() {
+                "float"
+            } else {
+                "int"
+            }
+        }
+        Value::String(_) => "str",
+        Value::Array(_) => "list",
+        Value::Object(_) => "dict",
+    }
+}
+
+/// An exception nothing caught, the way Python leaves it: frames, then
+/// `<qualified name>: <message>`. Only the name survives the gate's normalizer
+/// — frame lines are interpreter detail — but the message is written properly
+/// because a person reads this too.
+fn py_traceback(name: &str, msg: &str) -> ! {
+    eprintln!("Traceback (most recent call last):");
+    eprintln!("{name}: {msg}");
+    std::process::exit(1)
+}
+
+fn attribute_error(v: &Value) -> ! {
+    py_traceback(
+        "AttributeError",
+        &format!("'{}' object has no attribute 'get'", py_type_name(v)),
+    )
+}
+
 /// The IO half of `fetch_subscription`. urlopen's failures are not ValueErrors,
 /// so the Python dies with a traceback and exit 1; curl failing gives the same
 /// status, which is all the shell caller reads (`2>/dev/null`, status-checked).
@@ -106,6 +141,13 @@ pub fn main(argv: &[String]) -> ExitCode {
         i += 1;
     }
 
+    // main()'s chain tests TRUTHINESS, not presence — `elif args.sub:` — so
+    // `--sub ""` and a bare empty link both fall through to the "provide a
+    // link…" usage error rather than being attempted. Dropping the empties here
+    // makes the rest of this function read the way the Python does.
+    let sub = sub.filter(|s| !s.is_empty());
+    let link = link.filter(|s| !s.is_empty());
+
     // The same precedence main() has: --combine, then --sub, then --multi, then
     // a bare link. Passing several is not an error, the first one wins.
     if combine {
@@ -120,12 +162,51 @@ pub fn main(argv: &[String]) -> ExitCode {
             // clean failure because a traceback is not a contract worth keeping.
             fail(&Batch::default(), "combine expects a JSON array of outbounds");
         };
+        // An element that is not an object, though, IS worth keeping, and the
+        // difference is who reads the exit status. `combine` calls `.get` on
+        // each element in turn, so `[{...}, "hand-edited into nonsense"]` dies
+        // in `key_of` with an AttributeError — not a ValueError, so the script's
+        // `except` never sees it — and `rowt server add` reports "combine
+        // failed" and writes nothing.
+        //
+        // This used to be a deliberate divergence, and the generator said so:
+        // reporting it cleanly is nicer, and while this binary existed only to
+        // be replayed by `vless-diff`, its stdout went nowhere and nothing
+        // depended on the refusal. bin/rowt runs it now, and "nicer" became
+        // "writes the nonsense string into manual.json instead of refusing" —
+        // a corrupt pool accepted rather than rejected. `pool.rs::combine` had
+        // the type check all along and explained why; this is that check, on
+        // the path that grew a caller.
+        if let Some(bad) = arr.iter().find(|e| !e.is_object()) {
+            attribute_error(bad);
+        }
         let b = sharelink::combine(arr);
         let out = Value::Array(b.outbounds.clone());
         emit(b, out);
     }
 
     let links: Vec<String> = if let Some(url) = sub {
+        // Two different refusals, both before any socket opens, and curl makes
+        // neither — it would invent `http://` and go and fetch. Which one you
+        // get is `pyurl::url_type`'s business; see it for why the rule is not
+        // the obvious one.
+        match crate::pyurl::url_type(&url) {
+            // `Request(url)` raises ValueError, which the script CATCHES.
+            None => fail(
+                &Batch::default(),
+                &format!("unknown url type: {}", crate::pyurl::repr(&url)),
+            ),
+            // A type with no handler raises URLError from `urlopen`, which is
+            // not a ValueError and escapes the `except` — so the user sees a
+            // traceback. Reproduced rather than tidied: what a mistyped
+            // subscription URL does is the same question either way, and the
+            // gate compares the exception TYPE, not the frames.
+            Some(t) if !crate::pyurl::URL_HANDLERS.contains(&t.as_str()) => py_traceback(
+                "urllib.error.URLError",
+                &format!("<urlopen error unknown url type: {t}>"),
+            ),
+            Some(_) => {}
+        }
         let Ok(body) = fetch(&url) else { std::process::exit(1) };
         match sharelink::decode_subscription(&body) {
             Ok(l) => l,

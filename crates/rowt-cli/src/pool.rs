@@ -38,7 +38,7 @@
 //!   opening a socket, where curl assumes http and dials it. A subs.txt line
 //!   that is not a URL — `sub import` pointed at a lane list is the easy way to
 //!   get one — therefore had rowt-rs sending requests bin/rowt never sent.
-//!   `has_scheme` now rejects those before the process starts. Recorded here
+//!   `opens_a_request` now rejects those before the process starts. Recorded here
 //!   because it is the one divergence in this module that was a defect rather
 //!   than a choice.
 //! * `sub add` sorts and dedupes the list bytewise, where the shell's
@@ -139,21 +139,13 @@ fn combine(outbounds: &[Value]) -> Result<sharelink::Batch, ()> {
     Ok(sharelink::combine(outbounds))
 }
 
-/// `urlparse`'s rule, which is the one that decides whether a request happens
-/// at all: a scheme is a letter followed by letters, digits, `+`, `-` or `.`,
-/// ending at the first `:`. Anything else has "unknown url type" and never
-/// reaches the network.
-///
-/// Deliberately NOT a check for `http`/`https`: bin/rowt would hand `file://`
-/// to urllib and curl reads it too, so narrowing to the two web schemes would
-/// trade one divergence for another.
-fn has_scheme(url: &str) -> bool {
-    let Some(i) = url.find(':') else { return false };
-    let (s, _) = url.split_at(i);
-    !s.is_empty()
-        && s.starts_with(|c: char| c.is_ascii_alphabetic())
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
-}
+/// Moved to `rowt_core::pyurl::opens_a_request`, where the reasoning lives
+/// now. It was here alone while this was the only caller; `pycli::vless_parse`
+/// became the second, without the check, and handed curl a schemeless URL that
+/// urllib refuses without a packet. The shared version is also more accurate
+/// than what stood here: `nosuch://x` passed the old scheme test and got a
+/// curl, where urlopen raises URLError without one.
+use rowt_core::pyurl::opens_a_request;
 
 /// `curl` a subscription and parse it — the IO half of `--sub`.
 ///
@@ -171,7 +163,7 @@ fn fetch_sub(url: &str) -> Result<Vec<Value>, ()> {
     // bin/rowt never contacts at all. Refused here instead — the scheme check
     // has to come BEFORE the process, since by the time curl runs the request
     // is already out.
-    if !has_scheme(url) {
+    if !opens_a_request(url) {
         return Err(());
     }
     let ua = crate::env_or(
@@ -682,13 +674,13 @@ mod tests {
         // socket. `sub import <a lane list>` is the realistic way to get such a
         // line into subs.txt, and rowt-rs must not be the implementation that
         // phones home to every domain in it.
-        assert!(!has_scheme("example.com"));
-        assert!(!has_scheme("new-one.example"));
-        assert!(!has_scheme(""));
-        assert!(!has_scheme("//example.com/feed"));
+        assert!(!opens_a_request("example.com"));
+        assert!(!opens_a_request("new-one.example"));
+        assert!(!opens_a_request(""));
+        assert!(!opens_a_request("//example.com/feed"));
         // A leading digit is not a scheme, so this is a host:port, not a URL.
-        assert!(!has_scheme("127.0.0.1:9"));
-        assert!(!has_scheme(":no-scheme"));
+        assert!(!opens_a_request("127.0.0.1:9"));
+        assert!(!opens_a_request(":no-scheme"));
     }
 
     #[test]
@@ -700,9 +692,13 @@ mod tests {
             "https://example.com/sub?token=x",
             "file:///tmp/feed.txt",
             "ftp://example.com/feed",
-            "s3+http://example.com/feed",
         ] {
-            assert!(has_scheme(u), "{u}");
+            assert!(opens_a_request(u), "{u}");
         }
+        // `s3+http` is a legal URI scheme and urlparse accepts it, which is why
+        // it sat in the list above while the check was urlparse's. urlopen has
+        // no handler for it and raises URLError without a socket, so sending it
+        // to curl was a request bin/rowt never made.
+        assert!(!opens_a_request("s3+http://example.com/feed"));
     }
 }
