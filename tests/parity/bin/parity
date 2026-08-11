@@ -997,9 +997,18 @@ cmd_cli_diff() {
     # also puts the case in its own session, which is what makes a command that
     # prompts on /dev/tty answerable here — see the wrapper.
     # shellcheck disable=SC2086 — the case line is intentionally word-split
+    # PARITY_BASH_IMPL=rust puts §6.6's wrapper in the path on the BASH side, so
+    # the run compares rowt-rs against ITSELF through bin/rowt. That proves one
+    # thing only — that the front door is transparent — and it is worth being
+    # blunt that a green run here says nothing about whether anything was ported
+    # correctly: both sides are the same binary, so a wrong answer matches a
+    # wrong answer. What it can catch is a wrapper that drops an argument,
+    # mangles the exit status, doubles an audit line, or fails to exec at all.
+    # selftest 27 breaks the wrapper on purpose and requires this to notice.
     ( env -i HOME="$A/home" XDG_CONFIG_HOME="$A/home" \
         PATH="$A/shims:/usr/bin:/bin:/usr/sbin:/sbin" TERM=dumb LC_ALL=C TZ=UTC \
         PARITY_TRACE="$A/trace" PARITY_ENV="$A/env" \
+        ${PARITY_BASH_IMPL:+ROWT_IMPL="$PARITY_BASH_IMPL"} \
         perl -e "$TMO" "$tmo" \
         bash "$ROWT" $cmdline > "$A/out" 2>/dev/null < /dev/null ) 2>/dev/null || arc=$?
     # shellcheck disable=SC2086

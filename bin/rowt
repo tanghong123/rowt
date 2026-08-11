@@ -53,7 +53,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.3.4"
+ROWT_VERSION="3.3.5"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -4738,7 +4738,39 @@ run_command() {
   esac
 }
 
+# The Rust CLI, located like the other companions. Brew puts it at
+# libexec/bin/rowt-rs (and symlinks it into the prefix as `rowt-rust`);
+# install.sh copies it to $PREFIX/bin/rowt-rust; a checkout builds it in
+# target/.
+_rust_cli() {
+  local b
+  for b in "$HERE/bin/rowt-rs" "$HERE/bin/rowt-rust" \
+           "$HERE/target/release/rowt-rs" "$HERE/target/debug/rowt-rs"; do
+    [ -x "$b" ] && { echo "$b"; return 0; }
+  done
+  command -v rowt-rust 2>/dev/null
+}
+
 main() {
+  # §6.6 — ROWT_IMPL=rust hands the whole invocation to rowt-rs. BEFORE the
+  # preamble: rowt-rs migrates, rotates and audits for itself, and doing it on
+  # both sides would double every audit line.
+  #
+  # Guarded on ROWT_DELEGATED but deliberately NOT setting it. That marker means
+  # "rowt-rs sent this here", and rowt-rs REFUSES to delegate when it is already
+  # set — so setting it here would close §6.6's escape hatch: a command rowt-rs
+  # has no arm for would hard-error instead of falling back to this shell.
+  # Reading it and leaving it alone gives both properties — rust → bash → runs
+  # natively, and no loop, because the second pass sees the marker and does not
+  # switch again.
+  if [ "${ROWT_IMPL:-bash}" = rust ] && [ "${ROWT_DELEGATED:-}" != 1 ]; then
+    local _rb; _rb="$(_rust_cli)" || true
+    # Silence here would be the footgun §6.6 names: someone who asked for rust
+    # and is quietly handed bash collects a window's worth of evidence about the
+    # wrong implementation.
+    [ -n "$_rb" ] || { echo "error: ROWT_IMPL=rust but no rowt-rs found — build it (cargo build --release -p rowt-cli) or install it" >&2; exit 1; }
+    exec "$_rb" "$@"
+  fi
   migrate
   rotate_log "$HOST_LOG"
   rotate_log "$LOGDIR/watch.log"

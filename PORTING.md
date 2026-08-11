@@ -566,26 +566,49 @@ alongside as `rowt-legacy` for one full release cycle and the Formula carries
 both. Rollback is an env var, not a reinstall. Phase 4 deletes the bash only
 after a release cycle in which the fallback was never needed.
 
-**Not yet built.** Every command arm is now native AND compared against the
-shell, the lifecycle arms included — they were the last ones carrying the
-ledger's "proven by boot-test" note, which turned out to mean "run against a
-real sing-box", never "compared to bash". What is left before the switch is
-worth writing down as three separate things, none of which is more porting:
+**Built, and OFF by default.** `ROWT_IMPL` is unset for everyone until §6.5's
+window says otherwise; what exists is the door, not the decision to walk
+through it. Three details are load-bearing:
+
+* **It execs before the preamble.** rowt-rs migrates, rotates and audits for
+  itself, and doing it on both sides doubles every audit line.
+* **It reads `ROWT_DELEGATED` and deliberately does not set it.** That marker
+  means "rowt-rs sent this here", and rowt-rs *refuses* to delegate when it is
+  already set — so setting it here would close the escape hatch this section
+  exists for: a command rowt-rs has no arm for would hard-error instead of
+  falling back to the shell. Reading it and leaving it alone gives both
+  properties: rust → bash runs natively, and there is no loop, because the
+  second pass sees the marker and does not switch again.
+* **A missing binary is an error, not a fallback.** Silently handing bash to
+  someone who asked for rust is how a fourteen-day window fills with evidence
+  about the wrong implementation.
+
+`PARITY_BASH_IMPL=rust parity cli-diff` runs the whole matrix with the bash side
+wrapped. Be blunt about what that proves: both sides are then the same binary,
+so everything matches trivially and a wrong answer matches a wrong answer. Its
+only claim is that the front door is transparent — that no argument is dropped,
+no exit status mangled, no audit line doubled. `selftest` 26 makes the claim
+falsifiable by removing the wrapper's `"$@"` and requiring the run to notice;
+without that it would be a gate that cannot fail, which is the defect §6.5 took
+two releases to remove from the shadow.
+
+What is left before the switch becomes the DEFAULT is worth writing down as
+three separate things, none of which is more porting:
 
 1. **Data.** §6.5's promotion rule — 14 days of real use with zero unexplained
    divergences, including a corp-network day and a foreign-network day. The
    shadow window ships (3.2.6) but a window that was never started produces
    silence, and silence looks exactly like agreement.
-2. **Packaging.** Nothing installs `rowt-rs` today. `install.sh` rsyncs the
-   whole tree minus `.state` and `bin/sing-box`, so a repo install copies BOTH
-   build trees into the prefix — measured 2026-08-10: 406 MB of `target/` and
-   774 MB of `rowt-monitor/target/`, about 1.2 GB of object files. And that is
-   also how a local install currently finds its sidecars: `_render_bin` falls
-   back to `$HERE/target/release`, and `_collector_bin` looks in
-   `$HERE/rowt-monitor/target/release`. So excluding the two `target/` trees
-   and placing the binaries in `$PREFIX/bin/` are one change, not two —
-   excluding them alone would take the sidecars with them. A switch with
-   nothing to exec is a no-op with a footgun.
+2. ~~**Packaging.**~~ Done. `install.sh` excludes both `target/` trees and
+   copies the five binaries into `$PREFIX/bin/`; the Formula installs `rowt-rs`
+   into `libexec/bin` and symlinks it as `rowt-rust`. Both were one change, not
+   two: `_render_bin` and `_collector_bin` used to FIND the sidecars in those
+   build trees, so excluding them alone would have taken the sidecars with them.
+   (Measured before the change: 406 MB of `target/` and 774 MB of
+   `rowt-monitor/target/` copied into the prefix.) `_rust_cli` resolves
+   `$HERE/bin/rowt-rs` first, which is what the brew layout produces, then the
+   install.sh name, then a checkout's `target/`, then `PATH`.
+
 3. **The switch itself**, which is small: `exec` before the preamble (rowt-rs
    migrates, rotates and audits for itself, and doing it on both sides doubles
    every audit line), guarded on `ROWT_DELEGATED` so a delegated help page

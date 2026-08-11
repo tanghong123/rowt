@@ -689,7 +689,31 @@ else
   cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
 fi
 
-echo "26. every name native() claims must be an arm of run()"
+echo "26. drop the arguments the ROWT_IMPL=rust wrapper forwards"
+cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+if [ ! -x "$ROOT/target/release/rowt-rs" ]; then
+  echo "  skip — no release build"
+else
+  # §6.6's front door. `PARITY_BASH_IMPL=rust` runs cli-diff with the BASH side
+  # wrapped, so both sides are the same binary and everything matches trivially
+  # — which makes it a gate that cannot fail unless something like this proves
+  # otherwise. It says nothing about whether a command was ported correctly
+  # (that is what the other 253 cases are for); what it can catch is a wrapper
+  # that drops an argument, mangles the status, or never execs at all.
+  perl -0pi -e 's/exec "\$_rb" "\$\@"/exec "\$_rb"/' "$tmp/bin/rowt"
+  if grep -qF 'exec "$_rb" "$@"' "$tmp/bin/rowt"; then
+    bad "could not drop the wrapper's argument forwarding (main() moved?)"
+  elif PARITY_BASH_IMPL=rust PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" \
+       PARITY_CASES="$(only 'corp add example.com')" \
+       "$P" cli-diff >/dev/null 2>&1; then
+    bad "cli-diff passed with the ROWT_IMPL wrapper swallowing its arguments"
+  else
+    ok "cli-diff caught the wrapper dropping its arguments"
+  fi
+  cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+fi
+
+echo "27. every name native() claims must be an arm of run()"
 src="$ROOT/crates/rowt-cli/src/main.rs"
 # Command names only. A native() arm line is indented exactly eight spaces and
 # starts with a pattern; the sub-command lists inside `matches!(…)` are indented
