@@ -23,6 +23,7 @@
 
 pub mod corp_sync_reconcile;
 pub mod foreign_import;
+pub mod geosite_lookup;
 pub mod import_merge;
 pub mod net_detect;
 pub mod sr_import;
@@ -38,17 +39,19 @@ pub fn dispatch(tool: &str, argv: &[String]) -> Option<std::process::ExitCode> {
         "net-detect" => net_detect::main(argv),
         "foreign-import" => foreign_import::main(argv),
         "sr-import" => sr_import::main(argv),
+        "geosite-lookup" => geosite_lookup::main(argv),
         _ => return None,
     })
 }
 
 /// Every tool `dispatch` answers to, for the usage message and for the gate
 /// that checks the shell and the binary agree on the list.
-pub const TOOLS: [&str; 6] = [
+pub const TOOLS: [&str; 7] = [
     "vless-parse",
     "import-merge",
     "corp-sync-reconcile",
     "net-detect",
     "foreign-import",
     "sr-import",
+    "geosite-lookup",
 ];

@@ -29,6 +29,7 @@
 #   parity merge-diff        import accumulation, Python vs Rust: the review FILE
 #   parity foreign-diff      other clients' config trees, Python vs Rust
 #   parity sr-diff           Shadowrocket's plist + rules, Python vs Rust
+#   parity geosite-diff      the `add` hint's category lookup, Python vs Rust
 #   parity watch-diff        watchdog tick: bash's effects vs the FSM's plan
 #   parity platform-diff     the platform layer, compared by the argv it produces
 #   parity cli-diff          whole commands through rowt-rs vs the shell
@@ -810,6 +811,79 @@ cmd_sr_diff() { # [count]
   echo "  $fails/$n cases differ — artifacts: $work"; return 1
 }
 
+# The `add` hint's category lookup, Python vs Rust.
+#
+# Compares the CACHE DIRECTORY as well as the three streams, and that is the
+# half worth having: the lookup's whole job is to be silent when the world is
+# incomplete, so stdout is empty in most cases and comparing it alone would pass
+# two implementations that did nothing. What separates them is the litter they
+# leave — a decompiled .json, a zero-byte .srs from a failed download — and the
+# next run reads that litter back as "already cached".
+#
+# Each side gets its OWN copy of the seed for the same reason: the run mutates
+# the directory it reads, so sharing one would let whichever ran first decide
+# what the second saw.
+cmd_geosite_diff() { # [count]
+  local rust="${PARITY_RUST_GEOSITE:-$ROOT/target/release/rowt-geosite}"
+  local py="$ROOT/config/geosite-lookup.py"
+  [ -x "$rust" ] || die "no rust geosite at $rust — cargo build --release -p rowt-core"
+  local work n fails=0 d
+  work="$(mktemp -d "${TMPDIR:-/tmp}/parity-geosite.XXXXXX")"
+  n="$(python3 "$SELF/gen-geosite-cases.py" "$work" "${1:-120}")"
+  for d in "$work"/case*; do
+    local args=() line
+    while IFS= read -r line; do args+=("$line"); done < "$d/argv"
+    local side cmd base
+    base="$(cat "$d/base")"
+    for side in py rs; do
+      rm -rf "$d/$side-cache"; cp -R "$d/seed" "$d/$side-cache"
+      if [ "$side" = py ]; then cmd=(python3 "$py"); else cmd=("$rust"); fi
+      local rc=0
+      # Half the cases can fetch (a file:// directory) and half cannot (a port
+      # with nothing on it) — the generator explains why both are needed.
+      #
+      # The proxy variables are cleared, and that is not tidiness: curl and
+      # urllib both honour them, so on a machine with rowt actually running,
+      # every fetch in here was reaching 127.0.0.1:1 THROUGH the router and
+      # failing with a 502 instead of a refused connection. Same verdict, but a
+      # gate whose failure mode depends on whether the developer had the proxy
+      # on is a gate that will one day disagree with itself.
+      ( cd "$d" && HOME="$d" \
+          ROWT_CACHE="$d/$side-cache" \
+          ROWT_SB="$d/bin/sing-box" \
+          ROWT_GEOSITE_BASE="$base" \
+          http_proxy= https_proxy= all_proxy= no_proxy= \
+          HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= NO_PROXY= \
+          PYTHONUTF8=1 COLUMNS=80 \
+          "${cmd[@]}" ${args[@]+"${args[@]}"} \
+          > "$d/$side.out" 2> "$d/$side.err" ) || rc=$?
+      echo "$rc" > "$d/$side.rc"
+      ( cd "$d/$side-cache" && find . -type f | LC_ALL=C sort | while IFS= read -r f; do
+          printf '%s %s\n' "$(wc -c < "$f" | tr -d ' ')" "$f"
+        done ) > "$d/$side.tree"
+    done
+    local bad="" f
+    for f in out err rc tree; do
+      cmp -s "$d/py.$f" "$d/rs.$f" || bad="$bad $f"
+    done
+    if [ -n "$bad" ]; then
+      fails=$((fails + 1))
+      if [ "$fails" -le 3 ]; then
+        echo "  DIFFERS ($bad): $d"
+        sed 's/^/    argv: /' "$d/argv"
+        for f in $bad; do
+          diff "$d/py.$f" "$d/rs.$f" | sed 's/^/      /' | head -12 || true
+        done
+      fi
+    fi
+  done
+  if [ "$fails" -eq 0 ]; then
+    echo "  $n geosite-hint cases: identical (stdout, stderr, status, cache tree)"
+    rm -rf "$work"; return 0
+  fi
+  echo "  $fails/$n cases differ — artifacts: $work"; return 1
+}
+
 # Lane-list edits, bash vs Rust: the three files afterwards, and the lines the
 # user is told. The shell's surrounding effects (geosite fetch, the coverage
 # hint, the router reload) are filtered out — they are not set logic.
@@ -1355,6 +1429,7 @@ case "${1:-}" in
   merge-diff)      shift; cmd_merge_diff "$@" ;;
   foreign-diff)    shift; cmd_foreign_diff "$@" ;;
   sr-diff)         shift; cmd_sr_diff "$@" ;;
+  geosite-diff)    shift; cmd_geosite_diff "$@" ;;
   lanes-diff)      shift; cmd_lanes_diff "$@" ;;
   watch-diff)      shift; cmd_watch_diff "$@" ;;
   platform-diff)   shift; cmd_platform_diff "$@" ;;
