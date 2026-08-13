@@ -58,21 +58,33 @@ Undo an `E`/`C`/`B` with `D`, not `d`: lane removal is an exact-line match, so
 `d` on `x.y.z.com` removes only that entry and reports success without touching
 a `z.com` written by `E`.
 
-**The confirm bar is editable.** Once armed, the proposed entry is a one-line
-editor: type to change it, `←→`/`Home`/`End` move a block cursor, `Backspace`/
-`Delete` cut, `Ctrl-W` drops one label at a time, `Ctrl-U` clears, and `↵`
-applies whatever is in the field. Editing is additive — while the field is
-untouched the eight arm keys keep their meaning, so `e`,`e` still double-taps
-(= no edit, then apply) and `e`,`C` still re-arms; the first other keystroke
-starts an edit, and from then on letters type. `Esc` cancels, an empty field
-cancels, and an entry with a space in it is refused rather than silently closed
+**The confirm bar sits at the right of the footer and has two phases.** For the
+first **½ second** it is a plain confirmation, in the normal foreground colour
+with no cursor: press the same key again to apply, or another arm key to
+re-target. After that it turns **amber and grows a block cursor** — the entry is
+now a live field, and the arm keys type instead of committing.
+
+Each phase names only the key that works in it — `→ press e again to apply`,
+then `→ escape · ↵ apply · esc cancel`. The shorter hint is **padded** to the
+width of the longer, so the phase change swaps text in place and the entry does
+not move; typing likewise extends the entry *leftward*, leaving the cursor and
+everything after it where they were.
+
+(Phase 1 shows the key rather than the lane name. The key *is* the lane —
+`press c again` means corp — and the lane is spelled out the moment the bar
+becomes editable.)
+
+In the editable phase: type to change the entry, `←→`/`Home`/`End` move the
+cursor, `Backspace`/`Delete` cut, `Ctrl-W` drops one label at a time, `Ctrl-U`
+clears, `↵` applies whatever is in the field. `Esc` cancels, an empty field
+cancels, and an entry containing a space is refused rather than silently closed
 up (`edit_list` would strip it and write something the bar never showed).
 
-Two consequences worth knowing. While an edit is armed, printable keys go to the
-field — so `q` types `q` rather than quitting, and `?`/`y` likewise; press `Esc`
-first. And the arm timeout is an *inactivity* timer measured from the last
-keystroke: 5s for an untouched arm (the "did you mean that?" window), 20s once
-you start typing, so a pause to think doesn't discard the entry.
+Two consequences worth knowing. Once editable, printable keys go to the field —
+so `q` types `q` rather than quitting, and `?`/`y` likewise; press `Esc` first.
+And an armed edit **auto-cancels after 10s idle** — measured from the last
+keypress, so typing keeps it alive and a pause to think doesn't discard it. The
+cancel is exactly what `Esc` does, and just as silent.
 
 **Mouse:** wheel scrolls (and focuses) the list under the pointer; click a row /
 lane / window-tab to activate, a server chip to select it in place, or `sys proxy`

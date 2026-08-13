@@ -741,20 +741,27 @@ fn an_entry_with_a_space_is_refused_not_silently_closed_up() {
 }
 
 #[test]
-fn editing_gets_a_longer_idle_window_than_a_bare_arm() {
-    use rowt_monitor::app::{ARM_EDIT_TIMEOUT, ARM_TIMEOUT};
-    use std::time::Instant;
-    assert!(ARM_EDIT_TIMEOUT > ARM_TIMEOUT, "typing a domain needs more than the double-tap window");
+fn an_idle_edit_cancels_itself_like_esc() {
+    use rowt_monitor::app::ARM_TIMEOUT;
+    use std::time::{Duration, Instant};
     let mut a = app();
     a.update(Action::Down);
     a.update(Action::Route(Lane::Escape));
     a.update(Action::ArmEdit(Edit::Insert('x')));
-    // Idle past the bare-arm window but inside the editing one: still armed.
-    a.armed.as_mut().unwrap().at = Instant::now() - ARM_TIMEOUT - std::time::Duration::from_secs(1);
+
+    // The timer is measured from the LAST keypress, so typing keeps it alive —
+    // a pause to think about a domain must not discard the work.
+    a.armed.as_mut().unwrap().at = Instant::now() - ARM_TIMEOUT + Duration::from_secs(2);
     a.on_frame();
-    assert!(a.armed.is_some(), "an in-progress edit survives the 5s double-tap window");
-    // Idle past the editing window: gone.
-    a.armed.as_mut().unwrap().at = Instant::now() - ARM_EDIT_TIMEOUT - std::time::Duration::from_secs(1);
+    assert!(a.armed.is_some(), "still within the idle window");
+    a.update(Action::ArmEdit(Edit::Insert('y')));
+    assert!(a.armed.as_ref().unwrap().at.elapsed() < Duration::from_millis(500), "a keypress restamps it");
+
+    // Idle past the window: gone, and silently — this is Esc, which says nothing.
+    let before = a.toast.clone().map(|(m, _)| m);
+    a.armed.as_mut().unwrap().at = Instant::now() - ARM_TIMEOUT - Duration::from_secs(1);
     a.on_frame();
-    assert!(a.armed.is_none(), "…but not forever");
+    assert!(a.armed.is_none(), "an idle edit cancels itself");
+    assert_eq!(a.toast.clone().map(|(m, _)| m), before, "silently, like Esc");
+    assert!(a.pending_reload.is_none(), "and writes nothing");
 }

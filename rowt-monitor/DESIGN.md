@@ -440,24 +440,38 @@ interface, the system-proxy state, and router liveness/port.
   entry, and honouring it with the lowercase edit would leave the lane file
   unable to tell which key wrote it. The armed key is the uppercase letter, so
   the two forms can't cross-commit through the double-tap check.
-- **Editable confirm bar** (`Armed.domain` doubles as the buffer, `Action::ArmEdit`
-  carries the op): `↵` applies whatever is in the field, so the entry written
-  need not be the one proposed. Deliberately **not** a modal takeover like the
-  search editor — `input::armed_key` returns `None` for anything that isn't a
-  text key, so it falls through to the global keymap and still cancels the arm.
-  While `!edited` the eight arm keys are also left alone, which is what preserves
-  double-tap-to-commit and re-arming; the first other keystroke flips `edited`
-  and from then on letters type. Every edit restamps `at`, so `ARM_TIMEOUT`
-  measures inactivity, and an empty buffer commits as a cancel. Each shells out
-  to `$ROWT_BIN` (exported by `rowt monitor`) **off the UI thread**; outcomes are
-  drained each frame into the footer toast (a failed command surfaces its
-  stderr). Lane edits **arm** on first press (an amber confirm bar; re-press or
-  `↵` commits, any other key / `Esc` cancels — so a double-tap commits with no
-  pause) and are written with `--no-reload`; a single `render`+`router restart`
-  fires ~7s after the last edit settles (a footer chip counts down). `u`/`o` skip
-  the confirm (live + trivially reversible). The proxy toggle is **optimistic**:
-  the displayed state flips immediately, then reconciles with the real polled
-  state or reverts on timeout if the command failed.
+- **Confirm bar, in two phases** (`Armed.domain` doubles as the buffer,
+  `Action::ArmEdit` carries the op; `Armed::editing()` is the phase predicate).
+  For `DOUBLE_TAP_WINDOW` (500ms) it is a plain confirmation — normal foreground,
+  no cursor — and the eight arm keys keep committing/re-arming. After that it is
+  amber with a block cursor and the field is live, so those keys type. Typing
+  anything opens it immediately; there is nothing left to wait for once the
+  operator has said what they want.
+
+  Each phase advertises only the key that works in it (`press e again to apply`,
+  then `↵ apply · esc cancel`), so the bar never offers a shortcut that is not
+  live. Splitting the behaviours in TIME rather than by a mode flag is what makes
+  that honest — a key cannot both commit and type.
+
+  The bar is right-aligned, so its WIDTH positions everything, and the two hints
+  differ in length. The tail is therefore laid out at the wider of them and the
+  shorter is padded; sized to its own text, the narrower hint pulled the bar in
+  and the entry visibly jumped at the phase change. With the padding — and the
+  cursor's cell reserved from the start — the width is a function of the entry
+  alone, so neither the phase change nor a keystroke moves the cursor or anything
+  after it. `the_cursor_and_the_hint_after_it_never_move` pins exactly that,
+  anchored on the append cell because it is the one landmark present in both
+  phases (phase 1 draws no cursor; `^U` leaves no entry text to find).
+
+  `↵` applies whatever is in the field, so the entry written need not be the one
+  proposed. Every edit restamps `at`, so `ARM_TIMEOUT` is an INACTIVITY timer:
+  10s since the last keypress auto-cancels, exactly as `Esc` would and just as
+  silently. One value covers both phases — the bar is a live field within half a
+  second, so an untouched arm and a half-typed one look identical and it would be
+  strange for them to expire on different schedules. An empty buffer commits as a
+  cancel, and one containing whitespace is refused rather than silently closed up
+  (bash `edit_list` would `tr -d` it and write a different string than the bar
+  showed).
 - **Lane filter** is global (both panes) and shows as a `· <lane>` chip in both
   captions. Changing it re-polls immediately (cheap in-memory re-aggregation).
 - **Mouse:** wheel scrolls (and focuses) the list under the pointer; clicking a

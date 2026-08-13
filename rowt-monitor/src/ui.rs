@@ -1027,11 +1027,11 @@ fn draw_help(buf: &mut Buffer, area: Rect) {
         "  w [ ]      errors window (rolling)",
         "  y          copy the selected domain",
         "  e c b d    route selected → escape/corp/",
-        "             block / direct  (↵ or key×2 apply)",
+        "             block / direct   (key×2 = apply)",
         "  E C B D    same, on the parent suffix",
         "             (x.y.z.com → z.com)",
-        "             armed? the entry is editable — type,",
-        "             ^w drop a label, ^u clear, ↵ apply",
+        "             after ½s the entry turns editable:",
+        "             type, ^w drop a label, ^u clear, ↵",
         "  u          use the selected server",
         "  o          toggle the system proxy on/off",
         "  r          re-probe servers now",
@@ -1090,33 +1090,56 @@ pub fn draw_footer(buf: &mut Buffer, area: Rect, app: &App) {
         return;
     }
 
-    // Armed → confirm bar (overrides the whole left side).
+    // Armed → confirm bar, in two phases, distinguished by COLOUR rather than by
+    // wording. For `DOUBLE_TAP_WINDOW` it is a plain confirmation: bright, no
+    // cursor, and the arm keys still commit/re-arm. Then it turns amber, grows a
+    // block cursor, and the field is live — at which point the arm keys type.
+    //
+    // Each phase advertises only the key that works in it. The two hints differ
+    // in length, so the tail is laid out at the wider of them and the shorter is
+    // padded — sized to its own text, the narrower hint would pull the bar in and
+    // the entry would visibly jump at the phase change.
+    //
+    // RIGHT-aligned, so the cursor and everything after it hold still: type one
+    // more character and the bar simply starts one column further left.
     if let Some(a) = &app.armed {
-        let style = theme::bold(theme::armed());
+        let editing = a.editing();
+        let style = match editing {
+            true => theme::bold(theme::armed()),
+            false => theme::bold(theme::bright()),
+        };
+        let cursor_st = style.add_modifier(Modifier::REVERSED);
         let dest = a.lane.map(crate::model::Lane::label).unwrap_or("direct");
-        // Untouched: the original confirm bar, double-tap hint and all. Edited:
-        // the same bar with a block cursor in the entry and the hint dropping the
-        // double-tap (the arming key types now), so the bar never claims a
-        // shortcut that no longer applies.
-        if !a.edited {
-            let bar = format!(" CONFIRM  {}  · press {} again or ↵ to apply · edit it · esc cancel ", a.label(), a.key);
-            put(buf, left, y, &truncate(&bar, area.width), style);
-            return;
-        }
         let head = " CONFIRM  ";
-        put(buf, left, y, head, style);
-        let mut x = left + dw(head);
-        // The entry, one cell per char, so the block cursor lands on a real cell
-        // (and on the one-past-the-end column when appending).
+        // Each phase names only the key that is live in it: the double-tap while
+        // it lasts, then apply/cancel once the field is. (The arming key encodes
+        // the lane, so phase 1 spelling out `press c again` also says "corp".)
+        let hint_confirm = format!("  → press {} again to apply ", a.key);
+        let hint_edit = format!("  → {dest}  · ↵ apply · esc cancel ");
+        // Laid out at the WIDER of the two, so the shorter one is padded rather
+        // than shrinking the bar. The bar is right-aligned, so a narrower tail
+        // would pull everything left of it sideways — which is exactly the jump
+        // this had before. The padding is invisible: styled text, no background.
+        let tail_w = dw(&hint_confirm).max(dw(&hint_edit));
+        let tail = if editing { hint_edit } else { hint_confirm };
+        // One cell per entry char, plus the one-past-the-end column the cursor
+        // occupies while appending. Reserved from the start, so the cursor's
+        // arrival at the end of the window moves nothing.
+        let entry_w = a.domain.chars().count() as u16 + 1;
+        let total = dw(head) + entry_w + tail_w;
+        // Clamped, so an over-long bar degrades by losing its tail rather than
+        // sliding off the left edge and taking the entry with it.
+        let x0 = area.right().saturating_sub(total).max(area.left());
+        put(buf, x0, y, head, style);
+        let mut x = x0 + dw(head);
         for (i, ch) in a.domain.chars().chain(std::iter::once(' ')).enumerate() {
             if x >= area.right() {
                 return;
             }
-            let st = if i == a.cursor { theme::bold(theme::armed()).add_modifier(Modifier::REVERSED) } else { style };
-            put(buf, x, y, &ch.to_string(), st);
+            let on_cursor = editing && i == a.cursor;
+            put(buf, x, y, &ch.to_string(), if on_cursor { cursor_st } else { style });
             x += 1;
         }
-        let tail = format!("  → {dest}  · ↵ apply · esc cancel ");
         if x < area.right() {
             put(buf, x, y, &truncate(&tail, area.right() - x), style);
         }

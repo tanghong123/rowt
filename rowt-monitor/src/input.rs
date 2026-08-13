@@ -42,11 +42,10 @@ pub fn key(k: KeyEvent, app: &App) -> Option<Action> {
         };
     }
     // An armed lane edit turns the confirm bar into a one-line editor. This is
-    // deliberately NOT a modal takeover like the search editor: while the buffer
-    // is untouched the eight control keys keep arming/committing (so `e`,`e`
-    // still double-taps and `e`,`C` still re-arms), and anything that isn't a
-    // text key falls through to the global keymap — where, as before, it cancels
-    // the arm. The first text key starts an edit; from then on letters type.
+    // deliberately NOT a modal takeover like the search editor: anything that
+    // isn't a text key falls through to the global keymap, where — as before —
+    // it cancels the arm. The eight arm keys keep arming/committing for the
+    // first `DOUBLE_TAP_WINDOW`; after that the field is live and they type.
     if let Some(a) = &app.armed {
         if let Some(act) = armed_key(k, a) {
             return Some(act);
@@ -97,9 +96,9 @@ pub fn key(k: KeyEvent, app: &App) -> Option<Action> {
     })
 }
 
-/// The eight keys that arm a lane edit. While the armed buffer is untouched they
-/// keep that meaning inside the confirm bar rather than typing themselves — which
-/// is what makes "press the same key twice" still commit.
+/// The eight keys that arm a lane edit. Inside the double-tap window they keep
+/// that meaning within the confirm bar rather than typing themselves — which is
+/// what makes "press the same key twice" commit.
 const ARM_KEYS: [char; 8] = ['e', 'c', 'b', 'd', 'E', 'C', 'B', 'D'];
 
 /// Keys the armed confirm bar claims. `None` = not ours, fall through to the
@@ -125,9 +124,10 @@ fn armed_key(k: KeyEvent, a: &Armed) -> Option<Action> {
         KeyCode::Right => edit(Edit::Cursor(1)),
         KeyCode::Home => edit(Edit::Home),
         KeyCode::End => edit(Edit::End),
-        // A pristine buffer leaves the arm keys alone so double-tap/re-arm work;
-        // once edited (or for any other printable) the bar takes the character.
-        KeyCode::Char(c) if !ctrl && !alt && (a.edited || !ARM_KEYS.contains(&c)) => edit(Edit::Insert(c)),
+        // Inside the double-tap window the arm keys keep their meaning, so `e`,`e`
+        // commits and `e`,`C` re-arms. Once it closes — or as soon as anything is
+        // typed — the bar is a live editor and they type like any other key.
+        KeyCode::Char(c) if !ctrl && !alt && (a.editing() || !ARM_KEYS.contains(&c)) => edit(Edit::Insert(c)),
         _ => None, // Enter/Esc and everything else: the global keymap handles it
     }
 }

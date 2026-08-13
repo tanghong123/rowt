@@ -7,7 +7,7 @@ use ratatui::Terminal;
 use rowt_monitor::app::{Action, App, Focus};
 use rowt_monitor::model::Lane;
 use rowt_monitor::source::FixtureSource;
-use rowt_monitor::{render_text, ui};
+use rowt_monitor::{render_text, theme, ui};
 
 const G96: &str = include_str!("../../ux-design/rowt_monitor/renders/rowt-monitor-96x30.txt");
 const G150: &str = include_str!("../../ux-design/rowt_monitor/renders/rowt-monitor-150x38.txt");
@@ -120,7 +120,12 @@ fn footer_confirm_bar_when_armed() {
     .unwrap();
     let footer = row_text(term.backend().buffer(), w, h - 1);
     assert!(footer.contains("CONFIRM"), "armed footer shows the confirm bar: {footer:?}");
-    assert!(footer.contains("→ block"), "confirm bar previews the target lane: {footer:?}");
+    assert!(footer.contains("i.ytimg.com"), "…and the entry it would write: {footer:?}");
+    // A freshly armed bar is in its double-tap phase, which names the KEY rather
+    // than the lane — `b` is the lane, so the two say the same thing. The lane is
+    // spelled out once the bar becomes editable
+    // (`footer_confirm_bar_is_a_plain_confirmation_then_an_editor`).
+    assert!(footer.contains("press b again to apply"), "{footer:?}");
 }
 
 #[test]
@@ -455,46 +460,122 @@ fn help_overlay_clips_instead_of_panicking_on_a_short_terminal() {
         }
     }
 }
-
+/// The confirm bar has two phases, and the whole point is that only COLOUR and
+/// the cursor distinguish them — nothing moves, and no wording changes.
 #[test]
-fn footer_confirm_bar_is_an_editor_once_edited() {
-    use rowt_monitor::app::Edit;
+fn footer_confirm_bar_is_a_plain_confirmation_then_an_editor() {
+    use rowt_monitor::app::DOUBLE_TAP_WINDOW;
     std::env::set_var("ROWT_MONITOR_NO_CLIPBOARD", "1");
+    let (w, h) = (150u16, 41u16);
     let mut app = App::new(Box::new(FixtureSource::still()));
     app.side_by_side = true;
     app.conn_h = 6;
     app.err_h = 6;
     app.update(Action::Down);
-    app.update(Action::Route(Lane::Escape)); // arm i.ytimg.com
+    app.update(Action::Route(Lane::Escape));
 
-    let (w, h) = (150u16, 41u16);
     let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
-    let draw = |term: &mut Terminal<TestBackend>, app: &App| {
+    let snap = |term: &mut Terminal<TestBackend>, app: &App| {
         term.draw(|f| {
             let a = f.area();
             ui::draw_footer(f.buffer_mut(), a, app);
         })
         .unwrap();
+        let buf = term.backend().buffer();
+        let row = row_text(buf, w, h - 1);
+        let cur: Vec<u16> = (0..w)
+            .filter(|x| buf.cell((*x, h - 1)).unwrap().modifier.contains(Modifier::REVERSED))
+            .collect();
+        let fg = buf.cell((row.find("CONFIRM").unwrap() as u16, h - 1)).unwrap().fg;
+        (row, cur, fg)
     };
 
-    // Pristine: the original bar, double-tap hint intact.
-    draw(&mut term, &app);
-    let pristine = row_text(term.backend().buffer(), w, h - 1);
-    assert!(pristine.contains("i.ytimg.com → escape"), "{pristine:?}");
-    assert!(pristine.contains("press e again"), "double-tap is still offered: {pristine:?}");
+    // Phase 1 — a plain confirmation. No cursor, and NOT the armed colour.
+    let (row1, cur1, fg1) = snap(&mut term, &app);
+    assert!(cur1.is_empty(), "no cursor inside the double-tap window: {row1:?}");
+    assert_ne!(fg1, theme::armed(), "phase 1 is not the editing colour");
+    assert!(row1.contains("i.ytimg.com"), "{row1:?}");
+    // Phase 1 names only the key that works in it — and that key encodes the lane.
+    assert!(row1.contains("press e again to apply"), "{row1:?}");
+    assert!(!row1.contains("↵ apply"), "no apply/cancel hint yet: {row1:?}");
 
-    // Edited: the entry is shown as an editable field with a block cursor, and
-    // the double-tap hint is gone (the arming key types now).
-    app.update(Action::ArmEdit(Edit::KillWord)); // -> "i.ytimg."
-    draw(&mut term, &app);
-    let buf = term.backend().buffer();
-    let edited = row_text(buf, w, h - 1);
-    assert!(edited.contains("i.ytimg."), "shows the edited buffer: {edited:?}");
-    assert!(edited.contains("→ escape"), "still previews the target lane: {edited:?}");
-    assert!(!edited.contains("press e again"), "no stale double-tap hint: {edited:?}");
-    assert!(edited.contains("↵ apply"), "{edited:?}");
-    // The block cursor sits at the end of the buffer, on a real cell.
-    let cur_col = " CONFIRM  ".len() as u16 + "i.ytimg.".len() as u16;
-    let cur = buf.cell((cur_col, h - 1)).unwrap();
-    assert!(cur.modifier.contains(Modifier::REVERSED), "block cursor at the insertion point");
+    // Phase 2 — the window closes: amber, with a cursor. Nothing else changes.
+    app.armed.as_mut().unwrap().at = std::time::Instant::now() - DOUBLE_TAP_WINDOW;
+    let (row2, cur2, fg2) = snap(&mut term, &app);
+    assert_eq!(cur2.len(), 1, "a block cursor once editable: {row2:?}");
+    assert_eq!(fg2, theme::armed(), "phase 2 is the armed colour");
+    assert_ne!(fg1, fg2, "the colour also tells the two phases apart");
+    assert!(row2.contains("→ escape"), "phase 2 names the lane: {row2:?}");
+    assert!(row2.contains("↵ apply"), "{row2:?}");
+    assert!(!row2.contains("press e again"), "the double-tap is gone: {row2:?}");
+    // The hints differ in length, so the SHORTER is padded — nothing may move.
+    assert_eq!(
+        row1.find("i.ytimg.com"),
+        row2.find("i.ytimg.com"),
+        "the entry sits in the same column in both phases:\n{row1:?}\n{row2:?}"
+    );
+    // The cursor lands on the reserved append column, one past the entry.
+    let entry_end = row2.find("i.ytimg.com").unwrap() as u16 + "i.ytimg.com".len() as u16;
+    assert_eq!(cur2[0], entry_end);
+
+    // Right-aligned: the bar ends at the right edge, and the left is empty.
+    assert!(row2.trim_end().ends_with("esc cancel"), "{row2:?}");
+    assert!(row2.starts_with("  "), "{row2:?}");
+}
+
+/// The UX property the right-aligned bar exists for: the cursor, and every hint
+/// after it, hold still. Typing extends the entry LEFTWARD. The bar's width is a
+/// function of the entry alone — one fixed hint, and the cursor's cell reserved
+/// from the start — so neither the phase change nor a keystroke can slide it.
+#[test]
+fn the_cursor_and_the_hint_after_it_never_move() {
+    use rowt_monitor::app::{Edit, DOUBLE_TAP_WINDOW};
+    std::env::set_var("ROWT_MONITOR_NO_CLIPBOARD", "1");
+    let (w, h) = (150u16, 41u16);
+    // The anchor is the APPEND column — the reserved cell the cursor occupies.
+    // It is the one landmark present in both phases: phase 1 draws no cursor, and
+    // an emptied entry (^U) leaves no text to search for, so neither the cursor
+    // nor the entry alone can carry the measurement.
+    let cols = |edits: &[Edit], age: std::time::Duration| -> u16 {
+        let mut app = App::new(Box::new(FixtureSource::still()));
+        app.side_by_side = true;
+        app.conn_h = 6;
+        app.err_h = 6;
+        app.update(Action::Down);
+        app.update(Action::Route(Lane::Escape));
+        for e in edits {
+            app.update(Action::ArmEdit(*e));
+        }
+        app.armed.as_mut().unwrap().at = std::time::Instant::now() - age;
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| {
+            let a = f.area();
+            ui::draw_footer(f.buffer_mut(), a, &app);
+        })
+        .unwrap();
+        let buf = term.backend().buffer();
+        let row = row_text(buf, w, h - 1);
+        let entry = app.armed.as_ref().unwrap().domain.clone();
+        // Layout is [head][entry][append cell][tail], and every tail opens "  → ",
+        // so the arrow sits 3 past the append cell and " → " starts 2 past it.
+        let append = row.find(" → ").expect("the tail") as u16 - 2;
+        if let Some(cur) = (0..w).find(|x| buf.cell((*x, h - 1)).unwrap().modifier.contains(Modifier::REVERSED)) {
+            assert_eq!(cur, append, "the cursor IS the append cell: {row:?}");
+        }
+        if !entry.is_empty() {
+            let end = row.find(&entry).expect("the entry") as u16 + entry.chars().count() as u16;
+            assert_eq!(end, append, "the append cell sits one past the entry: {row:?}");
+        }
+        append
+    };
+
+    let zero = std::time::Duration::ZERO;
+    let armed = cols(&[], zero);
+    // The phase change — the transition that used to jump.
+    assert_eq!(cols(&[], DOUBLE_TAP_WINDOW), armed, "going editable must not move anything");
+    // …and it stays put as the entry grows and shrinks.
+    assert_eq!(cols(&[Edit::Insert('x')], zero), armed, "first keystroke");
+    assert_eq!(cols(&[Edit::Insert('x'), Edit::Insert('y'), Edit::Insert('z')], zero), armed);
+    assert_eq!(cols(&[Edit::KillWord], zero), armed);
+    assert_eq!(cols(&[Edit::KillLine], zero), armed);
 }

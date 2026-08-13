@@ -14,13 +14,29 @@ use crate::source::Source;
 /// After the last committed lane edit, wait this long before issuing the single
 /// batched router reload (CONTROLS.md §4.3).
 pub const RELOAD_DEBOUNCE: Duration = Duration::from_secs(7);
-/// An armed (not-yet-committed) lane edit auto-cancels after this long (§4.2).
-pub const ARM_TIMEOUT: Duration = Duration::from_secs(5);
-/// …but once the entry is being edited by hand, after this long instead. Five
-/// seconds is the right window for "did you mean to press that?"; it is far too
-/// short for typing a domain, where a pause to think would silently discard the
-/// work. Measured from the last keystroke, so it is an idle timeout either way.
-pub const ARM_EDIT_TIMEOUT: Duration = Duration::from_secs(20);
+/// An armed (not-yet-committed) lane edit auto-cancels after this long IDLE
+/// (§4.2) — measured from the last keypress, not from arming, so it never
+/// expires mid-edit while someone is typing. Cancelling is exactly what `Esc`
+/// does, and just as silent.
+///
+/// One value covers both phases. The bar is a live editable field within half a
+/// second, so an untouched arm and a half-typed one look the same to the
+/// operator and it would be strange for them to vanish on different schedules.
+/// Ten seconds is long enough to pause and think about a domain, short enough
+/// that a mis-press clears itself before you notice it.
+pub const ARM_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long after arming the bar stays a plain confirmation — arm keys keep
+/// their meaning, no cursor — before it becomes a live editor.
+///
+/// The two behaviours are mutually exclusive on purpose: a key cannot both
+/// commit and type. Splitting them in TIME rather than by a mode flag means the
+/// bar never has to advertise which one is active, so its hint is one fixed
+/// string and nothing in it can move (see `draw_footer`).
+///
+/// 500ms matches the usual double-click threshold. Too short and a deliberate
+/// second press lands as a keystroke; the cost of too long is only that the
+/// cursor appears late, so err upward if it ever feels tight.
+pub const DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(500);
 /// How long an optimistic proxy toggle is shown before deferring to the real
 /// polled state (long enough for `rowt proxy` + the ~2s state re-read to land).
 pub const PROXY_OPTIMISTIC_TTL: Duration = Duration::from_secs(6);
@@ -62,6 +78,12 @@ impl Armed {
     pub fn label(&self) -> String {
         let dest = self.lane.map(Lane::label).unwrap_or("direct");
         format!("{} → {}", self.domain, dest)
+    }
+    /// Is the bar a live editor yet? Before this the arm keys still commit and
+    /// re-arm, and no cursor is drawn. Typing anything opens it immediately —
+    /// the operator has said what they want, so there is nothing left to wait for.
+    pub fn editing(&self) -> bool {
+        self.edited || self.at.elapsed() >= DOUBLE_TAP_WINDOW
     }
     /// The entry as it would be written. Only the ends are trimmed — NOT
     /// interior whitespace, even though bash `edit_list` would strip that with
@@ -363,7 +385,7 @@ impl App {
             }
         }
         if let Some(a) = &self.armed {
-            if a.at.elapsed() >= if a.edited { ARM_EDIT_TIMEOUT } else { ARM_TIMEOUT } {
+            if a.at.elapsed() >= ARM_TIMEOUT {
                 self.armed = None;
             }
         }
