@@ -1028,6 +1028,10 @@ fn draw_help(buf: &mut Buffer, area: Rect) {
         "  y          copy the selected domain",
         "  e c b d    route selected → escape/corp/",
         "             block / direct  (↵ or key×2 apply)",
+        "  E C B D    same, on the parent suffix",
+        "             (x.y.z.com → z.com)",
+        "             armed? the entry is editable — type,",
+        "             ^w drop a label, ^u clear, ↵ apply",
         "  u          use the selected server",
         "  o          toggle the system proxy on/off",
         "  r          re-probe servers now",
@@ -1043,20 +1047,32 @@ fn draw_help(buf: &mut Buffer, area: Rect) {
     let bx = area.left() + (area.width.saturating_sub(bw + 2)) / 2;
     let by = area.top() + (area.height.saturating_sub(bh)) / 2;
     let border = theme::fg(theme::border_focus());
-    put(buf, bx, by, "╭", border);
-    hfill(buf, bx + 1, bx + bw, by, '─', border);
-    put(buf, bx + bw + 1, by, "╮", border);
+    // A terminal shorter than the box would draw rows past the buffer's last
+    // line. `set_string` clips the X axis for us but indexes Y directly, so an
+    // unguarded row is a panic, not a clipped one — every row below is gated on
+    // `fits`. The box then degrades to as much of itself as the pane can hold.
+    let fits = |y: u16| y < area.bottom();
+    if fits(by) {
+        put(buf, bx, by, "╭", border);
+        hfill(buf, bx + 1, bx + bw, by, '─', border);
+        put(buf, bx + bw + 1, by, "╮", border);
+    }
     for (i, l) in lines.iter().enumerate() {
         let y = by + 1 + i as u16;
+        if !fits(y) {
+            break;
+        }
         put(buf, bx, y, "│", border);
         hfill(buf, bx + 1, bx + bw, y, ' ', theme::fg(theme::bright())); // opaque row
         put(buf, bx + 1, y, l, theme::fg(theme::bright()));
         put(buf, bx + bw + 1, y, "│", border);
     }
     let yb = by + bh - 1;
-    put(buf, bx, yb, "╰", border);
-    hfill(buf, bx + 1, bx + bw, yb, '─', border);
-    put(buf, bx + bw + 1, yb, "╯", border);
+    if fits(yb) {
+        put(buf, bx, yb, "╰", border);
+        hfill(buf, bx + 1, bx + bw, yb, '─', border);
+        put(buf, bx + bw + 1, yb, "╯", border);
+    }
 }
 
 /// The bottom hint bar (interactive only; not part of the golden frame). Two
@@ -1076,9 +1092,34 @@ pub fn draw_footer(buf: &mut Buffer, area: Rect, app: &App) {
 
     // Armed → confirm bar (overrides the whole left side).
     if let Some(a) = &app.armed {
-        let bar = format!(" CONFIRM  {}  · press {} again or ↵ to apply · esc cancel ", a.label(), a.key);
-        let shown = truncate(&bar, area.width);
-        put(buf, left, y, &shown, theme::bold(theme::armed()));
+        let style = theme::bold(theme::armed());
+        let dest = a.lane.map(crate::model::Lane::label).unwrap_or("direct");
+        // Untouched: the original confirm bar, double-tap hint and all. Edited:
+        // the same bar with a block cursor in the entry and the hint dropping the
+        // double-tap (the arming key types now), so the bar never claims a
+        // shortcut that no longer applies.
+        if !a.edited {
+            let bar = format!(" CONFIRM  {}  · press {} again or ↵ to apply · edit it · esc cancel ", a.label(), a.key);
+            put(buf, left, y, &truncate(&bar, area.width), style);
+            return;
+        }
+        let head = " CONFIRM  ";
+        put(buf, left, y, head, style);
+        let mut x = left + dw(head);
+        // The entry, one cell per char, so the block cursor lands on a real cell
+        // (and on the one-past-the-end column when appending).
+        for (i, ch) in a.domain.chars().chain(std::iter::once(' ')).enumerate() {
+            if x >= area.right() {
+                return;
+            }
+            let st = if i == a.cursor { theme::bold(theme::armed()).add_modifier(Modifier::REVERSED) } else { style };
+            put(buf, x, y, &ch.to_string(), st);
+            x += 1;
+        }
+        let tail = format!("  → {dest}  · ↵ apply · esc cancel ");
+        if x < area.right() {
+            put(buf, x, y, &truncate(&tail, area.right() - x), style);
+        }
         return;
     }
 
@@ -1096,8 +1137,8 @@ pub fn draw_footer(buf: &mut Buffer, area: Rect, app: &App) {
     // — and the bar only appears when there actually are contextual keys. (`w`/`s`
     // are global now, so they live in the global group, not here.)
     let ctx: Option<String> = match app.focus {
-        Focus::Conn if app.conn_active() => Some("e·c·b·d route · y copy ".to_string()),
-        Focus::Err if app.err_active() => Some("e·c·b·d route · y copy ".to_string()),
+        Focus::Conn if app.conn_active() => Some("e·c·b·d route (⇧ = suffix) · y copy ".to_string()),
+        Focus::Err if app.err_active() => Some("e·c·b·d route (⇧ = suffix) · y copy ".to_string()),
         Focus::Health => match app.strip_sel.and_then(|i| app.snap.chips.get(i)) {
             None => Some("←→ select server ".to_string()),
             Some(s) if !s.active => Some(format!("u use {} ", s.name)),

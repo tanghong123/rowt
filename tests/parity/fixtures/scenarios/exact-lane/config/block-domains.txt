@@ -1,0 +1,2 @@
+domain:exact.block.example
+ads.example

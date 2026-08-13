@@ -181,6 +181,9 @@ fn run() -> Result<String, String> {
             corp_domains: parse_list(&corp_src, Filter::Domain),
             corp_cidrs: parse_list(&corp_src, Filter::Cidr),
             block_domains: parse_list(&block_src, Filter::Domain),
+            escape_exact: parse_list(&escape_src, Filter::Exact),
+            corp_exact: parse_list(&corp_src, Filter::Exact),
+            block_exact: parse_list(&block_src, Filter::Exact),
         },
         escape_outbound: if local_mode { "direct".into() } else { "escape".into() },
         geo: Geo {

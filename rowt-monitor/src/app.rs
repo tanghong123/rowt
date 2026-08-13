@@ -16,6 +16,11 @@ use crate::source::Source;
 pub const RELOAD_DEBOUNCE: Duration = Duration::from_secs(7);
 /// An armed (not-yet-committed) lane edit auto-cancels after this long (§4.2).
 pub const ARM_TIMEOUT: Duration = Duration::from_secs(5);
+/// …but once the entry is being edited by hand, after this long instead. Five
+/// seconds is the right window for "did you mean to press that?"; it is far too
+/// short for typing a domain, where a pause to think would silently discard the
+/// work. Measured from the last keystroke, so it is an idle timeout either way.
+pub const ARM_EDIT_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long an optimistic proxy toggle is shown before deferring to the real
 /// polled state (long enough for `rowt proxy` + the ~2s state re-read to land).
 pub const PROXY_OPTIMISTIC_TTL: Duration = Duration::from_secs(6);
@@ -32,6 +37,12 @@ pub enum Focus {
 
 /// A lane edit that's been armed by a first keypress and awaits confirmation
 /// (§4.2). `u`/`o` skip this and apply immediately.
+///
+/// `domain` doubles as a one-line editor buffer: the confirm bar is editable, so
+/// the entry that gets written need not be the one the keypress proposed. Until
+/// the buffer is touched (`edited`) the bar keeps every armed behaviour it had
+/// before — the arming key still double-taps, the other control keys still
+/// re-arm — so editing is strictly additive.
 #[derive(Clone, Debug)]
 pub struct Armed {
     pub domain: String,
@@ -39,6 +50,11 @@ pub struct Armed {
     pub lane: Option<Lane>,
     pub key: char, // the key that armed it; pressing it again commits
     pub at: Instant,
+    /// Block-cursor char index into `domain` (0..=len). Only drawn once `edited`.
+    pub cursor: usize,
+    /// Has the operator touched the buffer? Gates both the double-tap shortcut
+    /// and whether letters type instead of re-arming.
+    pub edited: bool,
 }
 
 impl Armed {
@@ -47,6 +63,28 @@ impl Armed {
         let dest = self.lane.map(Lane::label).unwrap_or("direct");
         format!("{} → {}", self.domain, dest)
     }
+    /// The entry as it would be written. Only the ends are trimmed — NOT
+    /// interior whitespace, even though bash `edit_list` would strip that with
+    /// `tr -d '[:space:]'`. Silently closing up `a b.com` into `ab.com` would
+    /// apply something other than what the bar previewed, so `commit_armed`
+    /// refuses instead.
+    pub fn entry(&self) -> String {
+        self.domain.trim().to_string()
+    }
+}
+
+/// One editing operation on the armed confirm bar. Mirrors the search editor's
+/// key set so the two line editors feel the same.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Edit {
+    Insert(char),
+    Backspace,
+    Delete,
+    Cursor(i8),
+    Home,
+    End,
+    KillLine,
+    KillWord,
 }
 
 /// An in-progress app-level drag selection (single row). Rendered as a reversed
@@ -138,6 +176,12 @@ pub enum Action {
     // Control layer (CONTROLS.md):
     Route(Lane),  // e/c/b — arm routing the selected domain into a lane
     Unroute,      // d — arm removing the selected domain (→ direct)
+    // E/C/B/D — the same four edits on the selected host's parent suffix
+    // (`x.y.z.com` → `.z.com`), so one keystroke covers the whole service
+    // instead of the one hostname that happened to show up in the pane.
+    RouteSuffix(Lane),
+    UnrouteSuffix,
+    ArmEdit(Edit), // a text key while armed — edit the entry in the confirm bar
     Confirm,      // Enter — commit the armed edit
     Escape,       // Esc — cancel arm / clear selection / clear lane filter (in that order)
     UseServer,    // u — switch to the selected server (immediate)
@@ -319,7 +363,7 @@ impl App {
             }
         }
         if let Some(a) = &self.armed {
-            if a.at.elapsed() >= ARM_TIMEOUT {
+            if a.at.elapsed() >= if a.edited { ARM_EDIT_TIMEOUT } else { ARM_TIMEOUT } {
                 self.armed = None;
             }
         }
@@ -408,7 +452,7 @@ impl App {
         // Arm lifecycle: a control-key (re)arms or commits; Confirm commits; Esc
         // is handled below; ANY other key cancels a pending arm, then proceeds.
         match a {
-            Route(_) | Unroute | Confirm | Escape => {}
+            Route(_) | Unroute | RouteSuffix(_) | UnrouteSuffix | ArmEdit(_) | Confirm | Escape => {}
             _ => self.armed = None,
         }
         match a {
@@ -419,8 +463,11 @@ impl App {
                 self.source.force_probe();
                 self.notify("re-probing servers…".to_string());
             }
-            Route(lane) => self.arm(Some(lane)),
-            Unroute => self.arm(None),
+            Route(lane) => self.arm(Some(lane), false),
+            Unroute => self.arm(None, false),
+            RouteSuffix(lane) => self.arm(Some(lane), true),
+            UnrouteSuffix => self.arm(None, true),
+            ArmEdit(e) => self.arm_edit(e),
             Confirm => self.commit_armed(),
             Escape => self.handle_escape(),
             UseServer => self.use_selected_server(),
@@ -697,32 +744,123 @@ impl App {
 
     /// Arm a lane edit on the focused pane's locked domain (or commit if the same
     /// edit is already armed — the double-tap path). Inert with no selection.
-    fn arm(&mut self, lane: Option<Lane>) {
-        let Some(domain) = self.selected_domain() else { return };
-        let key = match lane {
+    ///
+    /// `broaden` is the uppercase `E`/`C`/`B`/`D` variant: the edit targets the
+    /// host's parent suffix instead of the host.
+    ///
+    /// Where there is nothing to broaden — an IP, or a host that already IS its
+    /// registrable domain (`x.com`) — it stays inert and says so. It does NOT
+    /// quietly fall back to the host: `E` promises a suffix entry, and writing
+    /// the lowercase edit under an uppercase key would make the two forms
+    /// indistinguishable in the lane file afterwards.
+    fn arm(&mut self, lane: Option<Lane>, broaden: bool) {
+        let Some(host) = self.selected_domain() else { return };
+        let lower = match lane {
             Some(Lane::Escape) => 'e',
             Some(Lane::Corp) => 'c',
             Some(Lane::Block) => 'b',
             Some(Lane::Direct) | None => 'd',
         };
+        let domain = match broaden {
+            false => host,
+            true => match crate::model::parent_suffix(&host) {
+                Some(suffix) => suffix,
+                None => {
+                    self.notify(format!("⚠ {host} has no parent suffix — {lower} adds it as-is"));
+                    return;
+                }
+            },
+        };
+        // The armed key doubles as the commit key, so the two forms must stay
+        // distinguishable even when they name the same lane.
+        let key = if broaden { lower.to_ascii_uppercase() } else { lower };
         if let Some(a) = &self.armed {
             if a.key == key && a.domain == domain && a.lane == lane {
                 self.commit_armed();
                 return;
             }
         }
-        self.armed = Some(Armed { domain, lane, key, at: Instant::now() });
+        let cursor = domain.chars().count();
+        self.armed = Some(Armed { domain, lane, key, at: Instant::now(), cursor, edited: false });
+    }
+
+    /// Edit the armed entry in place. Any op enters edit mode (so letters type
+    /// from then on instead of re-arming) and restarts the arm timeout, so the
+    /// 5s window measures inactivity rather than total time spent typing.
+    fn arm_edit(&mut self, op: Edit) {
+        let Some(a) = self.armed.as_mut() else { return };
+        a.edited = true;
+        a.at = Instant::now();
+        let byte_at = |s: &str, i: usize| s.char_indices().nth(i).map(|(b, _)| b).unwrap_or(s.len());
+        match op {
+            Edit::Insert(c) => {
+                let b = byte_at(&a.domain, a.cursor);
+                a.domain.insert(b, c);
+                a.cursor += 1;
+            }
+            Edit::Backspace => {
+                if a.cursor > 0 {
+                    let b = byte_at(&a.domain, a.cursor - 1);
+                    a.domain.remove(b);
+                    a.cursor -= 1;
+                }
+            }
+            Edit::Delete => {
+                if a.cursor < a.domain.chars().count() {
+                    let b = byte_at(&a.domain, a.cursor);
+                    a.domain.remove(b);
+                }
+            }
+            Edit::Cursor(d) => {
+                let len = a.domain.chars().count() as i32;
+                a.cursor = (a.cursor as i32 + d as i32).clamp(0, len) as usize;
+            }
+            Edit::Home => a.cursor = 0,
+            Edit::End => a.cursor = a.domain.chars().count(),
+            Edit::KillLine => {
+                a.domain.clear();
+                a.cursor = 0;
+            }
+            Edit::KillWord => {
+                // Domains have no spaces, so `.` is the word separator that's
+                // actually useful here: Ctrl-W drops one label at a time.
+                let chars: Vec<char> = a.domain.chars().collect();
+                let mut i = a.cursor;
+                while i > 0 && chars[i - 1] == '.' {
+                    i -= 1;
+                }
+                while i > 0 && chars[i - 1] != '.' {
+                    i -= 1;
+                }
+                a.domain = chars[..i].iter().chain(chars[a.cursor..].iter()).collect();
+                a.cursor = i;
+            }
+        }
     }
 
     fn commit_armed(&mut self) {
         let Some(a) = self.armed.take() else { return };
+        // An edited-to-empty buffer is a cancel, not a write: `rowt <lane> add ""`
+        // would be a usage error and `rm ""` a silent no-op.
+        let entry = a.entry();
+        if entry.is_empty() {
+            self.notify("⚠ empty entry — nothing applied".to_string());
+            return;
+        }
+        // bash `edit_list` would strip interior whitespace and write a DIFFERENT
+        // string than the bar showed. Refuse rather than mangle.
+        if entry.chars().any(char::is_whitespace) {
+            self.notify(format!("⚠ {entry:?} has a space — not applied"));
+            return;
+        }
         match a.lane {
-            Some(l) => self.source.route_lane(&a.domain, l),
-            None => self.source.unroute(&a.domain),
+            Some(l) => self.source.route_lane(&entry, l),
+            None => self.source.unroute(&entry),
         }
         // Batch the reload: (re)start the 7s debounce (CONTROLS.md §4.3).
         self.pending_reload = Some(Instant::now() + RELOAD_DEBOUNCE);
-        self.notify(a.label());
+        let dest = a.lane.map(Lane::label).unwrap_or("direct");
+        self.notify(format!("{entry} → {dest}"));
     }
 
     /// Esc priority: cancel an arm, else clear the focused selection, else clear

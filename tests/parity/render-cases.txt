@@ -26,4 +26,12 @@ interval-short    ROWT_AUTO_INTERVAL=5m
 geosites-pinned   PARITY_SCENARIO=render-geosites ROWT_PRIVATE_DEFAULT=direct
 local-mode        PARITY_SCENARIO=render-local
 local-precedence  PARITY_SCENARIO=render-local-precedence
+# `--domain` entries in all three lanes, mixed with suffixes/CIDRs/geosite. The
+# canonical-JSON diff is what proves the `domain` rules land ahead of every
+# `domain_suffix` and that the corp one also gets its `server: local` dns rule.
+exact-lane        PARITY_SCENARIO=exact-lane
+# …and in local mode, where the escape lane's outbound retargets to `direct`:
+# the exact rules must retarget with it, or they keep naming a tunnel that the
+# render just removed.
+exact-lane-local  PARITY_SCENARIO=exact-lane-local
 local-dns-override PARITY_SCENARIO=render-local ROWT_DNS_LOCAL=9.9.9.9

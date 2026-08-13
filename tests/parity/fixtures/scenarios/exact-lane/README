@@ -1,0 +1,13 @@
+Lanes holding a MIX of every entry kind: plain suffix, `domain:` exact (the
+`--domain` flag), `geosite:`, and a CIDR — in all three lanes.
+
+Exists for two claims the other scenarios cannot make:
+
+1. A `domain:` line must not leak into the suffix rules. Both list readers pick
+   suffixes by "isn't a CIDR", a test `domain:z.com` passes, so the exclusion is
+   load-bearing and invisible if you only read the code.
+2. `exact.example` is present BOTH ways, and `example.com` is exact here while a
+   plain `example.com` also exists — so the render's ordering (every `domain`
+   rule ahead of every `domain_suffix`) and the explainer's "exact wins at any
+   length" agree, and the single-lane invariant treats the two kinds as the
+   different entries they are.

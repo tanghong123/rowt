@@ -505,7 +505,7 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 | `reload` | re-detect the network interface, re-render, restart, re-apply the proxy — run after switching Wi-Fi ↔ wired ↔ hotspot. |
 | `watch <install\|uninstall\|status>` | install/remove a LaunchAgent that (a) runs `reload` on every network change (debounced; a no-op when neither the interface nor the active-service proxy moved) and (b) on a timer **probes the escape tunnel** and auto-recovers it — a *wedged* tunnel (router up, not carrying traffic; 3 failed probes) or a *crashed* one (router down while your intent is up, same boot), via `reload`, cooldown-gated and verified by a re-probe. It also runs once at **login**: if rowt isn't running but the system proxy is still set to `127.0.0.1:7890`, it clears it, so rowt's proxy effect never outlives a reboot. `install` also adds a scoped passwordless-sudo rule for the `networksetup` proxy toggles (so a Wi-Fi↔Ethernet switch doesn't prompt); `uninstall` removes both. Recoveries are recorded in `audit`. |
 | `status` | mode, servers, proxy state, reachability **and config validity** (absorbs the old `doctor`). |
-| `explain <domain\|ip>` | explain which lane a destination takes — `escape` (proxy), `corp` (into the corp VPN), `block`, or `direct` (pass-through) — and which rule matched. Mirrors the real routing: hand-list domain suffixes win by **longest match** across all three lanes, then corp CIDR (on the resolved IP), then final; adds a live HTTP check if the router is running. (`route` still works as a hidden alias.) |
+| `explain <domain\|ip>` | explain which lane a destination takes — `escape` (proxy), `corp` (into the corp VPN), `block`, or `direct` (pass-through) — and which rule matched. Mirrors the real routing: a `--domain` (whole-host) entry wins outright, else hand-list domain suffixes win by **longest match** across all three lanes, then corp CIDR (on the resolved IP), then final; adds a live HTTP check if the router is running. (`route` still works as a hidden alias.) |
 | `report` | full offline diagnostic (deps, configs, per-server reachability, DNS, through-proxy tests, log + audit tail) → `~/.config/rowt/diag-*.txt`, **secrets masked**, for sharing. |
 | `audit [-n N\|all\|path\|clear]` | the **mutation trail** — one line per state-changing op, whether you ran it or the `watch` agent did, with `BEGIN`/`END`/`ABORT`, timing, and a `by=<parent>(<tty>)` field that says whether it was hands-on (`by=zsh`) or the watchdog (`by=launchd`). `BEGIN` is written before the work, so even a command that hangs leaves a trace. Read-only commands aren't recorded. → `~/.config/rowt/log/audit.log`. |
 | `metrics [status\|top\|path\|query]` | **per-domain traffic history** — a `collector` sidecar records bytes in/out per domain/lane into a tiered SQLite store (5s → 1y). `status` shows liveness; `top [secs]` the heaviest domains; `path` the store path + schema; `query "<SQL>"` a read-only SQL passthrough. Surfaced interactively in `monitor` via the `v` flip. See [Traffic metrics](#traffic-metrics). |
@@ -537,6 +537,7 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 | --- | --- |
 | `escape` / `corp` / `block` (no verb) | list the lane. |
 | `… add <d>…` / `… rm <d>…` | add / remove domains (corp also takes CIDRs). Reloads if running. |
+| `… add --domain <d>…` | match the **whole host only**, not its subdomains — stored as `domain:<host>`, rendered as a sing-box `domain` rule instead of `domain_suffix`. `--domain-suffix` names the default explicitly. Applies to every entry of that `add`/`rm`, from any position. |
 | `… import <file>` | batch-add one domain per line from a file (merges; never replaces). |
 | `… clear` | remove every entry (keeps the file's comment header). Reloads if running. |
 | `… dump [file]` | export the lane (stdout, or to a file for backup/versioning). |
@@ -544,6 +545,20 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 | `<lane> errors [5m\|…\|all]` | same for any lane: `block errors` (default 24h) = what got sinkholed; `escape errors` / `corp errors` = failures on those lanes. Only *failed/refused* connections are logged — an empty list means no errors, **not** no traffic. |
 | `<lane> log` | live-tail that lane's connection-error log. |
 | `connections [lane\|-w]` | **live view of active connections** and which lane each is on (escape/direct/corp/block), with bytes up/down and the matched rule. Unlike `errors`, this shows *successful* traffic — "what's actually going through escape right now". `-w` refreshes every 2s. |
+
+**Suffix vs whole-host.** A lane entry is a `domain_suffix` by default, and
+that is almost always what you want: `z.com` covers `z.com` and `a.z.com`, and —
+since sing-box matches on a **label boundary** — does *not* cover `xz.com`. Reach
+for `--domain` only when one host must go somewhere its own subdomains should
+not:
+
+```sh
+rowt corp add --domain dev.g.alicdn.com   # just this host into the corp VPN…
+rowt escape add alicdn.com                # …while the rest of the CDN escapes
+```
+
+The two kinds are different entries, so the same name can sit in different lanes
+one way each; the exact rule is emitted first and wins for that one host.
 
 The router captures each failed/refused connection per lane (`timestamp⇥domain⇥reason`)
 into `~/.config/rowt/log/lane-<lane>.log` — the block flood is diverted out of
@@ -648,6 +663,21 @@ place), or `sys proxy` to toggle it (hover-highlights).
   bar previews the change); a second press of the same key or `↵` commits, any
   other key or `Esc` cancels. Edits are batched — one router reload fires ~7s
   after the last edit settles.
+- `E` / `C` / `B` / `D` — the same four edits on the host's **parent suffix**
+  rather than the host: `x.y.z.com` → `z.com`, so one keystroke covers the whole
+  service. Registry second levels stay whole (`x.y.z.co.uk` → `z.co.uk`, never
+  `co.uk`). The entry is bare: sing-box matches `domain_suffix` on a label
+  boundary, so `z.com` covers the apex and every subdomain but not `xz.com` — a
+  leading dot would only drop the apex. With nothing broader to add (an IP, or a host
+  that already is its registrable domain like `x.com`) the shifted key is inert
+  and says so, rather than silently doing the lowercase edit. Undo an `E` with
+  `D` — removal is exact-line, so `d` on the host won't remove a suffix entry.
+- **The armed entry is editable.** The confirm bar is a one-line editor: type to
+  change the proposed entry, `Ctrl-W` drops a label, `Ctrl-U` clears, `↵` applies
+  what's in the field, `Esc` (or an empty field) cancels. Untouched, it behaves
+  exactly as before — the same key twice still commits unedited. The timeout is
+  an inactivity timer: 5s for an untouched arm, 20s while editing. Note printable
+  keys go to the field while armed, so `q` types rather than quits — `Esc` first.
 - `u` — switch the active outbound server to the selected chip (live, immediate).
 - `o` — toggle the macOS system proxy on/off (immediate).
 

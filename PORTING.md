@@ -675,9 +675,33 @@ becomes the channel through which accidental regressions get laundered.
 The running list — each is reproduced in Rust today, with a comment pointing
 here, and each is a shell-side commit waiting to be written:
 
+**Resolved 2026-08-13 — the dot-boundary row.** This table used to carry
+"`domain_suffix` matching has no dot boundary, so `example.com` also captures
+`xexample.com`", justified as "it matches what sing-box's `domain_suffix`
+actually does". **It did not.** Measured with `sing-box rule-set match` on
+1.13.14, the router matches on a label boundary in both forms:
+
+```
+entry     z.com  a.z.com  b.a.z.com  xz.com  com  xcom
+z.com       Y       Y         Y        .      .     .
+.z.com      .       Y         Y        .      .     .
+com         Y       Y         Y        Y      Y     .
+```
+
+So the explainer was over-reporting — promising a lane the router would not
+take — and the justification for keeping it was the thing that was wrong. Both
+sides now use a boundary test (`suffix_matches` / the `"$e"|*".$e"` case in
+`_longest_domain_hit`) and moved together. The corpus had it right the whole
+time: its intent labels already read "no match: no dot boundary before the
+suffix" for the seven cases whose golden verdicts this changed.
+
+The lesson worth keeping: a characterization test pins behavior, not
+correctness. This one's *name* asserted the false claim, so it read as
+settled. When a comment says "this matches what X does", the cheap move is to
+go ask X — here that was one command and a few seconds.
+
 | Behavior | Where | Why it is not "just fixed" |
 |---|---|---|
-| `domain_suffix` matching has no dot boundary, so `example.com` also captures `xexample.com` | `_longest_domain_hit`, mirrored in `classify::longest_domain_hit` | It matches what sing-box's `domain_suffix` actually does, so "fixing" the explainer alone would make it *disagree with the router*. Both sides move together or neither does. |
 | `resolve_ip` is defined **twice**; the second wins, so `explain` uses dig-then-dscacheutil and `probe` uses a different one | bin/rowt:1843 and :2853 | Two call sites currently depend on the two different behaviors. |
 | A host render probes the interface **twice** — `build_escape_outbounds host` runs `detect_iface`, then `assemble_host` runs it again | bin/rowt:1203, :1304 | Six subprocess calls where three would do. Collapsing them changes the argv trace, which is a gate; it needs its own commit and a golden update. |
 | A domain whose failures tie across two categories gets whichever `for (k in cc)` reaches first | `lane_errors`'s awk | Genuinely unspecified, so there is no behavior to copy. rowt-rs takes the lexicographically first to be repeatable. Do not build a fixture that hits this — it would compare two implementations against a coin flip. |

@@ -10,6 +10,15 @@ escape rm example.com
 escape rm absent.example
 escape add geosite:google
 corp add geosite:google
+escape add --domain exact.example
+escape add --domain-suffix suffixy.example
+escape add --domain a.example b.example
+escape add --domain example.com
+corp add --domain example.com
+escape rm --domain example.com
+escape rm --domain absent.example
+escape add --domain
+block add --domain exact.block.example
 block clear
 escape clear
 escape dump

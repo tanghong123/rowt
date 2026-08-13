@@ -1,0 +1,12 @@
+# A lane carrying every entry kind at once — the mix is the point.
+#
+# `domain:` (an `--domain` entry) has no `/N`, so it passes the "isn't a CIDR"
+# test both list readers select suffixes with. Without an explicit exclusion it
+# renders as a `domain_suffix` — silently becoming the leaky suffix the flag
+# exists to avoid — and nothing else in the corpus would catch it.
+suffixy.example
+exact.example
+domain:exact.example
+domain:example.com
+example.com
+geosite:google

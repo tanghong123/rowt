@@ -12,7 +12,7 @@
 //! router. Those are network and process work, not set logic.
 
 use rowt_core::classify::Lane;
-use rowt_core::lanes::{apply, dump, Lanes, Op};
+use rowt_core::lanes::{apply, dump, mark_entries, Lanes, Op};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -46,7 +46,7 @@ fn run() -> Result<String, String> {
         .filter(|l| *l != Lane::Direct)
         .ok_or("usage: rowt-lanes --config-dir DIR <escape|corp|block> <op> [args…]")?;
     let action = rest.get(1).cloned().unwrap_or_else(|| "list".into());
-    let operands: Vec<String> = rest.iter().skip(2).cloned().collect();
+    let (operands, exact) = rowt_core::lanes::take_kind(&rest[2.min(rest.len())..]);
 
     let lanes = Lanes {
         escape: read(&file_of(&cfg, Lane::Escape)),
@@ -64,8 +64,8 @@ fn run() -> Result<String, String> {
     }
 
     let op = match action.as_str() {
-        "add" => Op::Add(operands),
-        "rm" | "remove" => Op::Rm(operands),
+        "add" => Op::Add(mark_entries(&operands, exact)),
+        "rm" | "remove" => Op::Rm(mark_entries(&operands, exact)),
         "clear" => Op::Clear,
         "import" => {
             let f = operands.first().ok_or("import needs a file")?;

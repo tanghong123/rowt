@@ -428,3 +428,73 @@ fn colors_spot_check() {
     assert_eq!(sym, "d"); // dns
     assert_eq!(fg, Color::Rgb(224, 163, 94), "transient = orange");
 }
+
+/// Adding `E`/`C`/`B`/`D` grew the help box from 22 rows to 24. `draw_help`
+/// centres it with a `saturating_sub` that clamps to 0 and then wrote each row
+/// unguarded — and `set_string` clips the X axis but *indexes* Y, so a pane
+/// shorter than the box panicked instead of clipping. Two more lines moved that
+/// threshold onto terminal heights people actually use, so the rows are now
+/// gated and this sweep covers both sides of the box.
+///
+/// Bounded below by 13 rows / 80 cols, which is where the base frame itself
+/// becomes renderable (a separate, pre-existing limit — this test is about the
+/// overlay, not the layout).
+#[test]
+fn help_overlay_clips_instead_of_panicking_on_a_short_terminal() {
+    let mut app = App::new(Box::new(FixtureSource::still()));
+    app.update(Action::ToggleHelp);
+    assert!(app.help);
+    for h in 13..=26u16 {
+        for w in [80u16, 96, 150] {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| {
+                let a = f.area();
+                ui::draw(f.buffer_mut(), a, &app, false);
+            })
+            .unwrap_or_else(|e| panic!("help overlay at {w}x{h}: {e}"));
+        }
+    }
+}
+
+#[test]
+fn footer_confirm_bar_is_an_editor_once_edited() {
+    use rowt_monitor::app::Edit;
+    std::env::set_var("ROWT_MONITOR_NO_CLIPBOARD", "1");
+    let mut app = App::new(Box::new(FixtureSource::still()));
+    app.side_by_side = true;
+    app.conn_h = 6;
+    app.err_h = 6;
+    app.update(Action::Down);
+    app.update(Action::Route(Lane::Escape)); // arm i.ytimg.com
+
+    let (w, h) = (150u16, 41u16);
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    let draw = |term: &mut Terminal<TestBackend>, app: &App| {
+        term.draw(|f| {
+            let a = f.area();
+            ui::draw_footer(f.buffer_mut(), a, app);
+        })
+        .unwrap();
+    };
+
+    // Pristine: the original bar, double-tap hint intact.
+    draw(&mut term, &app);
+    let pristine = row_text(term.backend().buffer(), w, h - 1);
+    assert!(pristine.contains("i.ytimg.com → escape"), "{pristine:?}");
+    assert!(pristine.contains("press e again"), "double-tap is still offered: {pristine:?}");
+
+    // Edited: the entry is shown as an editable field with a block cursor, and
+    // the double-tap hint is gone (the arming key types now).
+    app.update(Action::ArmEdit(Edit::KillWord)); // -> "i.ytimg."
+    draw(&mut term, &app);
+    let buf = term.backend().buffer();
+    let edited = row_text(buf, w, h - 1);
+    assert!(edited.contains("i.ytimg."), "shows the edited buffer: {edited:?}");
+    assert!(edited.contains("→ escape"), "still previews the target lane: {edited:?}");
+    assert!(!edited.contains("press e again"), "no stale double-tap hint: {edited:?}");
+    assert!(edited.contains("↵ apply"), "{edited:?}");
+    // The block cursor sits at the end of the buffer, on a real cell.
+    let cur_col = " CONFIRM  ".len() as u16 + "i.ytimg.".len() as u16;
+    let cur = buf.cell((cur_col, h - 1)).unwrap();
+    assert!(cur.modifier.contains(Modifier::REVERSED), "block cursor at the insertion point");
+}

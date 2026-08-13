@@ -155,6 +155,31 @@ fn entries(list: &str) -> impl Iterator<Item = String> + '_ {
         .filter(|e| !e.is_empty() && !e.starts_with('#'))
 }
 
+/// sing-box's `domain_suffix`, as measured with `sing-box rule-set match` on
+/// 1.13.14 (the router is the spec; this table is the measurement):
+///
+/// ```text
+/// entry     z.com  a.z.com  b.a.z.com  xz.com  com  xcom
+/// z.com       Y       Y         Y        .      .     .
+/// .z.com      .       Y         Y        .      .     .
+/// com         Y       Y         Y        Y      Y     .
+/// .com        Y       Y         Y        Y      .     .
+/// ```
+///
+/// So: a LABEL BOUNDARY, both forms. A bare entry matches the name itself and
+/// anything under it; a dot-led entry matches only what is under it.
+///
+/// This replaced a bare `dest.ends_with(e)`, which claimed `z.com` covered
+/// `xz.com` — the explainer promising a lane the router would not take. The old
+/// behaviour was characterized as "matching sing-box's domain_suffix"; it never
+/// did, and measuring it is what settled the question.
+fn suffix_matches(dest: &str, e: &str) -> bool {
+    match e.starts_with('.') {
+        true => dest.ends_with(e),
+        false => dest == e || dest.ends_with(&format!(".{e}")),
+    }
+}
+
 /// `case "$e" in */[0-9]*)` — a slash followed somewhere by a digit.
 fn looks_like_cidr(e: &str) -> bool {
     match e.split_once('/') {
@@ -177,18 +202,40 @@ pub fn private_hit(ip: &str, private_cidrs: &[String], private_default: &str) ->
     private_cidrs.iter().find(|c| cidr_has(ip, c)).cloned()
 }
 
-/// `_longest_domain_hit` — longest suffix wins ACROSS the three lists.
+/// Which kind of hand-list rule matched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HitKind {
+    /// A `domain:<host>` entry — sing-box `domain`, whole-host equality.
+    Exact,
+    /// A plain entry — sing-box `domain_suffix`.
+    Suffix,
+}
+
+/// `_longest_domain_hit` — an exact hit if there is one, else the longest suffix
+/// ACROSS the three lists.
 ///
-/// Two details are load-bearing. The comparison is a bare suffix test with no
-/// dot boundary (so `example.com` also captures `xexample.com`), matching
-/// sing-box's `domain_suffix`; and ties keep the FIRST lane seen, because the
-/// shell replaces the best only on strictly-greater length — so the iteration
-/// order escape, corp, block is the tie-break.
-pub fn longest_domain_hit(dest: &str, escape: &str, corp: &str, block: &str) -> Option<(Lane, String)> {
+/// **Exact beats every suffix, at any length**, because the render emits the
+/// `domain` rules first and sing-box is first-match-wins. Among exacts the first
+/// lane seen wins, matching that emission order (escape → corp → block).
+///
+/// The suffix comparison is `suffix_matches` — a LABEL-BOUNDARY test, matching
+/// what sing-box actually does. Ranking stays byte length: for two entries that
+/// both boundary-match one host, one is a label-suffix of the other, so longer
+/// string and more labels agree — which is what keeps this in step with the
+/// render's `sort_by([label count, length])`. Ties keep the FIRST lane seen,
+/// because the shell replaces the best only on strictly-greater length.
+pub fn longest_domain_hit(dest: &str, escape: &str, corp: &str, block: &str) -> Option<(Lane, HitKind, String)> {
     let mut best: Option<(Lane, String)> = None;
+    let mut exact: Option<(Lane, String)> = None;
     for (lane, list) in [(Lane::Escape, escape), (Lane::Corp, corp), (Lane::Block, block)] {
         for e in entries(list) {
-            if looks_like_cidr(&e) || !dest.ends_with(&e) {
+            if let Some(host) = e.strip_prefix(crate::render::EXACT_PREFIX) {
+                if !host.is_empty() && dest == host && exact.is_none() {
+                    exact = Some((lane, host.to_string()));
+                }
+                continue;
+            }
+            if looks_like_cidr(&e) || !suffix_matches(dest, &e) {
                 continue;
             }
             // Byte length: the shell runs under LC_ALL=C, where ${#e} counts bytes.
@@ -201,7 +248,9 @@ pub fn longest_domain_hit(dest: &str, escape: &str, corp: &str, block: &str) -> 
             }
         }
     }
-    best
+    exact
+        .map(|(l, e)| (l, HitKind::Exact, e))
+        .or_else(|| best.map(|(l, e)| (l, HitKind::Suffix, e)))
 }
 
 /// Would this destination reach the branch that needs a DNS answer?
@@ -237,9 +286,12 @@ pub fn classify(raw_dest: &str, i: &ClassifyInput) -> Classification {
                 i.final_route.as_str()
             );
         }
-    } else if let Some((l, m)) = longest_domain_hit(&dest, i.escape_list, i.corp_list, i.block_list) {
+    } else if let Some((l, k, m)) = longest_domain_hit(&dest, i.escape_list, i.corp_list, i.block_list) {
         lane = l;
-        why = format!("longest-match {}-domains suffix '{m}'", l.as_str());
+        why = match k {
+            HitKind::Exact => format!("exact {}-domains match '{m}'", l.as_str()),
+            HitKind::Suffix => format!("longest-match {}-domains suffix '{m}'", l.as_str()),
+        };
     } else {
         ip = i.resolved_ip.to_string();
         if !ip.is_empty() {
@@ -297,12 +349,26 @@ mod tests {
     }
 
     #[test]
-    fn suffix_matching_has_no_dot_boundary() {
-        // Characterized behavior, matching sing-box's domain_suffix. Changing it
-        // is a deliberate routing change, not a bug fix (PORTING.md §6.7).
+    fn suffix_matching_is_on_a_label_boundary() {
+        // The router's rule, measured — see `suffix_matches`. This test used to
+        // assert the opposite and call it "matching sing-box's domain_suffix";
+        // it never did, and `rowt explain` was promising lanes the router would
+        // not take.
         let p: Vec<String> = vec![];
         let i = input("example.com\n", "", "", &p);
-        assert_eq!(classify("xexample.com", &i).lane, Lane::Escape);
+        assert_eq!(classify("example.com", &i).lane, Lane::Escape);
+        assert_eq!(classify("api.example.com", &i).lane, Lane::Escape);
+        assert_ne!(classify("xexample.com", &i).lane, Lane::Escape);
+        // A dot-led entry covers what is under it, not the apex.
+        let d = input(".example.com\n", "", "", &p);
+        assert_eq!(classify("api.example.com", &d).lane, Lane::Escape);
+        assert_ne!(classify("example.com", &d).lane, Lane::Escape);
+        // A bare TLD entry still matches every name under it, `xz.com` included
+        // — that name DOES end with `.com`, so this is the boundary rule, not a
+        // special case.
+        let t = input("com\n", "", "", &p);
+        assert_eq!(classify("xz.com", &t).lane, Lane::Escape);
+        assert_ne!(classify("xcom", &t).lane, Lane::Escape);
     }
 
     #[test]
@@ -360,5 +426,40 @@ mod tests {
         assert!(cidr_has("10.255.255.255", "10.0.0.0/8"));
         assert!(!cidr_has("11.0.0.0", "10.0.0.0/8"));
         assert!(cidr_has("1.2.3.4", "0.0.0.0/0"));
+    }
+
+    #[test]
+    fn an_exact_entry_beats_every_suffix_at_any_length() {
+        let p: Vec<String> = vec![];
+        // A LONGER suffix on escape vs a short exact on block: exact still wins,
+        // because the render emits `domain` rules first and sing-box takes the
+        // first match. Getting this backwards would make `--domain` a no-op.
+        let i = input("api.foo.com\n", "", "domain:api.foo.com\n", &p);
+        let c = classify("api.foo.com", &i);
+        assert_eq!(c.lane, Lane::Block);
+        assert_eq!(c.why, "exact block-domains match 'api.foo.com'");
+        // …but only for that one host. A subdomain falls back to the suffix.
+        assert_eq!(classify("x.api.foo.com", &i).lane, Lane::Escape);
+    }
+
+    #[test]
+    fn an_exact_entry_does_not_match_subdomains_or_partials() {
+        let p: Vec<String> = vec![];
+        let i = input("domain:z.com\n", "", "", &p);
+        assert_eq!(classify("z.com", &i).lane, Lane::Escape);
+        // No suffix behaviour at all — these fall through to the final route.
+        assert_ne!(classify("a.z.com", &i).lane, Lane::Escape);
+        assert_ne!(classify("xz.com", &i).lane, Lane::Escape);
+        // And the marker itself is never treated as a hostname.
+        assert_ne!(classify("domain:z.com", &i).lane, Lane::Escape);
+    }
+
+    #[test]
+    fn among_exacts_the_first_lane_wins_matching_the_render_order() {
+        let p: Vec<String> = vec![];
+        // Only reachable by hand-editing (`_lane_dedupe` prevents it), but the
+        // explainer must still agree with which rule sing-box would hit first.
+        let i = input("domain:z.com\n", "domain:z.com\n", "domain:z.com\n", &p);
+        assert_eq!(classify("z.com", &i).lane, Lane::Escape);
     }
 }

@@ -255,6 +255,92 @@ fn route_is_inert_without_a_selection() {
     assert!(a.armed.is_none());
     a.update(Action::Unroute);
     assert!(a.armed.is_none());
+    // …and neither do their shifted forms.
+    a.update(Action::RouteSuffix(Lane::Escape));
+    assert!(a.armed.is_none());
+    a.update(Action::UnrouteSuffix);
+    assert!(a.armed.is_none());
+}
+
+#[test]
+fn shifted_lane_edit_arms_the_parent_suffix() {
+    let mut a = app();
+    a.update(Action::Down); // lock i.ytimg.com
+    a.update(Action::RouteSuffix(Lane::Escape));
+    let armed = a.armed.clone().expect("first press arms");
+    assert_eq!(armed.domain, "ytimg.com", "the edit targets the suffix, not the host");
+    assert_eq!(armed.key, 'E');
+    assert_eq!(armed.label(), "ytimg.com → escape", "the confirm bar shows the literal entry");
+    a.update(Action::RouteSuffix(Lane::Escape));
+    assert!(a.armed.is_none(), "second press commits + disarms");
+    assert!(a.pending_reload.is_some(), "commit schedules the debounced reload");
+}
+
+#[test]
+fn shifted_unroute_arms_the_parent_suffix() {
+    let mut a = app();
+    a.update(Action::Down);
+    a.update(Action::UnrouteSuffix);
+    let armed = a.armed.clone().expect("D arms");
+    // Symmetric undo of `E`/`C`/`B`: it removes the suffix ENTRY, not everything
+    // the suffix would cover (lane `rm` is an exact-line match).
+    assert_eq!(armed.domain, "ytimg.com");
+    assert_eq!(armed.lane, None);
+    assert_eq!(armed.key, 'D');
+}
+
+#[test]
+fn the_two_forms_never_cross_commit() {
+    let mut a = app();
+    a.update(Action::Down);
+    a.update(Action::Route(Lane::Corp)); // c → i.ytimg.com
+    a.update(Action::RouteSuffix(Lane::Corp)); // C → .ytimg.com: a different edit
+    assert!(a.armed.is_some(), "the shifted form re-arms rather than committing");
+    assert_eq!(a.armed.as_ref().unwrap().domain, "ytimg.com");
+    assert!(a.pending_reload.is_none(), "nothing was written");
+}
+
+#[test]
+fn shift_is_inert_when_there_is_nothing_to_broaden() {
+    let mut a = app();
+    a.update(Action::FocusErr);
+    // Walk to the fixture's two-label error row.
+    for _ in 0..20 {
+        a.update(Action::Down);
+        if a.selected_domain().as_deref() == Some("x.com") {
+            break;
+        }
+    }
+    assert_eq!(a.selected_domain().as_deref(), Some("x.com"));
+    a.update(Action::RouteSuffix(Lane::Escape));
+    assert!(a.armed.is_none(), "x.com IS its own parent suffix — nothing broader to add");
+    assert!(
+        a.toast.as_ref().is_some_and(|(m, _)| m.contains("no parent suffix")),
+        "and it says so rather than silently doing the lowercase edit"
+    );
+    // The lowercase form is unaffected — it still adds the host itself.
+    a.update(Action::Route(Lane::Escape));
+    assert_eq!(a.armed.as_ref().unwrap().domain, "x.com");
+}
+
+#[test]
+fn shifted_control_keys_map_to_the_suffix_actions() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use rowt_monitor::input;
+    let a = app();
+    // Terminals deliver a shifted letter as an uppercase `Char` (with or without
+    // the SHIFT modifier set, depending on the terminal) — both must map.
+    let key = |c: char, m: KeyModifiers| input::key(KeyEvent::new(KeyCode::Char(c), m), &a);
+    for m in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
+        assert_eq!(key('E', m), Some(Action::RouteSuffix(Lane::Escape)));
+        assert_eq!(key('C', m), Some(Action::RouteSuffix(Lane::Corp)));
+        assert_eq!(key('B', m), Some(Action::RouteSuffix(Lane::Block)));
+        assert_eq!(key('D', m), Some(Action::UnrouteSuffix));
+    }
+    // The lowercase four are untouched, and Ctrl-C still quits.
+    assert_eq!(key('e', KeyModifiers::NONE), Some(Action::Route(Lane::Escape)));
+    assert_eq!(key('d', KeyModifiers::NONE), Some(Action::Unroute));
+    assert_eq!(key('c', KeyModifiers::CONTROL), Some(Action::Quit));
 }
 
 #[test]
@@ -500,4 +586,175 @@ fn esc_priority_arm_then_selection_then_filter() {
     // 3) esc finally clears the lane filter
     a.update(Action::Escape);
     assert_eq!(a.lane_filter, None);
+}
+
+// --- editable confirm bar -------------------------------------------------
+// The armed entry is a one-line editor: ↵ applies whatever is in it. Editing is
+// additive — while the buffer is untouched every previous armed behaviour holds.
+
+use rowt_monitor::app::Edit;
+
+/// The toast is written from the same `entry` string that's handed to the
+/// source, so it's a faithful witness for what would be applied.
+fn applied(a: &App) -> String {
+    a.toast.as_ref().map(|(m, _)| m.clone()).unwrap_or_default()
+}
+
+#[test]
+fn armed_entry_can_be_edited_and_enter_applies_the_edit() {
+    let mut a = app();
+    a.update(Action::Down); // lock i.ytimg.com
+    a.update(Action::Route(Lane::Escape));
+    assert_eq!(a.armed.as_ref().unwrap().domain, "i.ytimg.com");
+    // Trim the leading label off by hand, then retype part of it — exercising
+    // both directions of the editor, not just deletion.
+    a.update(Action::ArmEdit(Edit::Home));
+    for _ in 0.."i.".len() {
+        a.update(Action::ArmEdit(Edit::Delete));
+    }
+    assert_eq!(a.armed.as_ref().unwrap().domain, "ytimg.com");
+    a.update(Action::ArmEdit(Edit::Home));
+    for c in "img.".chars() {
+        a.update(Action::ArmEdit(Edit::Insert(c)));
+    }
+    assert_eq!(a.armed.as_ref().unwrap().domain, "img.ytimg.com");
+    a.update(Action::Confirm);
+    assert!(a.armed.is_none());
+    assert_eq!(applied(&a), "img.ytimg.com → escape", "the EDITED entry is what gets applied");
+    assert!(a.pending_reload.is_some());
+}
+
+#[test]
+fn double_tap_still_commits_the_unedited_entry() {
+    let mut a = app();
+    a.update(Action::Down);
+    a.update(Action::Route(Lane::Escape));
+    a.update(Action::Route(Lane::Escape));
+    assert_eq!(applied(&a), "i.ytimg.com → escape", "double-tap = no edit, then apply");
+}
+
+#[test]
+fn ctrl_w_drops_one_label_at_a_time() {
+    let mut a = app();
+    a.update(Action::Down);
+    a.update(Action::Route(Lane::Block)); // i.ytimg.com
+    a.update(Action::ArmEdit(Edit::KillWord));
+    assert_eq!(a.armed.as_ref().unwrap().domain, "i.ytimg.");
+    a.update(Action::ArmEdit(Edit::KillWord));
+    assert_eq!(a.armed.as_ref().unwrap().domain, "i.");
+}
+
+#[test]
+fn editing_to_empty_cancels_instead_of_applying() {
+    let mut a = app();
+    a.update(Action::Down);
+    a.update(Action::Route(Lane::Escape));
+    a.update(Action::ArmEdit(Edit::KillLine));
+    a.update(Action::Confirm);
+    assert!(a.armed.is_none());
+    assert!(applied(&a).contains("empty entry"), "an empty buffer is a cancel: {:?}", applied(&a));
+    assert!(a.pending_reload.is_none(), "nothing was written");
+}
+
+#[test]
+fn editing_restarts_the_arm_timeout() {
+    use std::time::{Duration, Instant};
+    let mut a = app();
+    a.update(Action::Down);
+    a.update(Action::Route(Lane::Escape));
+    // Backdate the arm to just inside the window, then type.
+    a.armed.as_mut().unwrap().at = Instant::now() - Duration::from_secs(4);
+    a.update(Action::ArmEdit(Edit::Insert('x')));
+    assert!(
+        a.armed.as_ref().unwrap().at.elapsed() < Duration::from_millis(500),
+        "the 5s window measures inactivity, not total time spent typing"
+    );
+}
+
+#[test]
+fn the_confirm_bar_claims_text_keys_but_not_the_arm_keys_until_edited() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use rowt_monitor::input;
+    let mut a = app();
+    a.update(Action::Down);
+    a.update(Action::Route(Lane::Escape));
+    let k = |a: &App, c: KeyCode, m: KeyModifiers| input::key(KeyEvent::new(c, m), a);
+    let n = KeyModifiers::NONE;
+
+    // Pristine: the eight arm keys keep their meaning, so double-tap and re-arm
+    // survive; every other printable starts an edit.
+    assert_eq!(k(&a, KeyCode::Char('e'), n), Some(Action::Route(Lane::Escape)));
+    assert_eq!(k(&a, KeyCode::Char('C'), n), Some(Action::RouteSuffix(Lane::Corp)));
+    assert_eq!(k(&a, KeyCode::Char('x'), n), Some(Action::ArmEdit(Edit::Insert('x'))));
+    assert_eq!(k(&a, KeyCode::Backspace, n), Some(Action::ArmEdit(Edit::Backspace)));
+    assert_eq!(k(&a, KeyCode::Left, n), Some(Action::ArmEdit(Edit::Cursor(-1))));
+    assert_eq!(k(&a, KeyCode::Char('w'), KeyModifiers::CONTROL), Some(Action::ArmEdit(Edit::KillWord)));
+    // ↵ / Esc stay with the global keymap.
+    assert_eq!(k(&a, KeyCode::Enter, n), Some(Action::Confirm));
+    assert_eq!(k(&a, KeyCode::Esc, n), Some(Action::Escape));
+    // Ctrl-C cancels the edit rather than quitting.
+    assert_eq!(k(&a, KeyCode::Char('c'), KeyModifiers::CONTROL), Some(Action::Escape));
+    // Keys that aren't text still fall through — and so still cancel the arm.
+    assert_eq!(k(&a, KeyCode::Down, n), Some(Action::Down));
+
+    // Once edited, the arm keys type like anything else.
+    a.update(Action::ArmEdit(Edit::Insert('x')));
+    assert_eq!(k(&a, KeyCode::Char('e'), n), Some(Action::ArmEdit(Edit::Insert('e'))));
+    assert_eq!(k(&a, KeyCode::Char('D'), n), Some(Action::ArmEdit(Edit::Insert('D'))));
+    // …but ↵ and Esc are unchanged, so there's always a way out.
+    assert_eq!(k(&a, KeyCode::Enter, n), Some(Action::Confirm));
+    assert_eq!(k(&a, KeyCode::Esc, n), Some(Action::Escape));
+}
+
+#[test]
+fn no_armed_edit_leaves_the_global_keymap_alone() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use rowt_monitor::input;
+    let a = app();
+    assert!(a.armed.is_none());
+    let k = |c| input::key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE), &a);
+    assert_eq!(k('q'), Some(Action::Quit));
+    assert_eq!(k('y'), Some(Action::Yank));
+    assert_eq!(k('?'), Some(Action::ToggleHelp));
+}
+
+#[test]
+fn an_entry_with_a_space_is_refused_not_silently_closed_up() {
+    let mut a = app();
+    a.update(Action::Down);
+    a.update(Action::Route(Lane::Escape));
+    a.update(Action::ArmEdit(Edit::Home));
+    a.update(Action::ArmEdit(Edit::Insert('x')));
+    a.update(Action::ArmEdit(Edit::Insert(' ')));
+    assert_eq!(a.armed.as_ref().unwrap().domain, "x i.ytimg.com");
+    a.update(Action::Confirm);
+    // bash `edit_list` would have written "xi.ytimg.com" — something the bar
+    // never showed. Refusing keeps preview and write identical.
+    assert!(applied(&a).contains("has a space"), "{:?}", applied(&a));
+    assert!(a.pending_reload.is_none(), "nothing was written");
+    // Surrounding whitespace is fine — it's only trimmed.
+    a.update(Action::Route(Lane::Escape));
+    a.update(Action::ArmEdit(Edit::End));
+    a.update(Action::ArmEdit(Edit::Insert(' ')));
+    a.update(Action::Confirm);
+    assert_eq!(applied(&a), "i.ytimg.com → escape");
+}
+
+#[test]
+fn editing_gets_a_longer_idle_window_than_a_bare_arm() {
+    use rowt_monitor::app::{ARM_EDIT_TIMEOUT, ARM_TIMEOUT};
+    use std::time::Instant;
+    assert!(ARM_EDIT_TIMEOUT > ARM_TIMEOUT, "typing a domain needs more than the double-tap window");
+    let mut a = app();
+    a.update(Action::Down);
+    a.update(Action::Route(Lane::Escape));
+    a.update(Action::ArmEdit(Edit::Insert('x')));
+    // Idle past the bare-arm window but inside the editing one: still armed.
+    a.armed.as_mut().unwrap().at = Instant::now() - ARM_TIMEOUT - std::time::Duration::from_secs(1);
+    a.on_frame();
+    assert!(a.armed.is_some(), "an in-progress edit survives the 5s double-tap window");
+    // Idle past the editing window: gone.
+    a.armed.as_mut().unwrap().at = Instant::now() - ARM_EDIT_TIMEOUT - std::time::Duration::from_secs(1);
+    a.on_frame();
+    assert!(a.armed.is_none(), "…but not forever");
 }

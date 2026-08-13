@@ -53,7 +53,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.3.8"
+ROWT_VERSION="3.4.0"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -469,11 +469,16 @@ list_json() {
   local f="$1" filt="${2:-}"
   [ -f "$f" ] || { echo '[]'; return 0; }
   # `geosite:<name>` lines are meta (they pull a rule-set) — never suffixes/CIDRs.
+  # `domain:<host>` lines are EXACT rules (`--domain`). Every filter except
+  # `exact` must drop them: the others select by "is / isn't a CIDR", a test a
+  # `domain:` line passes, so without this it would render as a domain_suffix —
+  # silently becoming the leaky suffix the flag exists to avoid.
   grep -vE '^[[:space:]]*(#|$)' "$f" | sed 's/[[:space:]]//g' | grep -vE '^geosite:' \
     | case "$filt" in
-        cidr)   grep -E '/[0-9]+$' || true ;;
-        domain) grep -vE '/[0-9]+$' || true ;;
-        *)      cat ;;
+        exact)  { grep -E '^domain:' | sed 's/^domain://'; } || true ;;
+        cidr)   { grep -vE '^domain:' | grep -E '/[0-9]+$'; } || true ;;
+        domain) { grep -vE '^domain:' | grep -vE '/[0-9]+$'; } || true ;;
+        *)      grep -vE '^domain:' || true ;;
       esac \
     | jq -R . | jq -s 'map(select(length>0))'
 }
@@ -494,6 +499,14 @@ domains_json()    { list_json "$DOMAINS"; }                 # escape suffixes
 corp_domains_json() { list_json "$CORP_DOMAINS" domain; }   # corp suffixes
 corp_cidrs_json()   { list_json "$CORP_DOMAINS" cidr; }     # corp IP ranges
 block_domains_json() { list_json "$BLOCK_DOMAINS" domain; } # block suffixes (extra, on top of the geosite set)
+# `--domain` entries per lane — sing-box `domain` (whole-host) rules. The
+# `buckets:` counts in status/report add these to the suffix counts: they are
+# entries the operator put there, and a count that silently omitted them would
+# read as "the flag did nothing". No diff gate can catch that class — both
+# implementations would be wrong identically — so it is pinned by a cli-case.
+escape_exact_json() { list_json "$DOMAINS" exact; }
+corp_exact_json()   { list_json "$CORP_DOMAINS" exact; }
+block_exact_json()  { list_json "$BLOCK_DOMAINS" exact; }
 
 # Re-render and restart the router if it is currently running.
 reload_if_running() {
@@ -613,9 +626,18 @@ edit_list() {
   local file="$1" label="$2" action="${3:-list}"; shift 3 2>/dev/null || true
   # --no-reload: write the lane file but skip the router bounce (used by the TUI
   # control layer, which batches several edits and issues ONE reload on a timer).
-  local no_reload=0 __a; local args=()
+  # --domain / --domain-suffix: which sing-box rule kind an entry becomes.
+  # Suffix is the default (and by far the right answer most of the time);
+  # --domain stores the entry as `domain:<host>`, an exact whole-host match.
+  # Both are honoured from ANY position, like --no-reload.
+  local no_reload=0 exact=0 __a; local args=()
   for __a in "$@"; do
-    if [ "$__a" = "--no-reload" ]; then no_reload=1; else args+=("$__a"); fi
+    case "$__a" in
+      --no-reload)     no_reload=1 ;;
+      --domain)        exact=1 ;;
+      --domain-suffix) exact=0 ;;
+      *)               args+=("$__a") ;;
+    esac
   done
   set -- ${args[@]+"${args[@]}"}
   # snapshot so we only reload the router if a lane ACTUALLY changed (adding an
@@ -630,7 +652,7 @@ edit_list() {
         grep -vE '^[[:space:]]*(#|$)' "$file" | sed 's/^/  /'
       else
         echo "  (empty)"
-        echo "  $PROG $label add <e>… | rm <e>… | import <file> | clear | dump [file]"
+        echo "  $PROG $label add [--domain] <e>… | rm [--domain] <e>… | import <file> | clear | dump [file]"
       fi
       return 0 ;;
     add)
@@ -638,6 +660,10 @@ edit_list() {
       touch "$file"; local e
       for e in "$@"; do
         e="$(printf '%s' "$e" | tr -d '[:space:]')"; [ -z "$e" ] && continue
+        # Stamp --domain on before anything else looks at the entry, so the
+        # single-lane invariant, the already-present test and every message all
+        # operate on the line as it is actually stored.
+        [ "$exact" -eq 1 ] && e="domain:$e"
         # geosite: is escape/block only (corp routes internal domains/CIDRs).
         case "$e" in
           geosite:*) [ "$label" = corp ] && { echo "  skipped $e — geosite: is only for the escape and block lanes"; continue; } ;;
@@ -652,7 +678,9 @@ edit_list() {
           # A plain-domain add on a geosite-capable lane shows (never applies) the
           # geosite categories that also cover it. Skipped for the TUI's batched
           # edits (--no-reload) so it never blocks on the network.
-          *) [ "$no_reload" -eq 0 ] && [ "$label" != corp ] && _geosite_hint "$file" "$label" "$e" ;;
+          # The hint is about the NAME, so an exact entry is looked up by its
+          # host — `domain:x.com` is not a domain and would silently never match.
+          *) [ "$no_reload" -eq 0 ] && [ "$label" != corp ] && _geosite_hint "$file" "$label" "${e#domain:}" ;;
         esac
       done ;;
     import)   # batch-add one domain per line from a file
@@ -669,6 +697,7 @@ edit_list() {
       local e tmp; tmp="$(mktemp)"
       for e in "$@"; do
         e="$(printf '%s' "$e" | tr -d '[:space:]')"
+        [ "$exact" -eq 1 ] && [ -n "$e" ] && e="domain:$e"
         if grep -qxF "$e" "$file" 2>/dev/null; then
           grep -vxF "$e" "$file" > "$tmp"; mv "$tmp" "$file"; echo "  removed: $e"
         else echo "  not found: $e"; fi
@@ -679,7 +708,7 @@ edit_list() {
       if [ -n "${1:-}" ]; then printf '%s\n' "$entries" > "$1"; echo "  dumped $label list -> $1" >&2
       else printf '%s\n' "$entries"; fi
       return 0 ;;
-    *) die "usage: $PROG $label [list | add <e>… | rm <e>… | import <file> | clear | dump [file]]" ;;
+    *) die "usage: $PROG $label [list | add [--domain] <e>… | rm [--domain] <e>… | import <file> | clear | dump [file]]" ;;
   esac
   # only re-render/restart if some lane changed (and reload wasn't suppressed)
   local _after; _after="$(cat "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" 2>/dev/null)"
@@ -1414,6 +1443,9 @@ assemble_host() {
     --argjson corp_dom "$(corp_domains_json)" \
     --argjson corp_cidr "$(corp_cidrs_json)" \
     --argjson block_dom "$(block_domains_json)" \
+    --argjson esc_exact "$(escape_exact_json)" \
+    --argjson corp_exact "$(corp_exact_json)" \
+    --argjson block_exact "$(block_exact_json)" \
     --arg priv_default "$PRIVATE_DEFAULT" \
     --argjson private_cidrs "$PRIVATE_CIDRS" \
     '
@@ -1431,6 +1463,15 @@ assemble_host() {
      | sort_by([(.s|split(".")|length), (.s|length)]) | reverse
      | map({domain_suffix:[.s], outbound:.o})) as $suffix_rules
     |
+    # `--domain` entries: sing-box `domain` (whole-host equality). These come
+    # BEFORE every suffix rule, and that ordering is correctness, not tidiness —
+    # first match wins, so an exact z.com on block would otherwise lose to a
+    # suffix z.com on escape. Lane order escape/corp/block, unsorted: only one
+    # exact entry can match a given host, so length ranking says nothing.
+    ([ if ($esc_exact|length)   > 0 then {domain:$esc_exact,   outbound:$esc_out} else empty end,
+       if ($corp_exact|length)  > 0 then {domain:$corp_exact,  outbound:"corp"}   else empty end,
+       if ($block_exact|length) > 0 then {domain:$block_exact, outbound:"block"}  else empty end ]) as $exact_rules
+    |
     # Per-lane `geosite:<name>` rule-sets (e.g. `geosite:google` in escape) sit after
     # the hand suffixes (an explicit entry still wins) and before the broad ad set.
     ( ($esc_geo   | map({rule_set:["geosite-"+.], outbound:$esc_out}))
@@ -1447,6 +1488,7 @@ assemble_host() {
     # onto the physical NIC. Explicit escape/corp/block rules above still win; only
     # otherwise-unmatched private IPs are caught. Toggle with ROWT_PRIVATE_DEFAULT.
     ([ {action:"sniff"} ]
+     + $exact_rules
      + $suffix_rules
      + $geo_rules
      + [ if ($corp_cidr|length) > 0     then {ip_cidr:$corp_cidr, outbound:"corp"} else empty end,
@@ -1461,7 +1503,11 @@ assemble_host() {
     ([ {type:"local", tag:"local"},
        {type:"https", tag:"dns-direct", server:$dns_direct, detour:"direct"} ]) as $dns_servers
     |
-    ([ if ($corp_dom|length) > 0 then {domain_suffix:$corp_dom, server:"local"} else empty end ]) as $dns_rules
+    # Corp names must resolve through the corp resolver or they answer with a
+    # public IP and leave the tunnel — so an EXACT corp entry needs this rule
+    # just as much as a suffix one. `domain` first, mirroring the route rules.
+    ([ if ($corp_exact|length) > 0 then {domain:$corp_exact, server:"local"} else empty end,
+       if ($corp_dom|length)   > 0 then {domain_suffix:$corp_dom, server:"local"} else empty end ]) as $dns_rules
     |
     {
       log:{level:$lvl, timestamp:true},
@@ -2771,6 +2817,7 @@ cmd_setup() {
     echo "  switch anytime: $PROG up host / $PROG up vm / $PROG up local"
   fi
   echo "  edit lanes:     $PROG escape add <domain> / $PROG corp add <domain>"
+  echo "                  add --domain <host> matches that host ONLY (no subdomains)"
 }
 
 # ---------- onboarding ------------------------------------------------------
@@ -2952,19 +2999,42 @@ _list_hit() {
 # one rule per suffix, most-specific-first). Echoes "<lane> <suffix>" for the
 # longest matching domain suffix, or returns nonzero if none match. Uses the same
 # plain-suffix test as _list_hit so this predictor matches the router.
+# -> "<lane> <exact|suffix> <entry>". An EXACT (`domain:`) hit beats every suffix
+# at any length, because the render emits the `domain` rules first and sing-box
+# is first-match-wins; among exacts the first lane seen wins, matching that same
+# emission order (escape -> corp -> block).
 _longest_domain_hit() { # $1=domain
-  local val="$1" best_e="" best_lane="" e lane f pair
+  local val="$1" best_e="" best_lane="" ex_e="" ex_lane="" e lane f pair ent
   for pair in "escape:$DOMAINS" "corp:$CORP_DOMAINS" "block:$BLOCK_DOMAINS"; do
     lane="${pair%%:*}"; f="${pair#*:}"
     [ -f "$f" ] || continue
     while IFS= read -r e; do
       e="$(printf '%s' "$e" | sed 's/[[:space:]]//g')"; case "$e" in ''|\#*) continue ;; esac
+      case "$e" in
+        domain:*)
+          ent="${e#domain:}"
+          [ -n "$ent" ] && [ "$val" = "$ent" ] && [ -z "$ex_e" ] && { ex_e="$ent"; ex_lane="$lane"; }
+          continue ;;
+      esac
       case "$e" in */[0-9]*) continue ;; esac   # skip corp CIDR entries
-      case "$val" in *"$e") [ "${#e}" -gt "${#best_e}" ] && { best_e="$e"; best_lane="$lane"; } ;; esac
+      # sing-box matches domain_suffix on a LABEL BOUNDARY — measured with
+      # `sing-box rule-set match` on 1.13.14:
+      #     z.com  -> z.com Y  a.z.com Y  xz.com .    com .
+      #    .z.com  -> z.com .  a.z.com Y  xz.com .    com .
+      #      com   -> z.com Y  a.z.com Y  xz.com Y    com Y   xcom .
+      # A bare entry matches the name itself and anything under it; a dot-led
+      # entry matches only what is under it. This was a bare `*"$e"` glob, which
+      # claimed z.com covered xz.com — explain promising a lane the router would
+      # not take.
+      case "$e" in
+        .*) case "$val" in *"$e") [ "${#e}" -gt "${#best_e}" ] && { best_e="$e"; best_lane="$lane"; } ;; esac ;;
+        *)  case "$val" in "$e"|*".$e") [ "${#e}" -gt "${#best_e}" ] && { best_e="$e"; best_lane="$lane"; } ;; esac ;;
+      esac
     done < "$f"
   done
+  [ -n "$ex_e" ] && { printf '%s exact %s\n' "$ex_lane" "$ex_e"; return 0; }
   [ -n "$best_e" ] || return 1
-  printf '%s %s\n' "$best_lane" "$best_e"
+  printf '%s suffix %s\n' "$best_lane" "$best_e"
 }
 
 # Explain which lane a destination takes. Mirrors the render exactly: hand-list
@@ -2982,7 +3052,11 @@ cmd_explain() {
     elif m="$(_private_hit "$dest")"; then lane=corp; why="private/overlay range '$m' — defaults to unbound (OS routing)"
     else lane="$FINAL_ROUTE"; why="no corp CIDR matched; final route = $FINAL_ROUTE"; fi
   elif hit="$(_longest_domain_hit "$dest")"; then
-    lane="${hit%% *}"; m="${hit#* }"; why="longest-match ${lane}-domains suffix '$m'"
+    lane="${hit%% *}"; local kind rest; rest="${hit#* }"; kind="${rest%% *}"; m="${rest#* }"
+    case "$kind" in
+      exact) why="exact ${lane}-domains match '$m'" ;;
+      *)     why="longest-match ${lane}-domains suffix '$m'" ;;
+    esac
   else
     ip="$(resolve_ip "$dest")"
     if [ -n "$ip" ] && m="$(_list_hit "$ip" "$CORP_DOMAINS" cidr)"; then lane=corp; why="resolves to $ip — in corp CIDR '$m'"
@@ -3034,7 +3108,7 @@ cmd_status() {
   local svc; svc="$(active_service 2>/dev/null || true)"
   [ -n "$svc" ] && printf 'system proxy: %s (%s)\n' "$(networksetup -getsecurewebproxy "$svc" 2>/dev/null | awk '/Enabled/{print $2}' | head -1)" "$svc"
   [ "$(sget captive)" = 1 ] && echo "captive:      portal detected — proxy dropped until login clears (watchdog auto-restores)"
-  echo "buckets:      escape=$(domains_json | jq length) corp=$(( $(corp_domains_json | jq length) + $(corp_cidrs_json | jq length) )) block=$(block_domains_json | jq length)$([ -f "$ADS_SRS" ] && echo '+ads')$(g="$(all_geosites | paste -sd, - 2>/dev/null)"; [ -n "$g" ] && echo " +geosite:$g") final=$FINAL_ROUTE"
+  echo "buckets:      escape=$(( $(domains_json | jq length) + $(escape_exact_json | jq length) )) corp=$(( $(corp_domains_json | jq length) + $(corp_cidrs_json | jq length) + $(corp_exact_json | jq length) )) block=$(( $(block_domains_json | jq length) + $(block_exact_json | jq length) ))$([ -f "$ADS_SRS" ] && echo '+ads')$(g="$(all_geosites | paste -sd, - 2>/dev/null)"; [ -n "$g" ] && echo " +geosite:$g") final=$FINAL_ROUTE"
   if [ -x "$SB" ] && [ -f "$HOST_CFG" ]; then
     "$SB" check -c "$HOST_CFG" >/dev/null 2>&1 && echo "config:       host.json OK" || echo "config:       host.json INVALID (run '$PROG render')"
   fi
@@ -3929,7 +4003,7 @@ diag_body() {
   else _d "  (none)"; fi
   _d "  subscriptions: $(sub_count)"
   [ -s "$SUBS_FILE" ] && sed -E 's#(https?://.{10}).*#  \1…(masked)#' "$SUBS_FILE" | grep -vE '^\s*#' || true
-  _d "  buckets: escape=$(domains_json | jq length) corp=$(( $(corp_domains_json | jq length) + $(corp_cidrs_json | jq length) )) block=$(block_domains_json | jq length)$([ -f "$ADS_SRS" ] && echo ' +geosite-ads')$(g="$(all_geosites | paste -sd, - 2>/dev/null)"; [ -n "$g" ] && echo " +geosite:$g")"
+  _d "  buckets: escape=$(( $(domains_json | jq length) + $(escape_exact_json | jq length) )) corp=$(( $(corp_domains_json | jq length) + $(corp_cidrs_json | jq length) + $(corp_exact_json | jq length) )) block=$(( $(block_domains_json | jq length) + $(block_exact_json | jq length) ))$([ -f "$ADS_SRS" ] && echo ' +geosite-ads')$(g="$(all_geosites | paste -sd, - 2>/dev/null)"; [ -n "$g" ] && echo " +geosite:$g")"
   _d ""
   _d "----- generated configs -----"
   if [ -x "$SB" ]; then
@@ -4378,6 +4452,11 @@ $PROG $1 <subcommand> — edit the $1 lane$([ "$1" = escape ] && echo " (domains
   (no verb)            list the lane                                 [default]
   add <entry> [more]   add domain(s)$([ "$1" = corp ] && echo "; corp also accepts CIDRs, e.g. 10.0.0.0/8")
   rm <entry> [more]    remove entries
+  --domain             match the WHOLE host only, not its subdomains: stored as
+                       'domain:<host>' and rendered as a sing-box 'domain' rule.
+                       Applies to every entry of that add/rm.
+  --domain-suffix      the default — match the host and everything under it
+                       (sing-box 'domain_suffix'). Accept it to be explicit.
   import <file>        batch-add one entry per line from a file (# comments ok)
   clear                remove every entry (keeps the file's comment header)
   dump [file]          print the lane (or write it to a file) for backup/versioning
@@ -4396,7 +4475,13 @@ $PROG $1 <subcommand> — edit the $1 lane$([ "$1" = escape ] && echo " (domains
                        entries above the managed blocks are never touched.")
 A domain lives in AT MOST one lane: 'add'/'import' here pulls the exact entry out
 of the other lanes (block/corp/escape), since the router matches block→corp→escape
-first-match-wins and a domain in two lists would be silently shadowed.
+first-match-wins and a domain in two lists would be silently shadowed. The two rule
+kinds are different entries, so 'z.com' and '--domain z.com' can sit in different
+lanes; the exact rule is emitted first and therefore wins for that one host.
+
+Suffix is almost always what you want — 'z.com' already covers 'a.z.com' and, since
+sing-box matches on a label boundary, does NOT cover 'xz.com'. Reach for '--domain'
+when a single host must go somewhere its own subdomains should not.
 
 Edits auto-reload the router if it is running. 'errors' reads the per-lane error
 log the router keeps (timestamp + domain + reason). NOTE: only failed/refused

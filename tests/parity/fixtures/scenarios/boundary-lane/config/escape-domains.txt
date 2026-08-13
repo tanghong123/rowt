@@ -1,0 +1,13 @@
+# The three suffix SHAPES sing-box distinguishes, on one lane, so the corpus
+# derives boundary destinations for each:
+#
+#   z.example    matches z.example and *.z.example, NOT xz.example
+#   .d.example   matches *.d.example only — NOT the apex d.example
+#   example      matches example and *.example, so xz.example DOES hit it
+#                (that name really does end with `.example`)
+#
+# Measured with `sing-box rule-set match` (1.13.14); before 2026-08-13 the
+# explainer used a bare ends_with and claimed z.example covered xz.example.
+z.example
+.d.example
+example

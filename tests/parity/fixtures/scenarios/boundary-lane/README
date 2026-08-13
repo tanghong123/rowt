@@ -1,0 +1,10 @@
+Suffix-boundary shapes. Exists because the classifier's suffix test changed from
+a bare `ends_with` to sing-box's label-boundary rule, and the previous corpus
+could only show the *bare* shape — it had no dot-led entry and no entry that was
+a proper label-suffix of another, so "which entry did it pick" was never really
+under test.
+
+The three entries overlap on purpose: `xz.example` must miss `z.example` but hit
+`example`, and `a.d.example` must prefer `.d.example` over `example` while
+`d.example` itself misses the dot-led one entirely. That is the whole rule in
+three lines.

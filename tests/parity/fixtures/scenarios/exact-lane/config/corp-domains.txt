@@ -1,0 +1,5 @@
+# Exact + suffix + CIDR together: the exact entry must ALSO get a dns rule
+# (server: local), or a corp name resolves public and leaves the tunnel.
+corp.example
+domain:host.corp.example
+198.18.0.0/19

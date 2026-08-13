@@ -53,6 +53,7 @@ walks the rules **top to bottom, first match wins**:
 
 | rule | outbound | what physically happens (corp ON) |
 |------|----------|-----------------------------------|
+| `domain:<host>` in any lane (`<lane> add --domain`) | that lane | a sing-box `domain` rule — **whole-host equality**, no subdomains. Emitted ahead of every suffix rule, so it wins outright for that one host: `corp add --domain dev.g.alicdn.com` keeps just that name on corp while `escape add alicdn.com` covers the rest of the CDN |
 | `domain_suffix` in `block-domains.txt` | **block** | refused instantly — no DNS, no dial (kills the ad/tracker retry storm) |
 | `domain_suffix` in `corp-domains.txt` | **corp** | resolved to an intranet IP (see §4), sent via the **routing table** → matches the corp route → into `utunN` → corp network |
 | `ip_cidr` in `corp-domains.txt` (e.g. `10.0.0.0/8`) | **corp** | literal intranet IP → routing table → `utunN` → corp |
@@ -93,6 +94,7 @@ dns:
     - local        (type: "local"  → the macOS system resolver)
     - dns-direct   (DoH https://223.5.5.5, detour: "direct" → queried over en0)
   rules:
+    - domain in corp-domains.txt (the `--domain` entries) → server: local
     - domain_suffix in corp-domains.txt → server: local
   final: dns-direct
 outbounds:

@@ -52,6 +52,46 @@ pub enum Op {
     Import { lines: Vec<String>, source: String },
 }
 
+/// Split the rule-kind flags out of a lane command's arguments.
+///
+/// Returns the remaining operands and whether `--domain` (exact) was chosen.
+/// Suffix is the default; `--domain-suffix` exists so a script can say so, and
+/// last-one-wins if both appear. Position-independent, like `--no-reload`.
+///
+/// This lives here rather than in the CLI because there are TWO callers —
+/// `rowt-rs`'s `cmd_lane` and the `rowt-lanes` harness the parity gate drives.
+/// The first version put it only in `cmd_lane`, so `lanes-diff` fed `--domain`
+/// through as an ENTRY and wrote it as a lane line; cli-diff passed the whole
+/// time because it exercises the other caller.
+pub fn take_kind(args: &[String]) -> (Vec<String>, bool) {
+    let mut exact = false;
+    let mut rest = Vec::new();
+    for a in args {
+        match a.as_str() {
+            "--domain" => exact = true,
+            "--domain-suffix" => exact = false,
+            _ => rest.push(a.clone()),
+        }
+    }
+    (rest, exact)
+}
+
+/// Stamp the exact marker onto entries. A no-op for the suffix default, and it
+/// leaves an entry that normalizes to nothing alone so the "no entries" usage
+/// error still fires instead of writing a bare `domain:` line.
+pub fn mark_entries(entries: &[String], exact: bool) -> Vec<String> {
+    if !exact {
+        return entries.to_vec();
+    }
+    entries
+        .iter()
+        .map(|a| {
+            let e = normalize_entry(a);
+            if e.is_empty() { e } else { format!("{}{e}", crate::render::EXACT_PREFIX) }
+        })
+        .collect()
+}
+
 /// `tr -d '[:space:]'` — every whitespace character goes, not just the ends.
 pub fn normalize_entry(s: &str) -> String {
     s.chars().filter(|c| !c.is_whitespace()).collect()
@@ -403,5 +443,34 @@ mod tests {
         // Below the prose, above the real marker.
         assert_eq!(lines[entry - 1], "a.com");
         assert!(entry < lines.iter().position(|l| l.contains("do not edit below")).unwrap());
+    }
+
+    #[test]
+    fn the_rule_kind_flags_are_position_independent_and_last_wins() {
+        let v = |a: &[&str]| -> (Vec<String>, bool) {
+            let owned: Vec<String> = a.iter().map(|s| s.to_string()).collect();
+            take_kind(&owned)
+        };
+        assert_eq!(v(&["a.com"]), (vec!["a.com".into()], false));
+        assert_eq!(v(&["--domain", "a.com"]), (vec!["a.com".into()], true));
+        assert_eq!(v(&["a.com", "--domain"]), (vec!["a.com".into()], true));
+        assert_eq!(v(&["--domain-suffix", "a.com"]), (vec!["a.com".into()], false));
+        // Both given: last wins, so a wrapper script can override a default.
+        assert_eq!(v(&["--domain", "--domain-suffix", "a.com"]), (vec!["a.com".into()], false));
+        assert_eq!(v(&["--domain-suffix", "--domain", "a.com"]), (vec!["a.com".into()], true));
+        // Every entry of the command takes the kind, not just the next one.
+        assert_eq!(v(&["--domain", "a.com", "b.com"]), (vec!["a.com".into(), "b.com".into()], true));
+    }
+
+    #[test]
+    fn marking_stamps_the_prefix_but_leaves_empties_alone() {
+        let e = |a: &[&str], x| mark_entries(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>(), x);
+        assert_eq!(e(&["a.com"], false), ["a.com"]);
+        assert_eq!(e(&["a.com", "b.com"], true), ["domain:a.com", "domain:b.com"]);
+        // Whitespace is normalized away first, as `tr -d` would.
+        assert_eq!(e(&[" a.com "], true), ["domain:a.com"]);
+        // An entry that normalizes to nothing stays empty, so the caller's
+        // "no entries" usage error still fires instead of a bare `domain:` line.
+        assert_eq!(e(&["  "], true), [""]);
     }
 }

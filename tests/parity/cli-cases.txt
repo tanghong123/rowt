@@ -20,6 +20,39 @@ escape add geosite:nosuchcategory
 corp add geosite:google
 escape add --no-reload batched.example
 corp add example.com
+# --domain / --domain-suffix: the rule KIND. These must diff on the config tree,
+# not just stdout — the entry is stored as `domain:<host>` and the whole point is
+# that it renders as a sing-box `domain` rule instead of a `domain_suffix`. The
+# flags are position-independent like --no-reload, apply to every entry of the
+# command, and must not touch an `import`/`dump` path argument.
+escape add --domain exact.example
+escape add --domain-suffix suffixy.example
+escape add --domain a.example b.example
+escape add a.example --domain b.example
+corp add --domain exact.corp.example
+block add --domain exact.block.example
+escape add --domain --no-reload batched-exact.example
+# The two kinds are different lines, so this leaves BOTH in the file — and the
+# single-lane invariant must not confuse one for the other.
+escape add --domain example.com
+corp add --domain example.com
+escape rm --domain example.com
+escape rm --domain absent.example
+# `--domain` with no entry, and with an entry that normalizes to nothing.
+escape add --domain
+escape rm --domain
+# The explainer has to name the kind it matched, on both sides.
+PARITY_SCENARIO=exact-lane route exact.example
+PARITY_SCENARIO=exact-lane route sub.exact.example
+PARITY_SCENARIO=exact-lane route suffixy.example
+PARITY_SCENARIO=exact-lane route a.suffixy.example
+PARITY_SCENARIO=exact-lane escape list
+PARITY_SCENARIO=exact-lane render
+# `buckets:` counts these entries. No DIFF gate can catch an undercount — both
+# sides would be wrong identically — so it is pinned by eye here: escape=5,
+# corp=3, block=2 for this scenario's lanes.
+PARITY_SCENARIO=exact-lane status
+PARITY_SCENARIO=exact-lane report
 # A corp lane `corp sync` has already written into. `add` appended at EOF until
 # this scenario existed — inside the region sync rebuilds on every watchdog
 # tick — so the entry was reported added, rendered into the router, and deleted

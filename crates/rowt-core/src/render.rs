@@ -17,6 +17,11 @@ pub struct Lists {
     pub corp_domains: Vec<String>,
     pub corp_cidrs: Vec<String>,
     pub block_domains: Vec<String>,
+    // `--domain` entries (`domain:<host>` lines), rendered as sing-box `domain`
+    // rules ahead of every suffix rule.
+    pub escape_exact: Vec<String>,
+    pub corp_exact: Vec<String>,
+    pub block_exact: Vec<String>,
 }
 
 /// Cached `geosite:<name>` rule-sets, split the way the render uses them.
@@ -69,20 +74,37 @@ pub fn parse_list(contents: &str, filter: Filter) -> Vec<String> {
         })
         .map(|raw| raw.chars().filter(|c| !c.is_whitespace()).collect::<String>())
         .filter(|s| !s.starts_with("geosite:"))
-        .filter(|s| match filter {
-            Filter::All => true,
-            Filter::Cidr => is_cidr(s),
-            Filter::Domain => !is_cidr(s),
+        .filter_map(|s| {
+            let exact = s.strip_prefix(EXACT_PREFIX).map(str::to_string);
+            match filter {
+                Filter::Exact => exact,
+                // A `domain:` line is an EXACT rule, never a suffix or a CIDR.
+                // Every other filter MUST drop it: they select by "is / isn't a
+                // CIDR", a test `domain:z.com` passes, so without this it would
+                // render as a `domain_suffix` — silently becoming the leaky
+                // suffix the flag exists to avoid.
+                _ if exact.is_some() => None,
+                Filter::All => Some(s),
+                Filter::Cidr => is_cidr(&s).then_some(s),
+                Filter::Domain => (!is_cidr(&s)).then_some(s),
+            }
         })
         .filter(|s| !s.is_empty())
         .collect()
 }
+
+/// Marks a lane entry as an EXACT host rule (sing-box `domain`) rather than the
+/// default `domain_suffix`. Same shape as `geosite:` — a hostname can't contain
+/// a colon, so the prefix is unambiguous, and both readers already split on one.
+pub const EXACT_PREFIX: &str = "domain:";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Filter {
     All,
     Cidr,
     Domain,
+    /// Only `domain:<host>` lines, with the prefix stripped.
+    Exact,
 }
 
 /// `grep -E '/[0-9]+$'` — a trailing slash-and-digits marks a CIDR.
@@ -160,6 +182,32 @@ pub fn group(servers: &[Value], iface: &str, selected: &str, interval: &str) -> 
     Value::Array(out)
 }
 
+/// `domain:` (exact) rules across the three hand lists.
+///
+/// These are emitted BEFORE `suffix_rules` and that ordering is a correctness
+/// requirement, not tidiness: sing-box route rules are first-match-wins, so an
+/// exact `z.com` on block would otherwise lose to a suffix `z.com` on escape.
+/// Exact is strictly the more specific statement, so it goes first.
+///
+/// Lane order escape → corp → block, plain and unsorted — no length ranking is
+/// meaningful when only one exact entry can ever match a given host, and it
+/// matches the tie-break `suffix_rules` lands on. `classify` scans in the same
+/// order, so the explainer and the router agree on which lane claims a host that
+/// (only by hand-editing — `_lane_dedupe` prevents it) sits in two.
+fn exact_rules(lists: &Lists, escape_outbound: &str) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    for (list, outbound) in [
+        (&lists.escape_exact, escape_outbound),
+        (&lists.corp_exact, "corp"),
+        (&lists.block_exact, "block"),
+    ] {
+        if !list.is_empty() {
+            out.push(json!({"domain": list, "outbound": outbound}));
+        }
+    }
+    out
+}
+
 /// Suffix rules across the three hand lists, most-specific first.
 ///
 /// jq sorts by `[label count, string length]` ascending and then reverses the
@@ -185,6 +233,7 @@ fn suffix_rules(lists: &Lists, escape_outbound: &str) -> Vec<Value> {
 /// The host configuration — what lands in `host.json`.
 pub fn render_host(i: &HostInput) -> Value {
     let mut rules: Vec<Value> = vec![json!({"action": "sniff"})];
+    rules.extend(exact_rules(&i.lists, &i.escape_outbound));
     rules.extend(suffix_rules(&i.lists, &i.escape_outbound));
     rules.extend(
         i.geo.escape.iter()
@@ -208,11 +257,18 @@ pub fn render_host(i: &HostInput) -> Value {
         {"type": "local", "tag": "local"},
         {"type": "https", "tag": "dns-direct", "server": i.dns_direct, "detour": "direct"}
     ]);
-    let dns_rules: Vec<Value> = if i.lists.corp_domains.is_empty() {
-        vec![]
-    } else {
-        vec![json!({"domain_suffix": i.lists.corp_domains, "server": "local"})]
-    };
+    // Corp names must resolve through the corp resolver or they answer with a
+    // public IP and leave the tunnel — so an EXACT corp entry needs this rule
+    // just as much as a suffix one. `domain` sits first, mirroring the route
+    // rules, and each half is omitted when empty so a suffix-only config renders
+    // byte-identically to before this flag existed.
+    let mut dns_rules: Vec<Value> = Vec::new();
+    if !i.lists.corp_exact.is_empty() {
+        dns_rules.push(json!({"domain": i.lists.corp_exact, "server": "local"}));
+    }
+    if !i.lists.corp_domains.is_empty() {
+        dns_rules.push(json!({"domain_suffix": i.lists.corp_domains, "server": "local"}));
+    }
 
     let mut outbounds = i.escapes.as_array().cloned().unwrap_or_default();
     outbounds.push(json!({
@@ -382,5 +438,44 @@ mod tests {
     fn an_empty_server_list_selects_block() {
         let g = group(&[], "en0", "ghost", "20m");
         assert_eq!(g.as_array().unwrap().last().unwrap()["default"], json!("block"));
+    }
+
+    /// The load-bearing exclusion: a `domain:` line has no `/N`, so it passes
+    /// the "isn't a CIDR" test every other filter selects on. If it leaked
+    /// through it would render as a `domain_suffix` — the exact leak the flag
+    /// exists to prevent, and silent.
+    #[test]
+    fn exact_entries_never_leak_into_the_suffix_filters() {
+        let src = "z.com\ndomain:host.z.com\n10.0.0.0/8\ngeosite:google\n";
+        assert_eq!(parse_list(src, Filter::Domain), ["z.com"]);
+        assert_eq!(parse_list(src, Filter::All), ["z.com", "10.0.0.0/8"]);
+        assert_eq!(parse_list(src, Filter::Cidr), ["10.0.0.0/8"]);
+        assert_eq!(parse_list(src, Filter::Exact), ["host.z.com"]);
+        // A lane of nothing but exact entries renders NO suffix rules at all.
+        let only = "domain:a.com\ndomain:b.com\n";
+        assert!(parse_list(only, Filter::Domain).is_empty());
+        assert_eq!(parse_list(only, Filter::Exact), ["a.com", "b.com"]);
+    }
+
+    #[test]
+    fn exact_rules_are_emitted_before_every_suffix_rule() {
+        let lists = Lists {
+            escape_domains: vec!["z.com".into()],
+            block_exact: vec!["z.com".into()],
+            ..Default::default()
+        };
+        let r = [exact_rules(&lists, "escape"), suffix_rules(&lists, "escape")].concat();
+        // First-match-wins: without this order the block exact would lose to the
+        // escape suffix and `--domain` would silently do nothing.
+        assert_eq!(r[0], json!({"domain": ["z.com"], "outbound": "block"}));
+        assert_eq!(r[1], json!({"domain_suffix": ["z.com"], "outbound": "escape"}));
+    }
+
+    #[test]
+    fn a_suffix_only_config_renders_exactly_as_before() {
+        // The feature must be inert when unused — no empty `domain` rule, no
+        // second dns rule — or every existing render diffs.
+        let lists = Lists { corp_domains: vec!["corp.example".into()], ..Default::default() };
+        assert!(exact_rules(&lists, "escape").is_empty());
     }
 }

@@ -141,9 +141,10 @@ pub fn body(ctx: &Ctx, here: &Path) -> String {
     geo.sort();
     geo.dedup();
     o.push(format!("  buckets: escape={} corp={} block={}{}{}",
-        parse_list(&esc, Filter::All).len(),
-        parse_list(&corp, Filter::Domain).len() + parse_list(&corp, Filter::Cidr).len(),
-        parse_list(&blk, Filter::All).len(),
+        parse_list(&esc, Filter::All).len() + parse_list(&esc, Filter::Exact).len(),
+        parse_list(&corp, Filter::Domain).len() + parse_list(&corp, Filter::Cidr).len()
+            + parse_list(&corp, Filter::Exact).len(),
+        parse_list(&blk, Filter::All).len() + parse_list(&blk, Filter::Exact).len(),
         if ads { " +geosite-ads" } else { "" },
         if geo.is_empty() { String::new() } else { format!(" +geosite:{}", geo.join(",")) }));
     o.push(String::new());

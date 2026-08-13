@@ -241,6 +241,9 @@ pub fn build_host(ctx: &Ctx) -> Result<Value, String> {
             corp_domains: parse_list(&corp_src, Filter::Domain),
             corp_cidrs: parse_list(&corp_src, Filter::Cidr),
             block_domains: parse_list(&blk_src, Filter::Domain),
+            escape_exact: parse_list(&esc_src, Filter::Exact),
+            corp_exact: parse_list(&corp_src, Filter::Exact),
+            block_exact: parse_list(&blk_src, Filter::Exact),
         },
         escape_outbound: if local { "direct".into() } else { "escape".into() },
         geo: Geo {
@@ -1024,6 +1027,7 @@ pub fn cmd_setup(ctx: &Ctx, here: &Path, args: &[String]) -> Result<String, Stri
         out.push(format!("  switch anytime: {p} up host / {p} up vm / {p} up local", p = crate::PROG));
     }
     out.push(format!("  edit lanes:     {p} escape add <domain> / {p} corp add <domain>", p = crate::PROG));
+    out.push("                  add --domain <host> matches that host ONLY (no subdomains)".to_string());
     Ok(out.join("\n"))
 }
 

@@ -428,7 +428,27 @@ interface, the system-proxy state, and router liveness/port.
   free-running clock would be.
 - **Control layer** (§1): contextual keys act on the current selection —
   `e`/`c`/`b`/`d` route the locked domain to escape/corp/block/direct, `u`
-  switches to the selected server, `o` toggles the system proxy. Each shells out
+  switches to the selected server, `o` toggles the system proxy. Shifted,
+  `E`/`C`/`B`/`D` make the same four edits on the host's **parent suffix**
+  (`model::parent_suffix` — `x.y.z.com` → `z.com`; registry second levels take
+  one label more, so `x.y.z.co.uk` → `z.co.uk`). The entry is **bare**: measured
+  with `sing-box rule-set match` (1.13.14), `domain_suffix: ["z.com"]` already
+  declines `xz.com`, so a leading dot would only drop the apex. `classify.rs`
+  uses the same boundary rule (`suffix_matches`), so the explainer agrees. `None` — an IP, or
+  a host that already is its registrable domain — is **inert with a toast**,
+  never a silent fall back to the host: the uppercase key promises a suffix
+  entry, and honouring it with the lowercase edit would leave the lane file
+  unable to tell which key wrote it. The armed key is the uppercase letter, so
+  the two forms can't cross-commit through the double-tap check.
+- **Editable confirm bar** (`Armed.domain` doubles as the buffer, `Action::ArmEdit`
+  carries the op): `↵` applies whatever is in the field, so the entry written
+  need not be the one proposed. Deliberately **not** a modal takeover like the
+  search editor — `input::armed_key` returns `None` for anything that isn't a
+  text key, so it falls through to the global keymap and still cancels the arm.
+  While `!edited` the eight arm keys are also left alone, which is what preserves
+  double-tap-to-commit and re-arming; the first other keystroke flips `edited`
+  and from then on letters type. Every edit restamps `at`, so `ARM_TIMEOUT`
+  measures inactivity, and an empty buffer commits as a cancel. Each shells out
   to `$ROWT_BIN` (exported by `rowt monitor`) **off the UI thread**; outcomes are
   drained each frame into the footer toast (a failed command surfaces its
   stderr). Lane edits **arm** on first press (an amber confirm bar; re-press or

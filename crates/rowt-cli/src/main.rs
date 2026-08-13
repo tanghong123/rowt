@@ -761,8 +761,17 @@ fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<Str
     // literal `--no-reload` line, which is a lane entry that matches nothing
     // and that the user then has to find and remove by hand.
     let no_reload = args.iter().any(|a| a == "--no-reload");
+    // `--domain` / `--domain-suffix` pick the rule kind for the WHOLE command,
+    // and like `--no-reload` are honoured from any position. Shared with the
+    // `rowt-lanes` harness so the two callers cannot drift.
     let args: Vec<String> = args.iter().filter(|a| *a != "--no-reload").cloned().collect();
+    let (args, exact) = rowt_core::lanes::take_kind(&args);
     let args = args.as_slice();
+    // Stamp the marker before anything else looks at an ENTRY, so the
+    // single-lane invariant, the "already present" test and the messages all
+    // operate on the line as it is actually stored. Entries only — `import` and
+    // `dump` take a path, which must not be rewritten.
+    let mark = |entries: &[String]| rowt_core::lanes::mark_entries(entries, exact);
     let lanes = load_lanes(cfg);
     let body = match lane {
         Lane::Escape => &lanes.escape,
@@ -778,7 +787,7 @@ fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<Str
             if entries.is_empty() {
                 o.push_str("\n  (empty)");
                 o.push_str(&format!(
-                    "\n  {PROG} {label} add <e>… | rm <e>… | import <file> | clear | dump [file]"
+                    "\n  {PROG} {label} add [--domain] <e>… | rm [--domain] <e>… | import <file> | clear | dump [file]"
                 ));
             } else {
                 for e in entries {
@@ -801,7 +810,17 @@ fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<Str
         }
         "add" | "rm" | "remove" | "clear" | "import" => {
             let op = match action {
-                "add" => Op::Add(args.to_vec()),
+                // `edit_list` requires at least one entry, AFTER stripping the
+                // flags — so `add --domain` with nothing after it is a usage
+                // error, not a silent success. rowt-rs accepted a bare `add`
+                // and exited 0; no case covered it until `--domain` made the
+                // zero-entry shape easy to reach by accident.
+                // `die` not `Err`: the shell's `die` writes an `ABORT <op>: <msg>`
+                // audit line, while a returned Err lands on `END … rc=1`. The
+                // audit log is part of what cli-diff compares, so the two paths
+                // are not interchangeable.
+                "add" if args.is_empty() => die(cfg, &format!("usage: {PROG} {label} add <entry>...")),
+                "add" => Op::Add(mark(args)),
                 "clear" => Op::Clear,
                 "import" => {
                     let f = args.first().ok_or(format!(
@@ -812,7 +831,12 @@ fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<Str
                         source: f.clone(),
                     }
                 }
-                _ => Op::Rm(args.to_vec()),
+                // Same for `rm` — but bash checks the file first, so a missing
+                // lane still reports "list is empty" rather than usage.
+                _ if args.is_empty() && lane_file(cfg, lane).exists() => {
+                    die(cfg, &format!("usage: {PROG} {label} rm <entry>..."))
+                }
+                _ => Op::Rm(mark(args)),
             };
             let e = apply(&lanes, lane, &op);
             for l in [Lane::Escape, Lane::Corp, Lane::Block] {
@@ -869,8 +893,14 @@ fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<Str
                             // A plain domain shows (never applies) the categories
                             // that also cover it. Skipped for the TUI's batched
                             // edits so it never blocks on the network.
+                            // The hint is about the NAME, so an exact entry is
+                            // looked up by its host — `domain:x.com` is not a
+                            // domain and would silently never match.
                             None if !no_reload => {
-                                out.extend(geosite_hint(&cfg, label, entry, &have))
+                                let name = entry
+                                    .strip_prefix(rowt_core::render::EXACT_PREFIX)
+                                    .unwrap_or(entry);
+                                out.extend(geosite_hint(&cfg, label, name, &have))
                             }
                             None => {}
                         }
@@ -880,7 +910,7 @@ fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<Str
             Ok(out.join("\n"))
         }
         _ => Err(format!(
-            "usage: {PROG} {label} [list | add <e>… | rm <e>… | import <file> | clear | dump [file]]"
+            "usage: {PROG} {label} [list | add [--domain] <e>… | rm [--domain] <e>… | import <file> | clear | dump [file]]"
         )),
     }
 }
@@ -1786,10 +1816,15 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
             let esc = read(&cfg.join("escape-domains.txt"));
             let corp = read(&cfg.join("corp-domains.txt"));
             let blk = read(&cfg.join("block-domains.txt"));
-            let n_esc = rowt_core::render::parse_list(&esc, rowt_core::render::Filter::All).len();
-            let n_corp = rowt_core::render::parse_list(&corp, rowt_core::render::Filter::Domain).len()
-                       + rowt_core::render::parse_list(&corp, rowt_core::render::Filter::Cidr).len();
-            let n_blk = rowt_core::render::parse_list(&blk, rowt_core::render::Filter::All).len();
+            // `--domain` entries count too — they are entries the operator put
+            // there, and omitting them makes `status` read as "the flag did
+            // nothing" right when they'd check.
+            let n = |src: &str, f| rowt_core::render::parse_list(src, f).len();
+            let n_esc = n(&esc, rowt_core::render::Filter::All) + n(&esc, rowt_core::render::Filter::Exact);
+            let n_corp = n(&corp, rowt_core::render::Filter::Domain)
+                       + n(&corp, rowt_core::render::Filter::Cidr)
+                       + n(&corp, rowt_core::render::Filter::Exact);
+            let n_blk = n(&blk, rowt_core::render::Filter::All) + n(&blk, rowt_core::render::Filter::Exact);
             let ads = if cfg.join("cache/geosite-category-ads-all.srs").is_file() { "+ads" } else { "" };
             let mut geo: Vec<String> = rowt_core::render::geosites_of(&esc);
             geo.extend(rowt_core::render::geosites_of(&blk));

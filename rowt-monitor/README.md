@@ -33,6 +33,47 @@ domain · `p` pause · `?` help · `q` quit. (`v`/`s`/`f`/`/`/`w` are all global
 re-press or `↵` to commit; batched into one reload ~7s later) · `u` use the
 selected server · `o` toggle the system proxy.
 
+Shifted — `E`/`C`/`B`/`D` — make the same four edits on the host's **parent
+suffix** instead of the host: `x.y.z.com` → `z.com`, so one keystroke covers a
+whole service rather than the one hostname that happened to surface in the pane.
+Registry second levels stay whole (`x.y.z.co.uk` → `z.co.uk`, never `co.uk`).
+
+The entry is bare, not dot-led — measured against the router's own matcher
+(`sing-box rule-set match`, 1.13.14):
+
+| entry | `z.com` | `a.z.com` | `xz.com` |
+|---|---|---|---|
+| `domain_suffix: ["z.com"]` | ✓ | ✓ | ✗ |
+| `domain_suffix: [".z.com"]` | ✗ | ✓ | ✗ |
+
+sing-box matches on a **label boundary either way**, so a leading dot would only
+*lose* the apex — not what "cover the whole service" means. `rowt explain` uses
+the same boundary rule, so what it reports is what the router does.
+
+Where there is nothing broader to add — an IP, or a host that already *is* its
+registrable domain (`x.com`) — the shifted key stays **inert** and says so in the
+footer, rather than silently writing what the lowercase key would.
+
+Undo an `E`/`C`/`B` with `D`, not `d`: lane removal is an exact-line match, so
+`d` on `x.y.z.com` removes only that entry and reports success without touching
+a `z.com` written by `E`.
+
+**The confirm bar is editable.** Once armed, the proposed entry is a one-line
+editor: type to change it, `←→`/`Home`/`End` move a block cursor, `Backspace`/
+`Delete` cut, `Ctrl-W` drops one label at a time, `Ctrl-U` clears, and `↵`
+applies whatever is in the field. Editing is additive — while the field is
+untouched the eight arm keys keep their meaning, so `e`,`e` still double-taps
+(= no edit, then apply) and `e`,`C` still re-arms; the first other keystroke
+starts an edit, and from then on letters type. `Esc` cancels, an empty field
+cancels, and an entry with a space in it is refused rather than silently closed
+up (`edit_list` would strip it and write something the bar never showed).
+
+Two consequences worth knowing. While an edit is armed, printable keys go to the
+field — so `q` types `q` rather than quitting, and `?`/`y` likewise; press `Esc`
+first. And the arm timeout is an *inactivity* timer measured from the last
+keystroke: 5s for an untouched arm (the "did you mean that?" window), 20s once
+you start typing, so a pause to think doesn't discard the entry.
+
 **Mouse:** wheel scrolls (and focuses) the list under the pointer; click a row /
 lane / window-tab to activate, a server chip to select it in place, or `sys proxy`
 to toggle it (hover-highlights).

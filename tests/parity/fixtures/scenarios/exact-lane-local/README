@@ -1,0 +1,7 @@
+`exact-lane`'s mixed lanes, in LOCAL mode (`state` has mode=local).
+
+Local mode retargets the escape lane's outbound to `direct` — the rules stay,
+because they still carry precedence over broader block entries. The exact
+(`domain`) rules must retarget with the suffix ones; if only `suffix_rules` read
+`escape_outbound`, an exact escape entry would keep naming a tunnel the render
+just removed, and sing-box would reject the config.

@@ -44,6 +44,55 @@ impl Lane {
     }
 }
 
+/// Registry second levels — the labels that are part of the public suffix rather
+/// than of anyone's name. Only consulted under a two-letter ccTLD, so a `.com`
+/// host can never reach them.
+///
+/// Deliberately NOT `geosite::is_generic`: that list exists to guess a *brand*
+/// and so carries `api`, `cdn`, `static`, `mail`… — under it `a.b.cdn.com` would
+/// broaden to `b.cdn.com` instead of `cdn.com`.
+const REGISTRY_SLD: [&str; 10] = ["co", "com", "net", "org", "edu", "gov", "ac", "mil", "or", "ne"];
+
+/// The broadened lane entry for `host` — its registrable domain (`x.y.z.com` →
+/// `z.com`, `x.y.z.co.uk` → `z.co.uk`). `None` when there is nothing broader to
+/// add: an IP literal, a bare label, or a host that already *is* its registrable
+/// domain (`x.com`). The caller stays inert on `None` — it does not fall back to
+/// the host, which is what the lowercase key already does.
+///
+/// Bare, not dot-led. Measured against sing-box 1.13.14 with
+/// `sing-box rule-set match`, which is the router's own matcher:
+///
+/// ```text
+/// domain_suffix ["z.com"]   z.com ✓   a.z.com ✓   xz.com ✗
+/// domain_suffix [".z.com"]  z.com ✗   a.z.com ✓   xz.com ✗
+/// ```
+///
+/// sing-box matches on a LABEL BOUNDARY either way, so the dot's only effect is
+/// to *lose* the apex — which is not what "cover the whole service" means.
+/// `classify.rs` uses the same boundary rule, so `rowt explain` agrees.
+///
+/// Sibling subdomains parked in another lane are safe: `_lane_dedupe` is
+/// exact-line, so adding `alicdn.com` here leaves `dev.g.alicdn.com` in corp,
+/// and the render's longest-match ordering keeps the longer entry winning.
+pub fn parent_suffix(host: &str) -> Option<String> {
+    let h = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    // An IPv6 literal, or an IPv4 one (a final label that's all digits can't be
+    // a TLD) — `3.4` would be nonsense, so decline.
+    if h.contains(':') || h.rsplit('.').next().is_some_and(|t| t.chars().all(|c| c.is_ascii_digit())) {
+        return None;
+    }
+    let labels: Vec<&str> = h.split('.').filter(|l| !l.is_empty()).collect();
+    let n = labels.len();
+    if n < 2 {
+        return None;
+    }
+    let take = if labels[n - 1].len() == 2 && REGISTRY_SLD.contains(&labels[n - 2]) { 3 } else { 2 };
+    if n <= take {
+        return None; // the host is already the registrable domain
+    }
+    Some(labels[n - take..].join("."))
+}
+
 /// Which columns the connections pane is showing. `v` pans this window across a
 /// conceptually-wide table (pinned `host:port` + [live | ↑ upload | ↓ download])
 /// and wraps — see METRICS.md §5. Selection is by domain, so it rides the pan.
@@ -296,4 +345,48 @@ pub struct Snapshot {
     pub servers_down: u32,
     pub active_server: String,
     pub chips: Vec<Server>, // idle-but-up pool, sorted by latency
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parent_suffix;
+
+    #[test]
+    fn parent_suffix_broadens_to_the_registrable_domain() {
+        let s = |h: &str| parent_suffix(h).unwrap();
+        assert_eq!(s("x.y.z.com"), "z.com");
+        assert_eq!(s("polyfill.alicdn.com"), "alicdn.com");
+        assert_eq!(s("i.ytimg.com"), "ytimg.com");
+        // A generic-looking label under a generic TLD is still just a label —
+        // the `is_generic` trap this rule exists to avoid.
+        assert_eq!(s("a.b.cdn.com"), "cdn.com");
+        // Case and a trailing root dot normalise away.
+        assert_eq!(s("API.Anthropic.COM."), "anthropic.com");
+    }
+
+    #[test]
+    fn parent_suffix_keeps_registry_second_levels_whole() {
+        let s = |h: &str| parent_suffix(h).unwrap();
+        assert_eq!(s("www.bbc.co.uk"), "bbc.co.uk");
+        assert_eq!(s("x.y.z.co.uk"), "z.co.uk"); // not `co.uk` — that's a registry
+        assert_eq!(s("x.y.com.cn"), "y.com.cn");
+        assert_eq!(s("a.b.ne.jp"), "b.ne.jp");
+        // Two-letter ccTLD, but the SLD is somebody's name, not a registry.
+        assert_eq!(s("x.y.z.io"), "z.io");
+        assert_eq!(s("mail.google.co"), "google.co");
+    }
+
+    #[test]
+    fn parent_suffix_declines_when_there_is_nothing_to_broaden() {
+        // Already the registrable domain — bare and registry-SLD forms.
+        assert_eq!(parent_suffix("z.com"), None);
+        assert_eq!(parent_suffix("y.com.cn"), None);
+        assert_eq!(parent_suffix("bbc.co.uk"), None);
+        // IP literals: `1.2.3.4` → `.3.4` would be nonsense.
+        assert_eq!(parent_suffix("1.2.3.4"), None);
+        assert_eq!(parent_suffix("2606:4700:4700::1111"), None);
+        // Nothing to work with.
+        assert_eq!(parent_suffix("localhost"), None);
+        assert_eq!(parent_suffix(""), None);
+    }
 }

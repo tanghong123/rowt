@@ -2,7 +2,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
-use crate::app::{Action, App};
+use crate::app::{Action, App, Armed, Edit};
 use crate::model::Lane;
 use crate::ui::Hit;
 
@@ -41,6 +41,17 @@ pub fn key(k: KeyEvent, app: &App) -> Option<Action> {
             _ => None,
         };
     }
+    // An armed lane edit turns the confirm bar into a one-line editor. This is
+    // deliberately NOT a modal takeover like the search editor: while the buffer
+    // is untouched the eight control keys keep arming/committing (so `e`,`e`
+    // still double-taps and `e`,`C` still re-arms), and anything that isn't a
+    // text key falls through to the global keymap — where, as before, it cancels
+    // the arm. The first text key starts an edit; from then on letters type.
+    if let Some(a) = &app.armed {
+        if let Some(act) = armed_key(k, a) {
+            return Some(act);
+        }
+    }
     Some(match k.code {
         KeyCode::Char('/') => Action::SearchOpen,
         KeyCode::Char('q') => Action::Quit,
@@ -71,12 +82,54 @@ pub fn key(k: KeyEvent, app: &App) -> Option<Action> {
         KeyCode::Char('c') => Action::Route(Lane::Corp),
         KeyCode::Char('b') => Action::Route(Lane::Block),
         KeyCode::Char('d') => Action::Unroute,
+        // Shifted: the same four edits on the host's parent suffix (`x.y.z.com`
+        // → `.z.com`). Listed after the Ctrl-C guard above, which only matches
+        // lowercase, so a shifted key can't be mistaken for it.
+        KeyCode::Char('E') => Action::RouteSuffix(Lane::Escape),
+        KeyCode::Char('C') => Action::RouteSuffix(Lane::Corp),
+        KeyCode::Char('B') => Action::RouteSuffix(Lane::Block),
+        KeyCode::Char('D') => Action::UnrouteSuffix,
         KeyCode::Char('u') => Action::UseServer,
         KeyCode::Char('o') => Action::ToggleProxy,
         KeyCode::Enter => Action::Confirm,
         KeyCode::Esc => Action::Escape,
         _ => return None,
     })
+}
+
+/// The eight keys that arm a lane edit. While the armed buffer is untouched they
+/// keep that meaning inside the confirm bar rather than typing themselves — which
+/// is what makes "press the same key twice" still commit.
+const ARM_KEYS: [char; 8] = ['e', 'c', 'b', 'd', 'E', 'C', 'B', 'D'];
+
+/// Keys the armed confirm bar claims. `None` = not ours, fall through to the
+/// global keymap (which cancels the arm, as it always did).
+fn armed_key(k: KeyEvent, a: &Armed) -> Option<Action> {
+    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = k.modifiers.contains(KeyModifiers::ALT);
+    let edit = |e| Some(Action::ArmEdit(e));
+    match k.code {
+        // Ctrl-C cancels the pending edit rather than quitting — the same
+        // precedence the search editor uses while it owns the keyboard.
+        KeyCode::Char('c') if ctrl => Some(Action::Escape),
+        KeyCode::Char('a') if ctrl => edit(Edit::Home),
+        KeyCode::Char('e') if ctrl => edit(Edit::End),
+        KeyCode::Char('u') if ctrl => edit(Edit::KillLine),
+        KeyCode::Char('w') if ctrl => edit(Edit::KillWord),
+        // Unambiguous edit intent: these do nothing useful while armed today
+        // (Backspace/Delete/Home/End aren't bound at all; ←/→ only change focus
+        // on the way to cancelling), so claiming them costs nothing.
+        KeyCode::Backspace => edit(Edit::Backspace),
+        KeyCode::Delete => edit(Edit::Delete),
+        KeyCode::Left => edit(Edit::Cursor(-1)),
+        KeyCode::Right => edit(Edit::Cursor(1)),
+        KeyCode::Home => edit(Edit::Home),
+        KeyCode::End => edit(Edit::End),
+        // A pristine buffer leaves the arm keys alone so double-tap/re-arm work;
+        // once edited (or for any other printable) the bar takes the character.
+        KeyCode::Char(c) if !ctrl && !alt && (a.edited || !ARM_KEYS.contains(&c)) => edit(Edit::Insert(c)),
+        _ => None, // Enter/Esc and everything else: the global keymap handles it
+    }
 }
 
 pub fn mouse(m: MouseEvent, hit: &Hit) -> Option<Action> {
