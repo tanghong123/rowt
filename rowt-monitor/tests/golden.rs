@@ -514,9 +514,10 @@ fn footer_confirm_bar_is_a_plain_confirmation_then_an_editor() {
         row2.find("i.ytimg.com"),
         "the entry sits in the same column in both phases:\n{row1:?}\n{row2:?}"
     );
-    // The cursor lands on the reserved append column, one past the entry.
-    let entry_end = row2.find("i.ytimg.com").unwrap() as u16 + "i.ytimg.com".len() as u16;
-    assert_eq!(cur2[0], entry_end);
+    // The cursor starts at the LEFT — on the entry's first character, where a
+    // domain edit begins — not at the append column.
+    let entry_start = row2.find("i.ytimg.com").unwrap() as u16;
+    assert_eq!(cur2[0], entry_start);
 
     // Right-aligned: the bar ends at the right edge, and the left is empty.
     assert!(row2.trim_end().ends_with("esc cancel"), "{row2:?}");
@@ -532,10 +533,10 @@ fn the_cursor_and_the_hint_after_it_never_move() {
     use rowt_monitor::app::{Edit, DOUBLE_TAP_WINDOW};
     std::env::set_var("ROWT_MONITOR_NO_CLIPBOARD", "1");
     let (w, h) = (150u16, 41u16);
-    // The anchor is the APPEND column — the reserved cell the cursor occupies.
-    // It is the one landmark present in both phases: phase 1 draws no cursor, and
-    // an emptied entry (^U) leaves no text to search for, so neither the cursor
-    // nor the entry alone can carry the measurement.
+    // The anchor is the APPEND column — the reserved cell one past the entry.
+    // It is what pins the hint: the cursor itself lives at the LEFT and so rides
+    // the entry's start, which legitimately moves when `^W` shortens the text.
+    // What must never move is everything from the append cell rightward.
     let cols = |edits: &[Edit], age: std::time::Duration| -> u16 {
         let mut app = App::new(Box::new(FixtureSource::still()));
         app.side_by_side = true;
@@ -555,16 +556,17 @@ fn the_cursor_and_the_hint_after_it_never_move() {
         .unwrap();
         let buf = term.backend().buffer();
         let row = row_text(buf, w, h - 1);
-        let entry = app.armed.as_ref().unwrap().domain.clone();
+        let armed = app.armed.as_ref().unwrap();
+        let entry = armed.domain.clone();
         // Layout is [head][entry][append cell][tail], and every tail opens "  → ",
         // so the arrow sits 3 past the append cell and " → " starts 2 past it.
         let append = row.find(" → ").expect("the tail") as u16 - 2;
-        if let Some(cur) = (0..w).find(|x| buf.cell((*x, h - 1)).unwrap().modifier.contains(Modifier::REVERSED)) {
-            assert_eq!(cur, append, "the cursor IS the append cell: {row:?}");
-        }
         if !entry.is_empty() {
-            let end = row.find(&entry).expect("the entry") as u16 + entry.chars().count() as u16;
-            assert_eq!(end, append, "the append cell sits one past the entry: {row:?}");
+            let start = row.find(&entry).expect("the entry") as u16;
+            assert_eq!(start + entry.chars().count() as u16, append, "append is one past the entry: {row:?}");
+            if let Some(cur) = (0..w).find(|x| buf.cell((*x, h - 1)).unwrap().modifier.contains(Modifier::REVERSED)) {
+                assert_eq!(cur, start + armed.cursor as u16, "the cursor is where the buffer says: {row:?}");
+            }
         }
         append
     };
@@ -576,8 +578,8 @@ fn the_cursor_and_the_hint_after_it_never_move() {
     // …and it stays put as the entry grows and shrinks.
     assert_eq!(cols(&[Edit::Insert('x')], zero), armed, "first keystroke");
     assert_eq!(cols(&[Edit::Insert('x'), Edit::Insert('y'), Edit::Insert('z')], zero), armed);
-    assert_eq!(cols(&[Edit::KillWord], zero), armed);
-    assert_eq!(cols(&[Edit::KillLine], zero), armed);
+    assert_eq!(cols(&[Edit::DropLabel], zero), armed);
+    assert_eq!(cols(&[Edit::Delete], zero), armed);
 }
 
 #[test]
@@ -606,8 +608,10 @@ fn the_confirm_bar_flags_an_over_broad_entry_before_you_commit() {
         let entry = app.armed.as_ref().unwrap().domain.clone();
         buf.cell((row.find(&entry).unwrap() as u16, h - 1)).unwrap().fg
     };
+    // No kill-line any more: the cursor sits at the left, so Delete eats the
+    // proposed entry ("i.ytimg.com", 11 chars) and the typed text replaces it.
     let typed = |s: &str| -> Vec<Edit> {
-        let mut v = vec![Edit::KillLine];
+        let mut v = vec![Edit::Delete; "i.ytimg.com".len()];
         v.extend(s.chars().map(Edit::Insert));
         v
     };

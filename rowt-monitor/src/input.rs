@@ -113,8 +113,7 @@ fn armed_key(k: KeyEvent, a: &Armed) -> Option<Action> {
         KeyCode::Char('c') if ctrl => Some(Action::Escape),
         KeyCode::Char('a') if ctrl => edit(Edit::Home),
         KeyCode::Char('e') if ctrl => edit(Edit::End),
-        KeyCode::Char('u') if ctrl => edit(Edit::KillLine),
-        KeyCode::Char('w') if ctrl => edit(Edit::KillWord),
+        KeyCode::Char('w') if ctrl => edit(Edit::DropLabel),
         // Unambiguous edit intent: these do nothing useful while armed today
         // (Backspace/Delete/Home/End aren't bound at all; ←/→ only change focus
         // on the way to cancelling), so claiming them costs nothing.

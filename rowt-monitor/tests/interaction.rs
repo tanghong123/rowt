@@ -594,6 +594,18 @@ fn esc_priority_arm_then_selection_then_filter() {
 
 use rowt_monitor::app::Edit;
 
+/// Replace the whole entry, now that there is no kill-line: the cursor sits at
+/// the left, so forward-Delete eats it and the typed text lands in its place.
+fn retype(a: &mut App, to: &str) {
+    let n = a.armed.as_ref().unwrap().domain.chars().count();
+    for _ in 0..n {
+        a.update(Action::ArmEdit(Edit::Delete));
+    }
+    for c in to.chars() {
+        a.update(Action::ArmEdit(Edit::Insert(c)));
+    }
+}
+
 /// The toast is written from the same `entry` string that's handed to the
 /// source, so it's a faithful witness for what would be applied.
 fn applied(a: &App) -> String {
@@ -606,14 +618,12 @@ fn armed_entry_can_be_edited_and_enter_applies_the_edit() {
     a.update(Action::Down); // lock i.ytimg.com
     a.update(Action::Route(Lane::Escape));
     assert_eq!(a.armed.as_ref().unwrap().domain, "i.ytimg.com");
-    // Trim the leading label off by hand, then retype part of it — exercising
-    // both directions of the editor, not just deletion.
-    a.update(Action::ArmEdit(Edit::Home));
+    // The cursor is already at the left, so Delete eats the leading label…
     for _ in 0.."i.".len() {
         a.update(Action::ArmEdit(Edit::Delete));
     }
     assert_eq!(a.armed.as_ref().unwrap().domain, "ytimg.com");
-    a.update(Action::ArmEdit(Edit::Home));
+    // …and typing there puts a new one in its place.
     for c in "img.".chars() {
         a.update(Action::ArmEdit(Edit::Insert(c)));
     }
@@ -634,14 +644,31 @@ fn double_tap_still_commits_the_unedited_entry() {
 }
 
 #[test]
-fn ctrl_w_drops_one_label_at_a_time() {
+fn ctrl_w_drops_the_leading_label() {
     let mut a = app();
     a.update(Action::Down);
     a.update(Action::Route(Lane::Block)); // i.ytimg.com
-    a.update(Action::ArmEdit(Edit::KillWord));
-    assert_eq!(a.armed.as_ref().unwrap().domain, "i.ytimg.");
-    a.update(Action::ArmEdit(Edit::KillWord));
-    assert_eq!(a.armed.as_ref().unwrap().domain, "i.");
+    // Narrowing a hostname means dropping labels off the FRONT, which is also
+    // what `E` computes automatically — `^W` is the manual version of it.
+    a.update(Action::ArmEdit(Edit::DropLabel));
+    assert_eq!(a.armed.as_ref().unwrap().domain, "ytimg.com");
+    a.update(Action::ArmEdit(Edit::DropLabel));
+    assert_eq!(a.armed.as_ref().unwrap().domain, "com");
+    // No dot left: a no-op, not an emptied field.
+    a.update(Action::ArmEdit(Edit::DropLabel));
+    assert_eq!(a.armed.as_ref().unwrap().domain, "com");
+    assert_eq!(a.armed.as_ref().unwrap().cursor, 0, "and the cursor stays at the left");
+}
+
+/// The cursor starts at the LEFT, so the first thing typed lands at the front.
+#[test]
+fn the_cursor_starts_at_the_left() {
+    let mut a = app();
+    a.update(Action::Down);
+    a.update(Action::Route(Lane::Escape));
+    assert_eq!(a.armed.as_ref().unwrap().cursor, 0);
+    a.update(Action::ArmEdit(Edit::Insert('x')));
+    assert_eq!(a.armed.as_ref().unwrap().domain, "xi.ytimg.com");
 }
 
 #[test]
@@ -649,7 +676,10 @@ fn editing_to_empty_cancels_instead_of_applying() {
     let mut a = app();
     a.update(Action::Down);
     a.update(Action::Route(Lane::Escape));
-    a.update(Action::ArmEdit(Edit::KillLine));
+    let n = a.armed.as_ref().unwrap().domain.chars().count();
+    for _ in 0..n {
+        a.update(Action::ArmEdit(Edit::Delete));
+    }
     a.update(Action::Confirm);
     assert!(a.armed.is_none());
     assert!(applied(&a).contains("empty entry"), "an empty buffer is a cancel: {:?}", applied(&a));
@@ -688,7 +718,7 @@ fn the_confirm_bar_claims_text_keys_but_not_the_arm_keys_until_edited() {
     assert_eq!(k(&a, KeyCode::Char('x'), n), Some(Action::ArmEdit(Edit::Insert('x'))));
     assert_eq!(k(&a, KeyCode::Backspace, n), Some(Action::ArmEdit(Edit::Backspace)));
     assert_eq!(k(&a, KeyCode::Left, n), Some(Action::ArmEdit(Edit::Cursor(-1))));
-    assert_eq!(k(&a, KeyCode::Char('w'), KeyModifiers::CONTROL), Some(Action::ArmEdit(Edit::KillWord)));
+    assert_eq!(k(&a, KeyCode::Char('w'), KeyModifiers::CONTROL), Some(Action::ArmEdit(Edit::DropLabel)));
     // ↵ / Esc stay with the global keymap.
     assert_eq!(k(&a, KeyCode::Enter, n), Some(Action::Confirm));
     assert_eq!(k(&a, KeyCode::Esc, n), Some(Action::Escape));
@@ -773,10 +803,7 @@ fn an_over_broad_entry_is_refused() {
     let mut a = app();
     a.update(Action::Down);
     a.update(Action::Route(Lane::Escape));
-    a.update(Action::ArmEdit(Edit::KillLine));
-    for c in "com".chars() {
-        a.update(Action::ArmEdit(Edit::Insert(c)));
-    }
+    retype(&mut a, "com");
     a.update(Action::Confirm);
     assert!(a.armed.is_none());
     assert!(applied(&a).contains("whole top-level domain"), "{:?}", applied(&a));
@@ -784,20 +811,14 @@ fn an_over_broad_entry_is_refused() {
 
     // A registry suffix is the same mistake one label further down.
     a.update(Action::Route(Lane::Escape));
-    a.update(Action::ArmEdit(Edit::KillLine));
-    for c in "co.uk".chars() {
-        a.update(Action::ArmEdit(Edit::Insert(c)));
-    }
+    retype(&mut a, "co.uk");
     a.update(Action::Confirm);
     assert!(applied(&a).contains("whole registry namespace"), "{:?}", applied(&a));
     assert!(a.pending_reload.is_none());
 
     // …but a real domain of the same shape still applies.
     a.update(Action::Route(Lane::Escape));
-    a.update(Action::ArmEdit(Edit::KillLine));
-    for c in "bbc.co.uk".chars() {
-        a.update(Action::ArmEdit(Edit::Insert(c)));
-    }
+    retype(&mut a, "bbc.co.uk");
     a.update(Action::Confirm);
     assert_eq!(applied(&a), "bbc.co.uk → escape");
     assert!(a.pending_reload.is_some());

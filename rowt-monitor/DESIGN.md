@@ -464,7 +464,13 @@ interface, the system-proxy state, and router liveness/port.
   phases (phase 1 draws no cursor; `^U` leaves no entry text to find).
 
   `↵` applies whatever is in the field, so the entry written need not be the one
-  proposed. Every edit restamps `at`, so `ARM_TIMEOUT` is an INACTIVITY timer:
+  proposed. The cursor starts at index **0** and `^W` (`Edit::DropLabel`) strips
+  the LEADING dot-component rather than killing backwards — both because a
+  hostname is narrowed from the front, which is also what `parent_suffix`
+  computes. There is no kill-line; an empty field is a cancel and `Esc` states
+  that directly. One consequence: the cursor rides the entry's start, so `^W`
+  moves it — the invariant that holds is the append cell, and therefore
+  everything from the hint rightward. Every edit restamps `at`, so `ARM_TIMEOUT` is an INACTIVITY timer:
   10s since the last keypress auto-cancels, exactly as `Esc` would and just as
   silently. One value covers both phases — the bar is a live field within half a
   second, so an untouched arm and a half-typed one look identical and it would be

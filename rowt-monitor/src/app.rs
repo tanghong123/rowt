@@ -95,8 +95,14 @@ impl Armed {
     }
 }
 
-/// One editing operation on the armed confirm bar. Mirrors the search editor's
-/// key set so the two line editors feel the same.
+/// One editing operation on the armed confirm bar.
+///
+/// Close to the search editor's key set, with two deliberate differences that
+/// come from what a DOMAIN edit actually is: narrowing a hostname means dropping
+/// labels off the FRONT (`i.ytimg.com` → `ytimg.com`), so the cursor starts at
+/// the left and `^W` strips the leading label rather than killing backwards.
+/// There is no kill-line: an empty field is a cancel, which `Esc` already says
+/// more clearly.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Edit {
     Insert(char),
@@ -105,8 +111,8 @@ pub enum Edit {
     Cursor(i8),
     Home,
     End,
-    KillLine,
-    KillWord,
+    /// `^W` — drop the leading dot-component.
+    DropLabel,
 }
 
 /// An in-progress app-level drag selection (single row). Rendered as a reversed
@@ -802,7 +808,10 @@ impl App {
                 return;
             }
         }
-        let cursor = domain.chars().count();
+        // The cursor starts at the LEFT. A proposed entry is nearly always too
+        // specific rather than too short, so the first thing anyone does is trim
+        // from the front — and appending to a hostname is the rare case.
+        let cursor = 0;
         self.armed = Some(Armed { domain, lane, key, at: Instant::now(), cursor, edited: false });
     }
 
@@ -839,23 +848,15 @@ impl App {
             }
             Edit::Home => a.cursor = 0,
             Edit::End => a.cursor = a.domain.chars().count(),
-            Edit::KillLine => {
-                a.domain.clear();
+            Edit::DropLabel => {
+                // Strip the LEADING label — how you widen a hostname by hand:
+                // `i.ytimg.com` → `ytimg.com` → `com`. Position-independent, so
+                // it does the same thing wherever the cursor happens to be, and
+                // a no-op once no dot is left rather than emptying the field.
+                if let Some(i) = a.domain.find('.') {
+                    a.domain = a.domain[i + 1..].to_string();
+                }
                 a.cursor = 0;
-            }
-            Edit::KillWord => {
-                // Domains have no spaces, so `.` is the word separator that's
-                // actually useful here: Ctrl-W drops one label at a time.
-                let chars: Vec<char> = a.domain.chars().collect();
-                let mut i = a.cursor;
-                while i > 0 && chars[i - 1] == '.' {
-                    i -= 1;
-                }
-                while i > 0 && chars[i - 1] != '.' {
-                    i -= 1;
-                }
-                a.domain = chars[..i].iter().chain(chars[a.cursor..].iter()).collect();
-                a.cursor = i;
             }
         }
     }

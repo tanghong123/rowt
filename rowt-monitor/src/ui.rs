@@ -1031,7 +1031,7 @@ fn draw_help(buf: &mut Buffer, area: Rect) {
         "  E C B D    same, on the parent suffix",
         "             (x.y.z.com → z.com)",
         "             after ½s the entry turns editable:",
-        "             type, ^w drop a label, ^u clear, ↵",
+        "             type · ^w drop leading label · ↵ apply",
         "  u          use the selected server",
         "  o          toggle the system proxy on/off",
         "  r          re-probe servers now",

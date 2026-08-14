@@ -74,9 +74,13 @@ everything after it where they were.
 `press c again` means corp — and the lane is spelled out the moment the bar
 becomes editable.)
 
-In the editable phase: type to change the entry, `←→`/`Home`/`End` move the
-cursor, `Backspace`/`Delete` cut, `Ctrl-W` drops one label at a time, `Ctrl-U`
-clears, `↵` applies whatever is in the field. `Esc` cancels, an empty field
+In the editable phase the cursor starts at the **left**, because a proposed
+entry is nearly always too specific rather than too short and the first thing
+you do is trim from the front. `Ctrl-W` does that in one keystroke — it drops
+the **leading** label (`i.ytimg.com` → `ytimg.com` → `com`), the manual version
+of what `E` computes for you. Otherwise: type to insert, `←→`/`Home`/`End` move
+the cursor, `Backspace`/`Delete` cut, `↵` applies whatever is in the field.
+(There is no kill-line: an empty field is a cancel, which `Esc` says better.) `Esc` cancels, an empty field
 cancels, and an entry containing a space is refused rather than silently closed
 up (`edit_list` would strip it and write something the bar never showed).
 
