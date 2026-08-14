@@ -1109,6 +1109,11 @@ pub fn draw_footer(buf: &mut Buffer, area: Rect, app: &App) {
             false => theme::bold(theme::bright()),
         };
         let cursor_st = style.add_modifier(Modifier::REVERSED);
+        // An entry that would be refused is shown in the block colour as you
+        // type it, so the warning arrives before `↵` rather than after.
+        let risky = crate::model::entry_risk(&a.entry()).is_some();
+        let entry_st = if risky { theme::bold(theme::block()) } else { style };
+        let entry_cursor_st = entry_st.add_modifier(Modifier::REVERSED);
         let dest = a.lane.map(crate::model::Lane::label).unwrap_or("direct");
         let head = " CONFIRM  ";
         // Each phase names only the key that is live in it: the double-tap while
@@ -1137,7 +1142,13 @@ pub fn draw_footer(buf: &mut Buffer, area: Rect, app: &App) {
                 return;
             }
             let on_cursor = editing && i == a.cursor;
-            put(buf, x, y, &ch.to_string(), if on_cursor { cursor_st } else { style });
+            let st = match (on_cursor, risky) {
+                (true, true) => entry_cursor_st,
+                (true, false) => cursor_st,
+                (false, true) => entry_st,
+                (false, false) => style,
+            };
+            put(buf, x, y, &ch.to_string(), st);
             x += 1;
         }
         if x < area.right() {

@@ -53,6 +53,15 @@ impl Lane {
 /// broaden to `b.cdn.com` instead of `cdn.com`.
 const REGISTRY_SLD: [&str; 10] = ["co", "com", "net", "org", "edu", "gov", "ac", "mil", "or", "ne"];
 
+/// Why this entry is too broad to write, or `None` if it is fine.
+///
+/// Re-exported from `rowt_core::lanes` rather than reimplemented: the CLI
+/// refuses on exactly this rule, so a second copy here could drift and the bar
+/// would paint an entry safe that `rowt <lane> add` then declines — or worse,
+/// the other way round. The TUI applies it with no `--force` escape, because a
+/// keystroke in an editable field is not the place to override a safety rule.
+pub use rowt_core::lanes::entry_risk;
+
 /// The broadened lane entry for `host` — its registrable domain (`x.y.z.com` →
 /// `z.com`, `x.y.z.co.uk` → `z.co.uk`). `None` when there is nothing broader to
 /// add: an IP literal, a bare label, or a host that already *is* its registrable
@@ -389,4 +398,6 @@ mod tests {
         assert_eq!(parent_suffix("localhost"), None);
         assert_eq!(parent_suffix(""), None);
     }
+
+
 }

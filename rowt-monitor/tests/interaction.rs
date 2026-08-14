@@ -765,3 +765,40 @@ fn an_idle_edit_cancels_itself_like_esc() {
     assert_eq!(a.toast.clone().map(|(m, _)| m), before, "silently, like Esc");
     assert!(a.pending_reload.is_none(), "and writes nothing");
 }
+
+#[test]
+fn an_over_broad_entry_is_refused() {
+    // A lane entry is a domain_suffix, so `com` is every .com — and the editor
+    // puts that one ^U and three keystrokes away.
+    let mut a = app();
+    a.update(Action::Down);
+    a.update(Action::Route(Lane::Escape));
+    a.update(Action::ArmEdit(Edit::KillLine));
+    for c in "com".chars() {
+        a.update(Action::ArmEdit(Edit::Insert(c)));
+    }
+    a.update(Action::Confirm);
+    assert!(a.armed.is_none());
+    assert!(applied(&a).contains("whole top-level domain"), "{:?}", applied(&a));
+    assert!(a.pending_reload.is_none(), "nothing was written");
+
+    // A registry suffix is the same mistake one label further down.
+    a.update(Action::Route(Lane::Escape));
+    a.update(Action::ArmEdit(Edit::KillLine));
+    for c in "co.uk".chars() {
+        a.update(Action::ArmEdit(Edit::Insert(c)));
+    }
+    a.update(Action::Confirm);
+    assert!(applied(&a).contains("whole registry namespace"), "{:?}", applied(&a));
+    assert!(a.pending_reload.is_none());
+
+    // …but a real domain of the same shape still applies.
+    a.update(Action::Route(Lane::Escape));
+    a.update(Action::ArmEdit(Edit::KillLine));
+    for c in "bbc.co.uk".chars() {
+        a.update(Action::ArmEdit(Edit::Insert(c)));
+    }
+    a.update(Action::Confirm);
+    assert_eq!(applied(&a), "bbc.co.uk → escape");
+    assert!(a.pending_reload.is_some());
+}

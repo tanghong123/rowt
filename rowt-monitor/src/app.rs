@@ -875,6 +875,13 @@ impl App {
             self.notify(format!("⚠ {entry:?} has a space — not applied"));
             return;
         }
+        // An over-broad entry is refused outright, not confirmed: the bar has
+        // already been showing it in red, so `↵` here is a second mistake, and
+        // routing an entire TLD is silent and total once written.
+        if let Some(why) = crate::model::entry_risk(&entry) {
+            self.notify(format!("⚠ {entry} is {why} — not applied"));
+            return;
+        }
         match a.lane {
             Some(l) => self.source.route_lane(&entry, l),
             None => self.source.unroute(&entry),

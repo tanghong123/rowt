@@ -80,6 +80,17 @@ clears, `↵` applies whatever is in the field. `Esc` cancels, an empty field
 cancels, and an entry containing a space is refused rather than silently closed
 up (`edit_list` would strip it and write something the bar never showed).
 
+**Over-broad entries are refused.** A lane entry is a `domain_suffix`, so `com`
+is not a host — it is every `.com`, and `^U` plus three keystrokes is all it
+takes to get there. The bar turns the entry **red** as you type one, and `↵`
+declines with a reason instead of writing it. Two shapes are caught: a single
+label (`com`, `cn`, `localhost`, `.com` — any bare TLD) and a bare registry
+suffix (`co.uk`, `com.cn`, `ne.jp`). `bbc.co.uk` and `google.com` are fine —
+it is the *shape* that identifies the mistake, not a list of TLDs. The rule is
+`rowt_core::lanes::entry_risk`, shared with the CLI so the colour here and the
+refusal there can never disagree; `rowt <lane> add` takes a `--force` to step
+past it, the TUI deliberately does not.
+
 Two consequences worth knowing. Once editable, printable keys go to the field —
 so `q` types `q` rather than quitting, and `?`/`y` likewise; press `Esc` first.
 And an armed edit **auto-cancels after 10s idle** — measured from the last

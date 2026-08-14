@@ -43,13 +43,61 @@ impl Lanes {
 
 #[derive(Debug, Clone)]
 pub enum Op {
-    Add(Vec<String>),
+    /// `force` skips the `entry_risk` guard — `add --force`.
+    Add { entries: Vec<String>, force: bool },
     Rm(Vec<String>),
     Clear,
     /// Batch add — one entry per line, as `import` reads a file. Carries the
     /// source name because the shell names it in the summary line, and that
     /// summary is the message this has to reproduce.
     Import { lines: Vec<String>, source: String },
+}
+
+/// Registry second levels — the labels that belong to a public suffix rather
+/// than to anyone's name. Only consulted under a two-letter ccTLD.
+const REGISTRY_SLD: [&str; 10] = ["co", "com", "net", "org", "edu", "gov", "ac", "mil", "or", "ne"];
+
+/// Why this entry is too broad to add without saying so, or `None` if it is fine.
+///
+/// A lane entry is a `domain_suffix`, so `com` is not a host called com — it is
+/// every name under `.com`. Typed into the monitor's editable confirm bar that is
+/// one `^U` and three keystrokes away, and the damage is silent and total.
+///
+/// Two shapes, matched by SHAPE and never by a list of TLDs — new TLDs appear,
+/// the mistake's shape does not:
+///
+/// - **one label** — `com`, `cn`, `lan`, and the dot-led `.com`.
+/// - **a bare registry suffix** — `co.uk`, `com.cn`, `ne.jp`: two labels where
+///   the last is a ccTLD and the first is a registry level, i.e. a whole country
+///   namespace. `bbc.co.uk` (three labels) and `google.com` (`com` is not a
+///   ccTLD) both pass.
+///
+/// This is a WARNING, not a prohibition, which is why `add --force` exists: a
+/// single-label entry is exactly right for an internal namespace on the corp
+/// lane (`lan`, `corp`, `home`), and refusing those outright would block what
+/// that lane is for.
+pub fn entry_risk(entry: &str) -> Option<&'static str> {
+    let e = entry.trim().to_ascii_lowercase();
+    // Not entries of this kind: a `geosite:` reference names a rule-set, a CIDR
+    // is an address range, and a `domain:` entry is an EXACT host — it matches
+    // one name, so it cannot be over-broad however it is spelled.
+    if e.starts_with("geosite:") || e.starts_with(crate::render::EXACT_PREFIX) || e.contains('/') {
+        return None;
+    }
+    let e = e.trim_end_matches('.');
+    let e = e.strip_prefix('.').unwrap_or(e);
+    let labels: Vec<&str> = e.split('.').filter(|l| !l.is_empty()).collect();
+    match labels.as_slice() {
+        [] => None,
+        [_] => Some("a whole top-level domain"),
+        [sld, tld] if tld.len() == 2 && REGISTRY_SLD.contains(sld) => Some("a whole registry namespace"),
+        _ => None,
+    }
+}
+
+/// The line both implementations print when they decline one.
+pub fn risk_message(entry: &str, why: &str) -> String {
+    format!("  skipped {entry} — {why}; lane entries are suffixes. Use --force if you mean it.")
 }
 
 /// Split the rule-kind flags out of a lane command's arguments.
@@ -196,8 +244,9 @@ pub fn apply(lanes: &Lanes, target: Lane, op: &Op) -> Edit {
     }
 
     match op {
-        Op::Add(entries) | Op::Import { lines: entries, .. } => {
+        Op::Add { entries, .. } | Op::Import { lines: entries, .. } => {
             let importing = matches!(op, Op::Import { .. });
+            let force = matches!(op, Op::Add { force: true, .. });
             let mut added = 0usize;
             let mut already = 0usize;
             for raw in entries {
@@ -205,6 +254,15 @@ pub fn apply(lanes: &Lanes, target: Lane, op: &Op) -> Edit {
                 // import skips comments and blanks; add just skips blanks.
                 if e.is_empty() || (importing && e.starts_with('#')) {
                     continue;
+                }
+                // An entry that is a whole namespace is declined unless the
+                // caller says otherwise. Skipped for `import`, which is a file
+                // someone wrote deliberately rather than a slip at a prompt.
+                if !importing && !force {
+                    if let Some(why) = entry_risk(&e) {
+                        msgs.push(risk_message(&e, why));
+                        continue;
+                    }
                 }
                 // `geosite:` is escape/block only — corp routes internal
                 // domains and CIDRs, and a rule-set cannot express those.
@@ -312,7 +370,7 @@ mod tests {
 
     #[test]
     fn adding_to_one_lane_pulls_it_from_the_others() {
-        let e = apply(&lanes(), Lane::Corp, &Op::Add(vec!["example.com".into()]));
+        let e = apply(&lanes(), Lane::Corp, &Op::Add { entries: vec!["example.com".into()], force: false });
         assert!(e.lanes.corp.contains("example.com"));
         assert!(!e.lanes.escape.contains("example.com"));
         assert!(e.messages.iter().any(|m| m.contains("moved out of escape lane")));
@@ -320,17 +378,17 @@ mod tests {
 
     #[test]
     fn re_adding_is_a_no_op_that_says_so() {
-        let e = apply(&lanes(), Lane::Escape, &Op::Add(vec!["example.com".into()]));
+        let e = apply(&lanes(), Lane::Escape, &Op::Add { entries: vec!["example.com".into()], force: false });
         assert_eq!(e.lanes, lanes());
         assert_eq!(e.messages, vec!["  already present: example.com"]);
     }
 
     #[test]
     fn geosite_is_refused_on_corp_only() {
-        let e = apply(&lanes(), Lane::Corp, &Op::Add(vec!["geosite:google".into()]));
+        let e = apply(&lanes(), Lane::Corp, &Op::Add { entries: vec!["geosite:google".into()], force: false });
         assert_eq!(e.lanes, lanes());
         assert!(e.messages[0].contains("only for the escape and block lanes"));
-        let ok = apply(&lanes(), Lane::Escape, &Op::Add(vec!["geosite:google".into()]));
+        let ok = apply(&lanes(), Lane::Escape, &Op::Add { entries: vec!["geosite:google".into()], force: false });
         assert!(ok.lanes.escape.contains("geosite:google"));
     }
 
@@ -472,5 +530,64 @@ mod tests {
         // An entry that normalizes to nothing stays empty, so the caller's
         // "no entries" usage error still fires instead of a bare `domain:` line.
         assert_eq!(e(&["  "], true), [""]);
+    }
+
+    #[test]
+    fn entry_risk_refuses_whole_namespaces() {
+        // A single label is a whole TLD — `com` as a domain_suffix is every .com.
+        assert!(entry_risk("com").is_some());
+        assert!(entry_risk("cn").is_some());
+        assert!(entry_risk("lan").is_some());
+        assert!(entry_risk(".com").is_some(), "the dot-led form is the same rule");
+        assert!(entry_risk("com.").is_some());
+        assert!(entry_risk("  COM  ").is_some(), "trimmed and case-folded first");
+        // A bare registry suffix is a whole country namespace.
+        assert!(entry_risk("co.uk").is_some());
+        assert!(entry_risk("com.cn").is_some());
+        assert!(entry_risk("ne.jp").is_some());
+    }
+
+    #[test]
+    fn entry_risk_allows_real_domains_and_other_entry_kinds() {
+        assert_eq!(entry_risk("z.com"), None);
+        assert_eq!(entry_risk("google.com"), None, "com is not a ccTLD");
+        assert_eq!(entry_risk("bbc.co.uk"), None, "three labels — somebody's name");
+        assert_eq!(entry_risk(".z.com"), None);
+        assert_eq!(entry_risk("x.io"), None, "x is not a registry level");
+        assert_eq!(entry_risk("1.2.3.4"), None);
+        // Other entry KINDS are out of scope, not merely allowed: a rule-set
+        // reference names a category, a CIDR is a range, and `domain:` is an
+        // exact host — one name, so it cannot be over-broad however it is spelt.
+        assert_eq!(entry_risk("geosite:google"), None);
+        assert_eq!(entry_risk("10.0.0.0/8"), None);
+        assert_eq!(entry_risk("domain:com"), None);
+        assert_eq!(entry_risk(""), None);
+    }
+
+    #[test]
+    fn a_risky_add_is_declined_but_force_writes_it() {
+        let risky = |force| {
+            apply(&lanes(), Lane::Corp, &Op::Add { entries: vec!["lan".into()], force })
+        };
+        let e = risky(false);
+        assert!(!e.lanes.corp.contains("lan"), "declined by default");
+        assert!(e.messages.iter().any(|m| m.contains("a whole top-level domain")), "{:?}", e.messages);
+        assert!(e.messages.iter().any(|m| m.contains("--force")), "and says how to mean it");
+        // `lan` is a real internal namespace — the guard has to be steppable or
+        // it blocks exactly what the corp lane is for.
+        let f = risky(true);
+        assert!(f.lanes.corp.contains("lan"));
+        assert!(f.messages.iter().any(|m| m.contains("added: lan")), "{:?}", f.messages);
+    }
+
+    #[test]
+    fn import_is_not_subject_to_the_guard() {
+        // A file is something someone wrote deliberately, not a slip at a prompt.
+        let e = apply(
+            &lanes(),
+            Lane::Block,
+            &Op::Import { lines: vec!["com".into()], source: "f.txt".into() },
+        );
+        assert!(e.lanes.block.contains("com"));
     }
 }

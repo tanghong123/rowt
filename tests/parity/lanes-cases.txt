@@ -19,6 +19,13 @@ escape rm --domain example.com
 escape rm --domain absent.example
 escape add --domain
 block add --domain exact.block.example
+escape add com
+escape add co.uk
+corp add lan
+escape add --force com
+corp add --force lan
+escape add com z.example
+escape add --domain com
 block clear
 escape clear
 escape dump

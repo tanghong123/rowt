@@ -538,6 +538,7 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 | `escape` / `corp` / `block` (no verb) | list the lane. |
 | `… add <d>…` / `… rm <d>…` | add / remove domains (corp also takes CIDRs). Reloads if running. |
 | `… add --domain <d>…` | match the **whole host only**, not its subdomains — stored as `domain:<host>`, rendered as a sing-box `domain` rule instead of `domain_suffix`. `--domain-suffix` names the default explicitly. Applies to every entry of that `add`/`rm`, from any position. |
+| `… add --force <d>…` | add an entry that is a **whole namespace**. Lane entries are suffixes, so `com` is every `.com` and `co.uk` is every `.co.uk`; both are declined unless you say `--force`. |
 | `… import <file>` | batch-add one domain per line from a file (merges; never replaces). |
 | `… clear` | remove every entry (keeps the file's comment header). Reloads if running. |
 | `… dump [file]` | export the lane (stdout, or to a file for backup/versioning). |
@@ -559,6 +560,17 @@ rowt escape add alicdn.com                # …while the rest of the CDN escapes
 
 The two kinds are different entries, so the same name can sit in different lanes
 one way each; the exact rule is emitted first and wins for that one host.
+
+**Whole-namespace entries are declined.** Because entries are suffixes, `escape
+add com` would route every `.com` through the tunnel — silently and completely.
+`add` refuses two shapes: a single label (`com`, `cn`, `.com` — any bare TLD)
+and a bare registry suffix (`co.uk`, `com.cn`, `ne.jp`). It is matched by
+*shape*, not a list of TLDs, so it stays correct as new ones appear;
+`bbc.co.uk` and `google.com` are unaffected. Add `--force` when you mean it —
+a single label is exactly right for an internal namespace on the corp lane
+(`rowt corp add --force lan`), which is why this is a guard and not a ban. The
+monitor applies the same rule with no override, and paints the entry red as you
+type it.
 
 The router captures each failed/refused connection per lane (`timestamp⇥domain⇥reason`)
 into `~/.config/rowt/log/lane-<lane>.log` — the block flood is diverted out of

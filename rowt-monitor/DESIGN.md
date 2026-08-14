@@ -472,6 +472,18 @@ interface, the system-proxy state, and router liveness/port.
   cancel, and one containing whitespace is refused rather than silently closed up
   (bash `edit_list` would `tr -d` it and write a different string than the bar
   showed).
+- **Over-broad entries are refused** (`model::entry_risk`): a single label (any
+  bare TLD, dot-led or not) or a bare registry suffix (`co.uk`, `com.cn`). A lane
+  entry is a `domain_suffix`, so `com` routes every `.com` — silent and total,
+  and one `^U` away in an editable field. The bar paints the entry in the block
+  colour while it is unsafe, so the warning lands before `↵`, and the commit then
+  declines outright rather than asking: the operator has already been shown it in
+  red, so a keypress is not new information. Matched by SHAPE, never a TLD list —
+  new TLDs appear, the mistake's shape does not. The rule lives in
+  `rowt_core::lanes::entry_risk` and `rowt <lane> add` enforces it too, so the
+  colour painted here and the entry the CLI declines cannot drift apart; the CLI
+  offers `--force`, the TUI does not (a keystroke in a text field is not where a
+  safety rule should be overridable).
 - **Lane filter** is global (both panes) and shows as a `· <lane>` chip in both
   captions. Changing it re-polls immediately (cheap in-memory re-aggregation).
 - **Mouse:** wheel scrolls (and focuses) the list under the pointer; clicking a

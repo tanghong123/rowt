@@ -41,6 +41,21 @@ escape rm --domain absent.example
 # `--domain` with no entry, and with an entry that normalizes to nothing.
 escape add --domain
 escape rm --domain
+# The over-broad-entry guard: a lane entry is a suffix, so `com` is every .com.
+# Declined by default, written under --force. Other entry KINDS are out of scope.
+escape add com
+escape add co.uk
+escape add .com
+corp add lan
+escape add bbc.co.uk
+escape add --force com
+corp add --force lan
+escape add --domain com
+escape add com z.example
+corp add 10.0.0.0/8
+escape add geosite:google --force
+# import is deliberately NOT guarded — a file is not a slip at a prompt.
+escape add --force
 # The explainer has to name the kind it matched, on both sides.
 PARITY_SCENARIO=exact-lane route exact.example
 PARITY_SCENARIO=exact-lane route sub.exact.example

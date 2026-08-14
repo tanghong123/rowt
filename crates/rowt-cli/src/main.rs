@@ -764,7 +764,10 @@ fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<Str
     // `--domain` / `--domain-suffix` pick the rule kind for the WHOLE command,
     // and like `--no-reload` are honoured from any position. Shared with the
     // `rowt-lanes` harness so the two callers cannot drift.
-    let args: Vec<String> = args.iter().filter(|a| *a != "--no-reload").cloned().collect();
+    // `--force` steps past the over-broad-entry guard (`entry_risk`).
+    let force = args.iter().any(|a| a == "--force");
+    let args: Vec<String> =
+        args.iter().filter(|a| !matches!(a.as_str(), "--no-reload" | "--force")).cloned().collect();
     let (args, exact) = rowt_core::lanes::take_kind(&args);
     let args = args.as_slice();
     // Stamp the marker before anything else looks at an ENTRY, so the
@@ -787,7 +790,7 @@ fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<Str
             if entries.is_empty() {
                 o.push_str("\n  (empty)");
                 o.push_str(&format!(
-                    "\n  {PROG} {label} add [--domain] <e>… | rm [--domain] <e>… | import <file> | clear | dump [file]"
+                    "\n  {PROG} {label} add [--domain] [--force] <e>… | rm [--domain] <e>… | import <file> | clear | dump [file]"
                 ));
             } else {
                 for e in entries {
@@ -820,7 +823,7 @@ fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<Str
                 // audit log is part of what cli-diff compares, so the two paths
                 // are not interchangeable.
                 "add" if args.is_empty() => die(cfg, &format!("usage: {PROG} {label} add <entry>...")),
-                "add" => Op::Add(mark(args)),
+                "add" => Op::Add { entries: mark(args), force },
                 "clear" => Op::Clear,
                 "import" => {
                     let f = args.first().ok_or(format!(
@@ -865,7 +868,7 @@ fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<Str
             // the entry just added and excludes whatever dedupe pulled out of
             // the other two lanes.
             let mut out = e.messages.clone();
-            if let Op::Add(entries) = &op {
+            if let Op::Add { entries, .. } = &op {
                 // `geosite:` is escape/block only — corp routes internal names —
                 // and on those two lanes an add splits two ways, exactly as the
                 // shell's `case "$e"` does.
@@ -910,7 +913,7 @@ fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<Str
             Ok(out.join("\n"))
         }
         _ => Err(format!(
-            "usage: {PROG} {label} [list | add [--domain] <e>… | rm [--domain] <e>… | import <file> | clear | dump [file]]"
+            "usage: {PROG} {label} [list | add [--domain] [--force] <e>… | rm [--domain] <e>… | import <file> | clear | dump [file]]"
         )),
     }
 }

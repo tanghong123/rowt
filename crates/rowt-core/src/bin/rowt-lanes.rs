@@ -47,6 +47,8 @@ fn run() -> Result<String, String> {
         .ok_or("usage: rowt-lanes --config-dir DIR <escape|corp|block> <op> [args…]")?;
     let action = rest.get(1).cloned().unwrap_or_else(|| "list".into());
     let (operands, exact) = rowt_core::lanes::take_kind(&rest[2.min(rest.len())..]);
+    let force = operands.iter().any(|a| a == "--force");
+    let operands: Vec<String> = operands.into_iter().filter(|a| a != "--force").collect();
 
     let lanes = Lanes {
         escape: read(&file_of(&cfg, Lane::Escape)),
@@ -64,7 +66,7 @@ fn run() -> Result<String, String> {
     }
 
     let op = match action.as_str() {
-        "add" => Op::Add(mark_entries(&operands, exact)),
+        "add" => Op::Add { entries: mark_entries(&operands, exact), force },
         "rm" | "remove" => Op::Rm(mark_entries(&operands, exact)),
         "clear" => Op::Clear,
         "import" => {

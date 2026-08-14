@@ -37,6 +37,12 @@ regex = { version = "1", default-features = false, features = ["std", "perf", "u
 # so an unanswering terminal costs 100 ms and never a wedged reader thread.
 # Already in the tree via crossterm; named here because theme.rs uses it directly.
 libc = "0.2"
+# The lane-entry safety rule (`entry_risk`) — shared with the CLI rather than
+# copied, so the colour the TUI paints and the entry the CLI refuses can never
+# disagree. Excluded from the root workspace, so this is a plain path dep; the
+# Intel formula branch builds this crate with `cd rowt-monitor && cargo install
+# --path .`, which resolves it the same way.
+rowt-core = { path = "../crates/rowt-core" }
 
 [profile.release]
 opt-level = 2

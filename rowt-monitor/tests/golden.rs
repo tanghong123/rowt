@@ -579,3 +579,41 @@ fn the_cursor_and_the_hint_after_it_never_move() {
     assert_eq!(cols(&[Edit::KillWord], zero), armed);
     assert_eq!(cols(&[Edit::KillLine], zero), armed);
 }
+
+#[test]
+fn the_confirm_bar_flags_an_over_broad_entry_before_you_commit() {
+    use rowt_monitor::app::Edit;
+    std::env::set_var("ROWT_MONITOR_NO_CLIPBOARD", "1");
+    let (w, h) = (150u16, 41u16);
+    let entry_fg = |edits: &[Edit]| -> Color {
+        let mut app = App::new(Box::new(FixtureSource::still()));
+        app.side_by_side = true;
+        app.conn_h = 6;
+        app.err_h = 6;
+        app.update(Action::Down);
+        app.update(Action::Route(Lane::Escape));
+        for e in edits {
+            app.update(Action::ArmEdit(*e));
+        }
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| {
+            let a = f.area();
+            ui::draw_footer(f.buffer_mut(), a, &app);
+        })
+        .unwrap();
+        let buf = term.backend().buffer();
+        let row = row_text(buf, w, h - 1);
+        let entry = app.armed.as_ref().unwrap().domain.clone();
+        buf.cell((row.find(&entry).unwrap() as u16, h - 1)).unwrap().fg
+    };
+    let typed = |s: &str| -> Vec<Edit> {
+        let mut v = vec![Edit::KillLine];
+        v.extend(s.chars().map(Edit::Insert));
+        v
+    };
+    // The refusal has to arrive while you are typing, not after `↵`.
+    assert_eq!(entry_fg(&typed("com")), theme::block(), "a bare TLD reads as dangerous");
+    assert_eq!(entry_fg(&typed("co.uk")), theme::block(), "so does a registry suffix");
+    assert_ne!(entry_fg(&typed("bbc.co.uk")), theme::block(), "a real domain does not");
+    assert_ne!(entry_fg(&typed("z.com")), theme::block());
+}

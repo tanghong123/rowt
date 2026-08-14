@@ -53,7 +53,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.4.1"
+ROWT_VERSION="3.4.2"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -621,6 +621,35 @@ _geosite_hint() {
   esac
 }
 
+# Why this entry is too broad to add without saying so — rc 0 + a reason, else
+# rc 1. Mirrors rowt_core::lanes::entry_risk; the parity gate holds them equal.
+#
+# A lane entry is a domain_suffix, so `com` is not a host, it is every .com.
+# Matched by SHAPE (one label, or a bare registry suffix like co.uk) rather than
+# a TLD list, which would go stale. `geosite:` refs and CIDRs are not entries of
+# A single label is exactly right for an internal namespace on the corp lane
+# (`lan`), which is why --force exists rather than a hard refusal.
+_entry_risk() { # $1=entry -> prints the reason, rc 0 when risky
+  local e l1 l2
+  e="$(printf '%s' "$1" | tr 'A-Z' 'a-z')"
+  # Not entries of this kind: geosite: names a rule-set, a CIDR is an address
+  # range, and domain: is an EXACT host — one name, so never over-broad.
+  case "$e" in geosite:*|domain:*|*"/"*) return 1 ;; esac
+  e="${e%.}"; e="${e#.}"
+  [ -n "$e" ] || return 1
+  case "$e" in
+    *.*) ;;
+    *)   printf 'a whole top-level domain\n'; return 0 ;;
+  esac
+  case "${e%.*}" in *.*) return 1 ;; esac   # three or more labels: somebody's name
+  l1="${e%.*}"; l2="${e##*.}"
+  [ "${#l2}" -eq 2 ] || return 1
+  case " co com net org edu gov ac mil or ne " in
+    *" $l1 "*) printf 'a whole registry namespace\n'; return 0 ;;
+  esac
+  return 1
+}
+
 # rowt escape / corp  [list | add <e>… | rm <e>… | import <file> | clear | dump [file]]
 edit_list() {
   local file="$1" label="$2" action="${3:-list}"; shift 3 2>/dev/null || true
@@ -630,12 +659,13 @@ edit_list() {
   # Suffix is the default (and by far the right answer most of the time);
   # --domain stores the entry as `domain:<host>`, an exact whole-host match.
   # Both are honoured from ANY position, like --no-reload.
-  local no_reload=0 exact=0 __a; local args=()
+  local no_reload=0 exact=0 force=0 __a; local args=()
   for __a in "$@"; do
     case "$__a" in
       --no-reload)     no_reload=1 ;;
       --domain)        exact=1 ;;
       --domain-suffix) exact=0 ;;
+      --force)         force=1 ;;
       *)               args+=("$__a") ;;
     esac
   done
@@ -652,7 +682,7 @@ edit_list() {
         grep -vE '^[[:space:]]*(#|$)' "$file" | sed 's/^/  /'
       else
         echo "  (empty)"
-        echo "  $PROG $label add [--domain] <e>… | rm [--domain] <e>… | import <file> | clear | dump [file]"
+        echo "  $PROG $label add [--domain] [--force] <e>… | rm [--domain] <e>… | import <file> | clear | dump [file]"
       fi
       return 0 ;;
     add)
@@ -664,6 +694,14 @@ edit_list() {
         # single-lane invariant, the already-present test and every message all
         # operate on the line as it is actually stored.
         [ "$exact" -eq 1 ] && e="domain:$e"
+        # An entry that is a whole namespace is declined unless --force.
+        if [ "$force" -eq 0 ]; then
+          local _why
+          if _why="$(_entry_risk "$e")"; then
+            echo "  skipped $e — $_why; lane entries are suffixes. Use --force if you mean it."
+            continue
+          fi
+        fi
         # geosite: is escape/block only (corp routes internal domains/CIDRs).
         case "$e" in
           geosite:*) [ "$label" = corp ] && { echo "  skipped $e — geosite: is only for the escape and block lanes"; continue; } ;;
@@ -708,7 +746,7 @@ edit_list() {
       if [ -n "${1:-}" ]; then printf '%s\n' "$entries" > "$1"; echo "  dumped $label list -> $1" >&2
       else printf '%s\n' "$entries"; fi
       return 0 ;;
-    *) die "usage: $PROG $label [list | add [--domain] <e>… | rm [--domain] <e>… | import <file> | clear | dump [file]]" ;;
+    *) die "usage: $PROG $label [list | add [--domain] [--force] <e>… | rm [--domain] <e>… | import <file> | clear | dump [file]]" ;;
   esac
   # only re-render/restart if some lane changed (and reload wasn't suppressed)
   local _after; _after="$(cat "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" 2>/dev/null)"
@@ -4457,6 +4495,11 @@ $PROG $1 <subcommand> — edit the $1 lane$([ "$1" = escape ] && echo " (domains
                        Applies to every entry of that add/rm.
   --domain-suffix      the default — match the host and everything under it
                        (sing-box 'domain_suffix'). Accept it to be explicit.
+  --force              add an entry that is a WHOLE namespace. Lane entries are
+                       suffixes, so 'com' is every .com and 'co.uk' is every
+                       .co.uk; both are declined unless you say --force. A single
+                       label is right for an internal namespace on the corp lane
+                       ('lan'), which is why this is a guard and not a ban.
   import <file>        batch-add one entry per line from a file (# comments ok)
   clear                remove every entry (keeps the file's comment header)
   dump [file]          print the lane (or write it to a file) for backup/versioning
