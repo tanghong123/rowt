@@ -354,8 +354,8 @@ CPU 往往因此被耗掉；这条通道正是为此而设。</p>
 <rect class="dg-box" x="500" y="258" width="210" height="50" rx="7" style="stroke:var(--block)"/>
 <text class="dg-t" x="605.0" y="279" text-anchor="middle">collector</text>
 <text class="dg-s" x="605.0" y="295" text-anchor="middle">按域名记流量 → SQLite</text>
-<path class="dg-l" d="M500 225 L465 225" style="stroke:var(--direct)" stroke-dasharray="4 5" marker-end="url(#ar-dir)"/>
-<path class="dg-l" d="M500 283 L465 271" style="stroke:var(--block)" stroke-dasharray="4 5" marker-end="url(#ar-blk)"/>
+<path class="dg-l" d="M500 225 L460 225" style="stroke:var(--direct)" stroke-dasharray="4 5" marker-end="url(#ar-dir)"/>
+<path class="dg-l" d="M500 283 L460 271" style="stroke:var(--block)" stroke-dasharray="4 5" marker-end="url(#ar-blk)"/>
 </svg></div><div class="foot"><span>rowt</span><span>5 / 25</span><span class="rail"><i class="h" title="回到第一页"></i><i class=""></i><i class=""></i><i class=""></i><i class="a "></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
 <section class="slide" data-i="5"><div class="eyebrow">工作原理</div><div class="body"><h2>通道选择逻辑</h2><p class="muted" style="margin:-.3em 0 14px">自上而下，命中即止。</p>
 <p>连接进来，sing-box 先嗅探目标域名，这一步早于任何 DNS 查询；取得域名后，逐条匹配规则。</p>
