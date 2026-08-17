@@ -991,12 +991,18 @@ rowt onboard</div>
 <script>
 (function(){
   var s=[].slice.call(document.querySelectorAll('.slide')),i=0,
-      bar=document.getElementById('bar'),hint=document.getElementById('hint');
+      bar=document.getElementById('bar'),hint=document.getElementById('hint'),
+      lang=document.querySelector('.lang'),
+      // The two editions are slide-for-slide parallel, so the index carries over
+      // as-is. Kept in the href (not added on click) so hover, middle-click and
+      // "copy link address" all land on the same slide too.
+      langHref=lang?lang.getAttribute('href'):null;
   function go(n){
     i=Math.max(0,Math.min(s.length-1,n));
     s.forEach(function(el,k){el.classList.toggle('on',k===i);});
     bar.style.width=((i+1)/s.length*100)+'%';
     location.hash=i?('#'+(i+1)):'';
+    if(lang)lang.href=langHref+(i?('#'+(i+1)):'');
     if(i>0)hint.classList.add('gone');
     var b=s[i].querySelector('.body'); if(b)b.scrollTop=0;
   }
