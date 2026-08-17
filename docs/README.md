@@ -1,6 +1,12 @@
 # `docs/` — the product introduction, as a page
 
-`index.html` is a self-contained slide deck introducing rowt: the problem, how it
+Two self-contained decks, same 25 slides: `index.html` (English) and `zh.html`
+(中文). They are parallel, not one translated line-by-line from the other — the
+Chinese版 is rewritten to read naturally, with its own typography (a CJK sans for
+headings, looser leading, a shorter measure). A link in the top-left switches
+between them.
+
+Both introduce rowt: the problem, how it
 differs from a VPN, the architecture, onboarding, daily operations, a tour of the
 monitor TUI, and the engineering numbers. Open it locally, or serve it from
 GitHub Pages (Settings → Pages → Source: `main` / `/docs`).
