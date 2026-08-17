@@ -403,19 +403,23 @@ specific entry always beats it.</p>
 rowt corp sync     <span class="c"># with the corp VPN UP — mirror its routes</span></div>
 <p class="muted" style="font-size:14px;margin:0">Run <code>corp sync</code> once while connected;
 after that the watchdog repeats it every tick.</p></div>
-<div class="n">07</div><div><h3>Make it permanent</h3>
-<div class="cmd">eval "$(rowt shell-init)"  <span class="c"># in ~/.zshrc</span>
-rowt watch install        <span class="c"># auto-reload</span></div></div></div></div></div><div class="foot"><span>rowt</span><span>8 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
+<div class="n">07</div><div><h3>Let it manage itself</h3>
+<p class="muted" style="font-size:14px;margin-bottom:.5em">Install the watchdog: auto-reload on
+network change, recovery from a wedged or crashed tunnel, and a stale proxy cleared at login.</p>
+<div class="cmd">rowt watch install
+rowt watch status</div></div></div></div></div><div class="foot"><span>rowt</span><span>8 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
 <section class="slide" data-i="8"><div class="eyebrow">Getting started</div><div class="body"><h2>Getting your terminal to use it.</h2>
 <p class="lead">The macOS system proxy covers browsers and GUI apps. CLI tools ignore it entirely —
 they only read <code>http_proxy</code> / <code>https_proxy</code> / <code>all_proxy</code>. rowt gives
 you three ways to bridge that.</p>
 <div class="cols c3" style="margin-top:22px">
 <div class="card"><div class="tag" style="--l:var(--escape)">Per shell</div>
-<div class="cmd" style="margin:.6em 0 0">rowt-proxy-on
+<div class="cmd" style="margin:.6em 0 0">eval "$(rowt shell-init)"  <span class="c"># in ~/.zshrc, once</span>
+
+rowt-proxy-on
 rowt-proxy-off</div>
-<p style="margin:.7em 0 0;font-size:14.5px">Set and clear the variables in <em>this</em> shell. Both
-come from <code>rowt shell-init</code>, which also installs tab-completion.</p></div>
+<p style="margin:.7em 0 0;font-size:14.5px">Both aliases come from <code>rowt shell-init</code>,
+which sets and clears the variables in <em>this</em> shell and installs tab-completion.</p></div>
 <div class="card"><div class="tag" style="--l:var(--corp)">Per command</div>
 <div class="cmd" style="margin:.6em 0 0">rowt run claude
 rowt run git pull</div>

@@ -431,18 +431,22 @@ rowt block  add <span class="c">ads.example.com</span></div>
 <div class="cmd">rowt corp suggest  <span class="c"># 依据 DHCP 搜索域推断</span>
 rowt corp sync     <span class="c"># 连着公司 VPN 时执行，同步其路由</span></div>
 <p class="muted" style="font-size:14px;margin:0">连接状态下执行一次 <code>corp sync</code>；此后看门狗每一拍自动重跑。</p></div>
-<div class="n">07</div><div><h3>长期生效</h3>
-<div class="cmd">eval "$(rowt shell-init)"  <span class="c"># 写入 ~/.zshrc</span>
-rowt watch install        <span class="c"># 网络变化时自动重载</span></div></div></div></div></div><div class="foot"><span>rowt</span><span>8 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
+<div class="n">07</div><div><h3>自动管理</h3>
+<p class="muted" style="font-size:14px;margin-bottom:.5em">装上看门狗：网络变化自动重载，
+隧道卡死或崩溃自动恢复，登录时清理残留代理设置。</p>
+<div class="cmd">rowt watch install
+rowt watch status</div></div></div></div></div><div class="foot"><span>rowt</span><span>8 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
 <section class="slide" data-i="8"><div class="eyebrow">上手</div><div class="body"><h2>命令行代理配置</h2>
 <p class="lead">系统代理只覆盖浏览器与图形应用。命令行工具不读系统代理，只认
 <code>http_proxy</code> / <code>https_proxy</code> / <code>all_proxy</code>。rowt 提供三种方式。</p>
 <div class="cols c3" style="margin-top:22px">
 <div class="card"><div class="tag" style="--l:var(--escape)">按 shell</div>
-<div class="cmd" style="margin:.6em 0 0">rowt-proxy-on
+<div class="cmd" style="margin:.6em 0 0">eval "$(rowt shell-init)"  <span class="c"># 写入 ~/.zshrc，一次即可</span>
+
+rowt-proxy-on
 rowt-proxy-off</div>
-<p style="margin:.7em 0 0;font-size:14.5px">在当前 shell 内设置与清除这几个变量。来自
-<code>rowt shell-init</code>，同时装好 Tab 补全。</p></div>
+<p style="margin:.7em 0 0;font-size:14.5px">这两条别名由 <code>rowt shell-init</code> 提供，
+在当前 shell 内设置与清除上述变量；同时装好 Tab 补全。</p></div>
 <div class="card"><div class="tag" style="--l:var(--corp)">按命令</div>
 <div class="cmd" style="margin:.6em 0 0">rowt run claude
 rowt run git pull</div>
