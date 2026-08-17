@@ -671,10 +671,10 @@ place), or `sys proxy` to toggle it (hover-highlights).
 **Controls** (confirmed, reversible — each maps to a `rowt` command):
 
 - `e` / `c` / `b` / `d` — route the locked domain into **escape** / **corp** /
-  **block**, or `d` back to **direct**. Armed by the first press (an amber confirm
-  bar previews the change); a second press of the same key or `↵` commits, any
-  other key or `Esc` cancels. Edits are batched — one router reload fires ~7s
-  after the last edit settles.
+  **block**, or `d` back to **direct**. Armed by the first press (a confirm bar
+  previews the change); a second press of the same key or `↵` commits, `Esc`
+  cancels. Edits are batched — one router reload fires ~7s after the last edit
+  settles.
 - `E` / `C` / `B` / `D` — the same four edits on the host's **parent suffix**
   rather than the host: `x.y.z.com` → `z.com`, so one keystroke covers the whole
   service. Registry second levels stay whole (`x.y.z.co.uk` → `z.co.uk`, never
@@ -684,12 +684,21 @@ place), or `sys proxy` to toggle it (hover-highlights).
   that already is its registrable domain like `x.com`) the shifted key is inert
   and says so, rather than silently doing the lowercase edit. Undo an `E` with
   `D` — removal is exact-line, so `d` on the host won't remove a suffix entry.
-- **The armed entry is editable.** The confirm bar is a one-line editor: type to
-  change the proposed entry, `Ctrl-W` drops a label, `Ctrl-U` clears, `↵` applies
-  what's in the field, `Esc` (or an empty field) cancels. Untouched, it behaves
-  exactly as before — the same key twice still commits unedited. The timeout is
-  an inactivity timer: 5s for an untouched arm, 20s while editing. Note printable
-  keys go to the field while armed, so `q` types rather than quits — `Esc` first.
+- **The confirm bar has two phases.** For the first **½ second** it is a plain
+  confirmation — press the same key again to apply, or another arm key to
+  re-target. After that it turns **amber with a block cursor** and the entry
+  becomes an editable field, at which point the arm keys type instead of
+  committing. Only colour and the cursor distinguish them; nothing moves.
+- **Editing works from the left**, because a proposed entry is nearly always too
+  specific rather than too short. The cursor starts on the first character;
+  `Ctrl-W` drops the **leading** label (`i.ytimg.com` → `ytimg.com` → `com`) —
+  the manual form of what `E` computes; `←→`/`Home`/`End` move, `Backspace`/
+  `Delete` cut, `↵` applies what's in the field. There is no kill-line: an empty
+  field is a cancel, and `Esc` says that directly. An armed edit **auto-cancels
+  after 10s idle**, measured from the last keypress, so typing keeps it alive.
+  Note printable keys go to the field once editable, so `q` types rather than
+  quits — `Esc` first. An over-broad entry (`com`, `co.uk`) shows red and is
+  refused; the CLI's `--force` has no equivalent here, deliberately.
 - `u` — switch the active outbound server to the selected chip (live, immediate).
 - `o` — toggle the macOS system proxy on/off (immediate).
 

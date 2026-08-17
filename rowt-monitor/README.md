@@ -80,13 +80,13 @@ you do is trim from the front. `Ctrl-W` does that in one keystroke — it drops
 the **leading** label (`i.ytimg.com` → `ytimg.com` → `com`), the manual version
 of what `E` computes for you. Otherwise: type to insert, `←→`/`Home`/`End` move
 the cursor, `Backspace`/`Delete` cut, `↵` applies whatever is in the field.
-(There is no kill-line: an empty field is a cancel, which `Esc` says better.) `Esc` cancels, an empty field
-cancels, and an entry containing a space is refused rather than silently closed
-up (`edit_list` would strip it and write something the bar never showed).
+There is no kill-line: an empty field is a cancel, and `Esc` says that directly.
+An entry containing a space is refused rather than silently closed up
+(`edit_list` would strip it and write something the bar never showed).
 
 **Over-broad entries are refused.** A lane entry is a `domain_suffix`, so `com`
-is not a host — it is every `.com`, and `^U` plus three keystrokes is all it
-takes to get there. The bar turns the entry **red** as you type one, and `↵`
+is not a host — it is every `.com`, and a few `^W`s is all it takes to get there
+(`i.ytimg.com` → `ytimg.com` → `com`). The bar turns the entry **red** as you type one, and `↵`
 declines with a reason instead of writing it. Two shapes are caught: a single
 label (`com`, `cn`, `localhost`, `.com` — any bare TLD) and a bare registry
 suffix (`co.uk`, `com.cn`, `ne.jp`). `bbc.co.uk` and `google.com` are fine —
