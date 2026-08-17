@@ -30,6 +30,11 @@ body{margin:0;background:var(--ground);color:var(--ink);font-family:var(--sans);
 .slide{position:absolute;inset:0;display:none;grid-template-rows:auto 1fr auto;
   padding:var(--pad) var(--pad) 0;overflow:hidden}
 .slide.on{display:grid;animation:in .34s cubic-bezier(.2,.7,.3,1)}
+/* Pin the rows. The title slides carry no eyebrow, so with auto-placement their
+   two children fell into rows 1 and 2 — putting the footer in the middle 1fr row
+   instead of the last one, and floating it off the bottom. */
+.slide>.body{grid-row:2}
+.slide>.foot{grid-row:3}
 @keyframes in{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
 @media (prefers-reduced-motion:reduce){.slide.on{animation:none}}
 .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.16em;text-transform:uppercase;
@@ -194,7 +199,12 @@ body.zh code,body.zh kbd,body.zh .cmd,body.zh .tag,body.zh .kv dt,body.zh .keys 
 body.zh .stat b,body.zh .ph,body.zh .bars .row b,body.zh .bars .row span,
 body.zh .ex,body.zh .foot,body.zh .lang,body.zh .hint{font-family:var(--mono)}
 body.zh .stat b{letter-spacing:-.02em}
-.lang{position:fixed;left:var(--pad);top:15px;z-index:9;font-family:var(--mono);font-size:11.5px;
+.tri{display:grid;gap:15px;margin:0 0 4px}
+.tri .it{display:grid;grid-template-columns:auto 1fr;gap:16px;align-items:baseline}
+.tri .it b{font-weight:600;color:var(--l,var(--accent));white-space:nowrap;font-size:15.5px;
+  letter-spacing:.02em}
+.tri .it p{margin:0;max-width:34em}
+.lang{position:fixed;right:var(--pad);top:15px;z-index:9;font-family:var(--mono);font-size:11.5px;
   letter-spacing:.09em;color:var(--ink-3);text-decoration:none;border-bottom:1px solid var(--rule);
   padding-bottom:1px}
 .lang:hover{color:var(--accent);border-color:var(--accent)}
@@ -205,59 +215,65 @@ body.zh .stat b{letter-spacing:-.02em}
 <div class="deck" id="deck">
 <section class="slide" data-i="0"><div class="body"><div class="title-wrap">
 <div class="eyebrow" style="max-width:340px">产品介绍</div>
-<h1>三条通道，<br>一个本地代理。</h1>
+<h1>三条通道，<br>一个本地代理</h1>
 <div class="lanes3"><i style="background:var(--escape)"></i><i style="background:var(--corp)"></i><i style="background:var(--direct)"></i></div>
-<p class="lead"><strong>rowt</strong> 让个人 VPN、公司 VPN 和直连在 macOS 上<em>同时生效</em>——
-办法是：它压根就不是一个 VPN。</p>
-<p class="muted">逐连接分流 · 实时 TUI · 不碰系统路由表。</p></div></div><div class="foot"><span>rowt</span><span>1 / 25</span><span class="rail"><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
-<section class="slide" data-i="1"><div class="eyebrow">为什么需要它</div><div class="body"><h2>两条隧道，一张路由表。</h2>
+<p class="lead">个人 VPN、公司 VPN、直连，三者在 macOS 上并行不悖。
+<strong>rowt</strong> 能做到这一点，恰恰因为它不是 VPN。</p>
+<p class="muted">逐连接分流 · 实时可观测 · 不写系统路由表</p></div></div><div class="foot"><span>rowt</span><span>1 / 25</span><span class="rail"><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
+<section class="slide" data-i="1"><div class="eyebrow">为什么需要它</div><div class="body"><h2>两条隧道，一张路由表</h2>
+<p class="muted" style="margin:-.4em 0 20px">这是一个资源独占问题，不是配置问题。</p>
 <div class="cols c2">
-<div><p>你想让 Google 走自己的 VLESS 服务器，内网走公司 VPN，百度直连——而且是同时。</p>
-<p>做不到。Shadowrocket 和公司 VPN 客户端都是<strong>数据包隧道</strong>：各自建一块
-<code>utun</code> 虚拟网卡，各自想抢默认路由。macOS 只会让其中一个赢。</p>
-<p>于是日常就变成了手动切换：连上公司 VPN，Google 没了；开个人 VPN，内网又进不去。来回折腾。</p></div>
+<div class="tri">
+<div class="it" style="--l:var(--escape)"><b>目标</b>
+<p>Google 走自己的 VLESS 服务器，内网走公司 VPN，百度直连，三者同时成立。</p></div>
+<div class="it" style="--l:var(--amber)"><b>障碍</b>
+<p>Shadowrocket 与公司 VPN 客户端都属于<strong>数据包隧道</strong>，各自建立一块
+<code>utun</code> 虚拟网卡，也都要占据默认路由；macOS 只让其中一个生效。</p></div>
+<div class="it" style="--l:var(--block)"><b>结果</b>
+<p>反复手动切换：连公司 VPN，Google 不通；开个人 VPN，内网进不去。</p></div></div>
 <div class="cols" style="gap:14px">
 <div class="card lane lane-esc"><div class="tag">冲突在哪</div>
-<p style="margin:.4em 0 0">两块 <code>utun</code>，一张路由表。后连上的那个拿走默认路由，
-另一个就这么无声无息地失效了。</p></div>
-<div class="card lane lane-dir"><div class="tag">你真正想要的</div>
-<p style="margin:.4em 0 0">按<em>每条连接</em>决定，而不是按整台机器。
-<code>google.com</code> 走一条路，<code>jira.corp</code> 走另一条，<code>baidu.com</code> 再走第三条。</p></div>
+<p style="margin:.4em 0 0">两块 <code>utun</code> 争同一张路由表。后连接的一方取走默认路由，
+先连接的那个随即失效，且没有任何提示。</p></div>
+<div class="card lane lane-dir"><div class="tag">真正需要的</div>
+<p style="margin:.4em 0 0">决定权在<em>每条连接</em>，而不是整台机器。
+<code>google.com</code> 一条路，<code>jira.corp</code> 另一条，<code>baidu.com</code> 第三条。</p></div>
 </div></div></div><div class="foot"><span>rowt</span><span>2 / 25</span><span class="rail"><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
-<section class="slide" data-i="2"><div class="eyebrow">它是什么</div><div class="body"><h2>不是隧道，是代理。</h2>
-<p class="lead">rowt 把 sing-box 当成一个普通的<strong>用户态代理</strong>跑在
-<code>127.0.0.1:7890</code>。代理不动路由表，自然也就没法跟公司 VPN 客户端打架。
-应用把连接交给它，它来决定这条连接从哪出去。</p>
+<section class="slide" data-i="2"><div class="eyebrow">它是什么</div><div class="body"><h2>不是隧道，是代理</h2>
+<p class="lead">rowt 用 sing-box 起一个<strong>用户态代理</strong>，监听
+<code>127.0.0.1:7890</code>。代理不碰路由表，自然不与公司 VPN 争抢资源；
+应用把连接交过来，由它逐条判断该走哪个出口。</p>
+<p class="muted" style="margin-top:-.4em">换一个层次解决问题：不在网络层抢路由，而在应用层做分发。</p>
 <div class="scroll" style="margin-top:22px"><table>
 <tr><th></th><th>常见 VPN 客户端</th><th>rowt</th></tr>
 <tr><td>实现方式</td><td>数据包隧道（<code>utun</code>）</td><td>监听端口的本地代理</td></tr>
-<tr><td>路由表</td><td>抢占默认路由</td><td>只读不写</td></tr>
-<tr><td>能否与公司 VPN 共存</td><td>不能，只能活一个</td><td>能，天然如此</td></tr>
-<tr><td>分流粒度</td><td>全量，或者你说了不算的分流</td><td>按连接、按域名</td></tr>
+<tr><td>路由表</td><td>占据默认路由</td><td>只读，不写</td></tr>
+<tr><td>与公司 VPN 共存</td><td>不能，只能活一个</td><td>可以，天然如此</td></tr>
+<tr><td>分流粒度</td><td>全量，或不可控的分流</td><td>按连接、按域名</td></tr>
 <tr><td>是否需要 root</td><td>需要</td><td>不需要</td></tr>
-<tr><td>判断依据</td><td>目标 IP</td><td><strong>嗅探到的域名</strong>，在 DNS 之前</td></tr>
+<tr><td>判断依据</td><td>目标 IP</td><td><strong>嗅探到的域名</strong>，早于 DNS</td></tr>
 </table></div>
-<p class="note">代价也说清楚：它只能管住愿意走代理的流量。裸 <code>ping</code>、<code>ssh</code>，
-以及任何无视系统代理设置的程序，都会绕过它——这是设计如此，也写在文档里，不藏着。</p></div><div class="foot"><span>rowt</span><span>3 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
-<section class="slide" data-i="3"><div class="eyebrow">它是什么</div><div class="body"><h2>四条通道。</h2>
+<p class="note">代价：只覆盖走代理的流量；裸 <code>ping</code>、<code>ssh</code>
+以及任何不读系统代理设置的程序都会绕过。取舍写在明处，不做隐性承诺。</p></div><div class="foot"><span>rowt</span><span>3 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
+<section class="slide" data-i="3"><div class="eyebrow">它是什么</div><div class="body"><h2>四条通道，各行其道</h2>
 <div class="cols c2" style="gap:16px">
 <div class="card lane lane-esc"><div class="tag">escape</div><h3>自己的隧道</h3>
-<p style="margin:0">VLESS / VMess / AnyTLS / hysteria2 连到你自己的 VPS。这条 socket
-<strong>绑定在物理网卡上</strong>，所以哪怕公司 VPN 占着默认路由，它照样从家里的路由器出去。</p>
+<p style="margin:0">连到自己的 VPS，支持 VLESS / VMess / AnyTLS / hysteria2。
+socket <strong>绑定物理网卡</strong>，公司 VPN 占着默认路由也不影响，照样经家庭路由器出网。</p>
 <p class="ex">google.com · youtube.com · geosite:github</p></div>
 <div class="card lane lane-corp"><div class="tag">corp</div><h3>进公司 VPN</h3>
-<p style="margin:0"><strong>不绑网卡</strong>、交给系统解析器的 socket——于是它顺着系统路由表
-径直进入 <code>utunN</code>。这条通道会自己长，见后面的 corp sync。</p>
+<p style="margin:0">socket <strong>不绑网卡</strong>，域名交系统解析器处理，顺着系统路由表
+直接进入 <code>utunN</code>。内容可自行生成，见后文 corp sync。</p>
 <p class="ex">*.intranet.example.com · 10.0.0.0/8</p></div>
-<div class="card lane lane-dir"><div class="tag">direct</div><h3>直接出去</h3>
-<p style="margin:0">绑定物理网卡，两条隧道都不走。没列进任何名单的流量默认走这里——
-国内站点保持原速，不绕路。</p>
+<div class="card lane lane-dir"><div class="tag">direct</div><h3>直接出网</h3>
+<p style="margin:0">绑定物理网卡，两条隧道都不走。未被任何名单命中的流量默认走这里，
+国内站点保持原速，不额外绕行。</p>
 <p class="ex">baidu.com · mirrors.debian.org · 其余全部</p></div>
 <div class="card lane lane-blk"><div class="tag">block</div><h3>黑洞</h3>
-<p style="margin:0">当场拒绝——不解析、不连接。广告和遥测域名死掉之后会疯狂重试，
-那点 CPU 就是这么被吃掉的，这条通道专治这个。</p>
+<p style="margin:0">当场拒绝，不解析也不连接。广告与遥测域名连不上会持续重试，
+CPU 往往因此被耗掉；这条通道正是为此而设。</p>
 <p class="ex">doubleclick.net · google-analytics.com</p></div></div></div><div class="foot"><span>rowt</span><span>4 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
-<section class="slide" data-i="4"><div class="eyebrow">工作原理</div><div class="body"><h2>从应用到出口。</h2><svg class="diagram" viewBox="0 0 940 570" role="img" aria-label="How traffic reaches rowt on macOS, is classified into lanes, and leaves">
+<section class="slide" data-i="4"><div class="eyebrow">工作原理</div><div class="body"><h2>产品架构</h2><p class="muted" style="margin:-.3em 0 14px">流量如何进入 rowt、如何被分类、又从哪里出去。</p><svg class="diagram" viewBox="0 0 940 570" role="img" aria-label="How traffic reaches rowt on macOS, is classified into lanes, and leaves">
 <defs>
 <marker id="ar-rule" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="var(--rule)"/></marker>
 <marker id="ar-esc" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="var(--escape)"/></marker>
@@ -328,141 +344,136 @@ body.zh .stat b{letter-spacing:-.02em}
 <path class="dg-l" d="M250 492 L250 525 L790 525" style="stroke:var(--corp)"/>
 <path class="dg-l" d="M790 525 L790 396" style="stroke:var(--corp)" marker-end="url(#ar-corp)"/>
 <text class="dg-lab" x="520" y="545" text-anchor="middle">corp 通道不绑网卡，靠这张表进隧道</text>
-<rect class="dg-box" x="500" y="206" width="210" height="42" rx="7" style="stroke:var(--direct)"/>
-<text class="dg-t" x="605.0" y="231.5" text-anchor="middle">watch</text>
-<text class="dg-s" x="605" y="240" text-anchor="middle">网络变化时重载</text>
-<rect class="dg-box" x="500" y="262" width="210" height="42" rx="7" style="stroke:var(--block)"/>
-<text class="dg-t" x="605.0" y="287.5" text-anchor="middle">collector</text>
-<text class="dg-s" x="605" y="296" text-anchor="middle">按域名记流量 → SQLite</text>
-<path class="dg-l" d="M500 227 L465 227" style="stroke:var(--direct)" stroke-dasharray="4 5" marker-end="url(#ar-dir)"/>
+<rect class="dg-box" x="500" y="200" width="210" height="50" rx="7" style="stroke:var(--direct)"/>
+<text class="dg-t" x="605.0" y="221" text-anchor="middle">watch</text>
+<text class="dg-s" x="605.0" y="237" text-anchor="middle">网络变化时重载</text>
+<rect class="dg-box" x="500" y="258" width="210" height="50" rx="7" style="stroke:var(--block)"/>
+<text class="dg-t" x="605.0" y="279" text-anchor="middle">collector</text>
+<text class="dg-s" x="605.0" y="295" text-anchor="middle">按域名记流量 → SQLite</text>
+<path class="dg-l" d="M500 225 L465 225" style="stroke:var(--direct)" stroke-dasharray="4 5" marker-end="url(#ar-dir)"/>
 <path class="dg-l" d="M500 283 L465 271" style="stroke:var(--block)" stroke-dasharray="4 5" marker-end="url(#ar-blk)"/>
 </svg></div><div class="foot"><span>rowt</span><span>5 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
-<section class="slide" data-i="5"><div class="eyebrow">工作原理</div><div class="body"><h2>命中即止。</h2>
-<p>一条连接进来，sing-box 先嗅探出目标域名——<em>在任何 DNS 查询之前</em>——然后自上而下逐条匹配。</p>
+<section class="slide" data-i="5"><div class="eyebrow">工作原理</div><div class="body"><h2>通道选择逻辑</h2><p class="muted" style="margin:-.3em 0 14px">自上而下，命中即止。</p>
+<p>连接进来，sing-box 先嗅探目标域名，这一步早于任何 DNS 查询；取得域名后，逐条匹配规则。</p>
 <div class="cols c2">
 <div><div class="cmd"><span class="c"># route.rules，按顺序</span>
 sniff
 <span style="color:var(--block)">domain</span>      精确域名        <span class="c">→ --domain 条目</span>
 <span style="color:var(--escape)">domain_suffix</span>  最长后缀优先  <span class="c">→ 三个通道文件</span>
 rule_set    geosite:…      <span class="c">→ 整个服务</span>
-<span style="color:var(--corp)">ip_cidr</span>     公司网段        <span class="c">→ corp sync 同步来的</span>
-ip_cidr     私有/CGNAT     <span class="c">→ 组网对端</span>
-rule_set    ads            <span class="c">→ 大而全的广告名单</span>
+<span style="color:var(--corp)">ip_cidr</span>     公司网段        <span class="c">→ corp sync 同步</span>
+ip_cidr     私有 / CGNAT   <span class="c">→ 组网对端</span>
+rule_set    ads            <span class="c">→ 广告规则集</span>
 final       direct</div>
-<p class="muted">最长后缀跨通道生效：escape 里写了 <code>api.foo.com</code>，就一定压过 block 里的
-<code>foo.com</code>——谁先谁后不由通道顺序决定。</p></div>
-<div><h3>为什么看域名而不是 IP</h3>
-<p>CDN 的 IP 说明不了任何问题——同一个地址既服务被墙的站点，也服务正常的站点。域名才是目的地的身份，而嗅探拿到它的时机，早于任何解析器有机会污染它。</p>
-<h3>随时可以问它</h3>
+<p class="muted">最长后缀跨通道比较。escape 中的 <code>api.foo.com</code> 一定优先于
+block 中的 <code>foo.com</code>，与通道先后无关。</p></div>
+<div><h3>为什么看域名，不看 IP</h3>
+<p>同一个 CDN 地址背后，既有被封锁的站点，也有正常的站点，IP 说明不了问题。
+能标识目的地的只有域名；嗅探取得域名时 DNS 尚未查询，污染也就无从发生。</p>
+<h3>随时可以问</h3>
 <div class="cmd">rowt explain www.google.com
 <span class="c">www.google.com → ESCAPE</span>
 <span class="c">matched: longest-match escape suffix 'google.com'</span></div>
-<p class="muted">它复刻的就是真实规则；路由器在跑的话，还会顺手做一次真实 HTTP 探测。</p></div></div></div><div class="foot"><span>rowt</span><span>6 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
-<section class="slide" data-i="6"><div class="eyebrow">工作原理</div><div class="body"><h2>三个层面，rowt 只管两个。</h2>
+<p class="muted">复现的就是线上那套规则；路由器在运行时，还会补一次真实请求验证。</p></div></div></div><div class="foot"><span>rowt</span><span>6 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
+<section class="slide" data-i="6"><div class="eyebrow">工作原理</div><div class="body"><h2>职责边界</h2><p class="muted" style="margin:-.3em 0 14px">三个层面，rowt 只管两个。</p>
 <div class="scroll"><table>
-<tr><th>层面</th><th>回答什么问题</th><th>归谁管</th></tr>
+<tr><th>层面</th><th>回答的问题</th><th>归属</th></tr>
 <tr><td><strong>通道</strong></td><td>走代理的连接从哪个出口出去</td><td style="color:var(--direct)">rowt</td></tr>
-<tr><td><strong>DNS</strong></td><td>哪个解析器来回答这个域名</td><td style="color:var(--direct)">rowt</td></tr>
+<tr><td><strong>DNS</strong></td><td>哪个解析器回答这个域名</td><td style="color:var(--direct)">rowt</td></tr>
 <tr><td><strong>系统路由</strong></td><td>不走代理的流量从哪块网卡出去</td><td style="color:var(--amber)">刻意不管</td></tr>
 </table></div>
 <div class="cols c2" style="margin-top:24px">
-<div><h3>DNS 跟着通道走</h3>
-<ul class="bare"><li>corp 域名 → 交给<strong>系统解析器</strong>，才能拿到内网地址</li>
-<li>escape 域名 → 在 <strong>VPS 那一侧</strong>解析，出口看到的和你看到的一致</li>
-<li>其余 → 走物理网卡上的 <strong>DoH</strong></li></ul></div>
-<div><h3>为什么第三层不碰</h3>
-<p>改路由表需要一个常驻的 <strong>root</strong> 守护进程，而 root 进程绝不该去执行用户可写的代码。
-rowt 是 brew 装的、用户可写、还经常更新——正好是最不该拿 root 的那种形态。它<em>读</em>这张表，
-但从不写。</p></div></div></div><div class="foot"><span>rowt</span><span>7 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
-<section class="slide" data-i="7"><div class="eyebrow">上手</div><div class="body"><h2>七步装好。</h2>
-<p class="muted" style="margin-bottom:16px">全程开着现有的 VPN 做——<code>rowt up</code> 会帮你下载
-sing-box。等一切正常了，再切回公司 VPN。<code>rowt onboard</code> 随时会把这张清单连同你的进度打出来。</p>
+<div><h3>DNS 随通道而定</h3>
+<ul class="bare"><li>corp 域名交<strong>系统解析器</strong>，以取得内网地址</li>
+<li>escape 域名在 <strong>VPS 侧</strong>解析，出口所见与本机一致</li>
+<li>其余走物理网卡上的 <strong>DoH</strong></li></ul></div>
+<div><h3>为何不碰第三层</h3>
+<p>改路由表需要常驻的 <strong>root</strong> 守护进程，而 root 进程不应执行用户可写的代码。
+rowt 由 brew 安装、文件用户可写、更新频繁，恰属最不适合以 root 运行的一类。
+按最小权限原则，这一层被主动排除在外：只<em>读</em>这张表，从不写入。</p>
+<p class="muted" style="margin-top:-.4em">真正需要动路由表的场景，交给一个独立的小型守护进程，
+与 rowt 不共享任何文件。</p></div></div></div><div class="foot"><span>rowt</span><span>7 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
+<section class="slide" data-i="7"><div class="eyebrow">上手</div><div class="body"><h2>新手上路</h2><p class="muted" style="margin:-.3em 0 14px">七步装好。</p>
+<p class="muted" style="margin-bottom:16px">全程开着现有 VPN 操作，<code>rowt up</code> 需要联网下载
+sing-box；整套跑通后再切回公司 VPN。这张清单可随时用 <code>rowt onboard</code> 打印，并标出当前进度。</p>
 <div class="cols c2">
 <div class="step">
 <div class="n">01</div><div><h3>安装</h3>
 <div class="cmd">brew install tanghong123/tap/rowt</div></div>
-<div class="n">02</div><div><h3>把服务器导进来</h3>
-<p class="muted" style="font-size:14px;margin-bottom:.5em">从你已经在用的客户端导入，删掉不要的，再确认写入。
-也可以直接贴分享链接。</p>
+<div class="n">02</div><div><h3>导入服务器</h3>
+<p class="muted" style="font-size:14px;margin-bottom:.5em">从在用的客户端导入，删掉不需要的，再确认写入；也可直接添加分享链接。</p>
 <div class="cmd">rowt server import <span class="c">--from shadowrocket</span>
 $EDITOR ~/.config/rowt/import-review.json
 rowt server import --apply</div></div>
 <div class="n">03</div><div><h3>启动</h3>
-<p class="muted" style="font-size:14px;margin-bottom:.5em">缺 sing-box 就去拉，探测该用哪种模式，
-渲染配置，拉起路由器，打开系统代理。</p>
+<p class="muted" style="font-size:14px;margin-bottom:.5em">缺 sing-box 会自动获取；探测适用模式，渲染配置，拉起路由器，打开系统代理。</p>
 <div class="cmd">rowt up</div></div>
-<div class="n">04</div><div><h3>挑一台服务器</h3>
+<div class="n">04</div><div><h3>选服务器</h3>
 <div class="cmd">rowt ping          <span class="c"># 按延迟排序</span>
-rowt use JP        <span class="c"># 或者 rowt use auto</span></div></div></div>
+rowt use JP        <span class="c"># 或 rowt use auto</span></div></div></div>
 <div class="step">
-<div class="n">05</div><div><h3>切网络，然后验证</h3>
-<p class="muted" style="font-size:14px;margin-bottom:.5em">退掉原来的 VPN，连上公司 VPN，
-再各挑一个域名看看走的对不对。</p>
+<div class="n">05</div><div><h3>切网络并验证</h3>
+<p class="muted" style="font-size:14px;margin-bottom:.5em">退出原 VPN，连接公司 VPN，各取一个域名确认走向。</p>
 <div class="cmd">rowt explain www.google.com
 rowt status</div></div>
-<div class="n">06</div><div><h3>把通道填起来</h3>
-<p class="muted" style="font-size:14px;margin-bottom:.5em">escape 出厂就带了一份（Google、GitHub、
-维基、X…），corp 会自己从 VPN 路由里长出来。缺什么补什么：</p>
+<div class="n">06</div><div><h3>填充通道</h3>
+<p class="muted" style="font-size:14px;margin-bottom:.5em">escape 出厂已带一份（Google、GitHub、维基、X 等）；corp 会从 VPN 路由自行生成。按需补充：</p>
 <div class="cmd">rowt escape add <span class="c">youtube.com googlevideo.com</span>
 rowt escape add <span style="color:var(--escape)">geosite:google</span>  <span class="c"># 一整个服务</span>
 rowt corp   add <span class="c">'*.intranet.example.com' 10.0.0.0/8</span>
 rowt block  add <span class="c">ads.example.com</span></div>
-<p class="muted" style="font-size:14px;margin:0 0 .5em"><code>geosite:&lt;名字&gt;</code>
-直接拉一份维护好的规则集——Google 的全部域名和各国后缀都在里面——省得你一条条列。
-更精确的条目永远压得过它。</p>
-<div class="cmd">rowt corp suggest  <span class="c"># 从 DHCP 搜索域猜</span>
-rowt corp sync     <span class="c"># 连着公司 VPN 时跑，同步它的路由</span></div>
-<p class="muted" style="font-size:14px;margin:0">连着的时候跑一次 <code>corp sync</code>，
-之后看门狗每一拍都会自己重跑。</p></div>
-<div class="n">07</div><div><h3>让它长久生效</h3>
-<div class="cmd">eval "$(rowt shell-init)"  <span class="c"># 写进 ~/.zshrc</span>
-rowt watch install        <span class="c"># 网络一变就自动重载</span></div></div></div></div></div><div class="foot"><span>rowt</span><span>8 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
-<section class="slide" data-i="8"><div class="eyebrow">上手</div><div class="body"><h2>让终端也用上它。</h2>
-<p class="lead">macOS 的系统代理只管得住浏览器和图形应用。命令行工具根本不看它，只认
-<code>http_proxy</code> / <code>https_proxy</code> / <code>all_proxy</code>。
-rowt 给了三种办法把这道坎填上。</p>
+<p class="muted" style="font-size:14px;margin:0 0 .5em"><code>geosite:&lt;名称&gt;</code>
+引入一份维护好的规则集，涵盖该服务的全部域名与各国后缀，无需逐条罗列；更精确的条目仍然优先。</p>
+<div class="cmd">rowt corp suggest  <span class="c"># 依据 DHCP 搜索域推断</span>
+rowt corp sync     <span class="c"># 连着公司 VPN 时执行，同步其路由</span></div>
+<p class="muted" style="font-size:14px;margin:0">连接状态下执行一次 <code>corp sync</code>；此后看门狗每一拍自动重跑。</p></div>
+<div class="n">07</div><div><h3>长期生效</h3>
+<div class="cmd">eval "$(rowt shell-init)"  <span class="c"># 写入 ~/.zshrc</span>
+rowt watch install        <span class="c"># 网络变化时自动重载</span></div></div></div></div></div><div class="foot"><span>rowt</span><span>8 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
+<section class="slide" data-i="8"><div class="eyebrow">上手</div><div class="body"><h2>命令行代理配置</h2>
+<p class="lead">系统代理只覆盖浏览器与图形应用。命令行工具不读系统代理，只认
+<code>http_proxy</code> / <code>https_proxy</code> / <code>all_proxy</code>。rowt 提供三种方式。</p>
 <div class="cols c3" style="margin-top:22px">
 <div class="card"><div class="tag" style="--l:var(--escape)">按 shell</div>
 <div class="cmd" style="margin:.6em 0 0">rowt-proxy-on
 rowt-proxy-off</div>
-<p style="margin:.7em 0 0;font-size:14.5px">在<em>当前这个</em> shell 里设上、清掉这几个变量。
-来自 <code>rowt shell-init</code>，顺带还装了 Tab 补全。</p></div>
+<p style="margin:.7em 0 0;font-size:14.5px">在当前 shell 内设置与清除这几个变量。来自
+<code>rowt shell-init</code>，同时装好 Tab 补全。</p></div>
 <div class="card"><div class="tag" style="--l:var(--corp)">按命令</div>
 <div class="cmd" style="margin:.6em 0 0">rowt run claude
 rowt run git pull</div>
-<p style="margin:.7em 0 0;font-size:14.5px"><em>当场</em>探测哪条路真的通得了外网——
-你 shell 里的设置、系统代理、rowt 自己的端口、直连——用第一条通的去跑命令。
-一条都不通就直接不跑。</p></div>
-<div class="card"><div class="tag" style="--l:var(--direct)">看一眼</div>
+<p style="margin:.7em 0 0;font-size:14.5px">当场探测哪条路径确实通得了外网：当前 shell 的设置、系统代理、
+rowt 自身端口、直连，取第一条可用的执行命令；全部不通则不执行。</p></div>
+<div class="card"><div class="tag" style="--l:var(--direct)">查看</div>
 <div class="cmd" style="margin:.6em 0 0">rowt proxy status
 rowt proxy env</div>
-<p style="margin:.7em 0 0;font-size:14.5px">系统代理现在指向哪、是不是指着 rowt，
-以及可以直接贴到别处去的那几行 export。</p></div></div>
-<p class="note" style="margin-top:20px"><code>rowt run</code> 存在的理由：机器上摆着好几个代理软件，
-网络一天换好几次，"正确的值"一直在变。猜错了报的错还特别难懂——所以干脆别猜，测一下。</p></div><div class="foot"><span>rowt</span><span>9 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
-<section class="slide" data-i="9"><div class="eyebrow">日常</div><div class="body"><h2>真正天天用的那几条。</h2>
+<p style="margin:.7em 0 0;font-size:14.5px">系统代理当前指向何处、是否指向 rowt，
+以及可直接粘贴到别处的 export 行。</p></div></div>
+<p class="note" style="margin-top:20px"><code>rowt run</code> 的由来：机器上并存多个代理软件，
+网络一天多变，"该填哪个值"始终在动；猜错后的报错又难以定位。与其猜，不如现测。</p></div><div class="foot"><span>rowt</span><span>9 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
+<section class="slide" data-i="9"><div class="eyebrow">日常</div><div class="body"><h2>高频命令</h2><p class="muted" style="margin:-.3em 0 14px">按使用频率排列。</p>
 <div class="cols c3">
 <div><div class="tag" style="--l:var(--escape)">几乎每天</div>
 <dl class="kv" style="margin-top:10px">
 <dt>rowt status</dt><dd>模式、服务器、代理、连通性、配置是否合法</dd>
 <dt>rowt monitor</dt><dd>全屏实时视图</dd>
-<dt>rowt escape add &lt;域名&gt;</dt><dd>把某个站点丢进隧道</dd>
-<dt>rowt reload</dt><dd>Wi-Fi ↔ 有线 ↔ 热点 切换之后跑一下</dd></dl></div>
+<dt>rowt escape add &lt;域名&gt;</dt><dd>把站点接入隧道</dd>
+<dt>rowt reload</dt><dd>Wi-Fi ↔ 有线 ↔ 热点 切换后执行</dd></dl></div>
 <div><div class="tag" style="--l:var(--corp)">时常</div>
 <dl class="kv" style="margin-top:10px">
-<dt>rowt explain &lt;域名&gt;</dt><dd>走哪条通道、命中了哪条规则</dd>
-<dt>rowt direct errors</dt><dd>直连失败的域名——这就是待入隧道的候选</dd>
-<dt>rowt ping / use</dt><dd>给服务器排序，钉一台或交给 auto</dd>
-<dt>rowt connections</dt><dd>此刻正在跑的连接分别走哪条通道</dd></dl></div>
-<div><div class="tag" style="--l:var(--direct)">出问题的时候</div>
+<dt>rowt explain &lt;域名&gt;</dt><dd>走哪条通道、命中哪条规则</dd>
+<dt>rowt direct errors</dt><dd>直连失败的域名，即待入隧道的候选</dd>
+<dt>rowt ping / use</dt><dd>服务器排序，指定一台或交给 auto</dd>
+<dt>rowt connections</dt><dd>当前连接分别走哪条通道</dd></dl></div>
+<div><div class="tag" style="--l:var(--direct)">排查时</div>
 <dl class="kv" style="margin-top:10px">
-<dt>rowt audit</dt><dd>谁改了什么——你，还是看门狗</dd>
-<dt>rowt report</dt><dd>完整诊断，敏感信息已脱敏，可以直接发人</dd>
+<dt>rowt audit</dt><dd>谁改了什么：本人，还是看门狗</dd>
+<dt>rowt report</dt><dd>完整诊断，敏感信息已脱敏，可直接发出</dd>
 <dt>rowt corp sync</dt><dd>重新同步公司 VPN 的实时路由</dd>
-<dt>rowt metrics top</dt><dd>某段时间里最耗流量的域名</dd></dl></div></div>
-<p class="note" style="margin-top:22px">最值得记住的循环：<code>rowt direct errors 10m</code>
-列出刚刚在直连上失败的域名——超时和 reset 基本就是被墙了。把真需要的加进 escape，然后继续干活。</p></div><div class="foot"><span>rowt</span><span>10 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
-<section class="slide" data-i="10"><div class="eyebrow">监控面板</div><div class="body"><h2>一屏看全。</h2><div class="split"><figure class="term"><div class="term-bar"><span></span><span></span><span></span><b>rowt monitor — 演示数据</b></div><div class="term-body"><pre><span style="color:#4c5064">╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮</span>
+<dt>rowt metrics top</dt><dd>指定窗口内最耗流量的域名</dd></dl></div></div>
+<p class="note" style="margin-top:22px">最常用的一套动作：执行 <code>rowt direct errors 10m</code>，
+查看刚才在直连上失败的域名；超时与 reset 基本即被封锁，把确需使用的加入 escape。</p></div><div class="foot"><span>rowt</span><span>10 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
+<section class="slide" data-i="10"><div class="eyebrow">监控面板</div><div class="body"><h2>监控面板总览</h2><p class="muted" style="margin:-.3em 0 14px">一屏之内，一目了然。</p><div class="split"><figure class="term"><div class="term-bar"><span></span><span></span><span></span><b>rowt monitor — 演示数据</b></div><div class="term-body"><pre><span style="color:#4c5064">╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0;font-weight:600">  _ __ _____      __| |_ </span>  <span style="color:#656a82">MONITOR</span>                                                                            <span style="color:#656a82">uptime</span>  <span style="color:#e9ecf3">3h 15m</span> <span style="color:#4c5064">│</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0;font-weight:600"> | &#x27;__/ _ \ \ /\ / /| __|</span>  <span style="color:#86c07a">●</span> <span style="color:#86c07a;font-weight:600">LIVE</span>  <span style="color:#656a82">mode</span>      <span style="color:#e9ecf3">host · en0</span>     <span style="color:#656a82">server</span>  <span style="color:#7c9df0;font-weight:600">JP-Tokyo</span> <span style="color:#86c07a;font-weight:600">42 ms</span>                                           <span style="color:#4c5064">│</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0;font-weight:600"> | | | (_) \ V  V / | |_ </span>          <span style="color:#656a82">sys proxy</span> <span style="color:#86c07a">on</span>             <span style="color:#656a82">router</span>  <span style="color:#e9ecf3">running</span> <span style="color:#656a82">·</span> <span style="color:#86c07a">3%</span>                                             <span style="color:#4c5064">│</span>
@@ -496,18 +507,18 @@ rowt proxy env</div>
 <span style="color:#4c5064">│</span> <span style="color:#8b90a4">10 servers · 9 up · 1 down</span>                                                                                                   <span style="color:#4c5064">│</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0">▶ </span><span style="color:#7c9df0;font-weight:600">JP-Tokyo</span><span style="color:#e9ecf3"> </span><span style="color:#86c07a"> 42 ms</span>   <span style="color:#e9ecf3">JP-Osaka </span><span style="color:#e0655e">175 ms</span>   <span style="color:#e9ecf3">KR-Seoul </span><span style="color:#e0a35e"> 72 ms</span>   <span style="color:#e9ecf3">DE-Frankfurt </span><span style="color:#e0655e">195 ms</span>   <span style="color:#e9ecf3">HK-1 </span><span style="color:#e0a35e"> 82 ms</span>   <span style="color:#e9ecf3">SG-1 </span><span style="color:#e0a35e"> 81 ms</span>   <span style="color:#e9ecf3">TW-Taipei </span><span style="color:#e0a35e">110 ms</span>   <span style="color:#4c5064">│</span>
 <span style="color:#4c5064">╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</span></pre><div class="mark wire" style="--r:1;--rn:4;--c:1;--cn:126;--mk:var(--escape)"><b>1</b></div><div class="mark wire" style="--r:6;--rn:24;--c:1;--cn:76;--mk:var(--corp)"><b>2</b></div><div class="mark wire" style="--r:6;--rn:24;--c:78;--cn:49;--mk:var(--amber)"><b>3</b></div><div class="mark wire" style="--r:30.5;--rn:2.75;--c:1;--cn:126;--mk:var(--block)"><b>4</b></div></div></figure><div class="regions">
-<p style="margin:0 0 4px">四个区域，接下来逐个讲。</p>
+<p style="margin:0 0 4px">四个区域，下面逐个展开。</p>
 <div class="r" style="--l:var(--escape)"><i></i><div><b>1 · 身份栏</b>
-<span>模式、当前服务器、代理、路由器健康、两个旁路进程——到底转没转起来</span></div></div>
+<span>模式、当前服务器、代理、路由器健康，以及两个后台进程</span></div></div>
 <div class="r" style="--l:var(--corp)"><i></i><div><b>2 · 实时连接</b>
-<span>什么在跑、走哪条通道，以及<em>命中了哪条规则</em></span></div></div>
+<span>什么在跑、走哪条通道，以及命中了哪条规则</span></div></div>
 <div class="r" style="--l:var(--amber)"><i></i><div><b>3 · 错误与拦截</b>
-<span>滚动窗口内失败了什么——待入隧道的候选就在这儿</span></div></div>
+<span>滚动窗口内的失败项，待入隧道的候选即在其中</span></div></div>
 <div class="r" style="--l:var(--block)"><i></i><div><b>4 · 服务器健康</b>
-<span>整个池子、实测延迟、当前出口是哪台</span></div></div>
-<p class="note" style="margin:8px 0 0">所有数据都来自 2 秒一拍的采样；
-不按控制键，它什么都不会改。</p></div></div></div><div class="foot"><span>rowt</span><span>11 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
-<section class="slide" data-i="11"><div class="eyebrow">监控面板 · 区域 1 / 4</div><div class="body"><h2>身份栏——到底转没转起来。</h2><div class="split"><div><figure class="term"><div class="term-bar"><span></span><span></span><span></span><b>rowt monitor — 演示数据</b></div><div class="term-body"><pre><span style="color:#4c5064">╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮</span>
+<span>整个池子、实测延迟、当前出口</span></div></div>
+<p class="note" style="margin:8px 0 0">数据均来自 2 秒一拍的采样；不按控制键则不作任何改动。</p>
+</div></div></div><div class="foot"><span>rowt</span><span>11 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
+<section class="slide" data-i="11"><div class="eyebrow">监控面板 · 区域 1 / 4</div><div class="body"><h2>身份栏</h2><p class="muted" style="margin:-.3em 0 14px">系统是否正常，先看这一栏。</p><div class="split"><div><figure class="term"><div class="term-bar"><span></span><span></span><span></span><b>rowt monitor — 演示数据</b></div><div class="term-body"><pre><span style="color:#4c5064">╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0;font-weight:600">  _ __ _____      __| |_ </span>  <span style="color:#656a82">MONITOR</span>                                                                            <span style="color:#656a82">uptime</span>  <span style="color:#e9ecf3">3h 15m</span> <span style="color:#4c5064">│</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0;font-weight:600"> | &#x27;__/ _ \ \ /\ / /| __|</span>  <span style="color:#86c07a">●</span> <span style="color:#86c07a;font-weight:600">LIVE</span>  <span style="color:#656a82">mode</span>      <span style="color:#e9ecf3">host · en0</span>     <span style="color:#656a82">server</span>  <span style="color:#7c9df0;font-weight:600">JP-Tokyo</span> <span style="color:#86c07a;font-weight:600">42 ms</span>                                           <span style="color:#4c5064">│</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0;font-weight:600"> | | | (_) \ V  V / | |_ </span>          <span style="color:#656a82">sys proxy</span> <span style="color:#86c07a">on</span>             <span style="color:#656a82">router</span>  <span style="color:#e9ecf3">running</span> <span style="color:#656a82">·</span> <span style="color:#86c07a">3%</span>                                             <span style="color:#4c5064">│</span>
@@ -540,18 +551,18 @@ rowt proxy env</div>
 <span style="color:#4c5064">├────────────────────────────────────────────────────────────────────────────┴─┤ </span><span style="color:#656a82">server health</span><span style="color:#4c5064"> ├───────────────────────────────┤</span>
 <span style="color:#4c5064">│</span> <span style="color:#8b90a4">10 servers · 9 up · 1 down</span>                                                                                                   <span style="color:#4c5064">│</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0">▶ </span><span style="color:#7c9df0;font-weight:600">JP-Tokyo</span><span style="color:#e9ecf3"> </span><span style="color:#86c07a"> 42 ms</span>   <span style="color:#e9ecf3">JP-Osaka </span><span style="color:#e0655e">175 ms</span>   <span style="color:#e9ecf3">KR-Seoul </span><span style="color:#e0a35e"> 72 ms</span>   <span style="color:#e9ecf3">DE-Frankfurt </span><span style="color:#e0655e">195 ms</span>   <span style="color:#e9ecf3">HK-1 </span><span style="color:#e0a35e"> 82 ms</span>   <span style="color:#e9ecf3">SG-1 </span><span style="color:#e0a35e"> 81 ms</span>   <span style="color:#e9ecf3">TW-Taipei </span><span style="color:#e0a35e">110 ms</span>   <span style="color:#4c5064">│</span>
-<span style="color:#4c5064">╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</span></pre><div class="mark below" style="--r:1;--rn:4;--c:1;--cn:126;--mk:var(--escape)"><b>身份栏</b></div></div></figure></div><div><p>"是不是哪儿不对"——这一栏就能答完，不用往下看。</p>
-<dl class="kv"><dt>● LIVE</dt><dd>呼吸式心跳；它不动了，说明数据已经不新鲜。也会显示 DOWN、ERROR、PAUSED</dd>
-<dt>mode</dt><dd>host / vm / local，以及正在用哪块网卡</dd>
-<dt>server</dt><dd>当前出口服务器和它的实测延迟</dd>
-<dt>sys proxy</dt><dd>macOS 到底有没有真的指向 rowt</dd>
-<dt>router</dt><dd>运行状态和 CPU——路由器打转的话，这里最先看出来</dd>
-<dt>collector · watch</dt><dd>流量记录和自动重载看门狗有没有在跑</dd></dl>
-<h3 style="margin-top:16px">在这儿能做什么</h3>
-<ul class="bare"><li><kbd>o</kbd> 开关系统代理——也可以直接点 <code>sys proxy</code> 那格</li>
-<li><kbd>p</kbd> 暂停采样，屏幕定住，方便你慢慢看</li>
-<li><kbd>r</kbd> 立刻重测所有服务器，不用等下一轮</li></ul></div></div></div><div class="foot"><span>rowt</span><span>12 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
-<section class="slide" data-i="12"><div class="eyebrow">监控面板 · 区域 2 / 4</div><div class="body"><h2>实时连接——什么在跑。</h2><div class="split"><div><figure class="term"><div class="term-bar"><span></span><span></span><span></span><b>rowt monitor — 演示数据</b></div><div class="term-body"><pre><span style="color:#4c5064">╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮</span>
+<span style="color:#4c5064">╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</span></pre><div class="mark below" style="--r:1;--rn:4;--c:1;--cn:126;--mk:var(--escape)"><b>身份栏</b></div></div></figure></div><div><p>系统是否正常，这一栏即可判断，无需下翻。</p>
+<dl class="kv"><dt>● LIVE</dt><dd>呼吸式心跳；停止即表示数据已不再更新。另有 DOWN、ERROR、PAUSED 三态</dd>
+<dt>mode</dt><dd>host / vm / local，以及当前使用的网卡</dd>
+<dt>server</dt><dd>当前出口服务器及其实测延迟</dd>
+<dt>sys proxy</dt><dd>macOS 是否确实指向 rowt</dd>
+<dt>router</dt><dd>运行状态与 CPU；路由器空转，最先在这里暴露</dd>
+<dt>collector · watch</dt><dd>流量记录与自动重载看门狗两个后台进程是否在运行</dd></dl>
+<h3 style="margin-top:16px">可执行的操作</h3>
+<ul class="bare"><li><kbd>o</kbd> 开关系统代理，也可直接点击 <code>sys proxy</code> 单元格</li>
+<li><kbd>p</kbd> 暂停采样，画面静止，便于逐行核对</li>
+<li><kbd>r</kbd> 立即重测全部服务器，不必等待下一轮</li></ul></div></div></div><div class="foot"><span>rowt</span><span>12 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
+<section class="slide" data-i="12"><div class="eyebrow">监控面板 · 区域 2 / 4</div><div class="body"><h2>实时连接</h2><p class="muted" style="margin:-.3em 0 14px">什么在跑，以及为什么这么跑。</p><div class="split"><div><figure class="term"><div class="term-bar"><span></span><span></span><span></span><b>rowt monitor — 演示数据</b></div><div class="term-body"><pre><span style="color:#4c5064">╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0;font-weight:600">  _ __ _____      __| |_ </span>  <span style="color:#656a82">MONITOR</span>                                                                            <span style="color:#656a82">uptime</span>  <span style="color:#e9ecf3">3h 15m</span> <span style="color:#4c5064">│</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0;font-weight:600"> | &#x27;__/ _ \ \ /\ / /| __|</span>  <span style="color:#86c07a">●</span> <span style="color:#86c07a;font-weight:600">LIVE</span>  <span style="color:#656a82">mode</span>      <span style="color:#e9ecf3">host · en0</span>     <span style="color:#656a82">server</span>  <span style="color:#7c9df0;font-weight:600">JP-Tokyo</span> <span style="color:#86c07a;font-weight:600">42 ms</span>                                           <span style="color:#4c5064">│</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0;font-weight:600"> | | | (_) \ V  V / | |_ </span>          <span style="color:#656a82">sys proxy</span> <span style="color:#86c07a">on</span>             <span style="color:#656a82">router</span>  <span style="color:#e9ecf3">running</span> <span style="color:#656a82">·</span> <span style="color:#86c07a">3%</span>                                             <span style="color:#4c5064">│</span>
@@ -584,17 +595,17 @@ rowt proxy env</div>
 <span style="color:#4c5064">├────────────────────────────────────────────────────────────────────────────┴─┤ </span><span style="color:#656a82">server health</span><span style="color:#4c5064"> ├───────────────────────────────┤</span>
 <span style="color:#4c5064">│</span> <span style="color:#8b90a4">10 servers · 9 up · 1 down</span>                                                                                                   <span style="color:#4c5064">│</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0">▶ </span><span style="color:#7c9df0;font-weight:600">JP-Tokyo</span><span style="color:#e9ecf3"> </span><span style="color:#86c07a"> 42 ms</span>   <span style="color:#e9ecf3">JP-Osaka </span><span style="color:#e0655e">175 ms</span>   <span style="color:#e9ecf3">KR-Seoul </span><span style="color:#e0a35e"> 72 ms</span>   <span style="color:#e9ecf3">DE-Frankfurt </span><span style="color:#e0655e">195 ms</span>   <span style="color:#e9ecf3">HK-1 </span><span style="color:#e0a35e"> 82 ms</span>   <span style="color:#e9ecf3">SG-1 </span><span style="color:#e0a35e"> 81 ms</span>   <span style="color:#e9ecf3">TW-Taipei </span><span style="color:#e0a35e">110 ms</span>   <span style="color:#4c5064">│</span>
-<span style="color:#4c5064">╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</span></pre><div class="mark" style="--r:6;--rn:24;--c:1;--cn:76;--mk:var(--corp)"><b>实时连接</b></div></div></figure></div><div><p>先是每条通道的速率汇总，然后一行一个目标主机。</p>
-<dl class="kv"><dt>LANE</dt><dd>这条连接从哪个出口走的</dd>
+<span style="color:#4c5064">╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</span></pre><div class="mark" style="--r:6;--rn:24;--c:1;--cn:76;--mk:var(--corp)"><b>实时连接</b></div></div></figure></div><div><p>上半部是每条通道的速率汇总，下半部一行一个目标主机。</p>
+<dl class="kv"><dt>LANE</dt><dd>该连接实际走的出口</dd>
 <dt>HOST:PORT</dt><dd>嗅探到的目标</dd>
 <dt>#</dt><dd>并发连接数</dd>
 <dt>UP · DOWN</dt><dd>上下行字节</dd>
-<dt>RULE</dt><dd><strong>为什么走这条</strong>——<code>domain_suffix</code>、<code>domain</code>、
-<code>rule_set</code> 还是 <code>final</code></dd></dl>
-<p style="margin-top:14px">最后那一列，回答的正是"这玩意儿凭什么走隧道"——不用离开这个屏幕。</p>
-<p class="note">灰掉、显示 <code>0B</code> 的是休眠行：刚才见过，现在闲着。它们不挪位置，
-免得你正盯着的主机一安静就消失了。</p></div></div></div><div class="foot"><span>rowt</span><span>13 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
-<section class="slide" data-i="13"><div class="eyebrow">监控面板 · 区域 3 / 4</div><div class="body"><h2>错误与拦截——什么在失败。</h2><div class="split"><div><figure class="term"><div class="term-bar"><span></span><span></span><span></span><b>rowt monitor — 演示数据</b></div><div class="term-body"><pre><span style="color:#4c5064">╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮</span>
+<dt>RULE</dt><dd><strong>命中的规则类型</strong>：<code>domain_suffix</code>、<code>domain</code>、
+<code>rule_set</code> 或 <code>final</code></dd></dl>
+<p style="margin-top:14px">最后一列回答的是"凭什么走这条通道"，排查分流问题时最常看。</p>
+<p class="note">灰显、字节为 <code>0B</code> 的是休眠行：近期出现过，当前空闲。位置保持不变，
+避免正在观察的主机一安静就从列表中消失。</p></div></div></div><div class="foot"><span>rowt</span><span>13 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
+<section class="slide" data-i="13"><div class="eyebrow">监控面板 · 区域 3 / 4</div><div class="body"><h2>错误与拦截</h2><p class="muted" style="margin:-.3em 0 14px">什么在失败，以及属于哪一类。</p><div class="split"><div><figure class="term"><div class="term-bar"><span></span><span></span><span></span><b>rowt monitor — 演示数据</b></div><div class="term-body"><pre><span style="color:#4c5064">╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0;font-weight:600">  _ __ _____      __| |_ </span>  <span style="color:#656a82">MONITOR</span>                                                                            <span style="color:#656a82">uptime</span>  <span style="color:#e9ecf3">3h 15m</span> <span style="color:#4c5064">│</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0;font-weight:600"> | &#x27;__/ _ \ \ /\ / /| __|</span>  <span style="color:#86c07a">●</span> <span style="color:#86c07a;font-weight:600">LIVE</span>  <span style="color:#656a82">mode</span>      <span style="color:#e9ecf3">host · en0</span>     <span style="color:#656a82">server</span>  <span style="color:#7c9df0;font-weight:600">JP-Tokyo</span> <span style="color:#86c07a;font-weight:600">42 ms</span>                                           <span style="color:#4c5064">│</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0;font-weight:600"> | | | (_) \ V  V / | |_ </span>          <span style="color:#656a82">sys proxy</span> <span style="color:#86c07a">on</span>             <span style="color:#656a82">router</span>  <span style="color:#e9ecf3">running</span> <span style="color:#656a82">·</span> <span style="color:#86c07a">3%</span>                                             <span style="color:#4c5064">│</span>
@@ -627,16 +638,16 @@ rowt proxy env</div>
 <span style="color:#4c5064">├────────────────────────────────────────────────────────────────────────────┴─┤ </span><span style="color:#656a82">server health</span><span style="color:#4c5064"> ├───────────────────────────────┤</span>
 <span style="color:#4c5064">│</span> <span style="color:#8b90a4">10 servers · 9 up · 1 down</span>                                                                                                   <span style="color:#4c5064">│</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0">▶ </span><span style="color:#7c9df0;font-weight:600">JP-Tokyo</span><span style="color:#e9ecf3"> </span><span style="color:#86c07a"> 42 ms</span>   <span style="color:#e9ecf3">JP-Osaka </span><span style="color:#e0655e">175 ms</span>   <span style="color:#e9ecf3">KR-Seoul </span><span style="color:#e0a35e"> 72 ms</span>   <span style="color:#e9ecf3">DE-Frankfurt </span><span style="color:#e0655e">195 ms</span>   <span style="color:#e9ecf3">HK-1 </span><span style="color:#e0a35e"> 82 ms</span>   <span style="color:#e9ecf3">SG-1 </span><span style="color:#e0a35e"> 81 ms</span>   <span style="color:#e9ecf3">TW-Taipei </span><span style="color:#e0a35e">110 ms</span>   <span style="color:#4c5064">│</span>
-<span style="color:#4c5064">╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</span></pre><div class="mark" style="--r:6;--rn:24;--c:78;--cn:49;--mk:var(--amber)"><b>错误与拦截</b></div></div></figure></div><div><p>按滚动窗口聚合——<kbd>w</kbd> 或 <kbd>[</kbd> <kbd>]</kbd>
-在 5m → 10m → 1h → 24h → 全部 之间切。</p>
+<span style="color:#4c5064">╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</span></pre><div class="mark" style="--r:6;--rn:24;--c:78;--cn:49;--mk:var(--amber)"><b>错误与拦截</b></div></div></figure></div><div><p>按滚动窗口聚合，<kbd>w</kbd> 或 <kbd>[</kbd> <kbd>]</kbd>
+在 5m → 10m → 1h → 24h → 全部 之间切换。</p>
 <dl class="kv">
-<dt style="color:var(--amber)">transient</dt><dd>DNS 失败，通常自己会好</dd>
-<dt style="color:var(--block)">persistent</dt><dd>超时、reset、拒绝——<strong>这些就是该进 escape 的候选</strong></dd>
-<dt style="color:var(--block)">blocked</dt><dd>被 block 通道和广告规则集拦下的</dd></dl>
-<p style="margin-top:14px">典型用法：筛到 direct 通道，看 persistent 那一类，
-把真正需要的丢进 escape——全程不用离开面板。</p>
-<p class="note">只有<em>失败</em>的连接才会被记下来。这一栏空着表示没出错，不表示没流量。</p></div></div></div><div class="foot"><span>rowt</span><span>14 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
-<section class="slide" data-i="14"><div class="eyebrow">监控面板 · 区域 4 / 4</div><div class="body"><h2>服务器健康——从哪儿出去。</h2><div class="split"><div><figure class="term"><div class="term-bar"><span></span><span></span><span></span><b>rowt monitor — 演示数据</b></div><div class="term-body"><pre><span style="color:#4c5064">╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮</span>
+<dt style="color:var(--amber)">transient</dt><dd>DNS 类失败，多数可自行恢复</dd>
+<dt style="color:var(--block)">persistent</dt><dd>超时、reset、拒绝；<strong>这一类就是待入 escape 的候选</strong></dd>
+<dt style="color:var(--block)">blocked</dt><dd>被 block 通道与广告规则集拦下的</dd></dl>
+<p style="margin-top:14px">标准动作：筛到 direct 通道，看 persistent 一类，把确需使用的接入 escape，
+全程不必离开面板。</p>
+<p class="note">仅记录<em>失败</em>连接。此栏为空表示没有错误，不代表没有流量。</p></div></div></div><div class="foot"><span>rowt</span><span>14 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
+<section class="slide" data-i="14"><div class="eyebrow">监控面板 · 区域 4 / 4</div><div class="body"><h2>服务器健康</h2><p class="muted" style="margin:-.3em 0 14px">从哪里出网，延迟如何。</p><div class="split"><div><figure class="term"><div class="term-bar"><span></span><span></span><span></span><b>rowt monitor — 演示数据</b></div><div class="term-body"><pre><span style="color:#4c5064">╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0;font-weight:600">  _ __ _____      __| |_ </span>  <span style="color:#656a82">MONITOR</span>                                                                            <span style="color:#656a82">uptime</span>  <span style="color:#e9ecf3">3h 15m</span> <span style="color:#4c5064">│</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0;font-weight:600"> | &#x27;__/ _ \ \ /\ / /| __|</span>  <span style="color:#86c07a">●</span> <span style="color:#86c07a;font-weight:600">LIVE</span>  <span style="color:#656a82">mode</span>      <span style="color:#e9ecf3">host · en0</span>     <span style="color:#656a82">server</span>  <span style="color:#7c9df0;font-weight:600">JP-Tokyo</span> <span style="color:#86c07a;font-weight:600">42 ms</span>                                           <span style="color:#4c5064">│</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0;font-weight:600"> | | | (_) \ V  V / | |_ </span>          <span style="color:#656a82">sys proxy</span> <span style="color:#86c07a">on</span>             <span style="color:#656a82">router</span>  <span style="color:#e9ecf3">running</span> <span style="color:#656a82">·</span> <span style="color:#86c07a">3%</span>                                             <span style="color:#4c5064">│</span>
@@ -669,19 +680,19 @@ rowt proxy env</div>
 <span style="color:#4c5064">├────────────────────────────────────────────────────────────────────────────┴─┤ </span><span style="color:#656a82">server health</span><span style="color:#4c5064"> ├───────────────────────────────┤</span>
 <span style="color:#4c5064">│</span> <span style="color:#8b90a4">10 servers · 9 up · 1 down</span>                                                                                                   <span style="color:#4c5064">│</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0">▶ </span><span style="color:#7c9df0;font-weight:600">JP-Tokyo</span><span style="color:#e9ecf3"> </span><span style="color:#86c07a"> 42 ms</span>   <span style="color:#e9ecf3">JP-Osaka </span><span style="color:#e0655e">175 ms</span>   <span style="color:#e9ecf3">KR-Seoul </span><span style="color:#e0a35e"> 72 ms</span>   <span style="color:#e9ecf3">DE-Frankfurt </span><span style="color:#e0655e">195 ms</span>   <span style="color:#e9ecf3">HK-1 </span><span style="color:#e0a35e"> 82 ms</span>   <span style="color:#e9ecf3">SG-1 </span><span style="color:#e0a35e"> 81 ms</span>   <span style="color:#e9ecf3">TW-Taipei </span><span style="color:#e0a35e">110 ms</span>   <span style="color:#4c5064">│</span>
-<span style="color:#4c5064">╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</span></pre><div class="mark" style="--r:30.5;--rn:2.75;--c:1;--cn:126;--mk:var(--block)"><b>服务器健康</b></div></div></figure></div><div><p>池子里每台服务器和它的实测延迟——真的走隧道测出来的，节奏很轻，
-而且跑在 UI 线程之外，不会卡顿。</p>
-<dl class="kv"><dt>▶</dt><dd>当前出口，<strong>钉在最左边</strong>，永远不会滚出视野</dd>
-<dt>跑马灯</dt><dd>池子装不下一行时会滚动，你一选中就立刻定住</dd>
-<dt>计数</dt><dd>总数 / 在线 / 掉线，一眼看完</dd></dl>
-<h3 style="margin-top:16px">在这儿能做什么</h3>
-<ul class="bare"><li><kbd>←</kbd> <kbd>→</kbd> 选服务器——点一下也行</li>
-<li><kbd>u</kbd> 立刻切到它</li>
-<li><kbd>r</kbd> 立刻重测整个池子</li></ul>
-<p class="muted" style="margin-top:12px">等价于 <code>rowt ping</code> 和
-<code>rowt use &lt;tag&gt;</code>，只是不用离开屏幕。</p></div></div></div><div class="foot"><span>rowt</span><span>15 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
-<section class="slide" data-i="15"><div class="eyebrow">监控面板 · 导航</div><div class="body"><h2>快捷键是全局的。</h2>
-<p class="muted" style="margin-bottom:14px">筛选、搜索、切窗口都作用于整屏——不需要先把焦点挪到某个面板上。</p>
+<span style="color:#4c5064">╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</span></pre><div class="mark" style="--r:30.5;--rn:2.75;--c:1;--cn:126;--mk:var(--block)"><b>服务器健康</b></div></div></figure></div><div><p>池中每台服务器及其实测延迟。延迟经隧道实测得出，探测节奏平缓，
+且运行在 UI 线程之外，不影响界面响应。</p>
+<dl class="kv"><dt>▶</dt><dd>当前出口，<strong>固定在最左侧</strong>，不会滚出视野</dd>
+<dt>跑马灯</dt><dd>一行放不下时滚动显示，选中即刻冻结</dd>
+<dt>计数</dt><dd>总数 / 在线 / 离线，一眼可见</dd></dl>
+<h3 style="margin-top:16px">可执行的操作</h3>
+<ul class="bare"><li><kbd>←</kbd> <kbd>→</kbd> 选择服务器，点击亦可</li>
+<li><kbd>u</kbd> 立即切换到该服务器</li>
+<li><kbd>r</kbd> 立即重测整个池子</li></ul>
+<p class="muted" style="margin-top:12px">等价于 <code>rowt ping</code> 与
+<code>rowt use &lt;tag&gt;</code>，只是无需离开面板。</p></div></div></div><div class="foot"><span>rowt</span><span>15 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
+<section class="slide" data-i="15"><div class="eyebrow">监控面板 · 导航</div><div class="body"><h2>全局快捷键</h2>
+<p class="muted" style="margin-bottom:14px">筛选、搜索、切窗口均作用于整屏，无需先把焦点移到某个面板。</p>
 <div class="split"><figure class="term"><div class="term-bar"><span></span><span></span><span></span><b>rowt monitor — 演示数据</b></div><div class="term-body"><pre><span style="color:#4c5064">╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0;font-weight:600">  _ __ _____      __| |_ </span>  <span style="color:#656a82">MONITOR</span>                                                                            <span style="color:#656a82">uptime</span>  <span style="color:#e9ecf3">3h 15m</span> <span style="color:#4c5064">│</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0;font-weight:600"> | &#x27;__/ _ \ \ /\ / /| __|</span>  <span style="color:#65905c">●</span> <span style="color:#86c07a;font-weight:600">LIVE</span>  <span style="color:#656a82">mode</span>      <span style="color:#e9ecf3">host · en0</span>     <span style="color:#656a82">server</span>  <span style="color:#7c9df0;font-weight:600">JP-Tokyo</span> <span style="color:#86c07a;font-weight:600">42 ms</span>                                           <span style="color:#4c5064">│</span>
@@ -715,21 +726,21 @@ rowt proxy env</div>
 <span style="color:#4c5064">├────────────────────────────────────────────────────────────────────────────┴─┤ </span><span style="color:#656a82">server health</span><span style="color:#4c5064"> ├───────────────────────────────┤</span>
 <span style="color:#4c5064">│</span> <span style="color:#8b90a4">10 servers · 9 up · 1 down</span>                                                                                                   <span style="color:#4c5064">│</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0">▶ </span><span style="color:#7c9df0;font-weight:600">JP-Tokyo</span><span style="color:#e9ecf3"> </span><span style="color:#86c07a"> 42 ms</span> <span style="color:#4c5064">│</span> <span style="color:#e9ecf3">JP-Osaka </span><span style="color:#e0655e">175 ms</span>   <span style="color:#e9ecf3">KR-Seoul </span><span style="color:#e0a35e"> 72 ms</span>   <span style="color:#e9ecf3">DE-Frankfurt </span><span style="color:#e0655e">195 ms</span>   <span style="color:#e9ecf3">HK-1 </span><span style="color:#e0a35e"> 82 ms</span>   <span style="color:#e9ecf3">SG-1 </span><span style="color:#e0a35e"> 81 ms</span>   <span style="color:#e9ecf3">TW-Taipei </span><span style="color:#e0a35e">110 ms</span>   <span style="color:#4c5064">│</span>
-<span style="color:#4c5064">╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</span></pre></div><figcaption>通道筛选设为 escape：两个面板同时收窄。按 0 清除。</figcaption></figure>
+<span style="color:#4c5064">╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</span></pre></div><figcaption>通道筛选设为 escape，两个面板同时收窄；按 0 清除。</figcaption></figure>
 <div class="keys" style="grid-template-columns:1fr;gap:16px">
 <section style="--l:var(--escape)"><h4>收窄</h4>
-<div class="k"><b>f · 1 2 3 0</b><span>循环切换通道筛选，或直接跳到 escape / corp / direct；<kbd>0</kbd> 清除</span></div>
-<div class="k"><b>/</b><span>按正则搜域名，边打字边同时过滤两个面板</span></div>
+<div class="k"><b>f · 1 2 3 0</b><span>循环切换通道筛选，或直接跳至 escape / corp / direct；<kbd>0</kbd> 清除</span></div>
+<div class="k"><b>/</b><span>按正则搜索域名，输入过程中同时过滤两个面板</span></div>
 <div class="k"><b>w · [ ]</b><span>错误窗口：5m → 10m → 1h → 24h → 全部</span></div></section>
 <section style="--l:var(--corp)"><h4>移动</h4>
-<div class="k"><b>↑↓ · j k</b><span>移动选中；第一次按会<em>按域名</em>把这一行锁住</span></div>
-<div class="k"><b>←→ · h l</b><span>切换面板，或挑服务器</span></div>
-<div class="k"><b>Tab</b><span>连接 → 错误 → 服务器条 循环</span></div></section>
+<div class="k"><b>↑↓ · j k</b><span>移动选中；首次按下会按<em>域名</em>锁定该行</span></div>
+<div class="k"><b>←→ · h l</b><span>切换面板，或选择服务器</span></div>
+<div class="k"><b>Tab</b><span>连接 → 错误 → 服务器条，循环切换</span></div></section>
 <section style="--l:var(--direct)"><h4>其他</h4>
 <div class="k"><b>y</b><span>复制选中的域名</span></div>
 <div class="k"><b>p</b><span>暂停采样</span></div>
-<div class="k"><b>?</b><span>随时打开完整键位表</span></div></section></div></div></div><div class="foot"><span>rowt</span><span>16 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
-<section class="slide" data-i="16"><div class="eyebrow">监控面板 · 历史</div><div class="body"><h2>流量到底花在哪了？</h2><div class="split"><div><figure class="term"><div class="term-bar"><span></span><span></span><span></span><b>rowt monitor — 演示数据</b></div><div class="term-body"><pre><span style="color:#4c5064">╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮</span>
+<div class="k"><b>?</b><span>随时调出完整键位表</span></div></section></div></div></div><div class="foot"><span>rowt</span><span>16 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
+<section class="slide" data-i="16"><div class="eyebrow">监控面板 · 历史</div><div class="body"><h2>流量历史</h2><p class="muted" style="margin:-.3em 0 14px">流量究竟花在哪里。</p><div class="split"><div><figure class="term"><div class="term-bar"><span></span><span></span><span></span><b>rowt monitor — 演示数据</b></div><div class="term-body"><pre><span style="color:#4c5064">╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0;font-weight:600">  _ __ _____      __| |_ </span>  <span style="color:#656a82">MONITOR</span>                                                                            <span style="color:#656a82">uptime</span>  <span style="color:#e9ecf3">3h 15m</span> <span style="color:#4c5064">│</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0;font-weight:600"> | &#x27;__/ _ \ \ /\ / /| __|</span>  <span style="color:#65905c">●</span> <span style="color:#86c07a;font-weight:600">LIVE</span>  <span style="color:#656a82">mode</span>      <span style="color:#e9ecf3">host · en0</span>     <span style="color:#656a82">server</span>  <span style="color:#7c9df0;font-weight:600">JP-Tokyo</span> <span style="color:#86c07a;font-weight:600">42 ms</span>                                           <span style="color:#4c5064">│</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0;font-weight:600"> | | | (_) \ V  V / | |_ </span>          <span style="color:#656a82">sys proxy</span> <span style="color:#86c07a">on</span>             <span style="color:#656a82">router</span>  <span style="color:#e9ecf3">running</span> <span style="color:#656a82">·</span> <span style="color:#86c07a">3%</span>                                             <span style="color:#4c5064">│</span>
@@ -762,15 +773,15 @@ rowt proxy env</div>
 <span style="color:#4c5064">├────────────────────────────────────────────────────────────────────────────┴─┤ </span><span style="color:#656a82">server health</span><span style="color:#4c5064"> ├───────────────────────────────┤</span>
 <span style="color:#4c5064">│</span> <span style="color:#8b90a4">10 servers · 9 up · 1 down</span>                                                                                                   <span style="color:#4c5064">│</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0">▶ </span><span style="color:#7c9df0;font-weight:600">JP-Tokyo</span><span style="color:#e9ecf3"> </span><span style="color:#86c07a"> 42 ms</span> <span style="color:#4c5064">│</span> <span style="color:#e9ecf3">JP-Osaka </span><span style="color:#e0655e">175 ms</span>   <span style="color:#e9ecf3">KR-Seoul </span><span style="color:#e0a35e"> 72 ms</span>   <span style="color:#e9ecf3">DE-Frankfurt </span><span style="color:#e0655e">195 ms</span>   <span style="color:#e9ecf3">HK-1 </span><span style="color:#e0a35e"> 82 ms</span>   <span style="color:#e9ecf3">SG-1 </span><span style="color:#e0a35e"> 81 ms</span>   <span style="color:#e9ecf3">TW-Taipei </span><span style="color:#e0a35e">110 ms</span>   <span style="color:#4c5064">│</span>
-<span style="color:#4c5064">╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</span></pre><div class="mark" style="--r:6;--rn:24;--c:1;--cn:76;--mk:var(--corp)"><b>▲ 上行</b></div></div><figcaption>按 v 切到 ▲ 上行，再按一次切到 ▼ 下行。错误和服务器健康不受影响——只有这个面板会翻。</figcaption></figure></div><div><p><strong>collector</strong> 旁路进程按域名和通道把字节数写进一个分层的 SQLite——
-5 秒一格，一路汇总到一年。</p>
-<dl class="kv"><dt>v</dt><dd>翻面板：实时 → ▲ 上行 → ▼ 下行</dd>
+<span style="color:#4c5064">╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</span></pre><div class="mark" style="--r:6;--rn:24;--c:1;--cn:76;--mk:var(--corp)"><b>▲ 上行</b></div></div><figcaption>按 v 切至 ▲ 上行，再按一次切至 ▼ 下行；错误与服务器健康不受影响。</figcaption></figure></div><div><p><strong>collector</strong> 旁路进程按域名与通道记录字节数，写入分层 SQLite：
+5 秒一格，逐级汇总至一年。</p>
+<dl class="kv"><dt>v</dt><dd>切换面板：实时 → ▲ 上行 → ▼ 下行</dd>
 <dt>s</dt><dd>时间跨度：近期（1m/5m/1h/24h）→ 天 → 年</dd></dl>
-<p style="margin-top:16px">选中是按域名记的，翻面板不会丢——在实时视图里锁住一台主机，
-就能一路看完它的历史。</p>
-<div class="cmd" style="margin-top:14px">rowt metrics top 3600   <span class="c"># 最近一小时最耗流量的</span>
+<p style="margin-top:16px">选中按域名记录，切换视图不丢失；在实时视图锁定一台主机，
+即可顺势查看其历史曲线。</p>
+<div class="cmd" style="margin-top:14px">rowt metrics top 3600   <span class="c"># 近一小时流量最大的域名</span>
 rowt metrics query "&lt;SQL&gt;"  <span class="c"># 只读 SQL 直通</span></div></div></div></div><div class="foot"><span>rowt</span><span>17 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
-<section class="slide" data-i="17"><div class="eyebrow">监控面板 · 动手</div><div class="body"><h2>要确认、可撤销的改动。</h2><div class="split"><div><figure class="term"><div class="term-bar"><span></span><span></span><span></span><b>rowt monitor — 演示数据</b></div><div class="term-body"><pre><span style="color:#4c5064">╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮</span>
+<section class="slide" data-i="17"><div class="eyebrow">监控面板 · 操作</div><div class="body"><h2>通道编辑</h2><p class="muted" style="margin:-.3em 0 14px">需确认，可撤销。</p><div class="split"><div><figure class="term"><div class="term-bar"><span></span><span></span><span></span><b>rowt monitor — 演示数据</b></div><div class="term-body"><pre><span style="color:#4c5064">╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0;font-weight:600">  _ __ _____      __| |_ </span>  <span style="color:#656a82">MONITOR</span>                                                                            <span style="color:#656a82">uptime</span>  <span style="color:#e9ecf3">3h 15m</span> <span style="color:#4c5064">│</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0;font-weight:600"> | &#x27;__/ _ \ \ /\ / /| __|</span>  <span style="color:#65905c">●</span> <span style="color:#86c07a;font-weight:600">LIVE</span>  <span style="color:#656a82">mode</span>      <span style="color:#e9ecf3">host · en0</span>     <span style="color:#656a82">server</span>  <span style="color:#7c9df0;font-weight:600">JP-Tokyo</span> <span style="color:#86c07a;font-weight:600">42 ms</span>                                           <span style="color:#4c5064">│</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0;font-weight:600"> | | | (_) \ V  V / | |_ </span>          <span style="color:#656a82">sys proxy</span> <span style="color:#86c07a">on</span>             <span style="color:#656a82">router</span>  <span style="color:#e9ecf3">running</span> <span style="color:#656a82">·</span> <span style="color:#86c07a">3%</span>                                             <span style="color:#4c5064">│</span>
@@ -804,16 +815,16 @@ rowt metrics query "&lt;SQL&gt;"  <span class="c"># 只读 SQL 直通</span></di
 <span style="color:#4c5064">│</span> <span style="color:#8b90a4">10 servers · 9 up · 1 down</span>                                                                                                   <span style="color:#4c5064">│</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0">▶ </span><span style="color:#7c9df0;font-weight:600">JP-Tokyo</span><span style="color:#e9ecf3"> </span><span style="color:#86c07a"> 42 ms</span> <span style="color:#4c5064">│</span> <span style="color:#e9ecf3">JP-Osaka </span><span style="color:#e0655e">175 ms</span>   <span style="color:#e9ecf3">KR-Seoul </span><span style="color:#e0a35e"> 72 ms</span>   <span style="color:#e9ecf3">DE-Frankfurt </span><span style="color:#e0655e">195 ms</span>   <span style="color:#e9ecf3">HK-1 </span><span style="color:#e0a35e"> 82 ms</span>   <span style="color:#e9ecf3">SG-1 </span><span style="color:#e0a35e"> 81 ms</span>   <span style="color:#e9ecf3">TW-Taipei </span><span style="color:#e0a35e">110 ms</span>   <span style="color:#4c5064">│</span>
 <span style="color:#4c5064">╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</span>
-                                                                       <span style="color:#e9ecf3;font-weight:600"> CONFIRM  i.ytimg.com   → press e again to apply </span>        </pre></div><figcaption>在 i.ytimg.com 上待确认。没确认之前什么都不会写——按 Esc，或者干脆走开，它自己就取消了。</figcaption></figure></div><div><dl class="kv"><dt>e c b d</dt><dd>把锁住的域名丢进 escape / corp / block，或 <code>d</code> 放回 direct</dd>
-<dt>E C B D</dt><dd>同样四件事，但作用在<strong>父级后缀</strong>上——<code>x.y.z.com</code> →
+                                                                       <span style="color:#e9ecf3;font-weight:600"> CONFIRM  i.ytimg.com   → press e again to apply </span>        </pre></div><figcaption>在 i.ytimg.com 上待确认；确认前不写入任何内容，按 Esc 或直接离开即取消。</figcaption></figure></div><div><dl class="kv"><dt>e c b d</dt><dd>将锁定的域名接入 escape / corp / block，或用 <code>d</code> 退回 direct</dd>
+<dt>E C B D</dt><dd>同样四项，作用于<strong>父级后缀</strong>：<code>x.y.z.com</code> →
 <code>z.com</code>，一键覆盖整个服务</dd>
 <dt>↵ / 连按两次</dt><dd>确认 · <kbd>esc</kbd> 取消 · 闲置 10 秒自动取消</dd>
-<dt>u · o</dt><dd>切服务器 · 开关系统代理——这两个立即生效，不需要确认</dd></dl>
-<p style="margin-top:16px">每一个都只是你本来就能敲的那条 <code>rowt</code> 命令的前端。
-改动会<strong>攒起来</strong>：最后一次改完约 7 秒后，只重载一次路由器。</p>
-<p class="note" style="margin-top:14px">范围过大的条目会变<span style="color:var(--block)">红</span>
-并被拒绝——<code>com</code> 不是一台主机，那是整个 <code>.com</code>。</p></div></div></div><div class="foot"><span>rowt</span><span>18 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
-<section class="slide" data-i="18"><div class="eyebrow">监控面板 · 速查</div><div class="body"><h2>一个键，全在这儿。</h2><div class="split"><div><figure class="term"><div class="term-bar"><span></span><span></span><span></span><b>rowt monitor — 演示数据</b></div><div class="term-body"><pre><span style="color:#4c5064">╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮</span>
+<dt>u · o</dt><dd>切换服务器 · 开关系统代理，两者立即生效，无需确认</dd></dl>
+<p style="margin-top:16px">每个按键背后都是一条本可手工输入的 <code>rowt</code> 命令。
+改动会先行累积，最后一次操作约 7 秒后统一重载一次路由器。</p>
+<p class="note" style="margin-top:14px">范围过大的条目会标<span style="color:var(--block)">红</span>并拒绝写入：
+<code>com</code> 不是一台主机，而是整个 <code>.com</code>。</p></div></div></div><div class="foot"><span>rowt</span><span>18 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
+<section class="slide" data-i="18"><div class="eyebrow">监控面板 · 速查</div><div class="body"><h2>键位速查</h2><p class="muted" style="margin:-.3em 0 14px">一个键，全部在内。</p><div class="split"><div><figure class="term"><div class="term-bar"><span></span><span></span><span></span><b>rowt monitor — 演示数据</b></div><div class="term-body"><pre><span style="color:#4c5064">╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0;font-weight:600">  _ __ _____      __| |_ </span>  <span style="color:#656a82">MONITOR</span>                                                                            <span style="color:#656a82">uptime</span>  <span style="color:#e9ecf3">3h 15m</span> <span style="color:#4c5064">│</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0;font-weight:600"> | &#x27;__/ _ \ \ /\ / /| __|</span>  <span style="color:#65905c">●</span> <span style="color:#86c07a;font-weight:600">LIVE</span>  <span style="color:#656a82">mode</span>      <span style="color:#e9ecf3">host · en0</span>     <span style="color:#656a82">server</span>  <span style="color:#7c9df0;font-weight:600">JP-Tokyo</span> <span style="color:#86c07a;font-weight:600">42 ms</span>                                           <span style="color:#4c5064">│</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0;font-weight:600"> | | | (_) \ V  V / | |_ </span>          <span style="color:#656a82">sys proxy</span> <span style="color:#86c07a">on</span>             <span style="color:#656a82">router</span>  <span style="color:#e9ecf3">running</span> <span style="color:#656a82">·</span> <span style="color:#86c07a">3%</span>                                             <span style="color:#4c5064">│</span>
@@ -846,95 +857,95 @@ rowt metrics query "&lt;SQL&gt;"  <span class="c"># 只读 SQL 直通</span></di
 <span style="color:#4c5064">├────────────────────────────────────────────────────────────────────────────┴─┤ </span><span style="color:#656a82">server health</span><span style="color:#4c5064"> ├───────────────────────────────┤</span>
 <span style="color:#4c5064">│</span> <span style="color:#8b90a4">10 servers · 9 up · 1 down</span>                                                                                                   <span style="color:#4c5064">│</span>
 <span style="color:#4c5064">│</span> <span style="color:#7c9df0">▶ </span><span style="color:#7c9df0;font-weight:600">JP-Tokyo</span><span style="color:#e9ecf3"> </span><span style="color:#86c07a"> 42 ms</span> <span style="color:#4c5064">│</span> <span style="color:#e9ecf3">JP-Osaka </span><span style="color:#e0655e">175 ms</span>   <span style="color:#e9ecf3">KR-Seoul </span><span style="color:#e0a35e"> 72 ms</span>   <span style="color:#e9ecf3">DE-Frankfurt </span><span style="color:#e0655e">195 ms</span>   <span style="color:#e9ecf3">HK-1 </span><span style="color:#e0a35e"> 82 ms</span>   <span style="color:#e9ecf3">SG-1 </span><span style="color:#e0a35e"> 81 ms</span>   <span style="color:#e9ecf3">TW-Taipei </span><span style="color:#e0a35e">110 ms</span>   <span style="color:#4c5064">│</span>
-<span style="color:#4c5064">╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</span></pre></div><figcaption>随时按 ?，esc 关掉。</figcaption></figure></div><div class="keys" style="grid-template-columns:1fr">
-<section style="--l:var(--escape)"><h4>值得知道</h4>
-<div class="k"><b>鼠标</b><span>滚轮滚指针底下的那个列表；行、通道、窗口标签、服务器、代理格，点了都有反应</span></div>
-<div class="k"><b>主题</b><span>按终端背景自动判断；<code>--theme light</code> 可以钉死</span></div>
-<div class="k"><b>兜底</b><span>没配置、没路由器时显示演示数据，而不是甩一个错误页</span></div>
-<div class="k"><b>只读</b><span>数据通路永远不改任何东西——只有那几个需要确认的控制键会</span></div>
-<div class="k"><b>省资源</b><span>IO 和 CPU 只随<em>新增</em>数据增长，跟日志和服务器池大小无关</span></div>
+<span style="color:#4c5064">╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</span></pre></div><figcaption>随时按 ?，esc 关闭。</figcaption></figure></div><div class="keys" style="grid-template-columns:1fr">
+<section style="--l:var(--escape)"><h4>还需知道</h4>
+<div class="k"><b>鼠标</b><span>滚轮作用于指针所在列表；行、通道、窗口标签、服务器、代理单元格均可点击</span></div>
+<div class="k"><b>主题</b><span>依终端背景自动判断，<code>--theme light</code> 可固定</span></div>
+<div class="k"><b>兜底</b><span>无配置或路由器未运行时显示演示数据，而非错误页</span></div>
+<div class="k"><b>只读</b><span>数据通路不修改任何状态，仅需确认的控制键会写入</span></div>
+<div class="k"><b>开销</b><span>IO 与 CPU 只随<em>新增</em>数据增长，与日志和服务器池规模无关</span></div>
 </section></div></div></div><div class="foot"><span>rowt</span><span>19 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
-<section class="slide" data-i="19"><div class="eyebrow">自动运转</div><div class="body"><h2>不用你操心的那些。</h2>
-<p class="muted" style="margin:-.3em 0 18px">只有 <code>watch</code> 需要装一次，其余默认就开着。</p>
+<section class="slide" data-i="19"><div class="eyebrow">自动运转</div><div class="body"><h2>智能路由，自动运转</h2>
+<p class="muted" style="margin:-.3em 0 18px">仅 <code>watch</code> 需安装一次，其余默认启用。</p>
 <div class="cols c3" style="gap:20px">
 <div class="card"><div class="tag" style="--l:var(--corp)">corp sync</div>
-<p style="margin:.4em 0 0">读系统路由表，把公司 VPN 当前的网段镜像进 corp 通道，
-让走代理的流量也能跟着进隧道。<strong>看门狗每一拍都会重跑</strong>——大约两分钟一次，
-外加每次网络变化——所以 VPN 重连换了网段它也跟得上。手工加的条目它从不碰。</p></div>
+<p style="margin:.4em 0 0">读取系统路由表，把公司 VPN 当前的网段镜像进 corp 通道，
+使走代理的流量同样能进入隧道。<strong>看门狗每一拍重跑一次</strong>，约两分钟一轮，网络变化亦会触发；
+VPN 重连后换了网段也跟得上。手工添加的条目不受影响。</p></div>
 <div class="card"><div class="tag" style="--l:var(--direct)">watch</div>
-<p style="margin:.4em 0 0">一个 LaunchAgent：网络一变就重载；定时探测隧道，卡住或崩了会自动救回来；
-登录时清掉残留的系统代理设置，免得 rowt 的影响活得比重启还久。</p></div>
+<p style="margin:.4em 0 0">一个 LaunchAgent：网络变化即重载；定时探活隧道，卡死或崩溃可自动恢复；
+登录时清理残留的系统代理设置，避免 rowt 的影响跨越重启。</p></div>
 <div class="card"><div class="tag" style="--l:var(--amber)">强制门户</div>
-<p style="margin:.4em 0 0">酒店和机场的 Wi-Fi 登录页，一开代理就打不开。rowt 认得出这种网络，
-先把代理摘掉让登录页能加载，等你过了再自动装回去。</p></div>
+<p style="margin:.4em 0 0">酒店与机场的 Wi-Fi 登录页在开启代理时无法打开。rowt 能识别此类网络，
+先摘掉代理让登录页加载，认证完成后自动恢复。</p></div>
 <div class="card"><div class="tag" style="--l:var(--block)">geosite</div>
-<p style="margin:.4em 0 0">一条命令加一整个维护好的服务——
-<code>rowt escape add geosite:google</code>——不用自己去列后缀。更精确的条目永远压过它。</p></div>
+<p style="margin:.4em 0 0">一条命令接入整个维护好的服务：
+<code>rowt escape add geosite:google</code>，无需自行罗列后缀；更精确的条目仍然优先。</p></div>
 <div class="card"><div class="tag" style="--l:var(--escape)">流量记录</div>
-<p style="margin:.4em 0 0">collector 按域名把字节数写进分层存储，5 秒一格一直汇总到一年；
-命令行可查，面板里翻一下也能看。</p></div>
+<p style="margin:.4em 0 0">collector 按域名写入分层存储，5 秒一格逐级汇总至一年；
+命令行可查询，面板中切换视图亦可查看。</p></div>
 <div class="card"><div class="tag" style="--l:var(--corp)">审计</div>
-<p style="margin:.4em 0 0">每一次改状态的操作都记账，写清是你还是看门狗干的——
-连卡住没跑完的命令也有记录，因为 <code>BEGIN</code> 是动手之前就写下的。</p></div>
+<p style="margin:.4em 0 0">每次状态变更均记账，并标明由本人还是看门狗发起；
+<code>BEGIN</code> 在动作之前写入，因此卡死未完成的命令同样留痕。</p></div>
 </div></div><div class="foot"><span>rowt</span><span>20 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
-<section class="slide" data-i="20"><div class="eyebrow">进阶</div><div class="body"><h2>三种模式，对付三种处境。</h2>
+<section class="slide" data-i="20"><div class="eyebrow">进阶</div><div class="body"><h2>三种运行模式</h2><p class="muted" style="margin:-.3em 0 14px">对应三种处境。</p>
 <div class="cols c3" style="gap:18px">
-<div class="card lane lane-esc"><div class="tag">host</div><h3>最常用的那种</h3>
-<p style="margin:0">sing-box 跑在 Mac 上，escape 的 socket <strong>绑在物理网卡</strong>。
-只要公司 VPN 客户端放行绑定网卡的连接，它就能用。</p></div>
-<div class="card lane lane-corp"><div class="tag">vm</div><h3>绑不出去的时候</h3>
-<p style="margin:0">有些公司客户端是靠<strong>包过滤</strong>拦的，光绑网卡不够。
-这时把隧道搬进一台桥接的 Lima 虚拟机，它有自己的局域网地址——在过滤器看来就是另一台机器。</p></div>
-<div class="card lane lane-dir"><div class="tag">local</div><h3>人已经在墙外</h3>
-<p style="margin:0">干脆不建隧道。escape 通道的规则<strong>改指向 direct</strong> 而不是消失，
-所以它仍然压得过范围更大的 block 条目。这种模式下连服务器都不需要。</p></div></div>
+<div class="card lane lane-esc"><div class="tag">host</div><h3>最常用</h3>
+<p style="margin:0">sing-box 运行在 Mac 上，escape 的 socket <strong>绑定物理网卡</strong>。
+只要公司 VPN 客户端放行绑定网卡的连接即可使用。</p></div>
+<div class="card lane lane-corp"><div class="tag">vm</div><h3>如果绑定网卡不生效</h3>
+<p style="margin:0">部分公司客户端以<strong>包过滤</strong>拦截，仅绑定网卡不足以绕开。
+此时把隧道移入一台桥接的 Lima 虚拟机，它拥有独立的局域网地址，在过滤器看来即另一台主机。</p></div>
+<div class="card lane lane-dir"><div class="tag">local</div><h3>人已在墙外</h3>
+<p style="margin:0">不建隧道。escape 通道的规则不会消失，而是<strong>改指向 direct</strong>，
+因而仍然优先于范围更大的 block 条目。此模式无需配置服务器。</p></div></div>
 <div class="cols c2" style="margin-top:24px">
-<div><h3>怎么选</h3>
+<div><h3>如何选择</h3>
 <div class="cmd">rowt up            <span class="c"># 自动判断</span>
 rowt up vm         <span class="c"># 强制指定</span>
-rowt probe         <span class="c"># 这儿到底哪种能用？</span></div></div>
-<div><p>不带参数的 <code>rowt up</code> 会自己探：在公司 VPN 开着的情况下，试试绑定网卡的连接能不能出去，
-据此决定。它还会从物理网卡上探一遍 GFW 探针域名——如果都通，说明你人已经在墙外，那就选
-<strong>local</strong>。</p>
-<p class="muted">连着公司 VPN 时判断最准，所以切完网络记得再跑一次。</p></div></div></div><div class="foot"><span>rowt</span><span>21 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
-<section class="slide" data-i="21"><div class="eyebrow">进阶</div><div class="body"><h2>搬走，或者交给别人。</h2>
+rowt probe         <span class="c"># 当前环境适用哪种</span></div></div>
+<div><p>不带参数的 <code>rowt up</code> 会自行探测：在公司 VPN 开启的前提下，验证绑定网卡的连接
+能否出网，据此决定模式；同时从物理网卡试探若干探针域名，若均可达，说明当前已在墙外，
+直接选用 <strong>local</strong>。</p>
+<p class="muted">连接公司 VPN 时判断最准，切换网络后建议重跑一次。</p></div></div></div><div class="foot"><span>rowt</span><span>21 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
+<section class="slide" data-i="21"><div class="eyebrow">进阶</div><div class="body"><h2>迁移与交接</h2>
 <div class="cols c2">
-<div><h3>把这套配置搬到另一台机器</h3>
-<p><code>config export</code> 只打包真正的源头——服务器池、订阅、三个通道文件。
-渲染出来的配置、运行状态和二进制都是跟机器绑的，到那边会自己重新生成。</p>
-<div class="cmd">rowt config list             <span class="c"># 看看会打包哪些</span>
+<div><h3>把整套配置搬到另一台机器</h3>
+<p><code>config export</code> 只打包真正的源头：服务器池、订阅，以及三个通道文件。
+渲染产物、运行状态与二进制均与机器绑定，在新机器上会重新生成。</p>
+<div class="cmd">rowt config list             <span class="c"># 查看打包范围</span>
 rowt config export           <span class="c"># → 一个 .tgz</span>
 rowt config import setup.tgz <span class="c"># 恢复并重新渲染</span></div>
-<p class="note">包里有凭证和订阅令牌。传的时候记得加密。</p></div>
-<div><h3>让 agent 来操作</h3>
-<p>rowt 自带一份 <strong>agent skill</strong>：链上之后，编码 agent 就能用你会用的那些命令
-帮你装、帮你查通道、帮你解释某条路由决策。</p>
+<p class="note">包内含凭证与订阅令牌，传输时请加密。</p></div>
+<div><h3>交给 agent 操作</h3>
+<p>rowt 附带一份 <strong>agent skill</strong>：链接之后，编码 agent 可以用同一套命令完成安装、
+排查通道、解释某条分流决策。</p>
 <div class="cmd">rowt skill install
 rowt skill status</div>
-<h3 style="margin-top:20px">要找人帮忙的时候</h3>
+<h3 style="margin-top:20px">需要他人协助时</h3>
 <div class="cmd">rowt report</div>
-<p class="muted">依赖、配置、每台服务器的连通性、DNS、走代理的测试、日志和审计尾巴——
-<strong>敏感信息已脱敏</strong>，直接把文件发出去就行。</p></div></div></div><div class="foot"><span>rowt</span><span>22 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
-<section class="slide" data-i="22"><div class="eyebrow">底层</div><div class="body"><h2>凭什么敢把流量交给它。</h2>
+<p class="muted">依赖、配置、逐台服务器连通性、DNS、走代理的探测、日志与审计尾部，
+<strong>敏感信息已脱敏</strong>，可直接发送。</p></div></div></div><div class="foot"><span>rowt</span><span>22 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
+<section class="slide" data-i="22"><div class="eyebrow">工程</div><div class="body"><h2>工程保障</h2><p class="muted" style="margin:-.3em 0 14px">凭什么把流量交给它。</p>
 <div class="cols c2">
-<div><p>rowt 最早是一个很大的 shell 脚本。现在正在<strong>渐进式</strong>迁到 Rust，
-而新旧两版之间靠一套差分测试台盯着，不是靠"应该没问题"。</p>
-<p>每条命令都在一个碰不到真实机器的沙箱里、用两套实现各跑一遍，
-比对四样东西：<strong>标准输出、退出码、整棵配置目录、以及每一个副作用命令的调用轨迹</strong>。</p>
+<div><p>rowt 最初是一个庞大的 shell 脚本，目前正逐块迁移到 Rust。
+新旧两套实现之间由一套差分测试台把关，而不是靠"应该没问题"。</p>
+<p>每条命令都放进一个接触不到真实机器的沙箱，用两套实现各跑一遍，比对四项产物：
+<strong>标准输出、退出码、整棵配置目录、以及每一个副作用命令的调用轨迹</strong>。</p>
 <div class="cmd">命令行界面     <span style="color:var(--direct)">292/292 一致</span>
 通道编辑       <span style="color:var(--direct)">28/28</span>
 渲染矩阵       <span style="color:var(--direct)">23/23</span>  <span class="c">规范化 JSON</span>
-分流判定       <span style="color:var(--direct)">10/10</span>  <span class="c">通道和理由都要对</span></div></div>
-<div><h3>这么做换来了什么</h3>
-<ul class="bare"><li>一次不会悄悄改掉行为的重写</li>
-<li>顺手在<em>老实现</em>里翻出了 bug——测试台真的抓到过 shell 藏了好几个月的路由错误</li>
-<li>影子模式：两套实现同时跑，把分歧记下来，在真机上跑够时间，再谈切换</li></ul>
-<p class="note" style="margin-top:18px">同一种克制也长在产品里：范围大到能匹配整个顶级域的条目会被拒绝，
-待确认的改动会自己过期，每一次改动都可撤销、都有记录。</p></div></div></div><div class="foot"><span>rowt</span><span>23 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i></span></div></section>
-<section class="slide" data-i="23"><div class="eyebrow">工程</div><div class="body"><h2>一些数字。</h2>
+分流判定       <span style="color:var(--direct)">10/10</span>  <span class="c">通道与理由均需一致</span></div></div>
+<div><h3>这样做换来什么</h3>
+<ul class="bare"><li>重写过程不会悄悄改变行为</li>
+<li>顺带在<em>旧实现</em>中查出缺陷：测试台确实抓到过潜伏数月的分流错误</li>
+<li>影子模式：两套实现同时运行，记录分歧，在真机上跑满观察期后再谈切换</li></ul>
+<p class="note" style="margin-top:18px">同一种克制也体现在产品里：范围大到能匹配整个顶级域的条目会被拒绝，
+待确认的改动会自动过期，每次改动均可撤销、均有记录。</p></div></div></div><div class="foot"><span>rowt</span><span>23 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i></span></div></section>
+<section class="slide" data-i="23"><div class="eyebrow">工程</div><div class="body"><h2>工程数据</h2>
 <div class="stats">
-<div class="stat" style="--l:var(--escape)"><b>4.3 万</b><span>行代码，含文档与测试</span></div>
-<div class="stat" style="--l:var(--corp)"><b>222</b><span>次提交，始于 2026 年 7 月 3 日</span></div>
+<div class="stat" style="--l:var(--escape)"><b>4.3 万</b><span>行，含文档与测试</span></div>
+<div class="stat" style="--l:var(--corp)"><b>222</b><span>次提交，始于 2026-07-03</span></div>
 <div class="stat" style="--l:var(--direct)"><b>81</b><span>个发布标签</span></div>
 <div class="stat" style="--l:var(--block)"><b>366</b><span>个 Rust 单测与集成测试</span></div>
 <div class="stat" style="--l:var(--amber)"><b>353</b><span>条差分对比用例</span></div>
@@ -949,32 +960,32 @@ rowt skill status</div>
 <div class="row" style="--l:var(--direct)"><b>差分测试台</b><i style="width:23%"></i><span>4,266</span></div>
 <div class="row" style="--l:var(--block)"><b>文档 · markdown</b><i style="width:18%"></i><span>3,480</span></div>
 <div class="row" style="--l:var(--amber)"><b>Python · 遗留</b><i style="width:13%"></i><span>2,529</span></div></div>
-<p class="muted" style="margin-top:14px;font-size:13.5px">Python 正在退场——3.3.7 起
-<code>bin/rowt</code> 调的已经是 Rust 版助手，两种架构的安装包都不再依赖
+<p class="muted" style="margin-top:14px;font-size:13.5px">Python 正在退场：自 3.3.7 起
+<code>bin/rowt</code> 调用的已是 Rust 版助手，两种架构的安装包均不再依赖
 <code>python@3.12</code>。</p></div>
-<div><h3>怎么搭起来的</h3>
-<dl class="kv"><dt>语言</dt><dd>Bash、Rust、少量 Python，以及最早那份用 jq 写的渲染</dd>
-<dt>运行时</dt><dd>sing-box · SQLite（内置）· TUI 用 ratatui</dd>
-<dt>工作区</dt><dd>两个——CLI/核心库，以及监控面板</dd>
+<div><h3>技术构成</h3>
+<dl class="kv"><dt>语言</dt><dd>Bash、Rust、少量 Python，以及最初用 jq 写的渲染</dd>
+<dt>运行时</dt><dd>sing-box · SQLite（内置）· TUI 基于 ratatui</dd>
+<dt>工作区</dt><dd>两个：CLI 与核心库，以及监控面板</dd>
 <dt>门禁</dt><dd>命令行 292 · 通道 28 · 渲染 23 · 分流 10 · 沙箱场景 25</dd>
-<dt>打包</dt><dd>Homebrew tap；Apple Silicon 直接拉 5 个预编译二进制，Intel 从源码构建</dd>
-<dt>零配置</dt><dd>没有任何进程以 root 常驻，也没有任何代码去写路由表</dd></dl>
+<dt>打包</dt><dd>Homebrew tap；Apple Silicon 直取 5 个预编译二进制，Intel 由源码构建</dd>
+<dt>权限</dt><dd>无任何进程以 root 常驻，也无任何代码写入路由表</dd></dl>
 <h3 style="margin-top:20px">Rust 迁移进度</h3>
 <div class="phases">
 <span class="ph done">0 · 测试台</span><span class="ph done">2 · 分流与通道</span>
 <span class="ph done">4 · 整个命令行</span><span class="ph done">6 · 导入解析</span>
-<span class="ph wip">1 · 渲染 — 影子期</span><span class="ph wip">3 · 看门狗 — 切换未完</span>
-<span class="ph todo">5 · Linux + tun 模式</span></div>
+<span class="ph wip">1 · 渲染 · 观察期</span><span class="ph wip">3 · 看门狗 · 未切换</span>
+<span class="ph todo">5 · Linux 与 tun 模式</span></div>
 <p class="muted" style="margin-top:10px;font-size:13.5px">典型的<strong>绞杀式</strong>迁移：
-每个阶段独立发布、各有各的门禁，而 shell 始终还是日常在跑的那一版。
-<code>ROWT_IMPL=rust</code> 已经能把整条命令交给 Rust 版——默认关着，等影子期跑够为止。</p></div></div></div><div class="foot"><span>rowt</span><span>24 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i></span></div></section>
+每个阶段单独发布、各自把关，日常运行的始终仍是 shell 版。
+<code>ROWT_IMPL=rust</code> 已可将整条命令交由 Rust 处理，默认关闭，待观察期跑满。</p></div></div></div><div class="foot"><span>rowt</span><span>24 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i></span></div></section>
 <section class="slide" data-i="24"><div class="body"><div class="title-wrap">
 <div class="lanes3" style="margin:0 0 22px"><i style="background:var(--escape)"></i><i style="background:var(--corp)"></i><i style="background:var(--direct)"></i></div>
-<h2 style="font-size:clamp(28px,4.2vw,52px)">从这儿开始。</h2>
+<h2 style="font-size:clamp(28px,4.2vw,52px)">从这里开始</h2>
 <div class="cmd" style="max-width:560px">brew install tanghong123/tap/rowt
 rowt onboard</div>
-<p class="lead" style="margin-top:6px">剩下的都能自己摸出来——<code>rowt help</code>、
-<code>rowt &lt;命令&gt; --help</code>，以及那份会告诉你下一步该跑什么的清单。</p>
+<p class="lead" style="margin-top:6px">其余都可自行探索：<code>rowt help</code>、
+<code>rowt &lt;命令&gt; --help</code>，以及那份会指出下一步的清单。</p>
 <p class="muted">文档：README.md · DESIGN.md · rowt-monitor/DESIGN.md</p></div></div><div class="foot"><span>rowt</span><span>25 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i></span></div></section></div>
 <div class="hint" id="hint">← → or space to move</div>
 <div class="nav"><button id="prev" aria-label="Previous slide">‹</button><button id="next" aria-label="Next slide">›</button></div>

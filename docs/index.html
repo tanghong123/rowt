@@ -30,6 +30,11 @@ body{margin:0;background:var(--ground);color:var(--ink);font-family:var(--sans);
 .slide{position:absolute;inset:0;display:none;grid-template-rows:auto 1fr auto;
   padding:var(--pad) var(--pad) 0;overflow:hidden}
 .slide.on{display:grid;animation:in .34s cubic-bezier(.2,.7,.3,1)}
+/* Pin the rows. The title slides carry no eyebrow, so with auto-placement their
+   two children fell into rows 1 and 2 — putting the footer in the middle 1fr row
+   instead of the last one, and floating it off the bottom. */
+.slide>.body{grid-row:2}
+.slide>.foot{grid-row:3}
 @keyframes in{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
 @media (prefers-reduced-motion:reduce){.slide.on{animation:none}}
 .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.16em;text-transform:uppercase;
@@ -172,7 +177,7 @@ td{color:var(--ink-2)} td:first-child{color:var(--ink)}
 .regions .r span{color:var(--ink-2);font-size:14.5px}
 .term.big pre{font-size:1em}
 
-.lang{position:fixed;left:var(--pad);top:15px;z-index:9;font-family:var(--mono);font-size:11.5px;
+.lang{position:fixed;right:var(--pad);top:15px;z-index:9;font-family:var(--mono);font-size:11.5px;
   letter-spacing:.09em;color:var(--ink-3);text-decoration:none;border-bottom:1px solid var(--rule);
   padding-bottom:1px}
 .lang:hover{color:var(--accent);border-color:var(--accent)}
@@ -305,13 +310,13 @@ otherwise spins CPU on the direct lane.</p><p class="ex">doubleclick.net · goog
 <path class="dg-l" d="M250 492 L250 525 L790 525" style="stroke:var(--corp)"/>
 <path class="dg-l" d="M790 525 L790 396" style="stroke:var(--corp)" marker-end="url(#ar-corp)"/>
 <text class="dg-lab" x="520" y="545" text-anchor="middle">the corp lane is UNBOUND — it follows this table into the tunnel</text>
-<rect class="dg-box" x="500" y="206" width="210" height="42" rx="7" style="stroke:var(--direct)"/>
-<text class="dg-t" x="605.0" y="231.5" text-anchor="middle">watch</text>
-<text class="dg-s" x="605" y="240" text-anchor="middle">reload on network change</text>
-<rect class="dg-box" x="500" y="262" width="210" height="42" rx="7" style="stroke:var(--block)"/>
-<text class="dg-t" x="605.0" y="287.5" text-anchor="middle">collector</text>
-<text class="dg-s" x="605" y="296" text-anchor="middle">bytes per domain → SQLite</text>
-<path class="dg-l" d="M500 227 L465 227" style="stroke:var(--direct)" stroke-dasharray="4 5" marker-end="url(#ar-dir)"/>
+<rect class="dg-box" x="500" y="200" width="210" height="50" rx="7" style="stroke:var(--direct)"/>
+<text class="dg-t" x="605.0" y="221" text-anchor="middle">watch</text>
+<text class="dg-s" x="605.0" y="237" text-anchor="middle">reload on network change</text>
+<rect class="dg-box" x="500" y="258" width="210" height="50" rx="7" style="stroke:var(--block)"/>
+<text class="dg-t" x="605.0" y="279" text-anchor="middle">collector</text>
+<text class="dg-s" x="605.0" y="295" text-anchor="middle">bytes per domain → SQLite</text>
+<path class="dg-l" d="M500 225 L465 225" style="stroke:var(--direct)" stroke-dasharray="4 5" marker-end="url(#ar-dir)"/>
 <path class="dg-l" d="M500 283 L465 271" style="stroke:var(--block)" stroke-dasharray="4 5" marker-end="url(#ar-blk)"/>
 </svg></div><div class="foot"><span>rowt</span><span>5 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
 <section class="slide" data-i="5"><div class="eyebrow">How it works</div><div class="body"><h2>First match wins.</h2>
@@ -932,7 +937,7 @@ cut over</li></ul>
 <p class="note" style="margin-top:18px">The same discipline shows up in the product: a lane entry that
 would match a whole TLD is refused, an armed edit expires, and every mutation is reversible and
 logged.</p></div></div></div><div class="foot"><span>rowt</span><span>23 / 25</span><span class="rail"><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class="a"></i><i class=""></i><i class=""></i></span></div></section>
-<section class="slide" data-i="23"><div class="eyebrow">Engineering</div><div class="body"><h2>By the numbers.</h2>
+<section class="slide" data-i="23"><div class="eyebrow">Under the hood</div><div class="body"><h2>By the numbers.</h2>
 <div class="stats">
 <div class="stat" style="--l:var(--escape)"><b>43k</b><span>lines, all told</span></div>
 <div class="stat" style="--l:var(--corp)"><b>222</b><span>commits since 3 Jul 2026</span></div>
