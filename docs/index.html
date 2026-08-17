@@ -367,11 +367,15 @@ downloads sing-box for you. Only switch to the corp VPN once it works.
 <div class="n">01</div><div><h3>Install</h3>
 <div class="cmd">brew install tanghong123/tap/rowt</div></div>
 <div class="n">02</div><div><h3>Bring your servers in</h3>
-<p class="muted" style="font-size:14px;margin-bottom:.5em">Import from a client you already use, prune
-the review file, then apply. Or add a share link directly.</p>
+<p class="muted" style="font-size:14px;margin-bottom:.5em">Import from the clients you already use —
+<strong>Shadowrocket, Clash Verge, V2Box, FlClash</strong>. Run it once per client: entries
+accumulate into one review file, each tagged with where it came from. Prune, then apply.</p>
 <div class="cmd">rowt server import <span class="c">--from shadowrocket</span>
+rowt server import <span class="c">--from clash-verge   # accumulates</span>
 $EDITOR ~/.config/rowt/import-review.json
-rowt server import --apply</div></div>
+rowt server import --apply</div>
+<p class="muted" style="font-size:14px;margin:0">Or add a share link directly:
+<code>rowt server add '&lt;vless://…&gt;'</code></p></div>
 <div class="n">03</div><div><h3>Start it</h3>
 <p class="muted" style="font-size:14px;margin-bottom:.5em">Fetches sing-box if missing, probes the
 right mode, renders the config, starts the router, turns the proxy on.</p>

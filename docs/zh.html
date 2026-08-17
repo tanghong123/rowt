@@ -400,10 +400,15 @@ sing-box；整套跑通后再切回公司 VPN。这张清单可随时用 <code>r
 <div class="n">01</div><div><h3>安装</h3>
 <div class="cmd">brew install tanghong123/tap/rowt</div></div>
 <div class="n">02</div><div><h3>导入服务器</h3>
-<p class="muted" style="font-size:14px;margin-bottom:.5em">从在用的客户端导入，删掉不需要的，再确认写入；也可直接添加分享链接。</p>
+<p class="muted" style="font-size:14px;margin-bottom:.5em">支持从
+<strong>Shadowrocket、Clash Verge、V2Box、FlClash</strong> 导入。每个客户端各跑一次，
+结果累加进同一份待确认文件，并标注来源；删掉不需要的，再确认写入。</p>
 <div class="cmd">rowt server import <span class="c">--from shadowrocket</span>
+rowt server import <span class="c">--from clash-verge   # 累加，不覆盖</span>
 $EDITOR ~/.config/rowt/import-review.json
-rowt server import --apply</div></div>
+rowt server import --apply</div>
+<p class="muted" style="font-size:14px;margin:0">也可直接添加分享链接：
+<code>rowt server add '&lt;vless://…&gt;'</code></p></div>
 <div class="n">03</div><div><h3>启动</h3>
 <p class="muted" style="font-size:14px;margin-bottom:.5em">缺 sing-box 会自动获取；探测适用模式，渲染配置，拉起路由器，打开系统代理。</p>
 <div class="cmd">rowt up</div></div>
