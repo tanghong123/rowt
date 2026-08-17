@@ -243,7 +243,7 @@ unlisted — local sites stay fast and un-tunnelled.</p><p class="ex">baidu.com 
 <div class="card lane lane-blk"><div class="tag">block</div><h3>Sinkhole</h3>
 <p style="margin:0">Refused instantly — no DNS, no dial. Kills the ad/telemetry retry storm that
 otherwise spins CPU on the direct lane.</p><p class="ex">doubleclick.net · google-analytics.com</p></div></div></div><div class="foot"><span>rowt</span><span>4 / 25</span><span class="rail"><i class="h" title="Back to the first slide"></i><i class=""></i><i class=""></i><i class="a "></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
-<section class="slide" data-i="4"><div class="eyebrow">How it works</div><div class="body"><h2>From app to exit.</h2><svg class="diagram" viewBox="0 0 940 570" role="img" aria-label="How traffic reaches rowt on macOS, is classified into lanes, and leaves">
+<section class="slide" data-i="4"><div class="eyebrow">How it works</div><div class="body"><h2>Architecture</h2><p class="muted" style="margin:-.3em 0 14px">How traffic reaches rowt, how it is classified, and where it leaves.</p><svg class="diagram" viewBox="0 0 940 570" role="img" aria-label="How traffic reaches rowt on macOS, is classified into lanes, and leaves">
 <defs>
 <marker id="ar-rule" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="var(--rule)"/></marker>
 <marker id="ar-esc" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="var(--escape)"/></marker>
@@ -324,9 +324,8 @@ otherwise spins CPU on the direct lane.</p><p class="ex">doubleclick.net · goog
 <path class="dg-l" d="M500 283 L460 271" style="stroke:var(--block)" stroke-dasharray="4 5" marker-end="url(#ar-blk)"/>
 </svg></div><div class="foot"><span>rowt</span><span>5 / 25</span><span class="rail"><i class="h" title="Back to the first slide"></i><i class=""></i><i class=""></i><i class=""></i><i class="a "></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i><i class=""></i></span></div></section>
 <section class="slide" data-i="5"><div class="eyebrow">How it works</div><div class="body"><h2>Lane classification</h2>
-<p class="muted" style="margin:-.3em 0 14px">Top to bottom, first match wins.</p>
 <p>One connection arrives. sing-box sniffs the destination hostname — <em>before</em> any DNS — and
-walks the rules top to bottom.</p>
+walks the rules top to bottom; first match wins.</p>
 <div class="cols c2">
 <div><div class="cmd"><span class="c"># route.rules, in order</span>
 sniff
