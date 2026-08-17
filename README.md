@@ -3,6 +3,11 @@
 Run a personal **VLESS / VMess / AnyTLS / hysteria2** VPN for selected sites **while the corporate
 VPN keeps the default route**, without the two clients fighting over the tunnel.
 
+📖 **[Product introduction](https://tanghong123.github.io/rowt/)** ·
+**[中文版](https://tanghong123.github.io/rowt/zh.html)** — a slide deck covering
+the problem, the architecture, onboarding, and a tour of the monitor. Start there
+if you'd rather see it than read it.
+
 ## TL;DR — the common path
 
 Do the whole setup with **Shadowrocket (or any working VPN) ON** — `rowt up`
