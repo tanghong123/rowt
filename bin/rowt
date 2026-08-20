@@ -53,7 +53,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.4.7"
+ROWT_VERSION="3.4.8"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -2751,6 +2751,17 @@ if [ -z "${_ROWT_SHELL_INIT:-}" ]; then
     esac
     printf '%s\n' "$remote_host"
   }
+  _rowt_remote_require_reachable() {
+    local caller="$1" remote_host="$2" share_port="$3"
+    if [ ! -x /usr/bin/nc ]; then
+      echo "$caller: cannot verify $remote_host:$share_port — /usr/bin/nc not found" >&2
+      return 1
+    fi
+    if ! /usr/bin/nc -z -G 3 -- "$remote_host" "$share_port" >/dev/null 2>&1; then
+      echo "$caller: cannot reach $remote_host:$share_port — check the host, Tailscale, policy, and rowt-share-status" >&2
+      return 1
+    fi
+  }
   # Client-side counterpart to rowt-share-on. Point this shell's CLI proxy env
   # at another tailnet node without changing the macOS system proxy. Pass only
   # the MagicDNS name or Tailscale IP; ROWT_SHARE_PORT selects its Serve port.
@@ -2759,9 +2770,12 @@ if [ -z "${_ROWT_SHELL_INIT:-}" ]; then
       echo "usage: rowt-remote-on <remote-host>" >&2
       return 2
     fi
-    local remote_host="" proxy_host=""
+    local remote_host="" proxy_host="" check_host=""
     local share_port="${ROWT_SHARE_PORT:-17890}"
     remote_host="$(_rowt_remote_resolve_host "$1" rowt-remote-on)" || return $?
+    check_host="$remote_host"
+    case "$check_host" in \[*\]) check_host="${check_host#\[}"; check_host="${check_host%\]}" ;; esac
+    _rowt_remote_require_reachable rowt-remote-on "$check_host" "$share_port" || return $?
     proxy_host="$remote_host"
     case "$remote_host" in
       \[*\]) ;;                         # already-bracketed IPv6
@@ -2771,6 +2785,7 @@ if [ -z "${_ROWT_SHELL_INIT:-}" ]; then
     local socks_proxy_url="socks5h://$proxy_host:$share_port"
     export http_proxy="$http_proxy_url" https_proxy="$http_proxy_url" all_proxy="$socks_proxy_url"
     export HTTP_PROXY="$http_proxy_url" HTTPS_PROXY="$http_proxy_url" ALL_PROXY="$socks_proxy_url"
+    echo "rowt remote shell proxy on ($check_host:$share_port)"
   }
   rowt-remote-off() {
     if [ "$#" -ne 0 ]; then
@@ -2817,10 +2832,7 @@ if [ -z "${_ROWT_SHELL_INIT:-}" ]; then
       echo "rowt-remote-system-on: no active physical network service" >&2
       return 1
     fi
-    if [ -x /usr/bin/nc ] && ! /usr/bin/nc -z -G 3 "$system_host" "$share_port" >/dev/null 2>&1; then
-      echo "rowt-remote-system-on: cannot reach $system_host:$share_port — check Tailscale, policy, and rowt-share-status" >&2
-      return 1
-    fi
+    _rowt_remote_require_reachable rowt-remote-system-on "$system_host" "$share_port" || return $?
     if _rowt_remote_proxy_type_ok "$service" -getwebproxy "$system_host" "$share_port" \
       && _rowt_remote_proxy_type_ok "$service" -getsecurewebproxy "$system_host" "$share_port" \
       && _rowt_remote_proxy_type_ok "$service" -getsocksfirewallproxy "$system_host" "$share_port"; then
@@ -4390,7 +4402,7 @@ Notes:
   • Modes: host = VLESS bound to the physical NIC; vm = a bridged Lima VM runs the tunnel.
   • Shell helpers (from shell-init): rowt-proxy-on / rowt-proxy-off point this
     shell's CLI proxy env at local rowt; rowt-remote-on <remote-host> / -off point
-    it at a tailnet-shared rowt (short machine names expand through Tailscale);
+    it at a reachable tailnet-shared rowt (short names expand through Tailscale);
     rowt-remote-system-on <remote-host> / -off apply the remote proxy to macOS;
     rowt-share-on / -off / -status manage that share.
 
@@ -4818,7 +4830,7 @@ $PROG proxy <status|check|on|off|env> — macOS system proxy + CLI env.
 shell-init also adds helpers around the two evals above:
   rowt-proxy-on    = eval "\$($PROG proxy env)"      (point this shell's CLI at rowt)
   rowt-proxy-off   = eval "\$($PROG proxy env --off)" (unset them)
-  rowt-remote-on <remote-host>                         (point it at shared remote rowt;
+  rowt-remote-on <remote-host>                         (verify + point it at shared remote rowt;
                                                         short names auto-expand)
   rowt-remote-off                                      (unset them)
   rowt-remote-system-on <remote-host>                  (point macOS apps at remote rowt;
@@ -4869,7 +4881,7 @@ Or add ONE line by hand to your ~/.zshrc (or ~/.bashrc), after 'brew shellenv':
   eval "\$($PROG shell-init)"
 It defines rowt-proxy-on / rowt-proxy-off (point this shell's CLI proxy env at
 local rowt / clear it), rowt-remote-on <remote-host> / rowt-remote-off (point it
-at a tailnet-shared rowt / clear it; short machine names auto-expand), and
+at a reachable tailnet-shared rowt / clear it; short machine names auto-expand), and
 rowt-remote-system-on <remote-host> / rowt-remote-system-off (apply it to macOS /
 disable it). rowt-share-on / rowt-share-off / rowt-share-status publish the
 loopback proxy through a tailnet-only Tailscale Serve TCP forward. It also loads

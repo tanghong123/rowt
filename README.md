@@ -94,6 +94,9 @@ full `DNSName` (without the trailing dot). If the Tailscale CLI or `jq` is
 unavailable, or the name is unknown, the helper keeps the short name and lets
 MagicDNS resolve it normally; an ambiguous match is rejected. Set
 `ROWT_SHARE_PORT` before calling it for a non-default Serve port.
+Before exporting anything, `rowt-remote-on` checks that the resolved host and
+Serve port are reachable; failure prints the rejected endpoint and leaves the
+existing proxy environment untouched. Success also prints the selected endpoint.
 `rowt-remote-off` clears the same six variables. These helpers affect only the
 current shell and do not change the client's macOS system proxy.
 

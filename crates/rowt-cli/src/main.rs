@@ -2093,6 +2093,7 @@ mod tests {
         assert!(init.contains(".DNSName // \"\""));
         assert!(init.contains("rtrimstr(\".\")"));
         assert!(init.contains("Tailscale machine name is ambiguous"));
+        assert!(init.contains("cannot reach $remote_host:$share_port"));
         assert!(init.contains("/usr/sbin/networksetup -setwebproxy"));
         assert!(init.contains("/usr/sbin/networksetup -setsecurewebproxy"));
         assert!(init.contains("/usr/sbin/networksetup -setsocksfirewallproxy"));
@@ -2102,6 +2103,11 @@ mod tests {
         assert!(init.contains("socks5h://$proxy_host:$share_port"));
         assert!(init.contains("tailscale serve --bg --tcp=\"$share_port\""));
         assert!(init.contains("tailscale serve --tcp=\"$share_port\" off"));
+        let remote_on = init.split_once("rowt-remote-on() {").unwrap().1
+                            .split_once("rowt-remote-off() {").unwrap().0;
+        let check = remote_on.find("_rowt_remote_require_reachable rowt-remote-on").unwrap();
+        let export = remote_on.find("export http_proxy=").unwrap();
+        assert!(check < export, "rowt-remote-on must check reachability before exporting");
     }
 
     /// A name the shell does not document is a TYPO, and the typo's error is
