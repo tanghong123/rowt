@@ -2081,11 +2081,25 @@ mod tests {
     /// compiles it into this binary. Pin the user-facing helpers here so a bad
     /// marker/extraction change cannot silently leave the native port behind.
     #[test]
-    fn native_shell_init_carries_the_share_helpers() {
+    fn native_shell_init_carries_the_tailnet_helpers() {
         let init = include_str!(concat!(env!("OUT_DIR"), "/shell_init.txt"));
-        for helper in ["rowt-share-on()", "rowt-share-off()", "rowt-share-status()"] {
+        for helper in ["rowt-remote-on()", "rowt-remote-off()",
+                       "rowt-remote-system-on()", "rowt-remote-system-off()",
+                       "rowt-share-on()", "rowt-share-off()", "rowt-share-status()"] {
             assert!(init.contains(helper), "native shell-init missing {helper}");
         }
+        assert!(init.contains("usage: rowt-remote-on <remote-host>"));
+        assert!(init.contains("tailscale status --json"));
+        assert!(init.contains(".DNSName // \"\""));
+        assert!(init.contains("rtrimstr(\".\")"));
+        assert!(init.contains("Tailscale machine name is ambiguous"));
+        assert!(init.contains("/usr/sbin/networksetup -setwebproxy"));
+        assert!(init.contains("/usr/sbin/networksetup -setsecurewebproxy"));
+        assert!(init.contains("/usr/sbin/networksetup -setsocksfirewallproxy"));
+        assert!(init.contains("/usr/bin/nc -z -G 3"));
+        assert!(init.contains("bypass list unchanged"));
+        assert!(init.contains("http://$proxy_host:$share_port"));
+        assert!(init.contains("socks5h://$proxy_host:$share_port"));
         assert!(init.contains("tailscale serve --bg --tcp=\"$share_port\""));
         assert!(init.contains("tailscale serve --tcp=\"$share_port\" off"));
     }

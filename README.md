@@ -47,14 +47,17 @@ eval "$(rowt shell-init)"
 ```
 
 It gives you **tab-completion** for every subcommand, the `rowt-proxy-on` /
-`rowt-proxy-off` aliases used below, and optional `rowt-share-on` / `-off` /
-`-status` helpers for sharing rowt inside your Tailscale tailnet — idempotent, so
-it's safe to keep in your rc.
+`rowt-proxy-off` aliases used below, `rowt-remote-on` / `-off` for using another
+tailnet node's rowt, `rowt-remote-system-on` / `-off` for doing that system-wide,
+and optional `rowt-share-on` / `-off` / `-status` helpers for sharing rowt inside
+your Tailscale tailnet — idempotent, so it's safe to keep in your rc.
 
 Day to day:
 
 ```sh
 rowt-proxy-on                 # point THIS shell's curl/git/npm/… at rowt (rowt-proxy-off to undo)
+rowt-remote-on rowt-mac       # client: point this shell at rowt-mac:17890 (rowt-remote-off to undo)
+rowt-remote-system-on rowt-mac # client: point macOS apps there (system-off to undo; needs admin)
 rowt-share-on                 # tailnet-only TCP forward :17890 -> rowt :7890 (rowt-share-off to undo)
 rowt escape add youtube.com   # send another site through the personal tunnel
 rowt corp add '*.intranet.example.com' '10.0.0.0/8'   # send a domain or CIDR into the corp VPN
@@ -79,6 +82,32 @@ tailnet peer allowed by policy can discover `17890` by scanning the Mac's
 Tailscale IP; a non-tailnet or policy-denied host cannot reach it. The Serve
 mapping persists across restarts; `rowt-share-off` removes it, and
 `rowt-share-status` shows both backend and Serve state.
+
+On a client node, `rowt-remote-on <remote-host>` points that shell's lowercase
+and uppercase HTTP/HTTPS proxy variables at `http://<remote-host>:17890` and its
+`all_proxy` variables at `socks5h://<remote-host>:17890`; the latter keeps DNS on
+the remote side so rowt receives the hostname it needs for lane classification.
+Pass a Tailscale MagicDNS name or IP, not a URL. Bare IPv6 addresses are bracketed
+automatically. A single-label machine name such as `aries-black` is matched
+case-insensitively against `tailscale status --json` and expanded to its unique
+full `DNSName` (without the trailing dot). If the Tailscale CLI or `jq` is
+unavailable, or the name is unknown, the helper keeps the short name and lets
+MagicDNS resolve it normally; an ambiguous match is rejected. Set
+`ROWT_SHARE_PORT` before calling it for a non-default Serve port.
+`rowt-remote-off` clears the same six variables. These helpers affect only the
+current shell and do not change the client's macOS system proxy.
+
+For GUI applications on a macOS client, `rowt-remote-system-on <remote-host>`
+uses the same expansion and points the active physical network service's HTTP,
+HTTPS, and SOCKS settings at the remote Serve port. It first refuses an
+unreachable port, is idempotent, needs admin only when the settings differ, and
+remembers that service for a paired
+`rowt-remote-system-off` in the same shell. It deliberately leaves the service's
+existing proxy bypass list untouched: whether private/corp destinations should
+stay local or traverse remote rowt is client-specific policy. The off helper
+disables all three proxy types on the remembered (otherwise current) service.
+Do not run the rowt watchdog on that client while using this system helper: both
+manage the same macOS proxy settings and the watcher may restore local rowt.
 
 **`rowt monitor`** is the `htop`-style live view (with confirmed, reversible
 controls — server switch, lane routing, proxy toggle) — press `?` for keys,
@@ -127,8 +156,10 @@ war with the corp client.
 
 CLI tools (`claude`, `git`, `npm`, `curl`, …) don't respect the macOS system
 proxy — they only honour the `http_proxy` / `https_proxy` / `all_proxy`
-environment variables. rowt gives you `rowt-proxy-on` / `rowt-proxy-off`
-(from `eval "$(rowt shell-init)"`) to set and clear those, but if you
+environment variables. rowt gives you `rowt-proxy-on` / `rowt-proxy-off` for a
+local rowt and `rowt-remote-on <remote-host>` / `rowt-remote-off` for a
+tailnet-shared rowt (from `eval "$(rowt shell-init)"`) to set and clear those,
+but if you
 **hop between networks a lot** — corp VPN, home Wi-Fi, a hotspot, a plane —
 or you have **several proxy apps** around (rowt, Shadowrocket, a corp client),
 the right value keeps changing, and it's easy to forget which one is live.
@@ -610,7 +641,7 @@ corp/escape/direct.
 | command | what it does |
 | --- | --- |
 | `proxy status\|check\|on\|off\|env [--off]` | show / verify / set / unset the macOS system proxy; `env` prints CLI env exports. `on`/`off` are **idempotent** — they read the current state first (no sudo) and only invoke admin for what's actually wrong, so re-running never prompts if already correct. `on` is a **no-op unless the router is running** (else it would just point the system proxy at a dead port and break traffic) — run `rowt up` first, or `proxy on --force` to override. `check` exits 0 iff fully configured (used to re-apply after the OS config drifts). |
-| `shell-init` | shell integration to `eval` in your rc — defines `rowt-proxy-on`/`-off`, the Tailscale `rowt-share-on`/`-off`/`-status` helpers, and loads tab-completion for subcommands (zsh/bash), idempotent. Add `eval "$(rowt shell-init)"` to `~/.zshrc`. |
+| `shell-init` | shell integration to `eval` in your rc — defines `rowt-proxy-on`/`-off`, client-side `rowt-remote-on <remote-host>`/`-off`, system-wide `rowt-remote-system-on <remote-host>`/`-off`, the Tailscale `rowt-share-on`/`-off`/`-status` helpers, and loads tab-completion for subcommands (zsh/bash), idempotent. Add `eval "$(rowt shell-init)"` to `~/.zshrc`. |
 | `completion <zsh\|bash>` | print a tab-completion script (normally auto-loaded by `shell-init`; defers to the live command set so it never drifts). |
 | `render` | regenerate the sing-box configs from current state. |
 | `fetch [host\|vm\|both]` | pre-download while a VPN is on so `up` works offline. `host` = the macOS sing-box binary; `vm` = the ubuntu image + linux sing-box tarball into `~/.config/rowt/cache/` (then `up vm` boots from the local image and installs sing-box into the guest from that cache — **the VM never reaches GitHub itself**). Default `both`. |

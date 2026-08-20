@@ -53,7 +53,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.4.6"
+ROWT_VERSION="3.4.7"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -2678,12 +2678,12 @@ shell_init_install() {
 }
 
 # Shell integration to eval from your rc:  eval "$(rowt shell-init)"
-# Emits the rowt-proxy-on / rowt-proxy-off aliases and the optional Tailscale
-# sharing helpers. IDEMPOTENT — the guard makes re-sourcing your rc a no-op, and
-# the sentinel is NOT exported so each new interactive shell (and subshell)
-# re-applies it cleanly. Homebrew won't edit your rc, so this is how brew installs
-# enable the helpers. '--install' appends the eval line to your rc for you (see
-# shell_init_install above).
+# Emits the local/remote proxy helpers and the optional Tailscale sharing helpers.
+# IDEMPOTENT — the guard makes re-sourcing your rc a no-op, and the sentinel is
+# NOT exported so each new interactive shell (and subshell) re-applies it cleanly.
+# Homebrew won't edit your rc, so this is how brew installs enable the helpers.
+# '--install' appends the eval line to your rc for you (see shell_init_install
+# above).
 cmd_shell_init() {
   case "${1:-}" in
     --install) shift; shell_init_install "${1:-}"; return $? ;;
@@ -2697,6 +2697,176 @@ if [ -z "${_ROWT_SHELL_INIT:-}" ]; then
   _ROWT_SHELL_INIT=1
   alias rowt-proxy-on='eval "$(rowt proxy env)"'
   alias rowt-proxy-off='eval "$(rowt proxy env --off)"'
+  # Resolve a client helper's host argument. Single-label Tailscale names become
+  # their canonical MagicDNS name; FQDNs and IPs pass through untouched.
+  _rowt_remote_resolve_host() {
+    local remote_host="${1:-}"
+    local caller="${2:-rowt-remote-on}"
+    case "$remote_host" in
+      ""|*://*|*/*|*[[:space:]]*)
+        echo "$caller: pass a hostname or Tailscale IP, not a URL: $remote_host" >&2
+        return 2
+        ;;
+    esac
+    # Turn a single-label Tailscale machine name into its canonical MagicDNS
+    # name. Never guess the tailnet suffix: DNSName also captures collision
+    # renames. A missing CLI/jq or an unknown name falls back to normal MagicDNS
+    # short-name resolution; an ambiguous HostName is unsafe to guess.
+    case "$remote_host" in
+      *.*|*:*) ;; # FQDN, IPv4, bracketed IPv6, or bare IPv6
+      *)
+        local expanded_hosts="" match_count=0
+        if command -v tailscale >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+          expanded_hosts="$(
+            command tailscale status --json 2>/dev/null |
+              command jq -r --arg host "$remote_host" '
+                ($host | ascii_downcase) as $wanted
+                | [.Self, ((.Peer // {}) | to_entries[]?.value)]
+                | map(select(. != null))
+                | map({
+                    hostname: (.HostName // ""),
+                    dnsname: ((.DNSName // "") | rtrimstr("."))
+                  })
+                | map(select(
+                    ((.hostname | ascii_downcase) == $wanted)
+                    or (((.dnsname | split(".")[0]) | ascii_downcase) == $wanted)
+                  ))
+                | map(.dnsname)
+                | map(select(length > 0))
+                | unique[]
+              ' 2>/dev/null || true
+          )"
+          match_count="$(printf '%s\n' "$expanded_hosts" | awk 'NF { n++ } END { print n + 0 }')"
+          case "$match_count" in
+            0) ;;
+            1) remote_host="$expanded_hosts" ;;
+            *)
+              echo "$caller: Tailscale machine name is ambiguous: $remote_host" >&2
+              printf '%s\n' "$expanded_hosts" | sed '/^$/d; s/^/  /' >&2
+              return 2
+              ;;
+          esac
+        fi
+        ;;
+    esac
+    printf '%s\n' "$remote_host"
+  }
+  # Client-side counterpart to rowt-share-on. Point this shell's CLI proxy env
+  # at another tailnet node without changing the macOS system proxy. Pass only
+  # the MagicDNS name or Tailscale IP; ROWT_SHARE_PORT selects its Serve port.
+  rowt-remote-on() {
+    if [ "$#" -ne 1 ] || [ -z "${1:-}" ]; then
+      echo "usage: rowt-remote-on <remote-host>" >&2
+      return 2
+    fi
+    local remote_host="" proxy_host=""
+    local share_port="${ROWT_SHARE_PORT:-17890}"
+    remote_host="$(_rowt_remote_resolve_host "$1" rowt-remote-on)" || return $?
+    proxy_host="$remote_host"
+    case "$remote_host" in
+      \[*\]) ;;                         # already-bracketed IPv6
+      *:*) proxy_host="[$remote_host]" ;; # bare IPv6 for a URL authority
+    esac
+    local http_proxy_url="http://$proxy_host:$share_port"
+    local socks_proxy_url="socks5h://$proxy_host:$share_port"
+    export http_proxy="$http_proxy_url" https_proxy="$http_proxy_url" all_proxy="$socks_proxy_url"
+    export HTTP_PROXY="$http_proxy_url" HTTPS_PROXY="$http_proxy_url" ALL_PROXY="$socks_proxy_url"
+  }
+  rowt-remote-off() {
+    if [ "$#" -ne 0 ]; then
+      echo "usage: rowt-remote-off" >&2
+      return 2
+    fi
+    unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
+  }
+  # The active service comes from rowt's own physical-interface detection, so a
+  # corp VPN owning the default route does not make us select its utun device.
+  _rowt_remote_active_service() {
+    command rowt proxy status 2>/dev/null |
+      sed -n "s/^system proxy (service '\(.*\)'):\$/\1/p" | head -1
+  }
+  _rowt_remote_proxy_type_ok() {
+    /usr/sbin/networksetup "$2" "$1" 2>/dev/null | awk -v h="$3" -v p="$4" '
+      /^Enabled:/{e=$2} /^Server:/{s=$2} /^Port:/{pt=$2}
+      END{ exit !(e=="Yes" && tolower(s)==tolower(h) && pt==p) }'
+  }
+  _rowt_remote_proxy_any_on() {
+    /usr/sbin/networksetup -getsocksfirewallproxy "$1" 2>/dev/null | grep -q '^Enabled: Yes' \
+      || /usr/sbin/networksetup -getwebproxy "$1" 2>/dev/null | grep -q '^Enabled: Yes' \
+      || /usr/sbin/networksetup -getsecurewebproxy "$1" 2>/dev/null | grep -q '^Enabled: Yes'
+  }
+  # System-wide client helper for GUI apps. It deliberately does not rewrite the
+  # service's bypass domains: those are policy, and private/corp destinations may
+  # need either local access or the remote rowt depending on the client.
+  rowt-remote-system-on() {
+    if [ "$#" -ne 1 ] || [ -z "${1:-}" ]; then
+      echo "usage: rowt-remote-system-on <remote-host>" >&2
+      return 2
+    fi
+    if [ ! -x /usr/sbin/networksetup ]; then
+      echo "rowt-remote-system-on: macOS networksetup not found" >&2
+      return 1
+    fi
+    local remote_host="" system_host="" service=""
+    local share_port="${ROWT_SHARE_PORT:-17890}"
+    remote_host="$(_rowt_remote_resolve_host "$1" rowt-remote-system-on)" || return $?
+    system_host="$remote_host"
+    case "$system_host" in \[*\]) system_host="${system_host#\[}"; system_host="${system_host%\]}" ;; esac
+    service="$(_rowt_remote_active_service)"
+    if [ -z "$service" ]; then
+      echo "rowt-remote-system-on: no active physical network service" >&2
+      return 1
+    fi
+    if [ -x /usr/bin/nc ] && ! /usr/bin/nc -z -G 3 "$system_host" "$share_port" >/dev/null 2>&1; then
+      echo "rowt-remote-system-on: cannot reach $system_host:$share_port — check Tailscale, policy, and rowt-share-status" >&2
+      return 1
+    fi
+    if _rowt_remote_proxy_type_ok "$service" -getwebproxy "$system_host" "$share_port" \
+      && _rowt_remote_proxy_type_ok "$service" -getsecurewebproxy "$system_host" "$share_port" \
+      && _rowt_remote_proxy_type_ok "$service" -getsocksfirewallproxy "$system_host" "$share_port"; then
+      _ROWT_REMOTE_SYSTEM_SERVICE="$service"
+      echo "rowt remote system proxy already on for '$service' ($system_host:$share_port)"
+      return 0
+    fi
+    echo "rowt-remote-system-on: setting '$service' HTTP/HTTPS/SOCKS proxy to $system_host:$share_port (admin required)" >&2
+    sudo /usr/sbin/networksetup -setwebproxy "$service" "$system_host" "$share_port" \
+      && sudo /usr/sbin/networksetup -setwebproxystate "$service" on \
+      && sudo /usr/sbin/networksetup -setsecurewebproxy "$service" "$system_host" "$share_port" \
+      && sudo /usr/sbin/networksetup -setsecurewebproxystate "$service" on \
+      && sudo /usr/sbin/networksetup -setsocksfirewallproxy "$service" "$system_host" "$share_port" \
+      && sudo /usr/sbin/networksetup -setsocksfirewallproxystate "$service" on \
+      || { echo "rowt-remote-system-on: could not set the system proxy" >&2; return 1; }
+    _ROWT_REMOTE_SYSTEM_SERVICE="$service"
+    echo "rowt remote system proxy on for '$service' ($system_host:$share_port); bypass list unchanged"
+  }
+  rowt-remote-system-off() {
+    if [ "$#" -ne 0 ]; then
+      echo "usage: rowt-remote-system-off" >&2
+      return 2
+    fi
+    if [ ! -x /usr/sbin/networksetup ]; then
+      echo "rowt-remote-system-off: macOS networksetup not found" >&2
+      return 1
+    fi
+    local service="${_ROWT_REMOTE_SYSTEM_SERVICE:-}"
+    [ -n "$service" ] || service="$(_rowt_remote_active_service)"
+    if [ -z "$service" ]; then
+      echo "rowt-remote-system-off: no active physical network service" >&2
+      return 1
+    fi
+    if ! _rowt_remote_proxy_any_on "$service"; then
+      unset _ROWT_REMOTE_SYSTEM_SERVICE
+      echo "rowt remote system proxy already off for '$service'"
+      return 0
+    fi
+    echo "rowt-remote-system-off: disabling '$service' HTTP/HTTPS/SOCKS proxy (admin required)" >&2
+    sudo /usr/sbin/networksetup -setwebproxystate "$service" off \
+      && sudo /usr/sbin/networksetup -setsecurewebproxystate "$service" off \
+      && sudo /usr/sbin/networksetup -setsocksfirewallproxystate "$service" off \
+      || { echo "rowt-remote-system-off: could not disable the system proxy" >&2; return 1; }
+    unset _ROWT_REMOTE_SYSTEM_SERVICE
+    echo "rowt remote system proxy off for '$service'"
+  }
   # Tailnet-only sharing through Tailscale Serve. rowt itself stays bound to
   # loopback; ROWT_SHARE_PORT is the tailnet-facing port (default 17890), while
   # ROWT_PORT remains the local rowt backend (default 7890).
@@ -4188,7 +4358,7 @@ a@internals@render@regenerate the sing-box configs from current state
 o@internals@fetch [host|vm]@pre-download artifacts so 'up' works offline
 a@internals@router <up|down|restart|status|log>@the local rule-router process
 a@internals@vm <up|down|restart|status|log|delete>@the bridged Lima VM
-a@internals@shell-init@shell integration to eval in your rc (proxy/share helpers + completion)
+a@internals@shell-init@shell integration to eval in your rc (local/remote proxy + share helpers + completion)
 a@internals@completion <zsh|bash>@print a tab-completion script (auto-loaded by shell-init)
 a@internals@version@print the version
 REG
@@ -4219,8 +4389,10 @@ Notes:
   • 'use <tag>' (manual) never probes servers, so flaky/dead ones can't spin the CPU.
   • Modes: host = VLESS bound to the physical NIC; vm = a bridged Lima VM runs the tunnel.
   • Shell helpers (from shell-init): rowt-proxy-on / rowt-proxy-off point this
-    shell's CLI proxy env at rowt; rowt-share-on / -off / -status manage a
-    tailnet-only Tailscale Serve forward.
+    shell's CLI proxy env at local rowt; rowt-remote-on <remote-host> / -off point
+    it at a tailnet-shared rowt (short machine names expand through Tailscale);
+    rowt-remote-system-on <remote-host> / -off apply the remote proxy to macOS;
+    rowt-share-on / -off / -status manage that share.
 
 Edit which domains escape:  $DOMAINS
 Env: ROWT_PORT ($PORT)  ROWT_CLASH_PORT ($CLASH_PORT)  ROWT_IFACE (auto)  ROWT_DNS_DIRECT ($DNS_DIRECT)  SINGBOX_VERSION ($SINGBOX_VERSION)
@@ -4643,9 +4815,15 @@ $PROG proxy <status|check|on|off|env> — macOS system proxy + CLI env.
   env [--off]   print shell exports for CLI tools that ignore the system proxy:
                   eval "\$($PROG proxy env)"      /      eval "\$($PROG proxy env --off)"
 
-install.sh also adds shell aliases that wrap the two evals above:
+shell-init also adds helpers around the two evals above:
   rowt-proxy-on    = eval "\$($PROG proxy env)"      (point this shell's CLI at rowt)
   rowt-proxy-off   = eval "\$($PROG proxy env --off)" (unset them)
+  rowt-remote-on <remote-host>                         (point it at shared remote rowt;
+                                                        short names auto-expand)
+  rowt-remote-off                                      (unset them)
+  rowt-remote-system-on <remote-host>                  (point macOS apps at remote rowt;
+                                                        needs admin if it changes)
+  rowt-remote-system-off                               (disable those system proxies)
 EOF
 ;;
     render) cat <<EOF
@@ -4690,8 +4868,11 @@ Let rowt add it for you (idempotent — appends one line if not already present)
 Or add ONE line by hand to your ~/.zshrc (or ~/.bashrc), after 'brew shellenv':
   eval "\$($PROG shell-init)"
 It defines rowt-proxy-on / rowt-proxy-off (point this shell's CLI proxy env at
-rowt / clear it), rowt-share-on / rowt-share-off / rowt-share-status (publish the
-loopback proxy through a tailnet-only Tailscale Serve TCP forward), and loads
+local rowt / clear it), rowt-remote-on <remote-host> / rowt-remote-off (point it
+at a tailnet-shared rowt / clear it; short machine names auto-expand), and
+rowt-remote-system-on <remote-host> / rowt-remote-system-off (apply it to macOS /
+disable it). rowt-share-on / rowt-share-off / rowt-share-status publish the
+loopback proxy through a tailnet-only Tailscale Serve TCP forward. It also loads
 tab-completion for subcommands (zsh/bash). Idempotent:
 guarded so re-sourcing your rc is a no-op, and each new shell re-applies it. This
 is how a Homebrew install enables the helpers (Homebrew doesn't edit your rc).
