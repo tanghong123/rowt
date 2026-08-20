@@ -53,7 +53,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.4.5"
+ROWT_VERSION="3.4.6"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -2671,18 +2671,19 @@ shell_init_install() {
       *)     rc="$HOME/.zshrc" ;;   # macOS default login shell
     esac
   fi
-  printf '\n# rowt shell integration — aliases + tab-completion (rowt shell-init --install)\neval "$(%s shell-init)"\n' "$PROG" >> "$rc" \
+  printf '\n# rowt shell integration — helpers + tab-completion (rowt shell-init --install)\neval "$(%s shell-init)"\n' "$PROG" >> "$rc" \
     || die "could not write to $rc"
   info "added shell integration to $rc"
-  info "open a new terminal (or 'source $rc') to enable rowt-proxy-on/-off + tab-completion"
+  info "open a new terminal (or 'source $rc') to enable rowt proxy/share helpers + tab-completion"
 }
 
 # Shell integration to eval from your rc:  eval "$(rowt shell-init)"
-# Emits the rowt-proxy-on / rowt-proxy-off aliases. IDEMPOTENT — the guard makes
-# re-sourcing your rc a no-op, and the sentinel is NOT exported so each new
-# interactive shell (and subshell) re-applies it cleanly. Homebrew won't edit
-# your rc, so this is how brew installs enable the aliases.  '--install' appends
-# the eval line to your rc for you (see shell_init_install above).
+# Emits the rowt-proxy-on / rowt-proxy-off aliases and the optional Tailscale
+# sharing helpers. IDEMPOTENT — the guard makes re-sourcing your rc a no-op, and
+# the sentinel is NOT exported so each new interactive shell (and subshell)
+# re-applies it cleanly. Homebrew won't edit your rc, so this is how brew installs
+# enable the helpers. '--install' appends the eval line to your rc for you (see
+# shell_init_install above).
 cmd_shell_init() {
   case "${1:-}" in
     --install) shift; shell_init_install "${1:-}"; return $? ;;
@@ -2696,6 +2697,43 @@ if [ -z "${_ROWT_SHELL_INIT:-}" ]; then
   _ROWT_SHELL_INIT=1
   alias rowt-proxy-on='eval "$(rowt proxy env)"'
   alias rowt-proxy-off='eval "$(rowt proxy env --off)"'
+  # Tailnet-only sharing through Tailscale Serve. rowt itself stays bound to
+  # loopback; ROWT_SHARE_PORT is the tailnet-facing port (default 17890), while
+  # ROWT_PORT remains the local rowt backend (default 7890).
+  rowt-share-on() {
+    local backend_port="${ROWT_PORT:-7890}"
+    local share_port="${ROWT_SHARE_PORT:-17890}"
+    if ! command -v tailscale >/dev/null 2>&1; then
+      echo "rowt-share-on: tailscale not found" >&2
+      return 1
+    fi
+    if ! command rowt router status 2>/dev/null | grep -q 'router: running'; then
+      echo "rowt-share-on: rowt is not running — run 'rowt up' first" >&2
+      return 1
+    fi
+    echo "rowt-share-on: tailnet peers allowed by your policy can use every rowt lane, including corp" >&2
+    command tailscale serve --bg --tcp="$share_port" "tcp://127.0.0.1:$backend_port"
+  }
+  rowt-share-off() {
+    local share_port="${ROWT_SHARE_PORT:-17890}"
+    if ! command -v tailscale >/dev/null 2>&1; then
+      echo "rowt-share-off: tailscale not found" >&2
+      return 1
+    fi
+    command tailscale serve --tcp="$share_port" off
+  }
+  rowt-share-status() {
+    local backend_port="${ROWT_PORT:-7890}"
+    local share_port="${ROWT_SHARE_PORT:-17890}"
+    echo "rowt backend: 127.0.0.1:$backend_port"
+    command rowt router status
+    if ! command -v tailscale >/dev/null 2>&1; then
+      echo "rowt share: tailscale not found (expected tailnet TCP port $share_port)" >&2
+      return 1
+    fi
+    echo "rowt share: tailnet TCP port $share_port"
+    command tailscale serve status
+  }
   # tab-completion for subcommands (zsh/bash); defers to 'rowt _complete' at
   # tab-time so it never drifts from the actual command set.
   if [ -n "${ZSH_VERSION:-}" ]; then
@@ -2931,8 +2969,8 @@ or add directly:  $PROG server add '<vless://|vmess://|anytls://|hysteria2://…
   #    block (marker comment) OR the recommended bare `eval "$(rowt shell-init)"`
   #    line, mirroring what 'uninstall' strips.
   if grep -qsE 'rowt shell integration|rowt shell-init' "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" 2>/dev/null; then
-    _ob 0 "shell aliases + tab-completion in your rc" "eval \"\$($PROG shell-init)\"   (already in your rc)"
-  else _ob 1 "add shell aliases + tab-completion" "$PROG shell-init --install   (appends to ~/.zshrc; or add by hand: eval \"\$($PROG shell-init)\")"; fi
+    _ob 0 "shell helpers + tab-completion in your rc" "eval \"\$($PROG shell-init)\"   (already in your rc)"
+  else _ob 1 "add shell helpers + tab-completion" "$PROG shell-init --install   (appends to ~/.zshrc; or add by hand: eval \"\$($PROG shell-init)\")"; fi
 
   # 8. agent skill linked (so an agent can drive setup)
   if [ -e "$HOME/.claude/skills/rowt" ] || [ -e "$HOME/.agents/skills/rowt" ]; then
@@ -4150,7 +4188,7 @@ a@internals@render@regenerate the sing-box configs from current state
 o@internals@fetch [host|vm]@pre-download artifacts so 'up' works offline
 a@internals@router <up|down|restart|status|log>@the local rule-router process
 a@internals@vm <up|down|restart|status|log|delete>@the bridged Lima VM
-a@internals@shell-init@shell integration to eval in your rc (aliases + completion)
+a@internals@shell-init@shell integration to eval in your rc (proxy/share helpers + completion)
 a@internals@completion <zsh|bash>@print a tab-completion script (auto-loaded by shell-init)
 a@internals@version@print the version
 REG
@@ -4180,8 +4218,9 @@ Notes:
   • Unlisted traffic goes to '$FINAL_ROUTE' (override with ROWT_FINAL=corp|direct).
   • 'use <tag>' (manual) never probes servers, so flaky/dead ones can't spin the CPU.
   • Modes: host = VLESS bound to the physical NIC; vm = a bridged Lima VM runs the tunnel.
-  • Shell aliases (from install.sh): rowt-proxy-on / rowt-proxy-off point this shell's
-    CLI proxy env at rowt (they wrap 'proxy env'; see '$PROG proxy --help').
+  • Shell helpers (from shell-init): rowt-proxy-on / rowt-proxy-off point this
+    shell's CLI proxy env at rowt; rowt-share-on / -off / -status manage a
+    tailnet-only Tailscale Serve forward.
 
 Edit which domains escape:  $DOMAINS
 Env: ROWT_PORT ($PORT)  ROWT_CLASH_PORT ($CLASH_PORT)  ROWT_IFACE (auto)  ROWT_DNS_DIRECT ($DNS_DIRECT)  SINGBOX_VERSION ($SINGBOX_VERSION)
@@ -4651,9 +4690,11 @@ Let rowt add it for you (idempotent — appends one line if not already present)
 Or add ONE line by hand to your ~/.zshrc (or ~/.bashrc), after 'brew shellenv':
   eval "\$($PROG shell-init)"
 It defines rowt-proxy-on / rowt-proxy-off (point this shell's CLI proxy env at
-rowt / clear it), and loads tab-completion for subcommands (zsh/bash). Idempotent:
+rowt / clear it), rowt-share-on / rowt-share-off / rowt-share-status (publish the
+loopback proxy through a tailnet-only Tailscale Serve TCP forward), and loads
+tab-completion for subcommands (zsh/bash). Idempotent:
 guarded so re-sourcing your rc is a no-op, and each new shell re-applies it. This
-is how a Homebrew install enables the aliases (Homebrew doesn't edit your rc).
+is how a Homebrew install enables the helpers (Homebrew doesn't edit your rc).
 EOF
 ;;
     completion) cat <<EOF

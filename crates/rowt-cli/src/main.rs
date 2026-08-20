@@ -2076,6 +2076,20 @@ mod tests {
         assert!(native("proxy", ""));
     }
 
+    /// The Rust implementation does not transcribe shell-init separately:
+    /// build.rs extracts the authoritative quoted heredoc from bin/rowt and
+    /// compiles it into this binary. Pin the user-facing helpers here so a bad
+    /// marker/extraction change cannot silently leave the native port behind.
+    #[test]
+    fn native_shell_init_carries_the_share_helpers() {
+        let init = include_str!(concat!(env!("OUT_DIR"), "/shell_init.txt"));
+        for helper in ["rowt-share-on()", "rowt-share-off()", "rowt-share-status()"] {
+            assert!(init.contains(helper), "native shell-init missing {helper}");
+        }
+        assert!(init.contains("tailscale serve --bg --tcp=\"$share_port\""));
+        assert!(init.contains("tailscale serve --tcp=\"$share_port\" off"));
+    }
+
     /// A name the shell does not document is a TYPO, and the typo's error is
     /// the shell's own — which needs no shell to print. A name it DOES
     /// document but this binary has no arm for is the §6.6 escape hatch and

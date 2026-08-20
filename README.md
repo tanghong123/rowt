@@ -46,13 +46,16 @@ Probing for host-vs-vm is most accurate with the corp VPN on, so if you let
 eval "$(rowt shell-init)"
 ```
 
-It gives you **tab-completion** for every subcommand *and* the `rowt-proxy-on` /
-`rowt-proxy-off` aliases used below — idempotent, so it's safe to keep in your rc.
+It gives you **tab-completion** for every subcommand, the `rowt-proxy-on` /
+`rowt-proxy-off` aliases used below, and optional `rowt-share-on` / `-off` /
+`-status` helpers for sharing rowt inside your Tailscale tailnet — idempotent, so
+it's safe to keep in your rc.
 
 Day to day:
 
 ```sh
 rowt-proxy-on                 # point THIS shell's curl/git/npm/… at rowt (rowt-proxy-off to undo)
+rowt-share-on                 # tailnet-only TCP forward :17890 -> rowt :7890 (rowt-share-off to undo)
 rowt escape add youtube.com   # send another site through the personal tunnel
 rowt corp add '*.intranet.example.com' '10.0.0.0/8'   # send a domain or CIDR into the corp VPN
 rowt block add ads.example.com   # sinkhole an ad/telemetry domain (no DNS, no dial)
@@ -63,6 +66,19 @@ rowt reload                   # after switching Wi-Fi ↔ wired ↔ hotspot
 rowt watch install            # (optional) auto-reload on every network change
 rowt down                     # stop everything
 ```
+
+`rowt-share-on` keeps sing-box bound to `127.0.0.1`; it asks Tailscale Serve to
+publish a raw TCP forward on tailnet port `17890`. Other tailnet devices can use
+`<this-mac>.ts.net:17890` as either an HTTP or SOCKS5 proxy for TCP traffic. Set
+`ROWT_SHARE_PORT` to change the published port and `ROWT_PORT` if rowt itself uses
+a non-default port. Access is governed by the tailnet policy: restrict that TCP
+port to trusted devices, because shared clients can use every rowt lane,
+including `corp`. This never uses Tailscale Funnel and does not expose rowt to the
+ordinary LAN or public internet. This is access control, not port hiding: a
+tailnet peer allowed by policy can discover `17890` by scanning the Mac's
+Tailscale IP; a non-tailnet or policy-denied host cannot reach it. The Serve
+mapping persists across restarts; `rowt-share-off` removes it, and
+`rowt-share-status` shows both backend and Serve state.
 
 **`rowt monitor`** is the `htop`-style live view (with confirmed, reversible
 controls — server switch, lane routing, proxy toggle) — press `?` for keys,
@@ -594,7 +610,7 @@ corp/escape/direct.
 | command | what it does |
 | --- | --- |
 | `proxy status\|check\|on\|off\|env [--off]` | show / verify / set / unset the macOS system proxy; `env` prints CLI env exports. `on`/`off` are **idempotent** — they read the current state first (no sudo) and only invoke admin for what's actually wrong, so re-running never prompts if already correct. `on` is a **no-op unless the router is running** (else it would just point the system proxy at a dead port and break traffic) — run `rowt up` first, or `proxy on --force` to override. `check` exits 0 iff fully configured (used to re-apply after the OS config drifts). |
-| `shell-init` | shell integration to `eval` in your rc — defines `rowt-proxy-on`/`-off` **and** loads tab-completion for subcommands (zsh/bash), idempotent. Add `eval "$(rowt shell-init)"` to `~/.zshrc`. |
+| `shell-init` | shell integration to `eval` in your rc — defines `rowt-proxy-on`/`-off`, the Tailscale `rowt-share-on`/`-off`/`-status` helpers, and loads tab-completion for subcommands (zsh/bash), idempotent. Add `eval "$(rowt shell-init)"` to `~/.zshrc`. |
 | `completion <zsh\|bash>` | print a tab-completion script (normally auto-loaded by `shell-init`; defers to the live command set so it never drifts). |
 | `render` | regenerate the sing-box configs from current state. |
 | `fetch [host\|vm\|both]` | pre-download while a VPN is on so `up` works offline. `host` = the macOS sing-box binary; `vm` = the ubuntu image + linux sing-box tarball into `~/.config/rowt/cache/` (then `up vm` boots from the local image and installs sing-box into the guest from that cache — **the VM never reaches GitHub itself**). Default `both`. |

@@ -181,10 +181,10 @@ pub fn run(ctx: &Ctx, here: &Path) -> String {
     // 7. shell integration — matched either as the pasted block or as the bare
     //    recommended line, mirroring exactly what `uninstall` strips.
     if rc_has_shell_init() {
-        ob(&mut o, true, "shell aliases + tab-completion in your rc",
+        ob(&mut o, true, "shell helpers + tab-completion in your rc",
            &format!("eval \"$({PROG} shell-init)\"   (already in your rc)"));
     } else {
-        ob(&mut o, false, "add shell aliases + tab-completion",
+        ob(&mut o, false, "add shell helpers + tab-completion",
            &format!("{PROG} shell-init --install   (appends to ~/.zshrc; or add by hand: eval \"$({PROG} shell-init)\")"));
     }
 

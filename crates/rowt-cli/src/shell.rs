@@ -235,7 +235,7 @@ pub const RC_FILES: [&str; 5] = [".zshrc", ".bashrc", ".bash_profile", ".profile
 /// load-bearing, not decoration.
 fn init_block(prog: &str) -> String {
     format!(
-        "\n# rowt shell integration — aliases + tab-completion (rowt shell-init --install)\neval \"$({prog} shell-init)\"\n"
+        "\n# rowt shell integration — helpers + tab-completion (rowt shell-init --install)\neval \"$({prog} shell-init)\"\n"
     )
 }
 
@@ -288,7 +288,7 @@ pub fn init_install(rc_arg: Option<&str>) -> Result<String, String> {
         .map_err(|_| format!("could not write to {}", rc.display()))?;
     info(&format!("added shell integration to {}", rc.display()));
     info(&format!(
-        "open a new terminal (or 'source {}') to enable rowt-proxy-on/-off + tab-completion",
+        "open a new terminal (or 'source {}') to enable rowt proxy/share helpers + tab-completion",
         rc.display()
     ));
     Ok(String::new())
