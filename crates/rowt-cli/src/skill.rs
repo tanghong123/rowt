@@ -34,6 +34,25 @@ pub fn skill_src(here: &Path) -> PathBuf {
 /// With `store`, ONLY the shared store: a skill manager (knack) links each agent
 /// directory at the store itself, so writing `~/.claude/skills/rowt` here would
 /// fight it for the same path — knack points it at the store, rowt at the source.
+/// Where the knack foreign-owner recipe lives. Resolved like `skill_src` and for
+/// the same reason: a hint that names a path is only useful if the path outlives
+/// the version that printed it, so a keg hands out the stable `opt` prefix.
+pub fn skill_recipe(here: &Path) -> PathBuf {
+    if here.to_string_lossy().contains("/Cellar/rowt/") {
+        let opt = std::process::Command::new("brew").args(["--prefix", "rowt"])
+            .stderr(std::process::Stdio::null()).output().ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        if !opt.is_empty() {
+            let p = PathBuf::from(opt).join("libexec/share/knack/rowt.toml");
+            if p.is_file() {
+                return p;
+            }
+        }
+    }
+    here.join("share/knack/rowt.toml")
+}
+
 pub fn skill_targets_scoped(home: &Path, store: bool) -> Vec<PathBuf> {
     if store {
         return vec![home.join(".agents/skills/rowt")];
@@ -108,6 +127,15 @@ mod tests {
     fn an_rc_with_nothing_of_ours_is_left_alone() {
         // None, not Some(unchanged): an untouched file must not be rewritten.
         assert!(strip_shell_init("export PATH=/x\n").is_none());
+    }
+
+    #[test]
+    fn the_recipe_sits_beside_the_checkout_that_printed_it() {
+        // From a checkout, share/knack/rowt.toml relative to $HERE. The keg
+        // branch needs a real Cellar path and `brew`, so it is covered by the
+        // bash/rust differential rather than here.
+        let d = std::env::temp_dir().join(format!("rowt-rcp-{}", std::process::id()));
+        assert_eq!(skill_recipe(&d), d.join("share/knack/rowt.toml"));
     }
 
     #[test]

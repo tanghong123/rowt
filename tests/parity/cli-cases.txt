@@ -419,6 +419,7 @@ skill nosucharm
 # these pin is that both implementations parse the flag and word it alike.
 skill status --store
 skill --store nosucharm
+skill recipe
 report
 PARITY_SCENARIO=router-up report
 # The usage lines a die() emits reach the AUDIT log via ABORT, so a message that

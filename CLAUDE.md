@@ -28,6 +28,9 @@ task's pipe, so killing the task kills sing-box) — use the **`rowt` skill** in
 - **`tests/parity/`** — the differential harness (see below).
 - **`skills/rowt/`** — the end-user skill, symlinked into `~/.agents/skills/`.
   Keep it in sync with `rowt help` / `rowt onboard` when commands change.
+- **`share/knack/rowt.toml`** — the knack foreign-owner recipe, printed by
+  `rowt skill recipe`. The formula installs `share/` into `libexec`, so adding a
+  file here that the CLI reads means changing `Formula/rowt.rb` in the same pass.
 - **Docs:** `README.md`, `DESIGN.md`, `PORTING.md`, `FUTURE.md`,
   `rowt-monitor/{README,DESIGN,METRICS,COLORS}.md`. Keep them current with
   behavior you change.

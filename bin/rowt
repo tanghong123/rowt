@@ -53,7 +53,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.4.9"
+ROWT_VERSION="3.4.10"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -4129,6 +4129,18 @@ _skill_src() {
   esac
   printf '%s' "$src"
 }
+# Where the knack foreign-owner recipe lives. Resolved like _skill_src and for
+# the same reason: a hint that names a path is only useful if the path outlives
+# the version that printed it, so a keg hands out the stable opt prefix.
+_skill_recipe() {
+  local r="$HERE/share/knack/rowt.toml"
+  case "$HERE" in
+    */Cellar/rowt/*)
+      local opt; opt="$(brew --prefix rowt 2>/dev/null || true)"
+      [ -n "$opt" ] && [ -f "$opt/libexec/share/knack/rowt.toml" ] && r="$opt/libexec/share/knack/rowt.toml" ;;
+  esac
+  printf '%s' "$r"
+}
 # Agent skill dirs to link into: Claude Code always; ~/.agents/skills if present.
 # With --store ($1=1) only the SHARED STORE (~/.agents/skills), because a skill
 # manager (knack) places the per-agent links itself and would fight us for them:
@@ -4158,8 +4170,8 @@ cmd_skill() {
       --store) store=1 ;;
       --dev) shift; dev="${1:?--dev needs a path to the rowt repo}" ;;
       --dev=*) dev="${1#--dev=}" ;;
-      -h|--help) echo "usage: $PROG skill <install [--force] [--store] [--dev <repo>] | uninstall [--store] | status [--store]>"; return 0 ;;
-      *) die "usage: $PROG skill <install [--force] [--store] [--dev <repo>] | uninstall [--store] | status [--store]>" ;;
+      -h|--help) echo "usage: $PROG skill <install [--force] [--store] [--dev <repo>] | uninstall [--store] | status [--store] | recipe>"; return 0 ;;
+      *) die "usage: $PROG skill <install [--force] [--store] [--dev <repo>] | uninstall [--store] | status [--store] | recipe>" ;;
     esac; shift
   done
   local src
@@ -4194,7 +4206,25 @@ cmd_skill() {
       done <<EOF
 $(_skill_targets "$store")
 EOF
-      [ "$did" = 1 ] && info "start a NEW agent session to load the 'rowt' skill." || true
+      if [ "$did" = 1 ]; then
+        info "start a NEW agent session to load the 'rowt' skill."
+        # Print, never run. Acquiring and giving are two decisions in knack, and
+        # which skills reach which agent is the user's call, not ours. Suppressed
+        # under --store: that invocation IS knack driving us, and the hint would
+        # echo back into knack's own output telling it to do what it just did.
+        if [ "$store" != 1 ] && command -v knack >/dev/null 2>&1; then
+          info "under knack, register rowt as the owner of this skill:"
+          info "  knack lib adopt rowt --via \"rowt:\$(rowt skill recipe)\""
+        fi
+      fi
+      return 0 ;;
+    recipe)
+      # Where knack's `--via` should point. Exposed so nobody has to know or type
+      # a keg path: `--via "rowt:$(rowt skill recipe)"` stays correct across
+      # upgrades and relocations, and rowt is the only thing that can answer it.
+      local rcp; rcp="$(_skill_recipe)"
+      [ -f "$rcp" ] || die "knack recipe not found at $rcp"
+      printf '%s\n' "$rcp"
       return 0 ;;
     uninstall)
       while IFS= read -r t; do
@@ -4217,7 +4247,7 @@ EOF
 $(_skill_targets "$store")
 EOF
       return 0 ;;
-    *) die "usage: $PROG skill <install [--force] [--store] [--dev <repo>] | uninstall [--store] | status [--store]>" ;;
+    *) die "usage: $PROG skill <install [--force] [--store] [--dev <repo>] | uninstall [--store] | status [--store] | recipe>" ;;
   esac
 }
 
@@ -4352,7 +4382,7 @@ c@lifecycle@onboard@guided getting-started checklist (what to run next)
 c@lifecycle@up [host|vm|local] [--force]@set up & start (no arg = auto-detect the mode)
 c@lifecycle@down@tear down: proxy off + stop sing-box + vm down
 o@lifecycle@uninstall [--purge]@reverse setup for a clean re-onboard (--purge wipes config)
-o@lifecycle@skill <install|uninstall|status> [--store]@link the rowt agent skill so an agent can drive setup
+o@lifecycle@skill <install|uninstall|status|recipe> [--store]@link the rowt agent skill so an agent can drive setup
 o@lifecycle@restart@bounce the tunnel in place (no re-render / proxy change)
 c@lifecycle@reload@re-apply after a network switch (re-render + restart + proxy)
 o@lifecycle@watch <install|uninstall|status|refresh>@auto-reload on net change; captive-portal handling; clears a stale proxy at login
@@ -4477,8 +4507,8 @@ EOF
 ;;
     skill) cat <<EOF
 $PROG skill <install [--force] [--store] [--dev <repo>] | uninstall [--store] |
-status [--store]> — link the rowt agent skill so an agent (Claude Code, …) can
-help you set up & run rowt.
+status [--store] | recipe> — link the rowt agent skill so an agent (Claude Code,
+…) can help you set up & run rowt.
 
 Symlinks the user-facing 'rowt' skill into ~/.claude/skills (and ~/.agents/skills
 if present). Run from a brew install it links the STABLE opt path (so a later
@@ -4492,6 +4522,10 @@ needed) and leaves every agent directory alone. That is the shape a skill
 manager needs: knack links each agent at the store, so if rowt also wrote
 ~/.claude/skills/rowt the two would fight over the same path. Plain 'install' is
 still right when nothing manages your skills for you.
+
+'recipe' prints the path to rowt's knack foreign-owner recipe, so you never have
+to know or type a keg path — it stays correct across upgrades:
+  knack lib adopt rowt --via "rowt:\$(rowt skill recipe)"
 EOF
 ;;
     run) cat <<EOF

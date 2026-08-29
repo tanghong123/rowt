@@ -42,15 +42,16 @@ still the right call when nothing manages your skills for you.
 
 knack adopts rowt as a *foreign* skill — rowt ships and upgrades its own skill,
 so knack fronts the lifecycle through rowt's own commands rather than vendoring
-a copy. The recipe is `~/.config/knack/recipes/rowt.toml`:
-
-```toml
-owner = "rowt"
-store_dir = "~/.agents/skills"
-[upgrade]      argv = ["brew", "upgrade", "tanghong123/tap/rowt"]
-[skill_install] argv = ["rowt", "skill", "install", "--store"]
-```
+a copy. rowt ships the recipe that says so (`share/knack/rowt.toml`, installed
+into `libexec` by the formula) and prints its path, so you never have to know or
+type a keg path:
 
 ```sh
-knack lib adopt rowt --via rowt:~/.config/knack/recipes/rowt.toml
+knack lib adopt rowt --via "rowt:$(rowt skill recipe)"
 ```
+
+That path stays correct across `brew upgrade` — from a keg it resolves through
+the stable `opt` prefix, not the versioned Cellar. knack copies the recipe to
+`~/.config/knack/recipes/rowt.toml` on adoption, after which the short
+`--via rowt` form works. `rowt skill install` prints this hint itself when knack
+is on PATH (and suppresses it under `--store`, since that call *is* knack).

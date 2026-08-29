@@ -1078,7 +1078,7 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                     "--store" => store = true,
                     "--dev" => dev = it.next().cloned().unwrap_or_default(),
                     x if x.starts_with("--dev=") => dev = x["--dev=".len()..].to_string(),
-                    _ => die(&cfg, &format!("usage: {PROG} skill <install [--force] [--store] [--dev <repo>] | uninstall [--store] | status [--store]>")),
+                    _ => die(&cfg, &format!("usage: {PROG} skill <install [--force] [--store] [--dev <repo>] | uninstall [--store] | status [--store] | recipe>")),
                 }
             }
             let src = if dev.is_empty() {
@@ -1128,8 +1128,27 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                     }
                     if did {
                         eprintln!("==> start a NEW agent session to load the 'rowt' skill.");
+                        // Print, never run. Acquiring and giving are two decisions in
+                        // knack, and which skills reach which agent is the user's call.
+                        // Suppressed under --store: that invocation IS knack driving us.
+                        if !store && std::env::var("PATH").unwrap_or_default().split(':')
+                            .any(|d| std::path::Path::new(d).join("knack").is_file()) {
+                            eprintln!("==> under knack, register rowt as the owner of this skill:");
+                            eprintln!("==>   knack lib adopt rowt --via \"rowt:$(rowt skill recipe)\"");
+                        }
                     }
                     Ok(String::new())
+                }
+                "recipe" => {
+                    // Where knack's `--via` should point. Exposed so nobody has to know
+                    // or type a keg path: it stays correct across upgrades, and rowt is
+                    // the only thing that can answer it.
+                    let rcp = skill::skill_recipe(&here_dir());
+                    if !rcp.is_file() {
+                        die(&cfg, &format!("knack recipe not found at {}", rcp.display()));
+                    }
+                    o.push(rcp.display().to_string());
+                    Ok(o.join("\n"))
                 }
                 "uninstall" => {
                     for t in targets {
@@ -1156,7 +1175,7 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                     }
                     Ok(o.join("\n"))
                 }
-                _ => die(&cfg, &format!("usage: {PROG} skill <install [--force] [--store] [--dev <repo>] | uninstall [--store] | status [--store]>")),
+                _ => die(&cfg, &format!("usage: {PROG} skill <install [--force] [--store] [--dev <repo>] | uninstall [--store] | status [--store] | recipe>")),
             }
         }
         // Latency to every server THROUGH the tunnel, via the clash API's own

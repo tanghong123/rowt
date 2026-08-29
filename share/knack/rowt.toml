@@ -1,0 +1,55 @@
+# knack foreign-owner recipe for rowt.
+#
+# rowt ships its own agent skill and owns its lifecycle, so knack does not store
+# the content — it *fronts* the lifecycle and delegates back to this binary. That
+# is knack's "foreign" kind, and this file is what `--via` loads:
+#
+#   knack lib adopt rowt --via "rowt:$(rowt skill recipe)"
+#
+# Once registered (knack copies it to ~/.config/knack/recipes/rowt.toml) the
+# short `--via rowt` form works.
+#
+# `--via` itself is never optional. Plain `knack lib adopt rowt` resolves only
+# *built-in tool* owners and refuses a software-owned skill outright, no matter
+# what knack can infer from disk.
+
+owner = "rowt"
+
+# rowt links the shared store, not a per-agent directory, so any agent that
+# reads ~/.agents/skills is served by the one copy. knack places the per-agent
+# links itself; these are the hosts it may place them for.
+compatible_agents = ["claude", "codex", "qoder", "qoderwork", "gemini"]
+
+# STORE-SCOPED (`store_dir` present). This is the important line.
+#
+# `rowt skill install` on its own writes BOTH ~/.claude/skills/rowt and
+# ~/.agents/skills/rowt, each pointing at rowt's own copy — right for a machine
+# where nothing manages skills, and wrong the moment something does: knack aims
+# ~/.claude/skills/rowt at the store, rowt aims it at the source, and whoever
+# ran last wins. `unexport` would stop meaning anything, because the next
+# `rowt skill install` puts the link straight back.
+#
+# So the argv below all carry --store, which scopes rowt to ~/.agents/skills
+# alone and leaves every agent directory to knack. One copy, N links, drift
+# impossible. A store recipe is agent-blind by construction: no {agent} or
+# {skills_dir} appears below, and knack refuses one that does.
+store_dir = "~/.agents/skills"
+
+# `obtain_owner` (how knack could install rowt if it is missing) is deliberately
+# absent: it takes a sequence of command steps, not one argv, and an unverified
+# guess at that shape is worse than the honest fallback — knack reports the skill
+# as unavailable rather than half-installing it. `brew install
+# tanghong123/tap/rowt` is the one command a human needs.
+
+[upgrade]
+argv = ["brew", "upgrade", "tanghong123/tap/rowt"]
+note = "the skill ships in the keg; the store link points at the stable opt path, so the upgraded copy is what every agent link already sees"
+
+[skill_install]
+argv = ["rowt", "skill", "install", "--store"]
+
+[skill_uninstall]
+argv = ["rowt", "skill", "uninstall", "--store"]
+
+[skill_status]
+argv = ["rowt", "skill", "status", "--store"]
