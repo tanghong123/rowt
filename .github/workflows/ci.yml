@@ -54,7 +54,7 @@ jobs:
   # been missing entirely — `cargo test` has never run in CI.
   #
   # NOT `cargo fmt --check`: the tree is deliberately hand-formatted with long
-  # lines and is not fmt-clean, per skills/rowt-dev.
+  # lines and is not fmt-clean, per CLAUDE.md.
   rust:
     runs-on: macos-latest
     steps:
