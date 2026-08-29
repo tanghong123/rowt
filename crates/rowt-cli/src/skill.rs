@@ -30,7 +30,14 @@ pub fn skill_src(here: &Path) -> PathBuf {
 
 /// Claude Code always; `~/.agents/skills` only when it already exists — rowt
 /// does not invent a directory for a tool that is not installed.
-pub fn skill_targets(home: &Path) -> Vec<PathBuf> {
+///
+/// With `store`, ONLY the shared store: a skill manager (knack) links each agent
+/// directory at the store itself, so writing `~/.claude/skills/rowt` here would
+/// fight it for the same path — knack points it at the store, rowt at the source.
+pub fn skill_targets_scoped(home: &Path, store: bool) -> Vec<PathBuf> {
+    if store {
+        return vec![home.join(".agents/skills/rowt")];
+    }
     let mut t = vec![home.join(".claude/skills/rowt")];
     if home.join(".agents/skills").is_dir() {
         t.push(home.join(".agents/skills/rowt"));
@@ -101,6 +108,37 @@ mod tests {
     fn an_rc_with_nothing_of_ours_is_left_alone() {
         // None, not Some(unchanged): an untouched file must not be rewritten.
         assert!(strip_shell_init("export PATH=/x\n").is_none());
+    }
+
+    #[test]
+    fn store_scope_touches_only_the_shared_store() {
+        // The whole point of --store: a skill manager owns the per-agent links,
+        // so rowt must not write ~/.claude/skills/rowt and fight it for the path.
+        let d = std::env::temp_dir().join(format!("rowt-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join(".claude/skills")).unwrap();
+        std::fs::create_dir_all(d.join(".agents/skills")).unwrap();
+
+        let store = skill_targets_scoped(&d, true);
+        assert_eq!(store, vec![d.join(".agents/skills/rowt")]);
+
+        // Without the flag, both — unchanged behaviour for an unmanaged machine.
+        let plain = skill_targets_scoped(&d, false);
+        assert_eq!(plain, vec![d.join(".claude/skills/rowt"), d.join(".agents/skills/rowt")]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn store_scope_does_not_depend_on_the_store_existing() {
+        // `install --store` creates ~/.agents/skills; the target list must name
+        // it either way, or the flag would silently no-op on a fresh machine.
+        let d = std::env::temp_dir().join(format!("rowt-store-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        assert_eq!(skill_targets_scoped(&d, true), vec![d.join(".agents/skills/rowt")]);
+        // …while plain install still never invents it: Claude Code only.
+        assert_eq!(skill_targets_scoped(&d, false), vec![d.join(".claude/skills/rowt")]);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

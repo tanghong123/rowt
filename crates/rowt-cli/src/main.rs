@@ -1070,14 +1070,15 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
         "skill" => {
             let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
             let action = rest.first().cloned().unwrap_or_else(|| "status".into());
-            let (mut force, mut dev) = (false, String::new());
+            let (mut force, mut dev, mut store) = (false, String::new(), false);
             let mut it = rest.iter().skip(1);
             while let Some(a) = it.next() {
                 match a.as_str() {
                     "--force" => force = true,
+                    "--store" => store = true,
                     "--dev" => dev = it.next().cloned().unwrap_or_default(),
                     x if x.starts_with("--dev=") => dev = x["--dev=".len()..].to_string(),
-                    _ => die(&cfg, &format!("usage: {PROG} skill <install [--force] [--dev <repo>] | uninstall | status>")),
+                    _ => die(&cfg, &format!("usage: {PROG} skill <install [--force] [--store] [--dev <repo>] | uninstall [--store] | status [--store]>")),
                 }
             }
             let src = if dev.is_empty() {
@@ -1089,7 +1090,12 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                 }
                 d.canonicalize().unwrap_or(d)
             };
-            let targets = skill::skill_targets(&home);
+            // --store is an explicit request for the shared store, so create it
+            // rather than skip it; without the flag rowt still never invents it.
+            if store && action == "install" {
+                let _ = std::fs::create_dir_all(home.join(".agents/skills"));
+            }
+            let targets = skill::skill_targets_scoped(&home, store);
             let mut o = Vec::new();
             match action.as_str() {
                 "install" => {
@@ -1150,7 +1156,7 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                     }
                     Ok(o.join("\n"))
                 }
-                _ => die(&cfg, &format!("usage: {PROG} skill <install [--force] [--dev <repo>] | uninstall | status>")),
+                _ => die(&cfg, &format!("usage: {PROG} skill <install [--force] [--store] [--dev <repo>] | uninstall [--store] | status [--store]>")),
             }
         }
         // Latency to every server THROUGH the tunnel, via the clash API's own

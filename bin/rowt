@@ -53,7 +53,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.4.8"
+ROWT_VERSION="3.4.9"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -4130,7 +4130,12 @@ _skill_src() {
   printf '%s' "$src"
 }
 # Agent skill dirs to link into: Claude Code always; ~/.agents/skills if present.
+# With --store ($1=1) only the SHARED STORE (~/.agents/skills), because a skill
+# manager (knack) places the per-agent links itself and would fight us for them:
+# it points ~/.claude/skills/rowt at the store, we would point it at the source.
+# One copy, N links, and `knack lib unexport` stays meaningful.
 _skill_targets() {
+  if [ "${1:-0}" = 1 ]; then printf '%s\n' "$HOME/.agents/skills/rowt"; return 0; fi
   printf '%s\n' "$HOME/.claude/skills/rowt"
   [ -d "$HOME/.agents/skills" ] && printf '%s\n' "$HOME/.agents/skills/rowt"
   return 0
@@ -4146,14 +4151,15 @@ _skill_ours() { [ -L "$1" ] && case "$(readlink "$1")" in */skills/rowt) return 
 # checkout instead (…/<repo>/skills/rowt) for live-editing.
 cmd_skill() {
   local a="${1:-status}"; [ "$#" -gt 0 ] && shift
-  local force=0 dev=""
+  local force=0 dev="" store=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --force) force=1 ;;
+      --store) store=1 ;;
       --dev) shift; dev="${1:?--dev needs a path to the rowt repo}" ;;
       --dev=*) dev="${1#--dev=}" ;;
-      -h|--help) echo "usage: $PROG skill <install [--force] [--dev <repo>] | uninstall | status>"; return 0 ;;
-      *) die "usage: $PROG skill <install [--force] [--dev <repo>] | uninstall | status>" ;;
+      -h|--help) echo "usage: $PROG skill <install [--force] [--store] [--dev <repo>] | uninstall [--store] | status [--store]>"; return 0 ;;
+      *) die "usage: $PROG skill <install [--force] [--store] [--dev <repo>] | uninstall [--store] | status [--store]>" ;;
     esac; shift
   done
   local src
@@ -4168,6 +4174,9 @@ cmd_skill() {
   case "$a" in
     install)
       [ -d "$src" ] || die "skill files not found at $src"
+      # --store is an explicit request for the shared store, so make it rather
+      # than skip it; without the flag rowt still never invents the directory.
+      [ "$store" = 1 ] && mkdir -p "$HOME/.agents/skills"
       local did=0
       while IFS= read -r t; do
         [ -n "$t" ] || continue
@@ -4183,7 +4192,7 @@ cmd_skill() {
         mkdir -p "$(dirname "$t")"
         ln -sfn "$src" "$t" && { info "linked $t -> $src"; did=1; }
       done <<EOF
-$(_skill_targets)
+$(_skill_targets "$store")
 EOF
       [ "$did" = 1 ] && info "start a NEW agent session to load the 'rowt' skill." || true
       return 0 ;;
@@ -4193,7 +4202,7 @@ EOF
         if _skill_ours "$t"; then rm -f "$t" && info "unlinked $t"
         elif [ -L "$t" ] || [ -e "$t" ]; then info "left $t (not a rowt-skill link)"; fi
       done <<EOF
-$(_skill_targets)
+$(_skill_targets "$store")
 EOF
       return 0 ;;
     status)
@@ -4205,10 +4214,10 @@ EOF
         elif [ -e "$t" ]; then echo "  dir:     $t (real, not a link)"
         else echo "  absent:  $t"; fi
       done <<EOF
-$(_skill_targets)
+$(_skill_targets "$store")
 EOF
       return 0 ;;
-    *) die "usage: $PROG skill <install [--force] [--dev <repo>] | uninstall | status>" ;;
+    *) die "usage: $PROG skill <install [--force] [--store] [--dev <repo>] | uninstall [--store] | status [--store]>" ;;
   esac
 }
 
@@ -4343,7 +4352,7 @@ c@lifecycle@onboard@guided getting-started checklist (what to run next)
 c@lifecycle@up [host|vm|local] [--force]@set up & start (no arg = auto-detect the mode)
 c@lifecycle@down@tear down: proxy off + stop sing-box + vm down
 o@lifecycle@uninstall [--purge]@reverse setup for a clean re-onboard (--purge wipes config)
-o@lifecycle@skill <install|uninstall|status>@link the rowt agent skill so an agent can drive setup
+o@lifecycle@skill <install|uninstall|status> [--store]@link the rowt agent skill so an agent can drive setup
 o@lifecycle@restart@bounce the tunnel in place (no re-render / proxy change)
 c@lifecycle@reload@re-apply after a network switch (re-render + restart + proxy)
 o@lifecycle@watch <install|uninstall|status|refresh>@auto-reload on net change; captive-portal handling; clears a stale proxy at login
@@ -4467,8 +4476,9 @@ rowt' command to finish. (The corp-route daemon, if any, is separate.)
 EOF
 ;;
     skill) cat <<EOF
-$PROG skill <install [--force] [--dev <repo>] | uninstall | status> — link the
-rowt agent skill so an agent (Claude Code, …) can help you set up & run rowt.
+$PROG skill <install [--force] [--store] [--dev <repo>] | uninstall [--store] |
+status [--store]> — link the rowt agent skill so an agent (Claude Code, …) can
+help you set up & run rowt.
 
 Symlinks the user-facing 'rowt' skill into ~/.claude/skills (and ~/.agents/skills
 if present). Run from a brew install it links the STABLE opt path (so a later
@@ -4476,6 +4486,12 @@ if present). Run from a brew install it links the STABLE opt path (so a later
 checkout's skills/rowt. --dev <repo> forces a specific checkout. Switching from
 another rowt skill (e.g. a brew-linked one) just warns and re-points; --force is
 only needed to replace an unrelated (non-rowt) entry. New agent session to load it.
+
+--store touches ONLY the shared store ~/.agents/skills/rowt (creating it if
+needed) and leaves every agent directory alone. That is the shape a skill
+manager needs: knack links each agent at the store, so if rowt also wrote
+~/.claude/skills/rowt the two would fight over the same path. Plain 'install' is
+still right when nothing manages your skills for you.
 EOF
 ;;
     run) cat <<EOF

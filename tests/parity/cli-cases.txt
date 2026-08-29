@@ -413,6 +413,12 @@ run
 skill
 skill status
 skill nosucharm
+# --store scopes every arm to the shared store, for a skill manager (knack)
+# that owns the per-agent links. The symlinks themselves are outside the
+# config tree so cli-diff cannot see them — skill.rs unit-tests those; what
+# these pin is that both implementations parse the flag and word it alike.
+skill status --store
+skill --store nosucharm
 report
 PARITY_SCENARIO=router-up report
 # The usage lines a die() emits reach the AUDIT log via ABORT, so a message that

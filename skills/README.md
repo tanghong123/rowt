@@ -24,4 +24,33 @@ ln -sfn "$PWD/skills/rowt"  ~/.agents/skills/rowt
 # ~/.claude/skills/rowt in turn symlinks to ~/.agents/skills/rowt
 ```
 
+Or let rowt do it: `rowt skill install` links the installed copy (from a brew
+install, the stable `opt` path, so `brew upgrade` refreshes the skill).
+
 New skills usually need a fresh agent session to load.
+
+## Under a skill manager
+
+`rowt skill <install|uninstall|status> --store` touches **only** the shared store
+`~/.agents/skills/rowt` and leaves every agent directory alone.
+
+That is the shape a manager like [knack](https://github.com/knackhq/knack) needs:
+it points `~/.claude/skills/rowt` at the store itself, so if rowt also wrote that
+path the two would fight over it — knack aiming at the store, rowt at the source.
+One copy, N links, and `unexport` keeps meaning something. Plain `install` is
+still the right call when nothing manages your skills for you.
+
+knack adopts rowt as a *foreign* skill — rowt ships and upgrades its own skill,
+so knack fronts the lifecycle through rowt's own commands rather than vendoring
+a copy. The recipe is `~/.config/knack/recipes/rowt.toml`:
+
+```toml
+owner = "rowt"
+store_dir = "~/.agents/skills"
+[upgrade]      argv = ["brew", "upgrade", "tanghong123/tap/rowt"]
+[skill_install] argv = ["rowt", "skill", "install", "--store"]
+```
+
+```sh
+knack lib adopt rowt --via rowt:~/.config/knack/recipes/rowt.toml
+```
