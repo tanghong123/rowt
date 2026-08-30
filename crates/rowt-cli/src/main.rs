@@ -462,8 +462,19 @@ fn cmd_explain(cfg: &Path, dest: &str) -> String {
         // probe DIRECT, which is exactly not the path being tested.
         let code = lifecycle::curl_code(&format!("http://127.0.0.1:{}", ctx.port),
                                         &format!("https://{}/", c.dest));
-        out.push_str(&format!("\n  live:    HTTP {code} through the router{}",
-            if code == "000" { "  (000 = lane not reachable)" } else { "" }));
+        // The probe fetches the SITE ROOT, because routing is per-host and
+        // `explain` has already dropped any path. So this status is the ORIGIN's
+        // answer about `/`, not a verdict on the lane: an OSS bucket answers 403
+        // to a root listing while every object under it serves 200, and plenty of
+        // hosts 301 to www. A bare "HTTP 403" read as "the lane is broken" and
+        // sent one investigation chasing rowt for what was the origin answering
+        // correctly. What the probe DOES prove is reachability: any status means
+        // the request crossed the lane and came back; only 000 means it did not.
+        if code == "000" {
+            out.push_str("\n  live:    lane NOT reachable — no response through the router");
+        } else {
+            out.push_str(&format!("\n  live:    lane reachable — origin answered HTTP {code} for https://{}/ (the site root; not a verdict on the lane)", c.dest));
+        }
     }
     out
 }

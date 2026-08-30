@@ -53,7 +53,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.4.10"
+ROWT_VERSION="3.4.11"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -2070,6 +2070,79 @@ cmd_probe() {
   fi
 }
 
+# ---------- throughput ---------------------------------------------------
+# Every other health signal rowt has is REACHABILITY: a small request either
+# completes or it doesn't. That is blind to the failure this exists for — a lane
+# that answers 200 on small responses while sustaining ~200 KB/s, so multi-MB
+# transfers never finish and die on the caller's timeout. It cost one long
+# investigation (a corp tunnel at 200 KB/s vs 40 MB/s direct, misread as a rowt
+# bug because nothing measured bytes/second per lane).
+#
+# The second column is what actually localises such a report: the same object
+# fetched with the proxy BYPASSED. If both are slow the transport is slow and
+# rowt is not involved; if only the proxied column is slow, it is rowt's relay.
+SPEED_BYTES="${ROWT_SPEED_BYTES:-3000000}"        # per-sample cap (~3 MB)
+SPEED_TIMEOUT="${ROWT_SPEED_TIMEOUT:-8}"          # per-sample seconds
+
+# Print "<bytes> <B/s> <code>" for one URL. $2=1 bypasses the router.
+_speed_one() {
+  local url="$1" bypass="${2:-0}" out
+  if [ "$bypass" = 1 ]; then
+    out="$(curl -sS --noproxy '*' -o /dev/null -r "0-$SPEED_BYTES" \
+      -w '%{size_download} %{speed_download} %{http_code}' \
+      --connect-timeout 5 -m "$SPEED_TIMEOUT" "$url" 2>/dev/null || true)"
+  else
+    out="$(curl -sS -x "http://127.0.0.1:$PORT" -o /dev/null -r "0-$SPEED_BYTES" \
+      -w '%{size_download} %{speed_download} %{http_code}' \
+      --connect-timeout 5 -m "$SPEED_TIMEOUT" "$url" 2>/dev/null || true)"
+  fi
+  printf '%s' "${out:-0 0 000}"
+}
+
+# Human bytes/second. Deliberately coarse: this is a triage signal, not a benchmark.
+_speed_human() {
+  awk -v b="${1:-0}" 'BEGIN{
+    if (b <= 0)          printf "—";
+    else if (b < 1024)   printf "%d B/s", b;
+    else if (b < 1048576) printf "%.0f KB/s", b/1024;
+    else                  printf "%.1f MB/s", b/1048576;
+  }'
+}
+
+# rowt speed [url …] — sustained throughput per lane, proxied vs bypassed.
+cmd_speed() {
+  host_running || die "router is not running — '$PROG up' first"
+  local urls=("$@")
+  if [ "${#urls[@]}" -eq 0 ]; then
+    urls=("${ROWT_SPEED_URL:-https://speed.cloudflare.com/__down?bytes=10000000}")
+  fi
+  info "sampling up to $((SPEED_BYTES/1000000)) MB per URL, ${SPEED_TIMEOUT}s cap — a stalled lane shows as a small number, not an error"
+  echo
+  printf '  %-42s %-12s %-12s %s\n' "URL" "VIA ROWT" "BYPASSED" "LANE"
+  local u lane pr by prs bys prc byc shown hit
+  for u in "${urls[@]}"; do
+    lane="$(printf '%s' "$u" | sed -E 's#^[a-zA-Z]+://##; s#/.*$##; s#:[0-9]+$##' | tr 'A-Z' 'a-z')"
+    # Same predictor `explain` uses, so the LANE column can never disagree with it.
+    if hit="$(_longest_domain_hit "$lane" 2>/dev/null)"; then lane="${hit%% *}"
+    else lane="$FINAL_ROUTE"; fi
+    read -r _ prs prc <<EOF
+$(_speed_one "$u" 0)
+EOF
+    read -r _ bys byc <<EOF
+$(_speed_one "$u" 1)
+EOF
+    pr="$(_speed_human "${prs%%.*}")"; by="$(_speed_human "${bys%%.*}")"
+    shown="$(printf '%s' "$u" | cut -c1-42)"
+    printf '  %-42s %-12s %-12s %s\n' "$shown" "$pr" "$by" "$lane"
+  done
+  echo
+  echo "  Reading it: both columns slow  -> the transport is slow; rowt is not in the way."
+  echo "              only VIA ROWT slow -> the router's relay is the bottleneck."
+  echo "              both fast          -> this lane is healthy for bulk transfer."
+  echo "  A lane can pass every other rowt check and still fail here: reachability"
+  echo "  probes use small responses and cannot see a throughput collapse."
+}
+
 # ---------- rule-router -------------------------------------------------
 host_pidfile() { echo "$CFG/host.pid"; }
 host_running() { local p; p="$(cat "$(host_pidfile)" 2>/dev/null || true)"; [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }
@@ -3191,6 +3264,7 @@ Choose what goes where (edit anytime; lane 'add' auto-renders + restarts):
 
 Everyday:
     $PROG status            is it working (state + reachability)?
+    $PROG speed <url>       is a lane FAST enough to use? (reachability can't see a stalled lane)
     $PROG reload            re-apply after switching Wi-Fi / wired / corp VPN on-off
     $PROG monitor           live TUI (--theme dark|light|auto)   ·   $PROG proxy on | off    macOS system proxy
     $PROG config export     move the whole setup to another Mac (holds secrets — send encrypted)
@@ -3347,7 +3421,19 @@ cmd_explain() {
     # DIRECT (which fails in China), instead of through the router we're testing.
     # -x already beats any env *_proxy. '|| true' avoids a set -e abort on failure.
     local code; code="$(curl -sS -m 8 -x "http://127.0.0.1:$PORT" -o /dev/null -w '%{http_code}' "https://$dest/" 2>/dev/null || true)"; code="${code:-000}"
-    echo "  live:    HTTP $code through the router$([ "$code" = 000 ] && echo '  (000 = lane not reachable)')"
+    # The probe fetches the SITE ROOT, because routing is per-host and `explain`
+    # has already dropped any path. So this status is the ORIGIN's answer about
+    # `/`, not a verdict on the lane: an OSS bucket answers 403 to a root listing
+    # while every object under it serves 200, and plenty of hosts 301 to www.
+    # A bare "HTTP 403" read as "the lane is broken" and sent one investigation
+    # chasing rowt for what was the origin answering correctly. What the probe
+    # DOES prove is reachability: any status means the request crossed the lane
+    # and came back; only 000 means it did not.
+    if [ "$code" = 000 ]; then
+      echo "  live:    lane NOT reachable — no response through the router"
+    else
+      echo "  live:    lane reachable — origin answered HTTP $code for https://$dest/ (the site root; not a verdict on the lane)"
+    fi
   fi
 }
 
@@ -4400,6 +4486,7 @@ o@servers & selection@sub <list|add|rm|update|clear|import|dump>@manage subscrip
 c@servers & selection@use <tag>|auto@pin a server (manual) or auto-pick fastest live
 c@servers & selection@ping [tag]@parallel latency test through the tunnel (fastest first)
 a@servers & selection@probe@detect which mode works (host vs vm) with corp VPN up
+o@lifecycle@speed [url …]@sustained throughput per lane, proxied vs bypassed (catches a lane that is reachable but too slow to use)
 c@routing lanes@escape <list|add|rm|import|clear|dump|errors>@edit the escape lane (VPN tunnel)
 o@routing lanes@corp <list|add|rm|import|clear|dump|errors|sync>@edit the corp lane; 'sync' mirrors an overlay VPN's routes (corp/Tailscale) into it
 o@routing lanes@block <list|add|rm|import|clear|dump|errors>@block lane (ad/telemetry sinkhole); 'errors' = what got blocked
@@ -4746,6 +4833,28 @@ Tests all servers (or one) in parallel via the running router's Clash API and
 prints them fastest-first; * marks the active one. Starts the router if needed.
 Goes through the real tunnel, so it handles AnyTLS too (unlike a plain TCP
 probe). Tunables: ROWT_PING_URL, ROWT_PING_TIMEOUT.
+EOF
+;;
+    speed) cat <<EOF
+$PROG speed [url …] — sustained throughput per lane, proxied vs bypassed.
+
+Every other rowt health signal is REACHABILITY: a small request completes or it
+doesn't. That is blind to a lane which answers 200 on small responses while
+sustaining a few hundred KB/s, so multi-MB transfers never finish and die on the
+caller's timeout — the lane looks perfect and is unusable.
+
+Fetches a capped range (~3 MB by default) from each URL twice:
+through the router, and with the proxy BYPASSED. That second column is what
+localises a slow lane:
+
+  both columns slow   the transport is slow; rowt is not in the way
+  only VIA ROWT slow  the router's relay is the bottleneck
+  both fast           the lane is healthy for bulk transfer
+
+With no URL it samples a public speed endpoint (the direct/escape path). Pass
+one URL per lane you care about — a corp host and a public one together give
+you the comparison that matters. Tunables: ROWT_SPEED_BYTES, ROWT_SPEED_TIMEOUT,
+ROWT_SPEED_URL.
 EOF
 ;;
     probe) cat <<EOF
@@ -5164,6 +5273,7 @@ run_command() {
     use)        cmd_use "$@" ;;
     ping)       cmd_ping "$@" ;;
     probe)      cmd_probe "$@" ;;
+    speed)      cmd_speed "$@" ;;
     # routing lanes
     escape)     cmd_escape "$@" ;;
     corp)       cmd_corp "$@" ;;

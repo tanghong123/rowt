@@ -420,6 +420,9 @@ skill nosucharm
 skill status --store
 skill --store nosucharm
 skill recipe
+# `speed` makes real network requests, so only its help and its argument
+# handling are matrix-safe; the measurement itself is not reproducible.
+help speed
 report
 PARITY_SCENARIO=router-up report
 # The usage lines a die() emits reach the AUDIT log via ABORT, so a message that

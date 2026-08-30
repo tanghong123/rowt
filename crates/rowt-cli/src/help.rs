@@ -211,9 +211,12 @@ fn split_outside_quotes<'a>(s: &'a str, sep: &str) -> Option<(&'a str, &'a str)>
 ///     { if ($2!=g){ g=$2; printf "\n %s\n", g }
 ///       printf "  %s %s %-42s %s\n", mark($1), prog, $3, $4 }
 ///
-/// The width is a BYTE width in awk. Every syntax field is ASCII, so padding by
-/// chars agrees — but the mark glyphs are not, which is why they are printed
-/// with `%s` on both sides rather than padded.
+/// The width is a BYTE width in awk, and `{:<42}` is a CHAR width — so they
+/// agree only while the syntax field is ASCII. That held until a field carried
+/// a `…` (3 bytes, 1 char) and the two rendered two spaces apart; cli-diff
+/// caught it. Pad by bytes here, matching awk, since bin/rowt is the reference.
+/// (The mark glyphs are multibyte too, which is why they are printed with `%s`
+/// on both sides rather than padded.)
 fn registry() -> String {
     let mut out = String::new();
     let mut group = String::new();
@@ -227,7 +230,9 @@ fn registry() -> String {
             out.push_str(&format!("\n {group}\n"));
         }
         let mark = match f[0] { "c" => "●", "o" => "◐", _ => "○" };
-        out.push_str(&format!("  {mark} {} {:<42} {}\n", crate::PROG, f[2], f[3]));
+        // Byte-padded, as awk pads: 42 minus the field's BYTE length.
+        let pad = 42usize.saturating_sub(f[2].len());
+        out.push_str(&format!("  {mark} {} {}{} {}\n", crate::PROG, f[2], " ".repeat(pad), f[3]));
     }
     out
 }
@@ -434,6 +439,24 @@ mod tests {
     /// every typo to the shell — or, worse, answer an unported command.
     #[test]
     fn the_registry_knows_which_names_are_commands() {
+        // awk's %-42s pads by BYTES; Rust's {:<42} pads by CHARS. They agree
+        // only while the syntax field is ASCII, and cli-diff caught them two
+        // spaces apart the first time a field carried a `…` (3 bytes, 1 char).
+        // Assert awk's rule in BYTES: the syntax field plus its padding occupies
+        // exactly 42 bytes, then one space, then the description.
+        for line in registry().lines() {
+            let Some(rest) = line.strip_prefix("  ") else { continue };
+            let Some((_mark, tail)) = rest.split_once(' ') else { continue };
+            let Some(col) = tail.strip_prefix(crate::PROG).and_then(|t| t.strip_prefix(' ')) else { continue };
+            if col.trim().is_empty() { continue; }
+            let syntax_len = col.find("  ").unwrap_or(col.len());
+            if syntax_len >= 42 { continue; }          // overflows the column, as awk does
+            let field = &col[..syntax_len];
+            let desc_at = col.len() - col[syntax_len..].trim_start().len();
+            assert_eq!(desc_at, 43,
+                "row not byte-padded to awk's %-42s (field {:?} is {} bytes / {} chars): {line}",
+                field, field.len(), field.chars().count());
+        }
         assert!(is_registered("status"));
         assert!(is_registered("escape"));
         assert!(is_registered("shell-init"));
