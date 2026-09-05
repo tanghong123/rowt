@@ -53,7 +53,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.4.12"
+ROWT_VERSION="3.4.13"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -2099,6 +2099,39 @@ _speed_one() {
   printf '%s' "${out:-0 0 000}"
 }
 
+# The attribution for one row, from the two samples that row just took.
+#
+# `speed` exists for the second column, and leaving the reader to divide two
+# numbers is exactly how the last report blamed rowt for a corp tunnel's own
+# 1294-byte mtu (BUG-corp-lane-throughput.md). So say it, in both directions —
+# "not rowt" is the answer a slow lane usually needs, and it is the sentence
+# that investigation was missing.
+#
+# ONE ratio, no absolute floor. A floor is wrong in both directions: 226 KB/s
+# looks damning and rowt was innocent, while on a hotel uplink every lane would
+# trip it and the warning would mean nothing. The 2x line comes out of that
+# report's own repeats — 226/213/212 proxied against 253/208/177 bypassed, so a
+# single lane's samples already span ~1.4x — and anything tighter reports noise.
+#
+# It never becomes an exit status. A script that gated on this would be refusing
+# a lane for being slow, and a slow lane is still the lane the rules chose
+# (DESIGN.md §10).
+_speed_verdict() { # $1=proxied B/s  $2=bypassed B/s  $3=proxied code  $4=bypassed code
+  awk -v p="${1:-0}" -v b="${2:-0}" -v pc="${3:-000}" -v bc="${4:-000}" 'BEGIN{
+    # A ratio needs two samples. Name which one is missing rather than dividing
+    # by a failure and reporting a confident 0%.
+    if (p <= 0 || pc == "000") { printf "· no verdict — the fetch THROUGH rowt did not complete (HTTP %s)", pc; exit }
+    if (b <= 0 || bc == "000") { printf "· no verdict — the BYPASSED control did not complete (HTTP %s), so there is nothing to compare against", bc; exit }
+    # Decide on the number that gets PRINTED, not the one behind it: 49.9% shows
+    # as "50%" and a warning reading "50%" against a documented 50% line looks
+    # like an off-by-one. Half a percent is nothing next to ~40% of run-to-run
+    # spread; a verdict that contradicts its own number is not.
+    r = sprintf("%.0f", 100 * p / b) + 0;
+    if (r < 50) printf "⚠ rowt is the bottleneck — %d%% of what the same fetch does with the proxy bypassed", r;
+    else        printf "✓ not rowt — %d%% of the bypassed control, so the path itself is the limit", r;
+  }'
+}
+
 # Human bytes/second. Deliberately coarse: this is a triage signal, not a benchmark.
 _speed_human() {
   awk -v b="${1:-0}" 'BEGIN{
@@ -2134,13 +2167,15 @@ EOF
     pr="$(_speed_human "${prs%%.*}")"; by="$(_speed_human "${bys%%.*}")"
     shown="$(printf '%s' "$u" | cut -c1-42)"
     printf '  %-42s %-12s %-12s %s\n' "$shown" "$pr" "$by" "$lane"
+    printf '    %s\n' "$(_speed_verdict "$prs" "$bys" "$prc" "$byc")"
   done
   echo
-  echo "  Reading it: both columns slow  -> the transport is slow; rowt is not in the way."
-  echo "              only VIA ROWT slow -> the router's relay is the bottleneck."
-  echo "              both fast          -> this lane is healthy for bulk transfer."
   echo "  A lane can pass every other rowt check and still fail here: reachability"
   echo "  probes use small responses and cannot see a throughput collapse."
+  echo "  Below 50% of the bypassed column is called out as rowt's own bottleneck."
+  echo "  A single lane's repeats vary by ~1.4x, so a tighter line would report noise."
+  echo "  rowt never refuses or re-routes a lane for being slow: this is a diagnosis,"
+  echo "  and it never changes the exit status."
 }
 
 # ---------- rule-router -------------------------------------------------
@@ -4870,11 +4905,20 @@ caller's timeout — the lane looks perfect and is unusable.
 
 Fetches a capped range (~3 MB by default) from each URL twice:
 through the router, and with the proxy BYPASSED. That second column is what
-localises a slow lane:
+localises a slow lane.
 
-  both columns slow   the transport is slow; rowt is not in the way
-  only VIA ROWT slow  the router's relay is the bottleneck
-  both fast           the lane is healthy for bulk transfer
+Each row then gets a verdict, because dividing the two columns by hand is how a
+slow corp tunnel got reported as a rowt bug. Below HALF the bypassed rate is
+called out as rowt's own bottleneck; above it says so too — "not rowt" is the
+answer a slow lane usually needs, and it points the investigation somewhere it
+can succeed. One lane's own repeats vary by ~1.4x, so a tighter line would
+report noise, and there is deliberately no absolute floor: a fixed "too slow"
+number is wrong on a fast link and wrong on a hotel one.
+
+rowt never refuses or re-routes a lane for being slow, however slow it is — a
+degraded lane is still the lane your rules chose, and the alternative is either
+stranding you or leaking the traffic somewhere your policy excluded. So this is
+a diagnosis and nothing else: '$PROG speed' exits 0 whatever it finds.
 
 With no URL it samples a public speed endpoint (the direct/escape path). Pass
 one URL per lane you care about — a corp host and a public one together give

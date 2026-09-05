@@ -219,19 +219,14 @@ profile "default" {
   LaunchAgent, vs. a small daemon; where the LLM layer runs (local CLI you invoke
   vs. background).
 
-- **Slow-lane policy — settled: warn, never refuse.** A lane that is reachable but
-  far slower than the others (the corp tunnel's ~200 KB/s in
-  [BUG-corp-lane-throughput.md](BUG-corp-lane-throughput.md)) must never be
-  disabled, nor its traffic re-routed, on throughput alone. Fail-closed exists to
-  stop traffic taking a **wrong** path — escape down means the request would leave
-  unproxied, so dropping it is the safe answer. A slow lane is still the **right**
-  path, and refusing it has only two outcomes: strand a user whose sole route to
-  that host is the tunnel, or push them onto a lane their own policy excluded.
-  Degraded beats broken, and beats a silent policy violation. Still open: the
-  threshold (absolute floor vs. a ratio against the fastest lane measured in the
-  same run) and the surface (`status`, `explain`, the monitor, or a watch-time
-  notice). `rowt speed` (3.4.11) already produces the signal such a rule consumes,
-  so this stays advisory: measure, say so, let the human decide.
+- **Slow-lane policy — settled and SHIPPED, no longer an open question.** A lane
+  that is reachable but far slower than the others is warned about and never
+  acted on: rowt does not disable a lane, or move its traffic, for being slow.
+  `rowt speed` prints the verdict per row, comparing the proxied fetch against
+  the same fetch with the proxy bypassed, with the threshold at half and no
+  absolute floor. The reasoning, the numbers behind the 2x, and why a floor was
+  rejected now live with the behavior in **[DESIGN.md](DESIGN.md) §10**; this
+  bullet is a pointer so the question is not reopened here.
 
 ## 11. Suggested phasing (incremental, each shippable)
 

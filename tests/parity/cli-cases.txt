@@ -420,9 +420,13 @@ skill nosucharm
 skill status --store
 skill --store nosucharm
 skill recipe
-# `speed` makes real network requests, so only its help and its argument
-# handling are matrix-safe; the measurement itself is not reproducible.
+# `speed` makes real network requests, so the measurement itself is not
+# reproducible — but its FAILURE branch is: curl is shimmed, so both samples come
+# back empty and every row lands on "no verdict". That pins the verdict lines the
+# command now prints per row, which nothing else compares. The rate columns are
+# blank in this case, so nothing time-varying reaches the diff.
 help speed
+PARITY_SCENARIO=router-up speed
 report
 PARITY_SCENARIO=router-up report
 # The usage lines a die() emits reach the AUDIT log via ABORT, so a message that

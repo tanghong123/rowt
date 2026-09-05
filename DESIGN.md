@@ -415,6 +415,38 @@ as the only VPN, "direct" just meant "off my tunnel". escape splits that
   handles this automatically — probe hosts on the proxy bypass so the popup
   appears, and the `watch` agent drops/restores the system proxy around the
   login. Full design, state machine, and the offline test harness: **§11**.
+- **A lane that is reachable but far too slow (`rowt speed`).** Every other
+  signal here is reachability — a small request completes or it does not — and
+  that is structurally blind to a lane answering 200 on small responses while
+  sustaining a few hundred KB/s. `rowt speed` fetches a capped range twice, once
+  through the router and once with the proxy **bypassed**, and prints a verdict
+  per row. The second fetch is the whole point: it is the one measurement that
+  separates "rowt's relay is slow" from "this path is slow", and its absence is
+  how a corp tunnel's own 1294-byte mtu was reported as a rowt bug
+  (BUG-corp-lane-throughput.md — the same object was no faster with rowt out of
+  the picture entirely).
+
+  **The threshold is a ratio, and there is deliberately no absolute floor.**
+  Below half the bypassed rate is called out as rowt's own bottleneck. The 2x
+  comes from that report's repeats — 226/213/212 KB/s proxied against
+  253/208/177 bypassed, so one lane's samples already span ~1.4x — and anything
+  tighter would report noise. A fixed "too slow" number is wrong in both
+  directions: 226 KB/s trips every intuition and rowt was innocent, while on a
+  hotel uplink every lane would trip it and the warning would mean nothing. The
+  absolute rate is already in the column; what a human cannot do at a glance is
+  the attribution.
+
+  **And it never acts.** rowt does not disable a lane, or move its traffic, for
+  being slow — however slow. Fail-closed exists to stop traffic taking the
+  *wrong* path: escape down means the request would leave unproxied, so dropping
+  it is the safe answer. A slow lane is still the *right* path, and refusing it
+  has only two outcomes, both worse than slow — strand a user whose only route to
+  that host is the tunnel, or push the traffic onto a lane their own policy
+  excluded (corp traffic out the physical NIC is a leak, not a fallback).
+  Degraded beats broken, and beats a silent policy violation. `speed` therefore
+  exits 0 on every verdict: a non-zero status is refusal by the back door, since
+  scripts would gate on it.
+
 - **Diagnosing after the fact (audit log).** Every mutating operation — a CLI
   command you ran or an action the `watch` agent took — appends a line to
   `~/.config/rowt/log/audit.log` (`rowt audit`): `BEGIN`/`END`/`ABORT`, timing,

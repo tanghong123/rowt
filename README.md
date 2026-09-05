@@ -64,7 +64,7 @@ rowt corp add '*.intranet.example.com' '10.0.0.0/8'   # send a domain or CIDR in
 rowt block add ads.example.com   # sinkhole an ad/telemetry domain (no DNS, no dial)
 rowt use JP                   # pick a server (rowt ping shows the fastest)
 rowt status                   # is it working? (mode / server / proxy / reachability)
-rowt speed <url>              # is a lane FAST enough? (a lane can be reachable and still unusable)
+rowt speed <url>              # is a lane FAST enough — and is rowt the cause? (it says which)
 rowt monitor                  # live full-screen dashboard (connections, errors, server health)
 rowt reload                   # after switching Wi-Fi ↔ wired ↔ hotspot
 rowt watch install            # (optional) auto-reload on every network change
