@@ -45,6 +45,7 @@ from the source and are not listed.
 | `use` | yes | use_server |
 | `ping` | yes | ping |
 | `probe` | yes | probe |
+| `speed` | **no** | — |
 | `escape errors` | yes | escape_errors |
 | `escape log` | yes | lane_log |
 | `escape stats` | yes | escape_stats |

@@ -16,6 +16,7 @@ tests/parity/bin/parity run -- explain example.com
 tests/parity/bin/parity mask            # every read-only command, twice, diffed
 tests/parity/bin/parity golden          # classifier verdicts vs the committed golden
 tests/parity/bin/parity ledger          # regenerate LEDGER.md from bin/rowt
+tests/parity/bin/parity ledger --check  # …or just fail if it is stale (same for cli-ledger)
 
 # cross-implementation gates (bash/Python vs Rust)
 tests/parity/bin/parity render-matrix    # the rendered config, canonically
@@ -144,6 +145,23 @@ runs, which is not a question a writer has. Those are `cli-diff`'s, and the
 skip reasons now say which scenario compares each one. Subcommands reachable only
 through a `*` catch-all cannot be enumerated from the source and are not
 listed.
+
+Both ledgers are **generated, and nothing used to regenerate them**. `speed`
+landed as a command arm in 3.4.11 and neither table noticed for two releases:
+`CLI-LEDGER.md` went on reading "37 of 37 command arms answered natively" and
+`LEDGER.md` did not list the arm at all. Both aged in the direction that
+*over*-reports, which is the unsafe one — a reader asking whether the port was
+done got yes.
+
+So `ledger` and `cli-ledger` take `--check`: regenerate into a temp file, print
+the diff, exit non-zero, and leave the committed file alone. A `--check` that
+rewrote the file would pass by fixing what it was asked to detect. The
+`.githooks/pre-commit` hook runs both when a commit stages one of the three
+inputs they are derived from — `bin/rowt`, `crates/rowt-cli/src/main.rs`,
+`cli-cases.txt`/`commands.txt` — and refuses rather than regenerating: a hook
+that rewrote `tests/parity/*.md` during a commit touching only `bin/rowt` would
+surprise more than it helps, and the message names the one command that fixes
+it. Not CI, for the same reason the rest of this directory is not there.
 
 **Watchdog coverage** — the captive decision table of DESIGN.md §11 runs from
 the matrix: clear, captive-by-body, captive-by-redirect, unknown-on-failure,

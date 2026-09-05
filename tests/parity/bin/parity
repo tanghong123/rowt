@@ -382,8 +382,36 @@ subs_of() {      # $1=function name
 # whether it mutates. Measuring only the first level would let `watch install`
 # and `router down` hide behind `watch status` and `router status` — precisely
 # the "commands I remembered to test" failure the ledger exists to prevent.
+# The check half of `ledger --check` / `cli-ledger --check`: regenerate into a
+# temp file and report whether the committed one still matches, WITHOUT touching
+# it. A --check that rewrote the file would pass by fixing the thing it was
+# asked to detect.
+#
+# These two tables are the only claim this harness makes about its own coverage,
+# and nothing rebuilt them: `speed` was a command arm for two releases while
+# CLI-LEDGER.md still read "37 of 37 command arms answered natively". A
+# generated file that nothing regenerates is a comment that ages into a lie —
+# and this one aged in the direction that OVER-reports, which is the unsafe one.
+_ledger_check() { # $1=freshly generated  $2=committed  $3=display name  $4=subcommand to rerun
+  local rc=0
+  if [ ! -f "$2" ]; then
+    echo "parity: $3 does not exist — generate it:  tests/parity/bin/parity $4"; rc=1
+  elif diff -u "$2" "$1"; then
+    echo "$3 is up to date"
+  else
+    echo
+    echo "parity: $3 is STALE — the diff above is what regenerating would change."
+    echo "        run:  tests/parity/bin/parity $4"
+    rc=1
+  fi
+  rm -f "$1"
+  return "$rc"
+}
+
 cmd_ledger() {
-  local pairs rows=0 miss=0
+  local check=0; [ "${1:-}" = "--check" ] && check=1
+  local pairs rows=0 miss=0 out="$DIR/LEDGER.md"
+  [ "$check" = 1 ] && out="$(mktemp "${TMPDIR:-/tmp}/parity-ledger.XXXXXX")"
   pairs="$(sed -n '/^run_command()/,/^}/p' "$ROWT" \
            | sed -n 's/^ *\([a-z_|-]*\)) *\(cmd_[a-z_]*\).*/\1 \2/p')"
   {
@@ -416,10 +444,11 @@ cmd_ledger() {
         fi
       done
     done
-  } > "$DIR/LEDGER.md"
-  rows="$(grep -c '^| `' "$DIR/LEDGER.md" || true)"
-  miss="$(grep -c '| \*\*no\*\* |' "$DIR/LEDGER.md" || true)"
-  echo "wrote $DIR/LEDGER.md — $rows rows, $miss uncovered"
+  } > "$out"
+  [ "$check" = 1 ] && { _ledger_check "$out" "$DIR/LEDGER.md" "LEDGER.md" "ledger"; return; }
+  rows="$(grep -c '^| `' "$out" || true)"
+  miss="$(grep -c '| \*\*no\*\* |' "$out" || true)"
+  echo "wrote $out — $rows rows, $miss uncovered"
 }
 
 # Replay the generated corpus through the classifier and emit one verdict per
@@ -1474,6 +1503,9 @@ cmd_replay_bundle() {
 # column out of cli-cases.txt. A command that rowt-rs handles but nothing
 # compares is not ported — it is untested code that happens to exist.
 cmd_cli_ledger() {
+  local check=0; [ "${1:-}" = "--check" ] && check=1
+  local out="$DIR/CLI-LEDGER.md"
+  [ "$check" = 1 ] && out="$(mktemp "${TMPDIR:-/tmp}/parity-cli-ledger.XXXXXX")"
   local rs_src="$ROOT/crates/rowt-cli/src/main.rs"
   local arms impl gated c
   arms="$(sed -n '/^run_command()/,/^}/p' "$ROWT" | sed -n 's/^ *\([a-z_|-]*\)) *cmd_.*/\1/p' | tr '|' '\n' | sort -u | grep -v '^$')"
@@ -1555,10 +1587,10 @@ cmd_cli_ledger() {
       # last arm ended in `),`.
       sed -n '/^fn native(/,/^}/p' "$rs_src" | sed -n '/=> matches!/,$p' | sed 's/^/    /'
     fi
-  } > "$DIR/CLI-LEDGER.md"
-  grep -c '| yes |' "$DIR/CLI-LEDGER.md" >/dev/null 2>&1 || true
-  tail -2 "$DIR/CLI-LEDGER.md"
-  echo "wrote $DIR/CLI-LEDGER.md"
+  } > "$out"
+  [ "$check" = 1 ] && { _ledger_check "$out" "$DIR/CLI-LEDGER.md" "CLI-LEDGER.md" "cli-ledger"; return; }
+  tail -2 "$out"
+  echo "wrote $out"
 }
 
 # The committed classifier baseline. `parity golden` fails if today's verdicts

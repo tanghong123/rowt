@@ -34,8 +34,9 @@ task's pipe, so killing the task kills sing-box) — use the **`rowt` skill** in
 - **Docs:** `README.md`, `DESIGN.md`, `PORTING.md`, `FUTURE.md`,
   `rowt-monitor/{README,DESIGN,METRICS,COLORS}.md`. Keep them current with
   behavior you change.
-- **`.githooks/pre-commit`** — the auto version-bump. Enable in a fresh clone:
-  `git config core.hooksPath .githooks`.
+- **`.githooks/pre-commit`** — the auto version-bump, **and** a refusal when a
+  commit leaves `tests/parity/{LEDGER,CLI-LEDGER}.md` stale. Enable in a fresh
+  clone: `git config core.hooksPath .githooks`.
 
 ## Gates
 
@@ -87,6 +88,15 @@ Run these before any release that touches `bin/rowt` or `crates/`.
 The pre-commit hook **auto-bumps the PATCH** in `bin/rowt` for any commit
 touching `bin/`, `config/`, `lima/`, `install.sh`, `README.md`, or `DESIGN.md`
 — **unless** a `ROWT_VERSION=` change is already staged (a manual minor/major).
+
+It also **refuses a commit that leaves a coverage ledger stale**, whenever the
+commit stages one of the three inputs they are generated from: `bin/rowt`,
+`crates/rowt-cli/src/main.rs`, or `cli-cases.txt`/`commands.txt`. It checks and
+tells you the command; it does not regenerate for you. Both tables had gone
+stale for two releases — `speed` was a command arm neither listed — and they
+were wrong in the direction that *over*-reports coverage. Fix with
+`tests/parity/bin/parity ledger && tests/parity/bin/parity cli-ledger`, then
+stage both.
 
 **`rowt-monitor/`-only changes do NOT bump.** A monitor fix commits at the
 current version; to *release* it you must bump `ROWT_VERSION` in `bin/rowt`

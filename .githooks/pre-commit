@@ -1,11 +1,51 @@
 #!/usr/bin/env bash
-# Auto-bump rowt's revision (patch) version on every commit that touches the tool.
-# Skipped if a ROWT_VERSION change is already staged (i.e. you manually bumped the
-# minor/major version yourself, or it's the initial add).
+# Two jobs, in order: refuse a commit that leaves a generated coverage ledger
+# stale, then auto-bump rowt's revision (patch) version.
+#
+# The bump is skipped if a ROWT_VERSION change is already staged (i.e. you
+# manually bumped the minor/major version yourself, or it's the initial add).
 #
 # Enable in a fresh clone with:  git config core.hooksPath .githooks
 set -euo pipefail
 
+# --- 1. the coverage ledgers must not go stale -------------------------------
+#
+# tests/parity/{LEDGER,CLI-LEDGER}.md are generated, and nothing regenerated
+# them: `speed` was a command arm for two releases while CLI-LEDGER.md still
+# read "37 of 37 command arms answered natively" and LEDGER.md did not list it
+# at all. Both aged in the direction that OVER-reports coverage, which is the
+# unsafe one — a reader asking "is the port done" was told yes.
+#
+# It CHECKS and refuses rather than regenerating and staging. A hook that
+# rewrote tests/parity/*.md during a commit touching only bin/rowt would be a
+# surprise of a different order than the version bump, and the fix is one
+# command the message names. Not CI: the differential harness is deliberately
+# not there (see .github/workflows/ci.yml), and this runs on the machine whose
+# tools generated the file.
+#
+# Scoped to the three inputs the tables are derived from, so an ordinary commit
+# pays nothing.
+if git diff --cached --name-only \
+   | grep -qE '^(bin/rowt|crates/rowt-cli/src/main\.rs|tests/parity/(cli-cases|commands)\.txt)$'; then
+  _p="tests/parity/bin/parity"
+  if [ -x "$_p" ]; then
+    _stale=0
+    "$_p" ledger     --check >/dev/null 2>&1 || _stale=1
+    "$_p" cli-ledger --check >/dev/null 2>&1 || _stale=1
+    if [ "$_stale" = 1 ]; then
+      echo "rowt: a generated coverage ledger is stale — this commit changes the" >&2
+      echo "      command surface it is derived from. See what would change:" >&2
+      echo "        tests/parity/bin/parity ledger     --check" >&2
+      echo "        tests/parity/bin/parity cli-ledger --check" >&2
+      echo "      then regenerate and stage:" >&2
+      echo "        tests/parity/bin/parity ledger && tests/parity/bin/parity cli-ledger" >&2
+      echo "        git add tests/parity/LEDGER.md tests/parity/CLI-LEDGER.md" >&2
+      exit 1
+    fi
+  fi
+fi
+
+# --- 2. the version bump -----------------------------------------------------
 f="bin/rowt"
 # only bump on commits that touch the tool itself
 git diff --cached --name-only | grep -qE '^(bin/|config/|lima/|install\.sh|README\.md|DESIGN\.md)' || exit 0
