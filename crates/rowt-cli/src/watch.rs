@@ -315,7 +315,10 @@ fn perform(ctx: &Ctx, actions: &[Action]) {
                 }
             }
             Action::Reload(_) => {
-                crate::shell::audit(&ctx.cfg, "BEGIN watchdog reload — network change");
+                // No BEGIN here: the planner already emitted it as its own
+                // `Action::Audit`, so writing one would log the line twice — and
+                // this copy hardcoded "network change", which is now not even the
+                // only reason a reload happens.
                 let r = crate::redirected(&watch_log_path(ctx), || lifecycle::cmd_reload(ctx, &crate::here_dir()));
                 if r.is_ok() {
                     watch_log(ctx, "reload ok");

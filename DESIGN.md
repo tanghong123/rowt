@@ -415,6 +415,41 @@ as the only VPN, "direct" just meant "off my tunnel". escape splits that
   handles this automatically — probe hosts on the proxy bypass so the popup
   appears, and the `watch` agent drops/restores the system proxy around the
   login. Full design, state machine, and the offline test harness: **§11**.
+- **A corporate auto-proxy (PAC) in front of rowt.** macOS resolves an
+  auto-proxy configuration **before** the manual proxy settings, so while one is
+  enabled the system is not using rowt however correctly rowt's three protocols
+  are set. Every check rowt had read the manual getters and none read this one,
+  so `rowt proxy check` could print "✓ system proxy fully configured" and be
+  wrong: the failure is silent by construction. `proxy check` and `status` now
+  say when a PAC is in front, and print its URL.
+
+  **rowt does not turn it off, and nothing automated treats it as broken.** A
+  PAC is normally pushed by a corporate client on VPN connect, and disabling it
+  is the "silently modify what MDM/EDR manages" that FUTURE.md §7 rules out.
+  More narrowly, `_proxy_pointing_ok` ignores it *on purpose*: the watchdog's
+  remedy is `cmd_reload`, a reload does not turn a PAC off, and so treating it
+  as "proxy wrong" would reload every tick forever. For the same reason the
+  warning stays out of `proxy check`'s exit status — `install.sh` answers
+  non-zero with `proxy on` plus a router restart, neither of which touches a
+  PAC, so it would buy a pointless restart on every upgrade.
+
+  To route through rowt with a PAC enabled, either disable the auto-proxy
+  (System Settings › Network › Details › Proxies), or use `rowt proxy env` for
+  CLI tools: those exports name `127.0.0.1:$PORT` directly and ignore the system
+  setting entirely.
+
+  **A watchdog reload names which of its two causes fired.** The netcheck phase
+  reloads when the bound interface moved *or* when the system proxy stopped
+  pointing at rowt, and it used to call both "network change" — so a reload
+  caused by something re-pointing the proxy logged
+  `network change (iface 'en0' -> 'en0')`: an interface that had not moved, in a
+  message about the interface moving. Four divergence bundles in three weeks read
+  that way and were investigated as a network problem. The proxy case now says
+  `system proxy on '<service>' no longer points at rowt (iface '<if>' unchanged,
+  …)`, in `watch.log` and in the audit log. The two implementations build the
+  same three strings; `parity watch-shadow`'s `watch-proxy-repoint` case holds
+  them to it.
+
 - **A lane that is reachable but far too slow (`rowt speed`).** Every other
   signal here is reachability — a small request completes or it does not — and
   that is structurally blind to a lane answering 200 on small responses while

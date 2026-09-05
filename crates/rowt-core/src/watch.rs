@@ -300,15 +300,27 @@ pub fn netcheck(obs: &Observation, st: &State, cfg: &Config) -> Outcome {
     let cur = obs.bound_iface.clone().unwrap_or_default();
     let ifc = obs.iface.clone().unwrap_or_default();
     let svc = obs.active_service.clone().unwrap_or_default();
-    a.push(Action::Log(format!(
-        "network change (iface '{cur}' -> '{ifc}', [{}], service '{svc}') — reloading",
-        obs.net_id
-    )));
-    a.push(Action::Audit(format!(
-        "BEGIN watchdog reload — network change (iface '{cur}' -> '{ifc}', [{}])",
-        obs.net_id
-    )));
-    a.push(Action::Reload(format!("network change '{cur}'->'{ifc}'")));
+    // Name the reason that actually fired. `need` has two independent causes and
+    // this said "network change" for both, so a reload triggered by a re-pointed
+    // system proxy logged `iface 'en0' -> 'en0'` — an interface that had not
+    // moved, in a message about the interface moving. Four divergence bundles in
+    // three weeks read that way, and the misreading cost a wrong bug report.
+    let (why_log, why_audit, why_short) = if iface_moved {
+        (
+            format!("network change (iface '{cur}' -> '{ifc}', [{}], service '{svc}') — reloading", obs.net_id),
+            format!("BEGIN watchdog reload — network change (iface '{cur}' -> '{ifc}', [{}])", obs.net_id),
+            format!("network change '{cur}'->'{ifc}'"),
+        )
+    } else {
+        (
+            format!("system proxy on '{svc}' no longer points at rowt (iface '{ifc}' unchanged, [{}]) — reloading", obs.net_id),
+            format!("BEGIN watchdog reload — system proxy on '{svc}' no longer points at rowt (iface '{ifc}', [{}])", obs.net_id),
+            format!("proxy re-point on '{svc}'"),
+        )
+    };
+    a.push(Action::Log(why_log));
+    a.push(Action::Audit(why_audit));
+    a.push(Action::Reload(why_short));
     Outcome { actions: a, state: s, next: Next::Stop }
 }
 
@@ -475,6 +487,27 @@ mod tests {
         o.bound_iface = Some("en1".into());
         let r = netcheck(&o, &State::default(), &Config::default());
         assert!(r.actions.iter().any(|a| matches!(a, Action::Reload(_))));
+    }
+
+    #[test]
+    fn a_reload_names_the_reason_that_actually_fired() {
+        // The interface has NOT moved; the proxy is what is wrong. Saying
+        // "network change (iface 'en0' -> 'en0')" here is how four real
+        // divergence bundles came to be read as an interface problem.
+        let mut o = running();
+        o.proxy_pointing_ok = false;
+        let st = State { last_net_id: Some(o.net_id.clone()), ..Default::default() };
+        let r = netcheck(&o, &st, &Config::default());
+        let l = &logs(&r)[0];
+        assert!(l.starts_with("system proxy on 'Wi-Fi' no longer points at rowt"), "{l}");
+        assert!(!l.contains("network change"), "{l}");
+        assert!(r.actions.iter().any(|a| matches!(a, Action::Reload(s) if s == "proxy re-point on 'Wi-Fi'")));
+
+        // …and a real interface move still says so, unchanged.
+        let mut o2 = running();
+        o2.bound_iface = Some("en1".into());
+        let r2 = netcheck(&o2, &State::default(), &Config::default());
+        assert!(logs(&r2)[0].starts_with("network change (iface 'en1' -> 'en0'"), "{}", logs(&r2)[0]);
     }
 
     #[test]

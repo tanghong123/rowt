@@ -24,3 +24,8 @@ ROWT_CAPTIVE_URL=http://127.0.0.1:9/x watch tick
 # bind_interface still matches, so the right answer is the "no reload needed"
 # log — a reload here would be the bug.
 PARITY_SCENARIO=watch-net-moved ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick | no reload needed, skip
+# The reload branch, and the one whose message was wrong: the interface has NOT
+# moved, the system proxy is simply no longer pointing at rowt. This used to log
+# "network change (iface 'en0' -> 'en0')" — an interface that had not moved, in a
+# message about the interface moving. Four real divergence bundles read that way.
+PARITY_SCENARIO=watch-proxy-repoint ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick | no longer points at rowt

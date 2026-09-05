@@ -431,6 +431,13 @@ report
 PARITY_SCENARIO=router-up report
 # The usage lines a die() emits reach the AUDIT log via ABORT, so a message that
 # only bash's stderr would have shown is still compared for the mutating arms.
+# A corporate auto-proxy in front of rowt. The dangerous shape is the one these
+# pin: `proxy check` says "fully configured" AND warns, because rowt's own three
+# protocols really are set — the PAC simply wins ahead of them. The warning is
+# deliberately not in the exit status (install.sh would answer a PAC with a
+# pointless router restart), so the case also pins that `check` still exits 0.
+PARITY_SCENARIO=pac-enabled proxy check
+PARITY_SCENARIO=pac-enabled status
 proxy nosucharm
 escape nosucharm
 router nosucharm

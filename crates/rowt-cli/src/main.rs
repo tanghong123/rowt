@@ -550,11 +550,30 @@ fn cmd_proxy(action: &str, arg: Option<&str>) -> Result<(String, bool), String> 
             let Some(svc) = p.active_service() else {
                 return Ok(("  ✗ no active network service".into(), false));
             };
-            if p.proxy_pointing_ok(&svc, prt) && rowt_platform::bypass_ok(&svc) {
-                Ok((format!("  ✓ system proxy fully configured for '{svc}' (127.0.0.1:{prt} + local bypass)"), true))
+            let ok = p.proxy_pointing_ok(&svc, prt) && rowt_platform::bypass_ok(&svc);
+            let mut m = if ok {
+                format!("  ✓ system proxy fully configured for '{svc}' (127.0.0.1:{prt} + local bypass)")
             } else {
-                Ok((format!("  ✗ system proxy not fully configured — run '{PROG} proxy on'"), false))
+                format!("  ✗ system proxy not fully configured — run '{PROG} proxy on'")
+            };
+            // Printed, but deliberately NOT folded into the exit status.
+            // install.sh treats non-zero as "fix it" and answers with `proxy on`
+            // plus a router restart — neither of which touches a PAC, so a PAC
+            // would buy a pointless restart on every upgrade for as long as corp
+            // policy has one enabled. The status answers "are rowt's own settings
+            // right"; the warning answers "is anything in front of them".
+            if rowt_platform::pac_on(&svc) {
+                let url = rowt_platform::pac_url(&svc);
+                m.push_str(&format!("\n  ⚠ an auto-proxy (PAC) is ENABLED on '{svc}', and macOS resolves it BEFORE"));
+                m.push_str("\n    the settings above — so traffic follows the PAC, not rowt's lanes:");
+                m.push_str(&format!("\n      {url}"));
+                m.push_str("\n    A corporate client usually sets this on VPN connect. rowt will not turn");
+                m.push_str("\n    it off. To route through rowt either disable it (System Settings ›");
+                m.push_str("\n    Network › Details › Proxies › Automatic proxy configuration), or use");
+                m.push_str(&format!("\n    '{PROG} proxy env' for CLI tools — those exports ignore the system"));
+                m.push_str("\n    setting entirely and still reach rowt.");
             }
+            Ok((m, ok))
         }
         _ => Err(format!("usage: {PROG} proxy [status | check | on [--force] | off | env [--off]]")),
     }
@@ -1848,6 +1867,9 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                 let en = body.lines().find(|l| l.starts_with("Enabled:"))
                     .and_then(|l| l.split_whitespace().nth(1)).unwrap_or("");
                 o.push(format!("system proxy: {en} ({svc})"));
+                if rowt_platform::pac_on(&svc) {
+                    o.push(format!("auto-proxy:   ⚠ a PAC is enabled on '{svc}' and macOS resolves it BEFORE rowt's proxy — traffic may bypass the lanes ('{PROG} proxy check' for detail)"));
+                }
             }
             if ctx.sget("captive") == "1" {
                 o.push("captive:      portal detected — proxy dropped until login clears (watchdog auto-restores)".into());

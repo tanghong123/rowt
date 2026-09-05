@@ -53,7 +53,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.4.13"
+ROWT_VERSION="3.4.14"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -2558,6 +2558,35 @@ _proxy_type_ok() {
 }
 _proxy_pointing_ok() { _proxy_type_ok "$1" -getsocksfirewallproxy && _proxy_type_ok "$1" -getwebproxy && _proxy_type_ok "$1" -getsecurewebproxy; }
 _proxy_bypass_ok() { [ "$(networksetup -getproxybypassdomains "$1" 2>/dev/null | sed '/^$/d' | sort | tr '\n' ' ')" = "$(_proxy_bypass_want | sort | tr '\n' ' ')" ]; }
+# Is a corporate auto-proxy (PAC) ENABLED on this service?
+#
+# macOS resolves a PAC BEFORE the manual proxy settings, so while one is on the
+# system is not using rowt however correctly rowt's own three protocols are set
+# — and every check rowt has says "fully configured", because all of them read
+# the manual getters and none reads this one.
+#
+# REPORTED, NEVER ACTED ON. Two independent reasons, and both matter:
+#   * A PAC is normally pushed by a corporate client on VPN connect. Turning it
+#     off is exactly the "silently modify what MDM/EDR manages" that FUTURE.md §7
+#     rules out.
+#   * No automated path may treat it as "broken" either. `_proxy_pointing_ok`
+#     deliberately ignores it, because the watchdog's remedy is `cmd_reload` and
+#     a reload does not turn a PAC off — it would reload every tick, forever.
+# So this feeds human-facing output only: `proxy check` and `status`.
+_proxy_pac_on()  { networksetup -getautoproxyurl "$1" 2>/dev/null | grep -q '^Enabled: Yes'; }
+_proxy_pac_url() { networksetup -getautoproxyurl "$1" 2>/dev/null | sed -n 's/^URL: //p'; }
+_proxy_pac_warn() { # $1=service. Silent unless a PAC is actually in front of rowt.
+  _proxy_pac_on "$1" || return 0
+  echo "  ⚠ an auto-proxy (PAC) is ENABLED on '$1', and macOS resolves it BEFORE"
+  echo "    the settings above — so traffic follows the PAC, not rowt's lanes:"
+  echo "      $(_proxy_pac_url "$1")"
+  echo "    A corporate client usually sets this on VPN connect. rowt will not turn"
+  echo "    it off. To route through rowt either disable it (System Settings ›"
+  echo "    Network › Details › Proxies › Automatic proxy configuration), or use"
+  echo "    '$PROG proxy env' for CLI tools — those exports ignore the system"
+  echo "    setting entirely and still reach rowt."
+}
+
 _proxy_any_on() {
   networksetup -getsocksfirewallproxy "$1" 2>/dev/null | grep -q '^Enabled: Yes' \
     || networksetup -getwebproxy "$1" 2>/dev/null | grep -q '^Enabled: Yes' \
@@ -2677,11 +2706,20 @@ cmd_proxy() {
       ;;
     check)   # exit 0 iff fully configured (proxy pointing + local bypass). No sudo.
       [ -n "$svc" ] || { echo "  ✗ no active network service"; return 1; }
+      local _rc=0
       if _proxy_pointing_ok "$svc" && _proxy_bypass_ok "$svc"; then
-        echo "  ✓ system proxy fully configured for '$svc' (127.0.0.1:$PORT + local bypass)"; return 0
+        echo "  ✓ system proxy fully configured for '$svc' (127.0.0.1:$PORT + local bypass)"
       else
-        echo "  ✗ system proxy not fully configured — run '$PROG proxy on'"; return 1
-      fi ;;
+        echo "  ✗ system proxy not fully configured — run '$PROG proxy on'"; _rc=1
+      fi
+      # Printed, but deliberately NOT folded into the exit status. install.sh
+      # treats non-zero as "fix it" and answers with `proxy on` + a router
+      # restart — neither of which touches a PAC, so a PAC would buy a pointless
+      # restart on every upgrade for as long as corp policy has one enabled.
+      # This status answers "are rowt's own settings right"; the warning answers
+      # "is anything in front of them".
+      _proxy_pac_warn "$svc"
+      return "$_rc" ;;
     on)
       # Refuse to point the system proxy at a dead port. If the router isn't
       # running, 127.0.0.1:$PORT has nothing listening, so setting the proxy
@@ -3486,6 +3524,7 @@ cmd_status() {
   echo "router:       $(host_running && echo "running (pid $(cat "$(host_pidfile)"))" || echo stopped) on 127.0.0.1:$PORT"
   local svc; svc="$(active_service 2>/dev/null || true)"
   [ -n "$svc" ] && printf 'system proxy: %s (%s)\n' "$(networksetup -getsecurewebproxy "$svc" 2>/dev/null | awk '/Enabled/{print $2}' | head -1)" "$svc"
+  [ -n "$svc" ] && _proxy_pac_on "$svc" && echo "auto-proxy:   ⚠ a PAC is enabled on '$svc' and macOS resolves it BEFORE rowt's proxy — traffic may bypass the lanes ('$PROG proxy check' for detail)"
   [ "$(sget captive)" = 1 ] && echo "captive:      portal detected — proxy dropped until login clears (watchdog auto-restores)"
   echo "buckets:      escape=$(( $(domains_json | jq length) + $(escape_exact_json | jq length) )) corp=$(( $(corp_domains_json | jq length) + $(corp_cidrs_json | jq length) + $(corp_exact_json | jq length) )) block=$(( $(block_domains_json | jq length) + $(block_exact_json | jq length) ))$([ -f "$ADS_SRS" ] && echo '+ads')$(g="$(all_geosites | paste -sd, - 2>/dev/null)"; [ -n "$g" ] && echo " +geosite:$g") final=$FINAL_ROUTE"
   if [ -x "$SB" ] && [ -f "$HOST_CFG" ]; then
@@ -4197,12 +4236,29 @@ PLIST
         _wact "next stop"
         exit 0
       fi
-      _watch_log "network change (iface '$cur' -> '$ifc', [$nid], service '$svc') — reloading"
-      _wact "log network change (iface '$cur' -> '$ifc', [$nid], service '$svc') — reloading"
-      _AUDIT_OP="watchdog: reload (network change '$cur'->'$ifc')"
-      _audit "BEGIN watchdog reload — network change (iface '$cur' -> '$ifc', [$nid])"
-      _wact "audit BEGIN watchdog reload — network change (iface '$cur' -> '$ifc', [$nid])"
-      _wact "reload network change '$cur'->'$ifc'"
+      # Name the reason that actually fired. `need` has two independent causes
+      # and this said "network change" for both, so a reload triggered by a
+      # re-pointed system proxy logged `iface 'en0' -> 'en0'` — an interface
+      # that had not moved, in a message about the interface moving. Four
+      # divergence bundles in three weeks read that way, and the misreading
+      # cost a wrong bug report. Keep both sides identical: the Rust netcheck
+      # in crates/rowt-core/src/watch.rs builds the same three strings.
+      local why_log why_audit why_short
+      if [ -n "$ifc" ] && [ "$ifc" != "$cur" ]; then
+        why_log="network change (iface '$cur' -> '$ifc', [$nid], service '$svc') — reloading"
+        why_audit="BEGIN watchdog reload — network change (iface '$cur' -> '$ifc', [$nid])"
+        why_short="network change '$cur'->'$ifc'"
+      else
+        why_log="system proxy on '$svc' no longer points at rowt (iface '$ifc' unchanged, [$nid]) — reloading"
+        why_audit="BEGIN watchdog reload — system proxy on '$svc' no longer points at rowt (iface '$ifc', [$nid])"
+        why_short="proxy re-point on '$svc'"
+      fi
+      _watch_log "$why_log"
+      _wact "log $why_log"
+      _AUDIT_OP="watchdog: reload ($why_short)"
+      _audit "$why_audit"
+      _wact "audit $why_audit"
+      _wact "reload $why_short"
       _wact "next stop"
       cmd_reload >>"$WATCH_LOG" 2>&1 && { _watch_log "reload ok"; rm -f "$WATCH_HEALTH"; _audit "END   watchdog reload — ok"; } || { _watch_log "reload FAILED"; _audit "END   watchdog reload — FAILED"; }
       _AUDIT_OP=""

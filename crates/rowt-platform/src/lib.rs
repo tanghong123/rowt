@@ -409,6 +409,35 @@ pub fn read_proxy(service: &str, flag: &str) -> String {
     out("networksetup", &[flag, service]).unwrap_or_default()
 }
 
+/// `_proxy_pac_on` — is a corporate auto-proxy (PAC) ENABLED on this service?
+///
+/// macOS resolves a PAC BEFORE the manual proxy settings, so while one is on the
+/// system is not using rowt however correctly rowt's own three protocols are set.
+/// Every other check here reads the manual getters and none reads this one, which
+/// is why "fully configured" could be true and wrong at the same time.
+///
+/// Reported, never acted on: turning off a PAC a corporate client owns is the
+/// "silently modify what MDM/EDR manages" that FUTURE.md §7 rules out, and no
+/// automated path may treat it as broken either — `proxy_pointing_ok` ignores it
+/// deliberately, because the watchdog's remedy is a reload and a reload does not
+/// turn a PAC off. It would reload every tick, forever.
+pub fn pac_on(service: &str) -> bool {
+    out("networksetup", &["-getautoproxyurl", service])
+        .unwrap_or_default()
+        .lines()
+        .any(|l| l.starts_with("Enabled: Yes"))
+}
+
+/// The PAC's URL, as `networksetup` prints it (empty when there is none).
+pub fn pac_url(service: &str) -> String {
+    out("networksetup", &["-getautoproxyurl", service])
+        .unwrap_or_default()
+        .lines()
+        .find_map(|l| l.strip_prefix("URL: "))
+        .unwrap_or("")
+        .to_string()
+}
+
 /// The bypass list as the shell prints it: newlines squashed to spaces.
 pub fn read_bypass(service: &str) -> String {
     let body = out("networksetup", &["-getproxybypassdomains", service]).unwrap_or_default();
