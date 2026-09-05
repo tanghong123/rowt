@@ -15,6 +15,8 @@
 #   8.   disable the single-lane rule   -> lanes-diff must fire
 #   9.   reword a captive log line      -> watch-diff must fire
 #   10.  …and the watchdog shadow must record it too
+#   10b. rebuild the guard observation at EXIT -> watch-shadow must fire
+#   10c. drop last_net_id from the netcheck observation -> watch-shadow must fire
 #   11.  drop a proxy protocol           -> platform-diff must fire
 #   12.  reword an explain description  -> cli-diff must fire
 #   13.  shift the share-link tag index -> vless-diff must fire
@@ -308,6 +310,65 @@ else
     else
       bad "the shadow stayed silent on a diverging tick ($(cat "$log" 2>/dev/null || echo 'no log'))"
     fi
+  fi
+fi
+
+echo "10b. rebuilding the guard observation at EXIT must be caught"
+# The bug class, not a wording change: both sides still speak the same
+# vocabulary — they just describe different instants. `_wobs` snapshots BEFORE
+# the tick acts precisely so the planner is judged on the world the shell
+# decided from; rebuild it in `_watch_shadow` and the captive case reads a proxy
+# that its own `_captive_proxy_off` already turned off.
+#
+# Only reachable because the sandbox now models that write (shims/_recorder).
+# Against a frozen fixture the mutated shell reads `Enabled: Yes` at EXIT too,
+# agrees with the plan, and the gate passes on a broken observation.
+if [ ! -x "$rwatch" ]; then
+  echo "  skip — no release build"
+else
+  # A PRISTINE shell, not step 9's `.bak`. Mutations accumulate down this file,
+  # and this gate runs a whole tick: step 4's altered bypass list alone makes the
+  # watchdog decide the proxy is wrong and reload, which is a different branch
+  # than either case below is written for. 10c passed on that once — the mutation
+  # was in place, the gate was green, and the tick never reached netcheck.
+  command cp -f "$ROOT/bin/rowt" "$tmp/bin/rowt"
+  if ! "$P" watch-shadow portal >/dev/null 2>&1; then
+    bad "watch-shadow already fails before the mutation"
+  else
+    sed -i.bak2 's|^  obs="\${_SH_OBS:-}"|  _wobs "$_SH_CAP" "$_SH_INTENT" "$_SH_PROXY_INTENT"; obs="${_SH_OBS:-}"|' "$tmp/bin/rowt"
+    if ! grep -q '_wobs "\$_SH_CAP"' "$tmp/bin/rowt"; then
+      bad "could not move the observation to EXIT (_watch_shadow moved?)"
+    elif "$P" watch-shadow portal >/dev/null 2>&1; then
+      bad "watch-shadow passed with the observation rebuilt after the tick acted"
+    else
+      ok "watch-shadow caught an observation built at EXIT"
+    fi
+    command cp -f "$ROOT/bin/rowt" "$tmp/bin/rowt"
+  fi
+fi
+
+echo "10c. dropping last_net_id from the netcheck observation must be caught"
+# The one field that decides whether the machine MOVED. `iface` cannot see a
+# home->hotspot switch (en0 either way), so without last_net_id the planner
+# cannot produce the "moved network … no reload needed" line the shell logs —
+# and every verdict on the auto-reload path becomes uninformative.
+if [ ! -x "$rwatch" ]; then
+  echo "  skip — no release build"
+else
+  command cp -f "$ROOT/bin/rowt" "$tmp/bin/rowt"
+  if ! "$P" watch-shadow net-moved >/dev/null 2>&1; then
+    bad "watch-shadow's net-moved case already fails before the mutation"
+  else
+    sed -i.bak3 's|--arg last "\$_SH2_LAST"|--arg last ""|' "$tmp/bin/rowt"
+    if ! grep -q -- '--arg last ""' "$tmp/bin/rowt"; then
+      bad "could not blank the netcheck observation's last_net_id (it moved?)"
+    elif "$P" watch-shadow net-moved >/dev/null 2>&1; then
+      bad "watch-shadow passed with the netcheck observation blind to the previous network"
+    else
+      ok "watch-shadow caught a netcheck observation with no previous net_id"
+    fi
+    # Left pristine for step 11, whose own mutation is self-contained.
+    command cp -f "$ROOT/bin/rowt" "$tmp/bin/rowt"
   fi
 fi
 

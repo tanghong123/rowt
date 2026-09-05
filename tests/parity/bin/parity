@@ -149,10 +149,23 @@ make_sandbox() { # $1=outdir  [$2=scenario]
   # "The router is running" cannot be a static fixture: `host_running` reads a
   # pidfile and then `kill -0`s it, so any pid committed to the repo is either
   # dead or, worse, someone else's. A scenario asks for it with an empty
-  # `host.pid.self` marker and gets THIS harness's pid, which is alive for
-  # exactly as long as the comparison runs — and is the same pid on both sides.
+  # `host.pid.self` marker and gets a live one.
+  #
+  # A `sleep`, NOT `$$`. The harness's own pid passes `kill -0` just as well and
+  # was used for exactly that reason — until a case reached `reload`, whose
+  # `_router_stop` reads that pidfile and kills it. The harness shot itself, the
+  # case died with rc 143, and it read as a timeout. A throwaway process is a
+  # truthful stand-in for a router: it can be signalled, and nothing cares when
+  # it is. It lives in the harness's process group, so it cannot outlive the run.
   if [ -f "$cfg/host.pid.self" ]; then
-    echo "$$" > "$cfg/host.pid"; rm -f "$cfg/host.pid.self"
+    # Detached from the harness's stdio as well: it outlives the case, and an
+    # inherited pipe would keep a caller's `| tail` waiting for a process that
+    # has nothing to say.
+    sleep 300 >/dev/null 2>&1 </dev/null & echo "$!" > "$cfg/host.pid"
+    # Off the job table, or reaping it prints "Terminated: 15" into a gate's
+    # output the moment a case actually stops the router.
+    disown 2>/dev/null || true
+    rm -f "$cfg/host.pid.self"
   fi
   mkdir -p "$cfg/bin" "$cfg/log" "$cfg/cache"
   cp "$DIR/fixtures/bin/sing-box" "$cfg/bin/sing-box"
@@ -1057,6 +1070,82 @@ cmd_watch_diff() {
   [ "$fails" -eq 0 ]
 }
 
+# The watchdog shadow, end to end — the comparator that PORTING.md §6.5's
+# promotion rule actually reads.
+#
+# `watch-diff` compares a hand-written observation against watch.log, so it
+# proves the DECISION table. It cannot prove the part that decides what the
+# planner is even told: `_wobs` snapshots the guard observation before the tick
+# acts, and netcheck's is assembled from values captured as the shell read them.
+# Get that wrong and both sides still speak the same vocabulary — they just
+# describe different instants, and the divergence log fills with noise that is
+# indistinguishable from a real gap. It has happened twice.
+#
+# So this runs the REAL tick with the REAL shadow armed and asserts its verdict.
+# No projection, no second implementation of the comparison.
+cmd_watch_shadow() {
+  local rust="${PARITY_RUST_WATCH:-$ROOT/target/release/rowt-watch-tick}"
+  [ -x "$rust" ] || die "no rust planner at $rust — cargo build --release -p rowt-core"
+  # A planner the shell cannot FIND is not an error to the shell: `_watch_shadow`
+  # returns quietly and every case "passes". So resolve it the way `_watch_bin`
+  # does — `$HERE/bin`, then `$HERE/target/release` — and only link when neither
+  # holds it, which is the case when the caller is running from a repo copy that
+  # has no target/ (selftest).
+  local linked=""
+  if [ ! -x "$ROOT/bin/rowt-watch-tick" ] && [ ! -x "$ROOT/target/release/rowt-watch-tick" ]; then
+    ln -sf "$rust" "$ROOT/bin/rowt-watch-tick" && linked="$ROOT/bin/rowt-watch-tick"
+  fi
+  # An optional substring picks one case — selftest mutates one decision at a
+  # time and has no reason to pay for the whole list per mutation.
+  local only="${1:-}"
+  local fails=0 total=0 line
+  while IFS= read -r line; do
+    case "$line" in ''|'#'*) continue ;; esac
+    [ -n "$only" ] && case "$line" in *"$only"*) ;; *) continue ;; esac
+    total=$((total + 1))
+    # `args | expected substring`. The right half is what the tick must be seen
+    # to have LOGGED, and it is not decoration: a case that stops earlier than
+    # intended — a mutation elsewhere in the shell knocks it onto another branch,
+    # a corp_sync reload ends the tick before phase two — still produces a plan
+    # and a trace that agree about nothing much, and reports `identical`. That
+    # happened: the netcheck case passed while never reaching netcheck.
+    local expect=""
+    case "$line" in
+      *\|*) expect="$(printf '%s' "${line##*|}" | sed -e 's/^ *//' -e 's/ *$//')"
+             line="$(printf '%s' "${line%|*}" | sed -e 's/ *$//')" ;;
+    esac
+    local out; out="$(mktemp -d "${TMPDIR:-/tmp}/parity-shadow.XXXXXX")"
+    # shellcheck disable=SC2086 — the case line is intentionally word-split
+    run_one "$out" ROWT_WATCH_SHADOW=1 $line
+    local log="$out/home/rowt/log/parity.log"
+    local id; id="$(printf '%s' "$line" | sed -e 's/ *watch tick$//' -e 's/[A-Z_]*=//g' -e 's|http://127.0.0.1:8099/||' -e 's|http://127.0.0.1:9/x|unreachable|' -e 's/  */-/g')"
+    if [ ! -s "$log" ]; then
+      # Silence is the failure mode this gate exists to catch: an unarmed shadow,
+      # a missing planner, a tick that exited before the comparator ran.
+      fails=$((fails + 1)); echo "[$id] NO VERDICT — the shadow never ran"
+      echo "    artifacts: $out"
+    elif grep -q DIVERGED "$log"; then
+      fails=$((fails + 1)); echo "[$id] DIVERGED"
+      sed 's/^/    /' "$log" | head -20
+      echo "    artifacts: $out"
+    elif [ -n "$expect" ] && ! grep -qF "$expect" "$out/home/rowt/log/watch.log" 2>/dev/null; then
+      fails=$((fails + 1)); echo "[$id] identical, but the tick never reached what this case is for"
+      echo "    expected the shell to log: $expect"
+      echo "    it logged:"; sed 's/^/      /' "$out/home/rowt/log/watch.log" 2>/dev/null || echo "      (nothing)"
+      echo "    artifacts: $out"
+    else
+      echo "[$id] identical"
+      rm -rf "$out"
+    fi
+  done < "$DIR/watch-shadow-cases.txt"
+  [ -n "$linked" ] && rm -f "$linked"
+  echo
+  # A filter that matched nothing looks exactly like a gate that passed.
+  [ "$total" -gt 0 ] || die "no shadow case matches '${only}'"
+  echo "watchdog shadow: $((total - fails))/$total ticks identical"
+  [ "$fails" -eq 0 ]
+}
+
 # The platform layer, compared by ARGV. A cutover that changed what gets executed
 # would be a behavior change wearing a refactor's clothes, so both sides run
 # under the same recorder shims and the traces must match as sequences.
@@ -1363,6 +1452,15 @@ cmd_replay_bundle() {
   echo "=== rust plan, from the recorded observation ==="
   if [ -x "$rust" ] && [ -f "$b/obs.json" ]; then
     "$rust" --obs "$b/obs.json" 2>&1 | sed 's/^/  /'
+    # The guard observation carries no net_id, no bound_iface and no health —
+    # netcheck has its own, and replaying only the guard is how a netcheck
+    # divergence gets read as "the planner cannot see the network".
+    if [ -f "$b/obs-netcheck.json" ]; then
+      "$rust" --obs "$b/obs-netcheck.json" --phase netcheck 2>&1 | sed 's/^/  /'
+    else
+      echo "  (guard only — no obs-netcheck.json; bundle predates rowt 3.4.12"
+      echo "   or the tick stopped in the guard phase)"
+    fi
   else
     echo "  (no planner built, or no obs.json)"
   fi
@@ -1560,6 +1658,7 @@ case "${1:-}" in
   splitter-diff)   shift; cmd_splitter_diff "$@" ;;
   lanes-diff)      shift; cmd_lanes_diff "$@" ;;
   watch-diff)      shift; cmd_watch_diff "$@" ;;
+  watch-shadow)    shift; cmd_watch_shadow "$@" ;;
   platform-diff)   shift; cmd_platform_diff "$@" ;;
   cli-diff)        shift; cmd_cli_diff "$@" ;;
   cli-ledger)      shift; cmd_cli_ledger "$@" ;;

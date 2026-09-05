@@ -45,6 +45,42 @@ fi
 # two arguments, then the first, then the bare command name.
 slug() { printf '%s' "$*" | tr -c 'A-Za-z0-9' '_' | sed -e 's/__*/_/g' -e 's/^_//' -e 's/_$//'; }
 
+# The system proxy is the one piece of machine state rowt both WRITES and READS
+# BACK inside a single run, so a purely static response is not merely incomplete
+# — it is wrong. The watchdog decides a reload because the proxy is unset, runs
+# it, and its shadow then re-reads the proxy expecting to see the repair; with a
+# frozen fixture the sandbox can only ever show one of those two worlds, and a
+# gate for anything in between cannot fail. So `-set…` rewrites the matching
+# `-get…` response, exactly as networksetup would.
+#
+# Deliberately narrow: only the proxy getters, only for the service named in the
+# call. Everything else stays a static fixture, which is what keeps runs
+# reproducible.
+if [ "$name" = networksetup ] && [ -n "$envdir" ] && [ "$#" -ge 2 ]; then
+  case "$1" in
+    -setsocksfirewallproxy|-setwebproxy|-setsecurewebproxy)
+      # -setwebproxy <svc> <host> <port> — setting a proxy also ENABLES it.
+      printf 'Enabled: Yes\nServer: %s\nPort: %s\nAuthenticated Proxy Enabled: 0\n' \
+        "${3:-}" "${4:-0}" > "$envdir/$(slug "$name" "-g${1#-s}" "$2")"
+      exit 0 ;;
+    -setsocksfirewallproxystate|-setwebproxystate|-setsecurewebproxystate)
+      # -setwebproxystate <svc> on|off — flips Enabled:, keeps server/port.
+      g="-g${1#-s}"; g="${g%state}"          # -setwebproxystate -> -getwebproxy
+      f="$envdir/$(slug "$name" "$g" "$2")"
+      case "${3:-}" in on) e=Yes ;; *) e=No ;; esac
+      if [ -f "$f" ]; then
+        sed "s/^Enabled: .*/Enabled: $e/" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+      else
+        printf 'Enabled: %s\nServer:\nPort: 0\nAuthenticated Proxy Enabled: 0\n' "$e" > "$f"
+      fi
+      exit 0 ;;
+    -setproxybypassdomains)
+      svc="$2"; shift 2
+      printf '%s\n' "$@" > "$envdir/$(slug "$name" "-getproxybypassdomains" "$svc")"
+      exit 0 ;;
+  esac
+fi
+
 # The last argument is keyed too: curl's URL is what identifies the call, and it
 # sits behind a pile of flags that would make a whole-argv key useless.
 last=""; [ "$#" -gt 0 ] && last="${!#}"

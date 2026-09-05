@@ -28,6 +28,7 @@ tests/parity/bin/parity merge-diff       # import accumulation: the review file 
 tests/parity/bin/parity foreign-diff     # other clients' config trees, over generated cases
 tests/parity/bin/parity sr-diff          # Shadowrocket's plist + rules, over generated cases
 tests/parity/bin/parity watch-diff       # watchdog decisions
+tests/parity/bin/parity watch-shadow     # the real tick + the real shadow, end to end
 tests/parity/bin/parity platform-diff    # the argv the platform layer produces
 tests/parity/bin/parity cli-diff         # whole commands, rowt-rs vs the shell
 
@@ -44,6 +45,15 @@ changed, the corp `domain_resolver` dropped, a classifier reason reworded, the
 single-lane invariant disabled, a captive log line reworded. It asserts each
 mutation actually landed first: a pattern that matched nothing looks exactly
 like a gate that failed to fire.
+
+`watch-shadow` is the gate that most depends on this. It asserts the production
+shadow's own verdict, and the thing it exists to catch — an observation captured
+at the wrong instant — is invisible unless the sandbox changes underneath the
+tick the way a real machine does. That is why `shims/_recorder` models the system
+proxy causally (a `-set…` rewrites the matching `-get…` response) instead of
+answering from a frozen fixture: without it, a tick that turns the proxy off and
+then re-reads it still sees it on, both sides agree, and the gate passes on a
+broken observation. Steps 10b and 10c of `selftest` are the proof it can fail.
 
 This has repeatedly earned its keep. It caught `normalize.sed`'s temp-path rule
 running greedy to end-of-token, so it swallowed whole paths and would have

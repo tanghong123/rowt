@@ -53,7 +53,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.4.11"
+ROWT_VERSION="3.4.12"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -3702,12 +3702,12 @@ _watch_shadow() {
       --arg svc "$_SH2_SVC" --arg ifc "$_SH2_IFC" --arg cur "$_SH2_CUR" \
       --arg nid "$_SH2_NID" --arg last "$_SH2_LAST" \
       --arg mode "$(sget mode 2>/dev/null || true)" \
-      --argjson pointing "$( { [ -n "$_SH2_SVC" ] && _proxy_pointing_ok "$_SH2_SVC"; } && echo true || echo false)" \
-      --argjson bypass "$( { [ -n "$_SH2_SVC" ] && _proxy_bypass_ok "$_SH2_SVC"; } && echo true || echo false)" \
+      --argjson pointing "${_SH2_POK:-false}" \
+      --argjson bypass "${_SH2_BOK:-false}" \
       --argjson health "$([ "${_SH2_HEALTH:-ok}" = ok ] && echo true || echo false)" \
       --argjson fails "${_SH_FAILS0:-0}" \
       --argjson lastrec "${_SH_LASTREC0:-0}" \
-      --argjson now "$(date +%s)" \
+      --argjson now "${_SH2_NOW:-$(date +%s)}" \
       '{obs:{proxy_intent:"", captive:"clear", active_service:$svc, proxy_any_on:true,
              host_running:true, intent:"up", boot_matches:true, iface:$ifc,
              proxy_pointing_ok:$pointing, proxy_bypass_ok:$bypass,
@@ -3716,7 +3716,12 @@ _watch_shadow() {
         state:{captive_flag:false, health_fails:$fails, last_net_id:$last,
                last_recovery:$lastrec}}' > "$obs2" 2>/dev/null
     "$wb" --obs "$obs2" --phase netcheck 2>/dev/null >> "$plan" || true
-    rm -f "$obs2"
+    # Kept, not deleted: this is the observation the diverging half of the plan
+    # was decided from, and a bundle without it sends the next reader to the
+    # GUARD obs — which has no net_id, no bound_iface and no health, and so
+    # invites the conclusion that the planner is blind when it is not. That
+    # misreading cost one wrong bug report already.
+    _SH_OBS2="$obs2"
   fi
   # …against the shell's own actions, recorded by `_wact` in that same
   # vocabulary as it took them.
@@ -3731,6 +3736,7 @@ _watch_shadow() {
       bundle="$LOGDIR/parity/$(date '+%Y%m%d-%H%M%S')"
       mkdir -p "$bundle" 2>/dev/null && chmod 700 "$bundle" 2>/dev/null || true
       cp "$obs" "$bundle/obs.json" 2>/dev/null || true
+      [ -n "${_SH_OBS2:-}" ] && cp "$_SH_OBS2" "$bundle/obs-netcheck.json" 2>/dev/null || true
       cp "$plan" "$bundle/plan" 2>/dev/null || true
       cp "$actual" "$bundle/actual" 2>/dev/null || true
       # The captive flag as it was BEFORE this tick — the tick may have just set
@@ -3743,11 +3749,14 @@ _watch_shadow() {
       cat > "$bundle/README" <<RDM 2>/dev/null || true
 Watchdog shadow divergence, rowt $ROWT_VERSION.
 
-  obs.json   what the Rust tick was given
+  obs.json   what the Rust tick was given for the GUARD phase
+  obs-netcheck.json  …and for netcheck, if the guard handed off (absent if not)
   plan       what it decided
   actual     what the shell decided (watch.log lines from this tick)
   state      the state keys that fed the decision
-  env/       RAW command output the observation was built from
+  env/       RAW command output, captured HERE at the end of the tick — context
+             for a replay, NOT what either observation above was built from.
+             A tick that reloaded has already changed some of it.
 
 Replay both sides against exactly this machine state:
 
@@ -3988,7 +3997,7 @@ PLIST
       _SH2_HEALTH=ok
       trap 'rmdir "$CFG/watch.lock" 2>/dev/null || true
             [ "${ROWT_WATCH_SHADOW:-$(sget shadow_watch)}" = 1 ] && [ -n "$_SH_CAP" ] && _watch_shadow || true
-            rm -f "${_SH_ACTS:-}" "${_SH_OBS:-}" 2>/dev/null || true' EXIT
+            rm -f "${_SH_ACTS:-}" "${_SH_OBS:-}" "${_SH_OBS2:-}" 2>/dev/null || true' EXIT
 
       local intent proxy_intent
       intent="$(sget intent 2>/dev/null || true)"
@@ -4116,8 +4125,24 @@ PLIST
       # What the netcheck observation is built from, captured as the tick reads
       # it rather than re-read at EXIT — same rule as the guard snapshot.
       _SH2_IFC="$ifc"; _SH2_CUR="$cur"; _SH2_SVC="$svc"; _SH2_NID="$nid"; _SH2_LAST="$last"
+      _SH2_NOW="$(date +%s)"
       [ -n "$ifc" ] && [ "$ifc" != "$cur" ] && need=1
-      [ -n "$svc" ] && { _proxy_pointing_ok "$svc" && _proxy_bypass_ok "$svc" || need=1; }
+      # Spelled out rather than `pointing && bypass || need=1` so the shadow can
+      # record the two verdicts AT THE INSTANT THE TICK USED THEM. Read again at
+      # EXIT they are worthless: `cmd_reload` below re-points the proxy, so the
+      # observation would say the proxy was fine and the Rust plan would drop the
+      # very reload this tick took (PORTING.md §6.5). The short-circuit is kept —
+      # `_proxy_bypass_ok` must not run when pointing already failed, or the argv
+      # trace gains a `networksetup` call the shell never made.
+      _SH2_POK=false; _SH2_BOK=false
+      if [ -n "$svc" ]; then
+        if _proxy_pointing_ok "$svc"; then
+          _SH2_POK=true
+          if _proxy_bypass_ok "$svc"; then _SH2_BOK=true; else need=1; fi
+        else
+          need=1
+        fi
+      fi
       if [ "$need" -eq 0 ]; then
         # bind iface + proxy unchanged, so no reload needed. Say which network we're
         # on — and whether it actually moved (same iface, new IP = home->hotspot).

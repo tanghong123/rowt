@@ -590,6 +590,30 @@ and the streak counters only *before* the shell touches them —
 `watch.restart`, so reading either at EXIT would hand the FSM the shell's own
 result and it would count the same failure twice.
 
+**And the same fault came back in phase two anyway** (fixed 3.4.12). Assembling
+netcheck's observation at the end of the tick is only safe for values captured
+where the shell read them, and three were not: `proxy_pointing_ok`,
+`proxy_bypass_ok` and `now` were re-read inside `_watch_shadow`. Those two
+booleans are half of `need` — and the reload they trigger is `cmd_reload`, which
+*re-points the proxy*. So every tick that reloaded because the proxy was wrong
+told the planner the proxy was fine, and the plan dropped the very reload the
+tick had just taken. Four bundles over three weeks, all reading
+`iface 'en0' -> 'en0'`: the interface never moved, `proxy_wrong` was the whole
+cause, and it was invisible in the evidence.
+
+It cost a wrong diagnosis too, and that is the second lesson. **The bundle kept
+only the guard observation.** A reader opening `obs.json` on a netcheck
+divergence sees a record with no `net_id`, no `bound_iface` and no `health` —
+and reasonably concludes the planner is blind to the network, which it is not.
+A whole task was filed to add a field that had been there since 109d092.
+Bundles now carry `obs-netcheck.json`, and `parity replay-bundle` replays both
+phases.
+
+The rule generalizes past this tick: **an observation is only as good as the
+instant it names.** If a value is read anywhere other than where the decision
+used it, it is not an observation — it is a second, later opinion, and the
+comparison it feeds is meaningless in the one direction that matters.
+
 Two lessons from getting it wrong first:
 
 * **Record the decision where it is made, not at the call site.** The first
@@ -602,6 +626,25 @@ Two lessons from getting it wrong first:
   trace claiming netcheck actions against a plan containing only the guard. Both
   netcheck openers are therefore recorded at the point where phase two is known
   to be comparable, so the shadow stays silent about ticks it cannot judge.
+
+**The sandbox can now catch the snapshot fault, not just the decision fault.**
+`parity watch-shadow` runs the real tick with the real shadow armed and asserts
+its verdict — no projection, no reimplementation of the comparison. That works
+only because `shims/_recorder` models the one piece of state rowt both writes
+and reads back inside a run: a `networksetup -set…` now rewrites the matching
+`-get…` response. Against a frozen fixture an observation rebuilt at EXIT reads
+the same world it did at guard time, agrees with the plan, and the gate passes
+on a broken observation — the exact shape of a gate that cannot fail. `selftest`
+steps 10b and 10c prove it does: rebuild the guard observation at EXIT, or blank
+netcheck's `last_net_id`, and the gate fires.
+
+One half is still proven only in production. The sandbox's `sing-box` is a
+stub that exits immediately, so a reload there always fails and never reaches
+its proxy-repair step — which means the late-read of `proxy_pointing_ok` cannot
+be reproduced in the harness. Making it reproducible needs a fake router that
+stays up and answers the clash API, which is a larger piece of work than the fix
+it would gate. Until then that specific regression is caught live, on the tick
+that takes a reload.
 
 With that, the 14-day window is worth starting: a real-use window with zero
 unexplained divergences, including at least one corp-network day and one

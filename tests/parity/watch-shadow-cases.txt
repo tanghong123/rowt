@@ -1,0 +1,26 @@
+# Cases for `parity watch-shadow` — the watchdog shadow, end to end.
+#
+# Unlike watch-cases/*.json, nothing here hands the planner a hand-written
+# observation. The shell builds it, the shell records its own actions, and the
+# shell's own comparator judges them: this gate asserts the production shadow
+# says `identical`, which is the claim PORTING.md §6.5's promotion rule rests on.
+#
+# One `ROWT_*=…`/`PARITY_SCENARIO=…` prefixed rowt invocation per line, optionally
+# followed by ` | <substring the tick must log>` — proof the case reached the
+# branch it was written for, rather than agreeing early and reporting a pass.
+#
+# The captive cases matter beyond the portal FSM: `_captive_proxy_off` WRITES the
+# system proxy mid-tick, and the sandbox now models that write (shims/_recorder),
+# so an observation rebuilt at EXIT reads a world the tick already changed and
+# diverges. That is what makes the snapshot discipline testable here rather than
+# only on a real machine — see selftest step 10b.
+PARITY_SCENARIO=proxy-on ROWT_CAPTIVE_URL=http://127.0.0.1:8099/portal watch tick | captive portal detected — dropping system proxy
+PARITY_SCENARIO=captive-episode ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick | captive portal cleared
+ROWT_CAPTIVE_URL=http://127.0.0.1:9/x watch tick
+# The only case that reaches phase two, and the one the netcheck observation
+# exists for: the machine has MOVED (watch.net holds a different address pair)
+# while the interface has not, so `iface` alone cannot see it and the decision
+# rests entirely on net_id vs last_net_id. The proxy is correct and
+# bind_interface still matches, so the right answer is the "no reload needed"
+# log — a reload here would be the bug.
+PARITY_SCENARIO=watch-net-moved ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick | no reload needed, skip

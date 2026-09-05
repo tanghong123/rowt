@@ -219,6 +219,20 @@ profile "default" {
   LaunchAgent, vs. a small daemon; where the LLM layer runs (local CLI you invoke
   vs. background).
 
+- **Slow-lane policy — settled: warn, never refuse.** A lane that is reachable but
+  far slower than the others (the corp tunnel's ~200 KB/s in
+  [BUG-corp-lane-throughput.md](BUG-corp-lane-throughput.md)) must never be
+  disabled, nor its traffic re-routed, on throughput alone. Fail-closed exists to
+  stop traffic taking a **wrong** path — escape down means the request would leave
+  unproxied, so dropping it is the safe answer. A slow lane is still the **right**
+  path, and refusing it has only two outcomes: strand a user whose sole route to
+  that host is the tunnel, or push them onto a lane their own policy excluded.
+  Degraded beats broken, and beats a silent policy violation. Still open: the
+  threshold (absolute floor vs. a ratio against the fastest lane measured in the
+  same run) and the surface (`status`, `explain`, the monitor, or a watch-time
+  notice). `rowt speed` (3.4.11) already produces the signal such a rule consumes,
+  so this stays advisory: measure, say so, let the human decide.
+
 ## 11. Suggested phasing (incremental, each shippable)
 
 1. **Broaden sensing** — add network identity (SSID/gateway) + corp-state +
