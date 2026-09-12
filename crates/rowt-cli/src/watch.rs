@@ -49,6 +49,11 @@ fn watch_log_path(ctx: &Ctx) -> PathBuf {
 fn watch_log(ctx: &Ctx, msg: &str) {
     use std::io::Write;
     let line = format!("{}  {msg}\n", crate::sh_date("+%Y-%m-%d %H:%M:%S"));
+    // The quiet half of the shell's bug: `create(true)` creates the FILE, not
+    // its directory, and the `if let Ok` then swallowed the failure — so on a
+    // config tree with no log/ yet the shell shouted and this side silently
+    // dropped the line. Both now make the directory first.
+    let _ = std::fs::create_dir_all(ctx.logdir());
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(watch_log_path(ctx)) {
         let _ = f.write_all(line.as_bytes());
     }
