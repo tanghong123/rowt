@@ -30,13 +30,26 @@ domain · `p` pause · `?` help · `q` quit. (`v`/`s`/`f`/`/`/`w` are all global
 
 **Controls** (confirmed, reversible; each runs the matching `rowt` command):
 `e`/`c`/`b`/`d` route the locked domain → escape/corp/block/direct (arm, then
-re-press or `↵` to commit; batched into one reload ~7s later) · `u` use the
-selected server · `o` toggle the system proxy.
+re-press or `↵` to commit; batched into one reload ~7s later) · `t` put it on
+the **hotspot** lane — macOS's proxy *bypass* list, so a venue's captive-portal
+page loads with the proxy on (`t` is the one letter of "hotspot" not already
+bound) · `u` use the selected server · `o` toggle the system proxy.
 
-Shifted — `E`/`C`/`B`/`D` — make the same four edits on the host's **parent
+A hotspot edit is not a routing edit: nothing in that lane is rendered, and the
+CLI refreshes the bypass list on the spot instead of bouncing the router. The
+batched reload still fires, because `t` on a host that sits in a routing lane
+pulls it out of there (single-lane rule), and the router keeps routing it until
+something reloads. `d` clears a hotspot entry too. Refreshing the bypass list is
+a `sudo networksetup` call with no terminal to prompt on — like `o`, it works
+silently with the passwordless rule `rowt watch install` adds and is otherwise
+skipped, in which case the entry is written and lands on the next `rowt proxy on`.
+
+Shifted — `E`/`C`/`B`/`D`/`T` — make the same five edits on the host's **parent
 suffix** instead of the host: `x.y.z.com` → `z.com`, so one keystroke covers a
 whole service rather than the one hostname that happened to surface in the pane.
 Registry second levels stay whole (`x.y.z.co.uk` → `z.co.uk`, never `co.uk`).
+For a portal that is usually what you want: `www.unitedwifi.com` → `T` →
+`unitedwifi.com`, which the bypass list holds as both the apex and `*.` form.
 
 The entry is bare, not dot-led — measured against the router's own matcher
 (`sing-box rule-set match`, 1.13.14):
@@ -54,7 +67,7 @@ Where there is nothing broader to add — an IP, or a host that already *is* its
 registrable domain (`x.com`) — the shifted key stays **inert** and says so in the
 footer, rather than silently writing what the lowercase key would.
 
-Undo an `E`/`C`/`B` with `D`, not `d`: lane removal is an exact-line match, so
+Undo an `E`/`C`/`B`/`T` with `D`, not `d`: lane removal is an exact-line match, so
 `d` on `x.y.z.com` removes only that entry and reports success without touching
 a `z.com` written by `E`.
 

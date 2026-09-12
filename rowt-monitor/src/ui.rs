@@ -1026,9 +1026,9 @@ fn draw_help(buf: &mut Buffer, area: Rect) {
         "  /          search hosts (regex) · esc clears",
         "  w [ ]      errors window (rolling)",
         "  y          copy the selected domain",
-        "  e c b d    route selected → escape/corp/",
-        "             block / direct   (key×2 = apply)",
-        "  E C B D    same, on the parent suffix",
+        "  e c b d t  route selected → escape/corp/",
+        "             block/direct/hotspot (key×2 = apply)",
+        "  E C B D T  same, on the parent suffix",
         "             (x.y.z.com → z.com)",
         "             after ½s the entry turns editable:",
         "             type · ^w drop leading label · ↵ apply",
@@ -1114,7 +1114,7 @@ pub fn draw_footer(buf: &mut Buffer, area: Rect, app: &App) {
         let risky = crate::model::entry_risk(&a.entry()).is_some();
         let entry_st = if risky { theme::bold(theme::block()) } else { style };
         let entry_cursor_st = entry_st.add_modifier(Modifier::REVERSED);
-        let dest = a.lane.map(crate::model::Lane::label).unwrap_or("direct");
+        let dest = a.target.label();
         let head = " CONFIRM  ";
         // Each phase names only the key that is live in it: the double-tap while
         // it lasts, then apply/cancel once the field is. (The arming key encodes

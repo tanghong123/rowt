@@ -2,7 +2,7 @@
 //! (README "Interactions & keymap"). The fixture is deterministic (`still`):
 //! 10 connections (6 escape / 1 corp / 3 direct), 10 error rows, window = 10m.
 
-use rowt_monitor::app::{Action, App, Focus};
+use rowt_monitor::app::{Action, App, Focus, Target};
 use rowt_monitor::model::{ConnView, Lane, MetricsBand, Window};
 use rowt_monitor::source::FixtureSource;
 
@@ -285,8 +285,49 @@ fn shifted_unroute_arms_the_parent_suffix() {
     // Symmetric undo of `E`/`C`/`B`: it removes the suffix ENTRY, not everything
     // the suffix would cover (lane `rm` is an exact-line match).
     assert_eq!(armed.domain, "ytimg.com");
-    assert_eq!(armed.lane, None);
+    assert_eq!(armed.target, Target::Direct);
     assert_eq!(armed.key, 'D');
+}
+
+#[test]
+fn hotspot_edit_arms_then_double_tap_commits() {
+    let mut a = app();
+    a.update(Action::Down); // lock i.ytimg.com
+    a.update(Action::RouteHotspot);
+    let armed = a.armed.clone().expect("first press arms");
+    assert_eq!(armed.key, 't');
+    assert_eq!(armed.target, Target::Hotspot);
+    assert_eq!(armed.label(), "i.ytimg.com → hotspot", "the confirm bar names the lane");
+    assert!(a.pending_reload.is_none());
+    a.update(Action::RouteHotspot);
+    assert!(a.armed.is_none(), "second press commits + disarms");
+    // A hotspot add may have pulled the entry out of a routing lane, and the
+    // router keeps routing it until something reloads — so it batches one.
+    assert!(a.pending_reload.is_some(), "commit schedules the debounced reload");
+}
+
+#[test]
+fn shifted_hotspot_edit_arms_the_parent_suffix() {
+    let mut a = app();
+    a.update(Action::Down); // lock i.ytimg.com
+    a.update(Action::RouteHotspotSuffix);
+    let armed = a.armed.clone().expect("T arms");
+    assert_eq!(armed.domain, "ytimg.com", "the edit targets the suffix, not the host");
+    assert_eq!(armed.key, 'T');
+    assert_eq!(armed.label(), "ytimg.com → hotspot");
+    // `t` after `T` is a different edit: re-arm, never a cross-commit.
+    a.update(Action::RouteHotspot);
+    assert_eq!(a.armed.as_ref().unwrap().domain, "i.ytimg.com");
+    assert!(a.pending_reload.is_none(), "nothing was written");
+}
+
+#[test]
+fn hotspot_is_inert_without_a_selection() {
+    let mut a = app();
+    a.update(Action::RouteHotspot);
+    assert!(a.armed.is_none());
+    a.update(Action::RouteHotspotSuffix);
+    assert!(a.armed.is_none());
 }
 
 #[test]
@@ -336,10 +377,12 @@ fn shifted_control_keys_map_to_the_suffix_actions() {
         assert_eq!(key('C', m), Some(Action::RouteSuffix(Lane::Corp)));
         assert_eq!(key('B', m), Some(Action::RouteSuffix(Lane::Block)));
         assert_eq!(key('D', m), Some(Action::UnrouteSuffix));
+        assert_eq!(key('T', m), Some(Action::RouteHotspotSuffix));
     }
-    // The lowercase four are untouched, and Ctrl-C still quits.
+    // The lowercase five are untouched, and Ctrl-C still quits.
     assert_eq!(key('e', KeyModifiers::NONE), Some(Action::Route(Lane::Escape)));
     assert_eq!(key('d', KeyModifiers::NONE), Some(Action::Unroute));
+    assert_eq!(key('t', KeyModifiers::NONE), Some(Action::RouteHotspot));
     assert_eq!(key('c', KeyModifiers::CONTROL), Some(Action::Quit));
 }
 

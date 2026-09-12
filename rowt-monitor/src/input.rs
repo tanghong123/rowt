@@ -44,7 +44,7 @@ pub fn key(k: KeyEvent, app: &App) -> Option<Action> {
     // An armed lane edit turns the confirm bar into a one-line editor. This is
     // deliberately NOT a modal takeover like the search editor: anything that
     // isn't a text key falls through to the global keymap, where — as before —
-    // it cancels the arm. The eight arm keys keep arming/committing for the
+    // it cancels the arm. The ten arm keys keep arming/committing for the
     // first `DOUBLE_TAP_WINDOW`; after that the field is live and they type.
     if let Some(a) = &app.armed {
         if let Some(act) = armed_key(k, a) {
@@ -81,13 +81,16 @@ pub fn key(k: KeyEvent, app: &App) -> Option<Action> {
         KeyCode::Char('c') => Action::Route(Lane::Corp),
         KeyCode::Char('b') => Action::Route(Lane::Block),
         KeyCode::Char('d') => Action::Unroute,
-        // Shifted: the same four edits on the host's parent suffix (`x.y.z.com`
+        // `t`: the one letter of "hotspot" not already bound (h l o s p are).
+        KeyCode::Char('t') => Action::RouteHotspot,
+        // Shifted: the same five edits on the host's parent suffix (`x.y.z.com`
         // → `.z.com`). Listed after the Ctrl-C guard above, which only matches
         // lowercase, so a shifted key can't be mistaken for it.
         KeyCode::Char('E') => Action::RouteSuffix(Lane::Escape),
         KeyCode::Char('C') => Action::RouteSuffix(Lane::Corp),
         KeyCode::Char('B') => Action::RouteSuffix(Lane::Block),
         KeyCode::Char('D') => Action::UnrouteSuffix,
+        KeyCode::Char('T') => Action::RouteHotspotSuffix,
         KeyCode::Char('u') => Action::UseServer,
         KeyCode::Char('o') => Action::ToggleProxy,
         KeyCode::Enter => Action::Confirm,
@@ -96,10 +99,10 @@ pub fn key(k: KeyEvent, app: &App) -> Option<Action> {
     })
 }
 
-/// The eight keys that arm a lane edit. Inside the double-tap window they keep
+/// The ten keys that arm a lane edit. Inside the double-tap window they keep
 /// that meaning within the confirm bar rather than typing themselves — which is
 /// what makes "press the same key twice" commit.
-const ARM_KEYS: [char; 8] = ['e', 'c', 'b', 'd', 'E', 'C', 'B', 'D'];
+const ARM_KEYS: [char; 10] = ['e', 'c', 'b', 'd', 't', 'E', 'C', 'B', 'D', 'T'];
 
 /// Keys the armed confirm bar claims. `None` = not ours, fall through to the
 /// global keymap (which cancels the arm, as it always did).

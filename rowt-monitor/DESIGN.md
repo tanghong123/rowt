@@ -427,9 +427,12 @@ interface, the system-proxy state, and router liveness/port.
   **resumes scrolling from where it stopped** rather than jumping to where a
   free-running clock would be.
 - **Control layer** (§1): contextual keys act on the current selection —
-  `e`/`c`/`b`/`d` route the locked domain to escape/corp/block/direct, `u`
-  switches to the selected server, `o` toggles the system proxy. Shifted,
-  `E`/`C`/`B`/`D` make the same four edits on the host's **parent suffix**
+  `e`/`c`/`b`/`d` route the locked domain to escape/corp/block/direct, `t` puts
+  it on the hotspot lane (the OS proxy-bypass list — `app::Target::Hotspot`,
+  deliberately not a `model::Lane`, which is the connection lane and never
+  carries a bypassed host), `u` switches to the selected server, `o` toggles
+  the system proxy. Shifted,
+  `E`/`C`/`B`/`D`/`T` make the same five edits on the host's **parent suffix**
   (`model::parent_suffix` — `x.y.z.com` → `z.com`; registry second levels take
   one label more, so `x.y.z.co.uk` → `z.co.uk`). The entry is **bare**: measured
   with `sing-box rule-set match` (1.13.14), `domain_suffix: ["z.com"]` already
@@ -443,7 +446,7 @@ interface, the system-proxy state, and router liveness/port.
 - **Confirm bar, in two phases** (`Armed.domain` doubles as the buffer,
   `Action::ArmEdit` carries the op; `Armed::editing()` is the phase predicate).
   For `DOUBLE_TAP_WINDOW` (500ms) it is a plain confirmation — normal foreground,
-  no cursor — and the eight arm keys keep committing/re-arming. After that it is
+  no cursor — and the ten arm keys keep committing/re-arming. After that it is
   amber with a block cursor and the field is live, so those keys type. Typing
   anything opens it immediately; there is nothing left to wait for once the
   operator has said what they want.

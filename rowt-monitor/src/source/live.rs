@@ -584,18 +584,35 @@ impl Source for LiveSource {
         );
     }
 
+    fn route_hotspot(&self, domain: &str) {
+        self.spawn_rowt(
+            vec!["hotspot".into(), "add".into(), domain.into(), "--no-reload".into()],
+            format!("{domain} → hotspot"),
+        );
+    }
+
     fn unroute(&self, domain: &str) {
         // Single-lane invariant means the domain is in at most one lane, but we
-        // don't track which from an errors row — remove from all three (a miss is
+        // don't track which from an errors row — remove from all four (a miss is
         // a harmless "not found"), so the result is always "back to direct".
+        //
+        // Hotspot only when its file exists: the three routing lanes are seeded
+        // from templates, that one is created by the first `hotspot add`, and
+        // `rm` on a lane that has no file dies ("hotspot list is empty") — which
+        // writes an ABORT audit line, one per `d` press, on every machine that
+        // never touched the lane.
         let out = Arc::clone(&self.ctl_out);
         let (bin_domain, ok) = (domain.to_string(), format!("{domain} → direct"));
+        let mut lanes = vec!["escape", "corp", "block"];
+        if self.cfg.join("hotspot-domains.txt").is_file() {
+            lanes.push("hotspot");
+        }
         std::thread::Builder::new()
             .name("rowt-monitor-ctl".into())
             .spawn(move || {
                 let bin = std::env::var("ROWT_BIN").unwrap_or_else(|_| "rowt".to_string());
                 let mut err: Option<String> = None;
-                for lane in ["escape", "corp", "block"] {
+                for lane in lanes {
                     let r = std::process::Command::new(&bin)
                         .args([lane, "rm", &bin_domain, "--no-reload"])
                         .output();

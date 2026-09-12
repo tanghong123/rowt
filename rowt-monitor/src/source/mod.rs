@@ -50,7 +50,13 @@ pub trait Source {
     fn use_server(&self, _tag: &str) {}
     /// Route a domain into a lane (`rowt <lane> add <domain> --no-reload`).
     fn route_lane(&self, _domain: &str, _lane: Lane) {}
-    /// Remove a domain from every editable lane → back to direct (`--no-reload`).
+    /// Put a domain on the hotspot lane — the OS proxy-bypass list, for a
+    /// venue's captive-portal page (`rowt hotspot add <domain> --no-reload`).
+    /// The CLI refreshes the bypass list itself; `--no-reload` only spares
+    /// the router bounce, which the batched reload issues if a pull-out needs it.
+    fn route_hotspot(&self, _domain: &str) {}
+    /// Remove a domain from every editable lane, hotspot included → back to
+    /// direct (`--no-reload`).
     fn unroute(&self, _domain: &str) {}
     /// Toggle the macOS system proxy (`rowt proxy on|off`).
     fn set_proxy(&self, _on: bool) {}

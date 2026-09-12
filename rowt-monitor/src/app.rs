@@ -59,11 +59,45 @@ pub enum Focus {
 /// the buffer is touched (`edited`) the bar keeps every armed behaviour it had
 /// before — the arming key still double-taps, the other control keys still
 /// re-arm — so editing is strictly additive.
+/// Where an armed edit sends the entry. Not `Lane`: that is the connection
+/// lane — colours, the filter, `classify_lane` — and a hotspot entry never
+/// appears as one (its traffic skips the proxy altogether).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Target {
+    /// `e`/`c`/`b` — route into that lane.
+    Lane(Lane),
+    /// `d` — remove from every lane, back to direct.
+    Direct,
+    /// `t` — the hotspot lane: macOS's proxy BYPASS list, so a captive
+    /// portal's login page loads with the proxy on. Not rendered; the CLI
+    /// refreshes the bypass list on the edit rather than bouncing the router.
+    Hotspot,
+}
+
+impl Target {
+    pub fn label(self) -> &'static str {
+        match self {
+            Target::Lane(l) => l.label(),
+            Target::Direct => "direct",
+            Target::Hotspot => "hotspot",
+        }
+    }
+    /// The lowercase arm key; the suffix form is its uppercase.
+    fn key(self) -> char {
+        match self {
+            Target::Lane(Lane::Escape) => 'e',
+            Target::Lane(Lane::Corp) => 'c',
+            Target::Lane(Lane::Block) => 'b',
+            Target::Lane(Lane::Direct) | Target::Direct => 'd',
+            Target::Hotspot => 't',
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Armed {
     pub domain: String,
-    /// `Some(lane)` = route into that lane (`e`/`c`/`b`); `None` = unroute (`d`).
-    pub lane: Option<Lane>,
+    pub target: Target,
     pub key: char, // the key that armed it; pressing it again commits
     pub at: Instant,
     /// Block-cursor char index into `domain` (0..=len). Only drawn once `edited`.
@@ -76,8 +110,7 @@ pub struct Armed {
 impl Armed {
     /// Footer preview label, e.g. `x.com → escape` or `x.com → direct`.
     pub fn label(&self) -> String {
-        let dest = self.lane.map(Lane::label).unwrap_or("direct");
-        format!("{} → {}", self.domain, dest)
+        format!("{} → {}", self.domain, self.target.label())
     }
     /// Is the bar a live editor yet? Before this the arm keys still commit and
     /// re-arm, and no cursor is drawn. Typing anything opens it immediately —
@@ -209,6 +242,10 @@ pub enum Action {
     // instead of the one hostname that happened to show up in the pane.
     RouteSuffix(Lane),
     UnrouteSuffix,
+    // t/T — arm adding the selected host (or its parent suffix) to the hotspot
+    // lane: the proxy-bypass list, for a venue's captive-portal page.
+    RouteHotspot,
+    RouteHotspotSuffix,
     ArmEdit(Edit), // a text key while armed — edit the entry in the confirm bar
     Confirm,      // Enter — commit the armed edit
     Escape,       // Esc — cancel arm / clear selection / clear lane filter (in that order)
@@ -480,7 +517,8 @@ impl App {
         // Arm lifecycle: a control-key (re)arms or commits; Confirm commits; Esc
         // is handled below; ANY other key cancels a pending arm, then proceeds.
         match a {
-            Route(_) | Unroute | RouteSuffix(_) | UnrouteSuffix | ArmEdit(_) | Confirm | Escape => {}
+            Route(_) | Unroute | RouteSuffix(_) | UnrouteSuffix | RouteHotspot | RouteHotspotSuffix
+            | ArmEdit(_) | Confirm | Escape => {}
             _ => self.armed = None,
         }
         match a {
@@ -491,10 +529,12 @@ impl App {
                 self.source.force_probe();
                 self.notify("re-probing servers…".to_string());
             }
-            Route(lane) => self.arm(Some(lane), false),
-            Unroute => self.arm(None, false),
-            RouteSuffix(lane) => self.arm(Some(lane), true),
-            UnrouteSuffix => self.arm(None, true),
+            Route(lane) => self.arm(Target::Lane(lane), false),
+            Unroute => self.arm(Target::Direct, false),
+            RouteSuffix(lane) => self.arm(Target::Lane(lane), true),
+            UnrouteSuffix => self.arm(Target::Direct, true),
+            RouteHotspot => self.arm(Target::Hotspot, false),
+            RouteHotspotSuffix => self.arm(Target::Hotspot, true),
             ArmEdit(e) => self.arm_edit(e),
             Confirm => self.commit_armed(),
             Escape => self.handle_escape(),
@@ -781,14 +821,9 @@ impl App {
     /// quietly fall back to the host: `E` promises a suffix entry, and writing
     /// the lowercase edit under an uppercase key would make the two forms
     /// indistinguishable in the lane file afterwards.
-    fn arm(&mut self, lane: Option<Lane>, broaden: bool) {
+    fn arm(&mut self, target: Target, broaden: bool) {
         let Some(host) = self.selected_domain() else { return };
-        let lower = match lane {
-            Some(Lane::Escape) => 'e',
-            Some(Lane::Corp) => 'c',
-            Some(Lane::Block) => 'b',
-            Some(Lane::Direct) | None => 'd',
-        };
+        let lower = target.key();
         let domain = match broaden {
             false => host,
             true => match crate::model::parent_suffix(&host) {
@@ -803,7 +838,7 @@ impl App {
         // distinguishable even when they name the same lane.
         let key = if broaden { lower.to_ascii_uppercase() } else { lower };
         if let Some(a) = &self.armed {
-            if a.key == key && a.domain == domain && a.lane == lane {
+            if a.key == key && a.domain == domain && a.target == target {
                 self.commit_armed();
                 return;
             }
@@ -812,7 +847,7 @@ impl App {
         // specific rather than too short, so the first thing anyone does is trim
         // from the front — and appending to a hostname is the rare case.
         let cursor = 0;
-        self.armed = Some(Armed { domain, lane, key, at: Instant::now(), cursor, edited: false });
+        self.armed = Some(Armed { domain, target, key, at: Instant::now(), cursor, edited: false });
     }
 
     /// Edit the armed entry in place. Any op enters edit mode (so letters type
@@ -883,14 +918,20 @@ impl App {
             self.notify(format!("⚠ {entry} is {why} — not applied"));
             return;
         }
-        match a.lane {
-            Some(l) => self.source.route_lane(&entry, l),
-            None => self.source.unroute(&entry),
+        match a.target {
+            Target::Lane(l) => self.source.route_lane(&entry, l),
+            Target::Direct => self.source.unroute(&entry),
+            Target::Hotspot => self.source.route_hotspot(&entry),
         }
-        // Batch the reload: (re)start the 7s debounce (CONTROLS.md §4.3).
+        // Batch the reload: (re)start the 7s debounce (CONTROLS.md §4.3). A
+        // hotspot add too: nothing in that lane is rendered, but the single-lane
+        // invariant may have pulled the entry out of a routing lane (a venue's
+        // domain sitting in the corp auto-block is the motivating case), and
+        // the router keeps routing it until something reloads. The CLI's
+        // stdout would say whether that happened; `spawn_rowt` discards it, so
+        // the consistent answer is the one every lane edit already gives.
         self.pending_reload = Some(Instant::now() + RELOAD_DEBOUNCE);
-        let dest = a.lane.map(Lane::label).unwrap_or("direct");
-        self.notify(format!("{entry} → {dest}"));
+        self.notify(format!("{entry} → {}", a.target.label()));
     }
 
     /// Esc priority: cancel an arm, else clear the focused selection, else clear
