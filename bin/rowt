@@ -45,6 +45,9 @@
 #      ROWT_WATCH_INTERVAL  watchdog liveness-probe cadence, seconds (default 120)
 #      ROWT_CAPTIVE_CHECK  watchdog captive-portal handling: 1=on (default), 0=off
 #      ROWT_CAPTIVE_URL  captive probe (default http://captive.apple.com/hotspot-detect.html)
+#      ROWT_CAPTIVE_TIMEOUT  captive probe cap, seconds (default 6)
+#      ROWT_CAPTIVE_RETRY  re-probe delays after a network change when the probe did not
+#                          answer, comma-separated seconds (default 5,10; empty = no retry)
 #      ROWT_DISCOVERY_LOG  journal advertised domains/resolvers per network: 1=on, 0=off
 #      ROWT_HEALTH_FAILS  consecutive probe failures before auto-recover (default 3)
 #      ROWT_HEALTH_COOLDOWN  min seconds between auto-recoveries (default 600)
@@ -53,7 +56,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.4.14"
+ROWT_VERSION="3.5.0"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -97,6 +100,7 @@ BLOCK_TMPL="$HERE/config/block-domains.txt"
 DOMAINS="$CFG/escape-domains.txt"                # -> escape (VLESS tunnel)
 CORP_DOMAINS="$CFG/corp-domains.txt"             # -> corp (into the corp VPN)
 BLOCK_DOMAINS="$CFG/block-domains.txt"           # -> block (ad/telemetry sinkhole)
+HOTSPOT_DOMAINS="$CFG/hotspot-domains.txt"       # -> OS proxy bypass (captive-portal hosts; never rendered)
 # Pre-compiled geosite ad/tracker rule-set (blocks thousands of domains). Cached
 # like the other artifacts so 'up' works offline; rendered in only when present.
 ADS_SRS="$CACHE/geosite-category-ads-all.srs"
@@ -499,6 +503,7 @@ domains_json()    { list_json "$DOMAINS"; }                 # escape suffixes
 corp_domains_json() { list_json "$CORP_DOMAINS" domain; }   # corp suffixes
 corp_cidrs_json()   { list_json "$CORP_DOMAINS" cidr; }     # corp IP ranges
 block_domains_json() { list_json "$BLOCK_DOMAINS" domain; } # block suffixes (extra, on top of the geosite set)
+hotspot_domains_json() { list_json "$HOTSPOT_DOMAINS" domain; } # hotspot suffixes (OS bypass; corp sync leaves them alone)
 # `--domain` entries per lane — sing-box `domain` (whole-host) rules. The
 # `buckets:` counts in status/report add these to the suffix counts: they are
 # entries the operator put there, and a count that silently omitted them would
@@ -517,23 +522,26 @@ reload_if_running() {
   if host_running; then info "reloading router"; cmd_render >/dev/null; cmd_router restart; fi
 }
 
-# The three editable routing lanes. A domain lives in AT MOST one of them: the
-# route rules are first-match-wins (block → corp → escape), so a domain sitting
-# in two lists is silently shadowed by the earliest lane. Adding to one lane
-# therefore removes the exact entry from the other two (see _lane_dedupe).
+# The three editable routing lanes, plus hotspot. A domain lives in AT MOST one
+# of them: the route rules are first-match-wins (block → corp → escape), so a
+# domain sitting in two lists is silently shadowed by the earliest lane — and a
+# hotspot entry never reaches the router at all (the OS skips the proxy for it),
+# so a routing-lane twin of it would be dead. Adding to one lane therefore
+# removes the exact entry from the other three (see _lane_dedupe).
 _lane_label() {
   case "$1" in
-    "$DOMAINS")       echo escape ;;
-    "$CORP_DOMAINS")  echo corp ;;
-    "$BLOCK_DOMAINS") echo block ;;
-    *)                echo "$1" ;;
+    "$DOMAINS")         echo escape ;;
+    "$CORP_DOMAINS")    echo corp ;;
+    "$BLOCK_DOMAINS")   echo block ;;
+    "$HOTSPOT_DOMAINS") echo hotspot ;;
+    *)                  echo "$1" ;;
   esac
 }
 # Remove exact entry $2 from every lane file except the target $1, so the entry
 # ends up in a single lane. Echoes a note per lane it was pulled out of.
 _lane_dedupe() { # $1=keep-file $2=entry
   local keep="$1" e="$2" f tmp
-  for f in "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS"; do
+  for f in "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" "$HOTSPOT_DOMAINS"; do
     [ "$f" = "$keep" ] && continue
     [ -f "$f" ] || continue
     if grep -qxF "$e" "$f" 2>/dev/null; then
@@ -650,7 +658,7 @@ _entry_risk() { # $1=entry -> prints the reason, rc 0 when risky
   return 1
 }
 
-# rowt escape / corp  [list | add <e>… | rm <e>… | import <file> | clear | dump [file]]
+# rowt escape / corp / block / hotspot  [list | add <e>… | rm <e>… | import <file> | clear | dump [file]]
 edit_list() {
   local file="$1" label="$2" action="${3:-list}"; shift 3 2>/dev/null || true
   # --no-reload: write the lane file but skip the router bounce (used by the TUI
@@ -675,6 +683,13 @@ edit_list() {
   # Snapshot ALL lanes, not just the target: an `add` may also pull the entry out
   # of a sibling lane (single-lane invariant), which likewise needs a reload.
   local _before; _before="$(cat "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" 2>/dev/null)"
+  # The hotspot lane is tracked apart: nothing in it is rendered, so a change
+  # there re-applies the OS bypass list (_hotspot_apply) instead of bouncing
+  # the router — the three routing lanes alone decide whether sing-box restarts.
+  # And --no-reload does not gate that refresh: it means "don't bounce the
+  # router", and the TUI's batched reload is a render + restart that never
+  # touches the proxy, so a refresh skipped here would not happen at all.
+  local _hbefore; _hbefore="$(cat "$HOTSPOT_DOMAINS" 2>/dev/null || true)"
   case "$action" in
     list)
       echo "$label list:"
@@ -702,9 +717,10 @@ edit_list() {
             continue
           fi
         fi
-        # geosite: is escape/block only (corp routes internal domains/CIDRs).
+        # geosite: is escape/block only (corp routes internal domains/CIDRs, and
+        # the OS bypass list cannot hold a rule-set).
         case "$e" in
-          geosite:*) [ "$label" = corp ] && { echo "  skipped $e — geosite: is only for the escape and block lanes"; continue; } ;;
+          geosite:*) case "$label" in corp|hotspot) echo "  skipped $e — geosite: is only for the escape and block lanes"; continue ;; esac ;;
         esac
         if grep -qxF "$e" "$file" 2>/dev/null; then echo "  already present: $e"
         else _lane_append "$file" "$e"; echo "  added: $e"; fi
@@ -718,7 +734,7 @@ edit_list() {
           # edits (--no-reload) so it never blocks on the network.
           # The hint is about the NAME, so an exact entry is looked up by its
           # host — `domain:x.com` is not a domain and would silently never match.
-          *) [ "$no_reload" -eq 0 ] && [ "$label" != corp ] && _geosite_hint "$file" "$label" "${e#domain:}" ;;
+          *) if [ "$no_reload" -eq 0 ]; then case "$label" in escape|block) _geosite_hint "$file" "$label" "${e#domain:}" ;; esac; fi ;;
         esac
       done ;;
     import)   # batch-add one domain per line from a file
@@ -749,7 +765,9 @@ edit_list() {
     *) die "usage: $PROG $label [list | add [--domain] [--force] <e>… | rm [--domain] <e>… | import <file> | clear | dump [file]]" ;;
   esac
   # only re-render/restart if some lane changed (and reload wasn't suppressed)
-  local _after; _after="$(cat "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" 2>/dev/null)"
+  local _after _hafter; _after="$(cat "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" 2>/dev/null)"
+  _hafter="$(cat "$HOTSPOT_DOMAINS" 2>/dev/null || true)"
+  [ "$_hbefore" != "$_hafter" ] && _hotspot_apply || true
   [ "$no_reload" -eq 0 ] && [ "$_before" != "$_after" ] && reload_if_running || true
 }
 
@@ -900,10 +918,12 @@ _dhcp_search_domains() {
   _tmo 5 "${PY_NETDETECT[@]}" 2>/dev/null | jq -r '.physical_search[]?' 2>/dev/null || true
 }
 
-# Domain suffixes the user has explicitly put in escape or block — their choice
-# wins over an auto-discovered corp domain (a network must not de-tunnel them).
+# Domain suffixes the user has explicitly put in escape, block or hotspot —
+# their choice wins over an auto-discovered corp domain (a network must not
+# de-tunnel them, and a venue's own domain is exactly what the venue advertises
+# over DHCP while it is the one that has to bypass the proxy).
 _esc_block_suffixes() {
-  { domains_json; block_domains_json; } 2>/dev/null | jq -r '.[]?' 2>/dev/null | sort -u || true
+  { domains_json; block_domains_json; hotspot_domains_json; } 2>/dev/null | jq -r '.[]?' 2>/dev/null | sort -u || true
 }
 
 # Rewrite $CORP_DOMAINS = head + DHCP-domain block + CIDR block (either may be empty).
@@ -989,7 +1009,7 @@ corp_sync() {
     [ "$quiet" = 1 ] || info "corp lane already in sync ($nd DHCP domain(s), $nc CIDR(s); ${nup}/${nlabels} tunnel(s) up)"
     return 0
   fi
-  [ -n "$dropped" ] && [ "$quiet" != 1 ] && while IFS= read -r d; do [ -n "$d" ] && err "corp sync: '$d' is DHCP-advertised but you keep it in escape/block — your rule wins"; done <<< "$dropped"
+  [ -n "$dropped" ] && [ "$quiet" != 1 ] && while IFS= read -r d; do [ -n "$d" ] && err "corp sync: '$d' is DHCP-advertised but you keep it in escape/block/hotspot — your rule wins"; done <<< "$dropped"
   _corp_sync_write "$desired_dom" "$body_cidr"; rm -f "$want"
   # Log the reason even under --quiet: this is a real change that triggers a reload,
   # so the watchdog log should record WHY it reloaded (no-op ticks stay silent above).
@@ -1051,6 +1071,18 @@ cmd_block() {
     errors|stats) lane_errors block "${1:-24h}" ;;
     log)          _lane_log_tail block ;;
     *)            edit_list "$BLOCK_DOMAINS" block "$a" "$@" ;;
+  esac
+}
+# 'hotspot' is the captive-portal lane: hosts the OS must reach WITHOUT the proxy,
+# so a venue's login page can load while rowt is up. Not a routing lane — nothing
+# here is rendered, and a system-proxy client never shows the router these names
+# — so there is nothing to log, and an edit re-applies the OS bypass list rather
+# than restarting sing-box. The why is in 'help hotspot' and DESIGN.md §11.
+cmd_hotspot() {
+  local a="${1:-list}"; [ "$#" -gt 0 ] && shift
+  case "$a" in
+    errors|stats|log) die "hotspot is not a routing lane — nothing is logged for it. '$PROG proxy status' shows the live bypass list" ;;
+    *)                edit_list "$HOTSPOT_DOMAINS" hotspot "$a" "$@" ;;
   esac
 }
 # 'direct' isn't an editable lane (it's the pass-through default) — only diagnostics.
@@ -1197,6 +1229,8 @@ cmd_run() {
   _run_export() {  # $1 = http proxy url, $2 = all_proxy (defaults to $1)
     export http_proxy="$1" https_proxy="$1" all_proxy="${2:-$1}"
     export HTTP_PROXY="$1" HTTPS_PROXY="$1" ALL_PROXY="${2:-$1}"
+    # Same bypass as `proxy env`: local names, the captive probes, the hotspot lane.
+    local _np; _np="$(_proxy_env_noproxy)"; export no_proxy="$_np" NO_PROXY="$_np"
   }
 
   local svc; svc="$(active_service 2>/dev/null || true)"
@@ -2545,10 +2579,27 @@ active_service() {
 # macOS pop the login window. Through the proxy the probe instead dies on the
 # walled-off DoH resolver (an error, not a redirect) and the popup never shows.
 # The probes carry nothing but "am I online", so bypassing them costs no privacy.
+# The hotspot lane rides along after the fixed set: the venues whose portal page
+# must load with the proxy on (see _hotspot_bypass_entries).
 _proxy_bypass_want() {
-  printf '%s\n' '*.local' '169.254/16' '127.0.0.1' 'localhost' '*.arpa' \
-    '10.0.0.0/8' '172.16.0.0/12' '192.168.0.0/16' \
-    'captive.apple.com' 'connectivitycheck.gstatic.com' 'detectportal.firefox.com' 'www.msftconnecttest.com'
+  { printf '%s\n' '*.local' '169.254/16' '127.0.0.1' 'localhost' '*.arpa' \
+      '10.0.0.0/8' '172.16.0.0/12' '192.168.0.0/16' \
+      'captive.apple.com' 'connectivitycheck.gstatic.com' 'detectportal.firefox.com' 'www.msftconnecttest.com'
+    _hotspot_bypass_entries
+  } | awk '!seen[$0]++'
+}
+# The hotspot lane as bypass entries. macOS matches a bare name EXACTLY and
+# needs the `*.` form for its subdomains, so a plain entry becomes both; a
+# `domain:` (exact) entry is just the host, and an address or CIDR passes as
+# written. Lowercased and byte-sorted: the setter hands this list to
+# networksetup in order, and both implementations must hand over the same argv.
+_hotspot_bypass_entries() {
+  [ -f "$HOTSPOT_DOMAINS" ] || return 0
+  { grep -vE '^[[:space:]]*(#|$)' "$HOTSPOT_DOMAINS" 2>/dev/null | sed 's/[[:space:]]//g' \
+      | grep -vE '^geosite:' | tr 'A-Z' 'a-z' \
+      | awk '/^domain:/ { print substr($0, 8); next }
+             /\/[0-9]+$/ || /^[0-9.]+$/ { print; next }
+             { print; print "*." $0 }' | LC_ALL=C sort -u; } || true
 }
 # is one proxy type enabled AND pointing at 127.0.0.1:$PORT ?  ($2 = getter flag)
 _proxy_type_ok() {
@@ -2558,6 +2609,28 @@ _proxy_type_ok() {
 }
 _proxy_pointing_ok() { _proxy_type_ok "$1" -getsocksfirewallproxy && _proxy_type_ok "$1" -getwebproxy && _proxy_type_ok "$1" -getsecurewebproxy; }
 _proxy_bypass_ok() { [ "$(networksetup -getproxybypassdomains "$1" 2>/dev/null | sed '/^$/d' | sort | tr '\n' ' ')" = "$(_proxy_bypass_want | sort | tr '\n' ' ')" ]; }
+# Hand the bypass list to networksetup for service $1 (interactive sudo). The
+# one setter, shared by `proxy on` and the hotspot lane editor.
+_proxy_bypass_apply() { # $1=svc
+  local -a _bp=(); local _b
+  while IFS= read -r _b; do _bp+=("$_b"); done < <(_proxy_bypass_want)
+  _ns_write 0 -setproxybypassdomains "$1" "${_bp[@]}" >/dev/null 2>&1 || true
+}
+# After a hotspot-lane edit: refresh the live bypass list, but only where rowt
+# already owns the proxy. With the proxy off or pointed elsewhere the list is
+# picked up by the next `proxy on` — writing it now would be editing a proxy
+# configuration that is not rowt's.
+_hotspot_apply() {
+  local svc; svc="$(active_service 2>/dev/null || true)"
+  if [ -z "$svc" ] || ! _proxy_pointing_ok "$svc"; then
+    echo "  (system proxy not pointing at rowt — the bypass list is applied by the next '$PROG proxy on')"
+    return 0
+  fi
+  if _proxy_bypass_ok "$svc"; then echo "  ✓ proxy bypass already current for '$svc'"; return 0; fi
+  _proxy_bypass_apply "$svc"
+  if [ "${_NS_SKIPPED:-0}" = 1 ]; then echo "  (system proxy left alone — ROWT_NO_SYSPROXY=1)"
+  else echo "  ✓ proxy bypass refreshed for '$svc' (hotspot lane)"; fi
+}
 # Is a corporate auto-proxy (PAC) ENABLED on this service?
 #
 # macOS resolves a PAC BEFORE the manual proxy settings, so while one is on the
@@ -2620,17 +2693,109 @@ _ns_write() { # $1 = 1 for the passwordless watchdog form, 0 for interactive
   else                   sudo networksetup "$@"; fi
 }
 
+# The resolver the physical NIC's DHCP server advertised — the hotspot's own
+# DNS, which is where a portal's hijack lives — and a lookup at exactly that
+# server. The system resolver is not that server once a VPN is up or the user
+# pinned one, and a probe resolved elsewhere sails past the hijack and reads
+# "clear" from inside a walled garden. `dig +short` prints a CNAME chain before
+# the address for a CDN-fronted name; the first dotted quad is the answer.
+_captive_dhcp_dns() { # $1=iface
+  [ -n "${1:-}" ] || return 0
+  ipconfig getoption "$1" domain_name_server 2>/dev/null | head -1 || true
+}
+_captive_resolve_at() { # $1=nameserver $2=host
+  dig +short +time=2 +tries=1 "@$1" "$2" 2>/dev/null \
+    | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true
+}
+# Prints the verdict; on `captive`, a second line names the portal's login
+# page — the redirect target when the probe was redirected, else the probe URL
+# itself (a portal serving its page under that URL answers the browser the same
+# way). Two lines rather than a global, because this runs inside a command
+# substitution. `-w` writes the code and the redirect after the body on lines
+# of their own; the redirect line carries a prefix so that an empty redirect is
+# still a line, not a trailing newline `$()` would strip.
+_captive_probe_once() { # $1=url $2=host:port:ip for --resolve, or empty
+  local url="$1" rsv="${2:-}" out code body redir verdict
+  out="$(curl -s --noproxy '*' --max-time "${ROWT_CAPTIVE_TIMEOUT:-6}" ${rsv:+--resolve "$rsv"} -w '\n%{http_code}\nredirect=%{redirect_url}' "$url" 2>/dev/null)" || { echo unknown; return 0; }
+  redir="${out##*$'\n'}"; redir="${redir#redirect=}"; out="${out%$'\n'*}"
+  code="${out##*$'\n'}"; body="${out%$'\n'*}"
+  case "$code" in
+    200) case "$body" in *Success*) verdict=clear ;; *) verdict=captive ;; esac ;;
+    # 3xx is a portal redirecting; 511 is RFC 6585's "Network Authentication
+    # Required" — a portal saying so in as many words. 403 is deliberately NOT
+    # here: a corp web filter answers the probe with one too, and acting on it
+    # would hold the proxy off for the whole office day (the episode would
+    # never clear there).
+    30[0-9]|511) verdict=captive ;;
+    *) verdict=unknown ;;
+  esac
+  echo "$verdict"
+  [ "$verdict" = captive ] && printf '%s\n' "${redir:-$url}"
+  return 0
+}
+# $1 = the physical interface (may be empty: offline), $2 = 1 when the network
+# just changed (net_id differs from watch.net), else 0.
+#
+# The probe host is resolved at the NIC's DHCP resolver and pinned with
+# `--resolve` (macOS curl has no --dns-servers); no resolver, no answer, or an
+# IP-literal probe URL means the plain probe, exactly as before. Right after a
+# network change an `unknown` — the link still settling, the portal's DNS not
+# yet answering — is re-probed after ROWT_CAPTIVE_RETRY seconds each, so the
+# drop lands on THIS tick and not on the next timer tick two minutes later.
+# Only then: mid-episode and in steady state one probe per tick is the budget,
+# and `unknown` there is the hands-off answer it always was. Silent on purpose
+# — a log line here would be an action the planner never took.
+_captive_pin() { # $1=iface $2=host $3=port -> host:port:ip for --resolve, or nothing
+  local ns ip
+  ns="$(_captive_dhcp_dns "$1")"; [ -n "$ns" ] || return 0
+  ip="$(_captive_resolve_at "$ns" "$2")"; [ -n "$ip" ] || return 0
+  printf '%s:%s:%s' "$2" "$3" "$ip"
+}
 _captive_state() {
   [ "${ROWT_CAPTIVE_CHECK:-1}" = 1 ] || { echo unknown; return 0; }
   local url="${ROWT_CAPTIVE_URL:-http://captive.apple.com/hotspot-detect.html}"
-  local out code body
-  out="$(curl -s --noproxy '*' --max-time "${ROWT_CAPTIVE_TIMEOUT:-3}" -w '\n%{http_code}' "$url" 2>/dev/null)" || { echo unknown; return 0; }
-  code="${out##*$'\n'}"; body="${out%$'\n'*}"
-  case "$code" in
-    200) case "$body" in *Success*) echo clear ;; *) echo captive ;; esac ;;
-    30[0-9]) echo captive ;;
-    *) echo unknown ;;
-  esac
+  local ifc="${1:-}" moved="${2:-0}" hp host port named=0 rsv="" out d
+  hp="${url#*://}"; hp="${hp%%/*}"
+  case "$hp" in *:*) host="${hp%%:*}"; port="${hp##*:}" ;;
+    *) host="$hp"; case "$url" in https://*) port=443 ;; *) port=80 ;; esac ;; esac
+  # A name gets resolved where the hotspot says to; nothing, an IPv6 literal
+  # or a dotted quad (every sandbox case) has nothing to resolve.
+  case "$host" in ''|\[*) ;; *[!0-9.]*) named=1 ;; esac
+  [ "$named" = 1 ] && rsv="$(_captive_pin "$ifc" "$host" "$port")"
+  out="$(_captive_probe_once "$url" "$rsv")"
+  if [ "$moved" = 1 ]; then
+    for d in $(printf '%s' "${ROWT_CAPTIVE_RETRY-5,10}" | tr ',' ' '); do
+      case "$d" in ''|*[!0-9]*) continue ;; esac
+      [ "${out%%$'\n'*}" = unknown ] || break
+      sleep "$d"
+      # The resolver may be what was not answering yet: a probe that could not
+      # be pinned tries again to pin itself, or the burst would re-probe via the
+      # system resolver — the case the pin exists for.
+      [ "$named" = 1 ] && [ -z "$rsv" ] && rsv="$(_captive_pin "$ifc" "$host" "$port")"
+      out="$(_captive_probe_once "$url" "$rsv")"
+    done
+  fi
+  printf '%s\n' "$out"
+  return 0
+}
+# Hand the portal's login page to the browser — the request the OS made before
+# the drop died on the proxy, and nothing retries it. Both halves run inside
+# the captive transition, so once per episode, and only for a page (http/https):
+# a hijacked probe must not be able to `open` anything else. Announced (log +
+# audit) alongside the drop's own lines and BEFORE the drop, acted on AFTER it
+# — the browser must not race a proxy that is still on. `open` from the
+# LaunchAgent lands in the user's session (it is an Aqua agent).
+_captive_portal_announce() { # $1=url
+  case "$1" in http://*|https://*) ;; *) return 0 ;; esac
+  _watch_log "captive portal: opening its login page in the browser — $1"
+  _wact "log captive portal: opening its login page in the browser — $1"
+  _audit "watchdog: captive portal — opened $1 in the browser"
+  _wact "audit watchdog: captive portal — opened $1 in the browser"
+}
+_captive_open_portal() { # $1=url
+  case "$1" in http://*|https://*) ;; *) return 0 ;; esac
+  _wact "open-portal $1"
+  open "$1" >/dev/null 2>&1 || _watch_log "captive: could not open the browser for $1"
 }
 
 # Flip only the enable state (server/port/bypass config persists in macOS), via
@@ -2759,9 +2924,7 @@ cmd_proxy() {
           # retry in a tight loop that pegs the CPU. The captive-probe hosts ride
           # along so hotspot login popups appear even with the proxy on (see
           # _proxy_bypass_want for the why). One source of truth: that function.
-          local -a _bp=(); local _b
-          while IFS= read -r _b; do _bp+=("$_b"); done < <(_proxy_bypass_want)
-          _ns_write 0 -setproxybypassdomains "$svc" "${_bp[@]}" >/dev/null 2>&1 || true
+          _proxy_bypass_apply "$svc"
           if [ "${_NS_SKIPPED:-0}" = 1 ]; then
           echo "  (system proxy left alone — ROWT_NO_SYSPROXY=1)"
         else
@@ -2788,14 +2951,28 @@ cmd_proxy() {
 
 # Proxy env exports for terminal/CLI tools (curl, git, npm...) that ignore the
 # macOS system proxy. Usage:  eval "$(rowt env)"   /   rowt env --off
+# The bypass list in the CLI channel's grammar — what curl, Go and Python read
+# from $no_proxy. A leading dot is their subdomain form (`*.local` matches
+# nothing in any of them) and a CIDR needs all four octets (`169.254/16` is not
+# one); everything else passes as written. Comma-joined, in list order.
+_proxy_env_noproxy() {
+  _proxy_bypass_want | awk '
+    /^\*\./ { print "." substr($0, 3); next }
+    /^[0-9.]+\/[0-9]+$/ { split($0, p, "/"); a = p[1]; k = split(a, q, "."); while (k < 4) { a = a ".0"; k++ }; print a "/" p[2]; next }
+    { print }' | awk '!seen[$0]++' | paste -sd, -
+}
 cmd_env() {
   if [ "${1:-}" = "--off" ]; then
-    echo "unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY"
+    echo "unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY no_proxy NO_PROXY"
     return 0
   fi
-  local p="http://127.0.0.1:$PORT"
+  local p="http://127.0.0.1:$PORT" np; np="$(_proxy_env_noproxy)"
   printf 'export http_proxy=%s https_proxy=%s all_proxy=%s\n' "$p" "$p" "socks5h://127.0.0.1:$PORT"
   printf 'export HTTP_PROXY=%s HTTPS_PROXY=%s ALL_PROXY=%s\n' "$p" "$p" "socks5h://127.0.0.1:$PORT"
+  # The CLI channel's bypass: what the system proxy's list does for apps, this
+  # does for curl/Go/Python — local names, private ranges, the captive probes
+  # and the hotspot lane stay off the proxy.
+  printf 'export no_proxy=%s NO_PROXY=%s\n' "$np" "$np"
 }
 
 # Append `eval "$(rowt shell-init)"` to the user's rc, idempotently. The lines
@@ -3333,6 +3510,7 @@ Choose what goes where (edit anytime; lane 'add' auto-renders + restarts):
     $PROG corp   suggest                   list this network's internal domains (on corp LAN / VPN up)
     $PROG corp   sync                      mirror the corp VPN's DHCP domains + routed CIDRs into the corp lane
     $PROG block  add ads.example           sinkhole (ad/telemetry); a big ad set is on by default
+    $PROG hotspot add unitedwifi.com       a venue's captive portal: the OS reaches it WITHOUT the proxy, so its login page loads
     unlisted traffic → direct (physical NIC); private/overlay IPs → OS routing (unbound).  '$PROG explain <domain|ip>' shows a destination's lane.
 
 Everyday:
@@ -3726,23 +3904,23 @@ _watch_bin() { # the Rust tick planner, located like the other companions
 _wact() { [ -n "${_SH_ACTS:-}" ] && printf '%s\n' "$*" >> "$_SH_ACTS" 2>/dev/null; return 0; }
 
 # Snapshot the guard-phase observation, at guard time. $1=captive $2=intent
-# $3=proxy_intent. Handed to the Rust tick verbatim, so both sides decide from
-# the same instant — the point §6.5 makes about never letting the shadow observe
-# for itself.
+# $3=proxy_intent $4=the portal page (empty unless captive). Handed to the Rust
+# tick verbatim, so both sides decide from the same instant — the point §6.5
+# makes about never letting the shadow observe for itself.
 _wobs() {
   [ -n "${_SH_ACTS:-}" ] || return 0
   have jq || return 0
   local svc ifc; svc="$(active_service 2>/dev/null || true)"; ifc="$(detect_iface 2>/dev/null || true)"
   _SH_OBS="$(mktemp)"
   jq -n \
-    --arg pi "$3" --arg cap "$1" --arg svc "$svc" --arg intent "$2" --arg ifc "$ifc" \
+    --arg pi "$3" --arg cap "$1" --arg svc "$svc" --arg intent "$2" --arg ifc "$ifc" --arg purl "${4:-}" \
     --arg mode "$(sget mode 2>/dev/null || true)" \
     --argjson any "$( { [ -n "$svc" ] && _proxy_any_on "$svc"; } && echo true || echo false)" \
     --argjson running "$(host_running && echo true || echo false)" \
     --argjson boot "$([ "$(sget boot)" = "$(_boot_id)" ] && echo true || echo false)" \
     --argjson pointing "$( { [ -n "$svc" ] && _proxy_pointing_ok "$svc"; } && echo true || echo false)" \
     --argjson flag "$([ "$_SH_CAPTIVE0" = 1 ] && echo true || echo false)" \
-    '{obs:{proxy_intent:$pi, captive:$cap, active_service:$svc, proxy_any_on:$any,
+    '{obs:{proxy_intent:$pi, captive:$cap, portal_url:$purl, active_service:$svc, proxy_any_on:$any,
            host_running:$running, intent:$intent, boot_matches:$boot, iface:$ifc,
            proxy_pointing_ok:$pointing, mode:(if $mode == "" then "host" else $mode end)},
       state:{captive_flag:$flag}}' > "$_SH_OBS" 2>/dev/null
@@ -3941,7 +4119,7 @@ cmd_watch() {
       done
       local envxml v val
       envxml="    <key>PATH</key><string>$agent_path</string>"
-      for v in XDG_CONFIG_HOME ROWT_PORT ROWT_CLASH_PORT ROWT_FINAL ROWT_IFACE ROWT_DNS_DIRECT ROWT_DNS_LOCAL ROWT_GFW_CANARIES ROWT_GFW_TIMEOUT SINGBOX_VERSION ROWT_LOG_LEVEL ROWT_WATCH_INTERVAL ROWT_HEALTH_FAILS ROWT_HEALTH_COOLDOWN ROWT_HEALTH_TIMEOUT ROWT_HEALTH_URL ROWT_WATCH_SHADOW ROWT_RENDER_SHADOW; do
+      for v in XDG_CONFIG_HOME ROWT_PORT ROWT_CLASH_PORT ROWT_FINAL ROWT_IFACE ROWT_DNS_DIRECT ROWT_DNS_LOCAL ROWT_GFW_CANARIES ROWT_GFW_TIMEOUT SINGBOX_VERSION ROWT_LOG_LEVEL ROWT_WATCH_INTERVAL ROWT_HEALTH_FAILS ROWT_HEALTH_COOLDOWN ROWT_HEALTH_TIMEOUT ROWT_HEALTH_URL ROWT_CAPTIVE_CHECK ROWT_CAPTIVE_URL ROWT_CAPTIVE_TIMEOUT ROWT_CAPTIVE_RETRY ROWT_WATCH_SHADOW ROWT_RENDER_SHADOW; do
         val="${!v:-}"; [ -n "$val" ] && envxml="$envxml
     <key>$v</key><string>$val</string>"
       done
@@ -4089,9 +4267,24 @@ PLIST
       # change), stay completely hands-off until the portal clears, then restore
       # and fall through to a normal tick. The WatchPaths trigger fires this on
       # network join, so the drop typically lands seconds after connecting.
-      local cap; cap="$(_captive_state)"
+      # The interface and whether the network MOVED (net_id vs watch.net, which
+      # netcheck wrote on the last tick that got that far) are read here, before
+      # the probe: the resolver comes from the interface, and the re-probe burst
+      # is only for a network that just changed.
+      local capout cap capurl="" cifc cmoved=0
+      cifc="$(detect_iface 2>/dev/null || true)"
+      [ -n "$cifc" ] && [ "$(net_id "$cifc")" != "$(cat "$WATCH_NET" 2>/dev/null || true)" ] && cmoved=1
+      capout="$(_captive_state "$cifc" "$cmoved")"
+      # The re-probe burst is the one place a healthy tick spends tens of
+      # seconds (≈33 s worst case). Restart the stale-lock clock after it, so
+      # "older than a minute" keeps measuring the tick the lock's comment
+      # describes and a concurrent tick cannot reclaim a lock that is merely
+      # busy.
+      touch "$CFG/watch.lock" 2>/dev/null || true
+      cap="${capout%%$'\n'*}"
+      case "$capout" in *$'\n'*) capurl="${capout#*$'\n'}" ;; esac
       _SH_CAP="$cap"; _SH_INTENT="$intent"; _SH_PROXY_INTENT="$proxy_intent"
-      _wobs "$cap" "$intent" "$proxy_intent"
+      _wobs "$cap" "$intent" "$proxy_intent" "$capurl"
       # Journal what this network/VPN advertises whenever it CHANGES (no-op in
       # steady state) — includes the captive state, so portal episodes and their
       # advertised domains land in the same line (log/discovery.log).
@@ -4106,13 +4299,16 @@ PLIST
             _wact "log captive portal detected — dropping system proxy on '$csvc' so the login page can load (auto-restores after login)"
             _audit "watchdog: captive portal — system proxy off on '$csvc' (intent stays on; auto-restore on clear)"
             _wact "audit watchdog: captive portal — system proxy off on '$csvc' (intent stays on; auto-restore on clear)"
+            _captive_portal_announce "$capurl"
             _wact "captive-proxy-off $csvc"
             _captive_proxy_off "$csvc" \
               || _watch_log "captive: could not drop the proxy (sudoers missing?) — log in after a manual '$PROG proxy off'"
           else
             _watch_log "captive portal detected — proxy already off; waiting for login"
             _wact "log captive portal detected — proxy already off; waiting for login"
+            _captive_portal_announce "$capurl"
           fi
+          _captive_open_portal "$capurl"
         fi
         _wact "next stop"
         exit 0
@@ -4606,6 +4802,7 @@ o@lifecycle@speed [url …]@sustained throughput per lane, proxied vs bypassed (
 c@routing lanes@escape <list|add|rm|import|clear|dump|errors>@edit the escape lane (VPN tunnel)
 o@routing lanes@corp <list|add|rm|import|clear|dump|errors|sync>@edit the corp lane; 'sync' mirrors an overlay VPN's routes (corp/Tailscale) into it
 o@routing lanes@block <list|add|rm|import|clear|dump|errors>@block lane (ad/telemetry sinkhole); 'errors' = what got blocked
+o@routing lanes@hotspot <list|add|rm|import|clear|dump>@captive-portal hosts the OS reaches WITHOUT the proxy, so a venue's login page loads while rowt is up
 o@routing lanes@direct <errors|log>@diagnose the pass-through lane; 'errors' = what failed direct (escape candidates)
 o@proxy@proxy <status|check|on|off|env>@macOS system proxy + CLI env exports
 a@internals@render@regenerate the sing-box configs from current state
@@ -5097,6 +5294,43 @@ log, which 'stats' summarizes and which rotates like the others. Geosite-matched
 blocks are counted too; only the hand-listed suffixes show under '$PROG block list'.
 EOF
 ;;
+    hotspot) cat <<EOF
+$PROG hotspot <subcommand> — edit the hotspot lane (captive-portal hosts).
+
+A hotel / airport / airplane network answers every request with its login page
+until you sign in. With rowt's system proxy on, the browser sends that request
+to 127.0.0.1:$PORT first — where it dies, because the router's resolver is
+walled off until you have logged in. The portal never loads, and the watchdog's
+captive-portal handling (which drops the proxy for you) is racing the very
+first request the OS makes.
+
+This lane settles the race for venues you know: every entry goes on macOS's
+proxy BYPASS list (System Settings → Proxies → "Bypass proxy settings for these
+Hosts & Domains"), so the OS and every system-proxy app reach it directly,
+proxy on or off. Nothing here is rendered into the router — it is not a routing
+lane — and an edit re-applies the bypass list instead of restarting sing-box.
+The list is (re)applied whenever rowt owns the proxy: 'proxy on', 'up',
+'reload', and right after an edit here.
+
+  (no verb)            list the lane                                 [default]
+  add <entry> [more]   add host(s); 'x.com' bypasses x.com AND *.x.com
+                       (--domain: that exact host only; an IP or CIDR as written)
+  rm <entry> [more]    remove entries
+  import <file>        batch-add one entry per line from a file (# comments ok)
+  clear                remove every entry (keeps the file's comment header)
+  dump [file]          print the lane (or write it to a file) for backup/versioning
+
+  $PROG hotspot add unitedwifi.com        an airline's in-flight portal
+  $PROG proxy status                      the live bypass list, as macOS has it
+
+A domain lives in AT MOST one lane: 'add' here pulls the exact entry out of the
+escape/corp/block lanes, and 'corp sync' stops mirroring a DHCP-advertised
+domain you keep here (a venue advertising its own domain is the usual case).
+Only apps that honour the system proxy are covered; CLI tools read \$no_proxy
+instead, which '$PROG proxy env' exports with the same list. Venues not listed
+here still get the watchdog's detection (see '$PROG help watch').
+EOF
+;;
     proxy) cat <<EOF
 $PROG proxy <status|check|on|off|env> — macOS system proxy + CLI env.
 
@@ -5237,7 +5471,7 @@ _is_readonly() { # $1=cmd  $2=first arg
     vm)     case "${2:-status}" in up|down|restart|delete) return 1 ;; *) return 0 ;; esac ;;
     watch)  case "${2:-status}" in install|uninstall|refresh) return 1 ;; *) return 0 ;; esac ;;
     config) case "${2:-list}" in import) return 1 ;; *) return 0 ;; esac ;;
-    escape|corp|block|direct) case "${2:-}" in ''|errors|stats|list|log) return 0 ;; *) return 1 ;; esac ;;
+    escape|corp|block|hotspot|direct) case "${2:-}" in ''|errors|stats|list|log) return 0 ;; *) return 1 ;; esac ;;
     server) case "${2:-}" in ''|list|ls|show) return 0 ;; *) return 1 ;; esac ;;
     sub)    case "${2:-}" in ''|list|ls|show|count) return 0 ;; *) return 1 ;; esac ;;
     *) return 1 ;;
@@ -5322,7 +5556,7 @@ EOF
 # host.json/vm.json, the machine-specific `state`, or runtime bin/cache/log/metrics.
 cmd_config() {
   local src=("$SERVERS" "$MANUAL" "$SR_REVIEW" "$SUBS_FILE" "$OUTBOUND" \
-             "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS")
+             "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" "$HOTSPOT_DOMAINS")
   case "${1:-list}" in
     list)
       echo "config bundle — '$PROG config export' packs the present ones:"
@@ -5403,6 +5637,7 @@ run_command() {
     escape)     cmd_escape "$@" ;;
     corp)       cmd_corp "$@" ;;
     block)      cmd_block "$@" ;;
+    hotspot)    cmd_hotspot "$@" ;;
     direct)     cmd_direct "$@" ;;
     # proxy
     proxy)      cmd_proxy "$@" ;;

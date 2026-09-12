@@ -514,15 +514,19 @@ behaviors then compound, each correct everywhere else:
    the probe dies with an error, not a redirect → **no popup**. Worse, DoH is
    *immunity to DNS hijack* — and the hijack is how the portal announces itself.
 3. The portal page itself often lives on a **public hostname** the gateway
-   whitelists (observed in the wild at an airport lounge) — public, so the
-   private-range bypass doesn't cover it; through the proxy it's as dead as
-   everything else.
+   whitelists (observed in the wild at an airport lounge, and on every United
+   flight: `www.unitedwifi.com`) — public, so the private-range bypass doesn't
+   cover it; through the proxy it's as dead as everything else. And the browser
+   asks for it *before* the watchdog has had a tick to notice the portal, so
+   the first request — the one that would have loaded the login page — dies on
+   the proxy, and there is no second one to rescue.
 
 Pre-login, the only working path is *direct socket + the hotspot's own DNS* —
 i.e. exactly what "system proxy off" restores. Hence the design: get the popup
-to appear, and automate the proxy-off/-on dance around the login.
+to appear, automate the proxy-off/-on dance around the login — and for venues
+you know, take the race out of it altogether.
 
-### Two defenses, independent and complementary
+### Three defenses, independent and complementary
 
 1. **Probe hosts on the proxy bypass list** (`_proxy_bypass_want`): 
    `captive.apple.com`, `connectivitycheck.gstatic.com` (Chrome),
@@ -531,15 +535,47 @@ to appear, and automate the proxy-off/-on dance around the login.
    with the proxy on**. These endpoints carry nothing but "am I online", so the
    bypass costs no privacy. The bypass *setter* builds its arguments from
    `_proxy_bypass_want`, so the checker and setter cannot drift.
-2. **The watchdog's captive state machine** — each tick starts with a **direct**
-   probe (`_captive_state`: no proxy, the network's own resolver, 3 s cap):
+2. **The hotspot lane** (`rowt hotspot add unitedwifi.com`,
+   `~/.config/rowt/hotspot-domains.txt`): the venues' portal hostnames, appended
+   to the same bypass list — as `unitedwifi.com` *and* `*.unitedwifi.com`,
+   because macOS matches a bare entry exactly. The OS and every system-proxy
+   app then reach the portal directly, proxy on or off, so the login page loads
+   on the browser's *first* request and defense 3 never has to win a race. It is
+   the fix for point 3 above, and the only one that is not timing-sensitive.
+   Not a routing lane: nothing in it is rendered, an edit re-applies the bypass
+   list (where rowt owns the proxy) rather than restarting the router, and the
+   single-lane invariant covers it — adding a name to a routing lane pulls it
+   out of hotspot, since the OS-level bypass would make that routing entry dead.
+   Two things that used to go wrong with a venue's domain are closed by it:
+   `corp sync` no longer mirrors a DHCP-advertised domain that sits in the lane
+   (a venue advertising its own domain is the usual case — it kept landing in
+   the corp lane, where it is not just useless but harmful once a corp VPN is
+   up), and `proxy env` / `rowt run` export the list as `no_proxy`, so the CLI
+   channel — which ignores the macOS list — gets the same exemptions.
+3. **The watchdog's captive state machine** — each tick starts with a **direct**
+   probe (`_captive_state`: no proxy, 6 s cap) whose host is resolved at **the
+   physical NIC's DHCP resolver** — `ipconfig getoption en0 domain_name_server`,
+   then `dig` at that server, pinned into curl with `--resolve` (macOS curl has
+   no `--dns-servers`). That resolver is the hotspot's own DNS, which is where
+   the hijack lives; the *system* resolver is not that server once a VPN is up
+   or the user pinned one, and a probe resolved elsewhere sails past the hijack
+   and reads "clear" from inside a walled garden. No DHCP resolver, no answer,
+   or a probe URL given by IP → the plain probe, as before. Right after a
+   **network change** (net_id ≠ the one netcheck last wrote) an `unknown` is
+   re-probed after `ROWT_CAPTIVE_RETRY` seconds each (default `5,10`), so the
+   drop lands on the tick WatchPaths fired and not two minutes later.
+   On the drop it also **opens the portal's login page in the browser** — the
+   redirect target the probe was sent to, or the probe URL itself when the
+   portal served its page under it — because the request the OS made before
+   the drop died on the proxy and nothing retries it. Once per episode, http(s)
+   only, logged and audited like the drop:
 
 ```
               probe result each tick (WatchPaths fires one on network join)
-   ┌─────────┐  captive: redirect | 200-that-isn't-Success   ┌──────────────────┐
+   ┌─────────┐  captive: 3xx | 511 | 200-that-isn't-Success  ┌──────────────────┐
    │ normal  │ ────────────────────────────────────────────▶ │ captive          │
    │  tick   │   drop system proxy ONCE (intent untouched),  │  every tick:     │
-   │         │   sset captive=1, audit, exit tick            │  captive → exit  │
+   │         │   open the login page, sset captive=1, audit  │  captive → exit  │
    └─────────┘                                               │  unknown → exit  │
         ▲                                                    └──────────────────┘
         │            clear: the genuine Success page                  │
@@ -553,7 +589,11 @@ to appear, and automate the proxy-off/-on dance around the login.
 | decision | why |
 |---|---|
 | probe **direct**, never via the proxy | the question is "is a portal between `en0` and the internet", not "does the proxy work" |
+| resolve the probe host at the **NIC's DHCP resolver**, not the system one | the portal announces itself by hijacking *its own* DNS; a system resolver pinned elsewhere (a VPN's, a manual `8.8.8.8`) answers truthfully and the probe reads "clear" behind the wall. Falls back to the plain probe when there is no DHCP resolver or it does not answer, so nothing that worked before is lost |
+| re-probe an `unknown` only **right after a network change** | the link is still settling and the portal's DNS may not answer yet; three tries (15 s of waiting, ≈33 s worst case with every probe timing out, and a probe that could not be pinned re-resolves before each retry) put the drop on THIS tick instead of the next timer tick. Not mid-episode or in steady state: there `unknown` is the hands-off answer it always was, and one probe per tick is the budget. (Mid-episode `net_id` stays "moved" — netcheck never runs while captive — but a captive tick answers `captive`, not `unknown`, so it does not burst.) The burst is silent: a log line would be an action the planner never took |
 | `unknown` (timeout/offline) is **never** captive | a flaky network or a dead probe host must not be able to drop your proxy; only definite portal evidence acts |
+| `511` is captive, `403` is **not** | 511 is RFC 6585's "Network Authentication Required" — a portal saying so; a 403 comes from a corp web filter as often as from a portal, and acting on it would hold the proxy off for the whole office day (the episode never clears there) |
+| open the login page **on the drop**, once | the browser's own first request died on the proxy before this tick ran; opening the page after the drop is the retry the OS does not make. Inside the transition, so a manual `proxy on` mid-login never re-opens it; http(s) only, so a hijacked probe cannot open anything else |
 | drop **once per episode** (`captive` state guards the transition) | if you manually `proxy on` mid-login, the watchdog must not fight you |
 | `proxy_intent` is **never touched** | intent is *the user's wish*; the `captive` state key records *why reality differs*. This also keeps the intent-off early-out intact: a deliberately-off proxy skips all of this |
 | recovery/reload **suppressed** while captive | tunnel probes and reloads all dead-end against the wall; they would burn the recovery cooldown and re-assert the proxy over the login page |
@@ -564,23 +604,36 @@ to appear, and automate the proxy-off/-on dance around the login.
 
 Join Wi-Fi → WatchPaths fires a tick within seconds → proxy drops (`watch.log`
 logs it, `rowt audit` records it, `rowt status` shows `captive: portal detected…`)
-→ the popup appears (bypassed probe) and the portal page loads (proxy off) →
+→ the popup appears (bypassed probe) and the portal page opens in the browser →
 log in → the next tick (≤ `ROWT_WATCH_INTERVAL`, default 120 s, or sooner if the
 network re-signals) sees Success → proxy restored, `captive` cleared, audit
 closes the episode.
 
 Knobs: `ROWT_CAPTIVE_CHECK=0` disables all of it; `ROWT_CAPTIVE_URL` /
-`ROWT_CAPTIVE_TIMEOUT` re-point/re-pace the probe. Without `rowt watch install`
-none of this runs — the manual dance is `rowt proxy off` → log in → `proxy on`.
+`ROWT_CAPTIVE_TIMEOUT` re-point/re-pace the probe; `ROWT_CAPTIVE_RETRY` is the
+post-change burst (comma-separated seconds, default `5,10`; empty = one probe).
+All four are baked into the LaunchAgent by `rowt watch install` if they are set
+in the shell that installs it (they were NOT before 3.5.0, so setting
+`ROWT_CAPTIVE_CHECK=0` had no effect on the installed watchdog); change one and
+re-run `rowt watch install`. Without `rowt watch install` none of this runs —
+the manual dance is `rowt proxy off` → log in → `proxy on`.
 
 ### Debugging it
 
 - `rowt status` — a `captive:` line means the watchdog is holding the proxy off.
+- `rowt proxy status` — the bypass list as macOS holds it; the venue's portal
+  host (and its `*.` twin) must be in it, or the hotspot lane is not applied
+  (`rowt proxy on` re-applies it; `rowt hotspot list` shows the lane).
 - `~/.config/rowt/log/watch.log` — "captive portal detected/cleared" lines.
 - `rowt audit` — the drop/restore pair with `by=launchd` attribution.
 - Reproduce the probe by hand:
-  `curl -s --noproxy '*' --max-time 3 http://captive.apple.com/hotspot-detect.html`
-  — `Success` body = clear; anything else = what the watchdog saw.
+  `curl -s --noproxy '*' --max-time 6 -w '\n%{http_code}\nredirect=%{redirect_url}' http://captive.apple.com/hotspot-detect.html`
+  — `Success` body = clear; anything else = what the watchdog saw, and the last
+  line is the page it would open. To see it the way the tick does, resolve at
+  the NIC's DHCP server first — `ns=$(ipconfig getoption en0 domain_name_server)`,
+  `ip=$(dig +short @$ns captive.apple.com | grep -E '^[0-9.]+$' | head -1)` —
+  and add `--resolve captive.apple.com:80:$ip`. If the two disagree, the
+  system resolver is not the hotspot's, and that is the case the pin exists for.
 - Stuck in `captive` wrongly (e.g. a middlebox rewrote the probe)? `rowt proxy on`
   re-asserts immediately (the state clears on the next clear tick), and
   `ROWT_CAPTIVE_CHECK=0` in the environment of `watch` disables detection.
@@ -594,7 +647,8 @@ seconds**:
 
 | step | command (`ROWT_CAPTIVE_URL=…`) | expect |
 |---|---|---|
-| portal appears | `…8099/portal bash bin/rowt watch tick` | proxy drops, `captive=1` in `state`, watch.log + audit lines, `rowt status` shows `captive:` |
+| portal appears | `…8099/portal bash bin/rowt watch tick` | proxy drops, `captive=1` in `state`, watch.log + audit lines, `rowt status` shows `captive:`, **the browser opens the fake portal page** |
+| portal redirects | `…8099/redirect bash bin/rowt watch tick` (after a `…/success` tick) | as above, but the browser is sent to the redirect target (`http://portal.fake/login` — expect a DNS error there; the `open` is the point) |
 | still captive | same again | exit 0, **zero** new log lines |
 | probe dies | `…127.0.0.1:9/x …watch tick` | hands-off: state and proxy unchanged |
 | login clears | `…8099/success …watch tick` | proxy restored, `captive=` empty, audit closes |

@@ -50,10 +50,12 @@ fn run() -> Result<String, String> {
     let force = operands.iter().any(|a| a == "--force");
     let operands: Vec<String> = operands.into_iter().filter(|a| a != "--force").collect();
 
+    let hotspot_file = cfg.join("hotspot-domains.txt");
     let lanes = Lanes {
         escape: read(&file_of(&cfg, Lane::Escape)),
         corp: read(&file_of(&cfg, Lane::Corp)),
         block: read(&file_of(&cfg, Lane::Block)),
+        hotspot: read(&hotspot_file),
     };
 
     if action == "dump" {
@@ -71,6 +73,11 @@ fn run() -> Result<String, String> {
         "clear" => Op::Clear,
         "import" => {
             let f = operands.first().ok_or("import needs a file")?;
+            // A missing file is an error, not an empty import (the shell dies
+            // before reading; `read` would hand back "" and report "0 new").
+            if !Path::new(f).is_file() {
+                return Err(format!("no such file: {f}"));
+            }
             Op::Import {
                 lines: read(Path::new(f)).lines().map(|s| s.to_string()).collect(),
                 source: f.clone(),
@@ -100,6 +107,14 @@ fn run() -> Result<String, String> {
                 use std::os::unix::fs::PermissionsExt;
                 let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
             }
+        }
+    }
+    // The hotspot lane is only ever pulled FROM here (single-lane invariant).
+    if lanes.hotspot != edit.lanes.hotspot {
+        std::fs::write(&hotspot_file, &edit.lanes.hotspot).map_err(|e| format!("write: {e}"))?;
+        if edit.hotspot_tightened {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&hotspot_file, std::fs::Permissions::from_mode(0o600));
         }
     }
     Ok(edit.messages.join("\n"))

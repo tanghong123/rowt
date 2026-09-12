@@ -48,11 +48,21 @@ fi
 # --- 2. the version bump -----------------------------------------------------
 f="bin/rowt"
 # only bump on commits that touch the tool itself
-git diff --cached --name-only | grep -qE '^(bin/|config/|lima/|install\.sh|README\.md|DESIGN\.md)' || exit 0
+#
+# `grep -c`, not `grep -q`, and the count in a variable: under `set -o pipefail`
+# a `grep -q` that matches early exits at once, git gets SIGPIPE, and the
+# PIPELINE reports 141 — so the condition reads false even though the pattern
+# matched. Both tests below depend on getting that right, and both were wrong:
+# this one could skip the bump on a commit that does touch the tool, and the
+# manual-bump test below silently overrode a hand-set version. 3.5.0 was bumped
+# to 3.5.1 under the author's hands by exactly that.
+_touched="$(git diff --cached --name-only | grep -cE '^(bin/|config/|lima/|install\.sh|README\.md|DESIGN\.md)' || true)"
+[ "${_touched:-0}" -gt 0 ] || exit 0
 [ -f "$f" ] || exit 0
 
 # respect a manual version bump already staged in this commit (incl. the initial add)
-if git diff --cached -- "$f" | grep -qE '^\+ROWT_VERSION='; then
+_manual="$(git diff --cached -- "$f" | grep -cE '^\+ROWT_VERSION=' || true)"
+if [ "${_manual:-0}" -gt 0 ]; then
   exit 0
 fi
 

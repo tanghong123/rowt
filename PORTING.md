@@ -590,6 +590,28 @@ and the streak counters only *before* the shell touches them —
 `watch.restart`, so reading either at EXIT would hand the FSM the shell's own
 result and it would count the same failure twice.
 
+**What the tick does NOT promise: the same argv.** `watch tick` is compared by
+`cli-diff` on everything the machine keeps — stdout, exit status, the config
+tree, the audit log — and deliberately not on the argv trace (the cases carry
+`PARITY_NOTRACE=1`, which the harness refuses for any other command). The two
+implementations read the machine at different moments ON PURPOSE: the shell
+reads each fact lazily, in the branch that needs it, while the port snapshots
+one `Observation` up front — the discipline this whole section is about. So a
+tick's trace carries proxy getters and a boot id the shell never reads on that
+path, and making them match would mean giving up the snapshot. The tick's argv
+is gated instead by `platform-diff` (the OS seams, call for call) and
+`watch-shadow` (the real tick against the real planner).
+
+Adding those cases (2026-09-12) immediately found four divergences in the half
+that IS compared, none of them visible to any other gate: `watch.health` written
+as `0` where the shell removes the file; the recovery stamp written to
+`watch.recovery` while the shell reads `watch.restart`, so a native tick could
+never honour `ROWT_HEALTH_COOLDOWN`; a `captive=` key rewritten on every tick;
+and — the real one — a discovery journal that was never ported at all, writing a
+second schema into the same log with no `discovery_sig`. A fifth, found on the
+way: with `proxy_intent=off` the port probed the network and resolved a hostname
+where the shell exits having read nothing.
+
 **And the same fault came back in phase two anyway** (fixed 3.4.12). Assembling
 netcheck's observation at the end of the tick is only safe for values captured
 where the shell read them, and three were not: `proxy_pointing_ok`,

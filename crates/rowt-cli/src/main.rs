@@ -373,11 +373,24 @@ fn lane_file(cfg: &Path, l: Lane) -> PathBuf {
     })
 }
 
+/// The hotspot lane's file. Not a `Lane`: nothing in it is routed — it is
+/// handed to the OS as proxy bypass entries (`hotspot_bypass`) so a venue's
+/// login page loads with the proxy on. Its own editor is still the shell's.
+fn hotspot_file(cfg: &Path) -> PathBuf {
+    cfg.join("hotspot-domains.txt")
+}
+
+/// `_hotspot_bypass_entries` — the lane shaped for `networksetup`.
+pub fn hotspot_bypass(cfg: &Path) -> Vec<String> {
+    rowt_core::hotspot::bypass_entries(&read(&hotspot_file(cfg)))
+}
+
 fn load_lanes(cfg: &Path) -> Lanes {
     Lanes {
         escape: read(&lane_file(cfg, Lane::Escape)),
         corp: read(&lane_file(cfg, Lane::Corp)),
         block: read(&lane_file(cfg, Lane::Block)),
+        hotspot: read(&hotspot_file(cfg)),
     }
 }
 
@@ -509,22 +522,26 @@ fn proxy_awk(body: &str) -> String {
     s
 }
 
-fn cmd_proxy(action: &str, arg: Option<&str>) -> Result<(String, bool), String> {
+fn cmd_proxy(cfg: &Path, action: &str, arg: Option<&str>) -> Result<(String, bool), String> {
     let p = Mac;
     let prt = port();
     match action {
         "env" => {
             if arg == Some("--off") {
                 return Ok((
-                    "unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY".into(),
+                    "unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY no_proxy NO_PROXY".into(),
                     true,
                 ));
             }
             let h = format!("http://127.0.0.1:{prt}");
             let s = format!("socks5h://127.0.0.1:{prt}");
+            // The CLI channel's bypass: what the system proxy's list does for
+            // apps, `no_proxy` does for curl/Go/Python — local names, private
+            // ranges, the captive probes and the hotspot lane stay off the proxy.
+            let np = rowt_core::hotspot::no_proxy(&rowt_platform::bypass_want(&hotspot_bypass(cfg)));
             Ok((
                 format!(
-                    "export http_proxy={h} https_proxy={h} all_proxy={s}\nexport HTTP_PROXY={h} HTTPS_PROXY={h} ALL_PROXY={s}"
+                    "export http_proxy={h} https_proxy={h} all_proxy={s}\nexport HTTP_PROXY={h} HTTPS_PROXY={h} ALL_PROXY={s}\nexport no_proxy={np} NO_PROXY={np}"
                 ),
                 true,
             ))
@@ -550,7 +567,7 @@ fn cmd_proxy(action: &str, arg: Option<&str>) -> Result<(String, bool), String> 
             let Some(svc) = p.active_service() else {
                 return Ok(("  ✗ no active network service".into(), false));
             };
-            let ok = p.proxy_pointing_ok(&svc, prt) && rowt_platform::bypass_ok(&svc);
+            let ok = p.proxy_pointing_ok(&svc, prt) && rowt_platform::bypass_ok(&svc, &hotspot_bypass(cfg));
             let mut m = if ok {
                 format!("  ✓ system proxy fully configured for '{svc}' (127.0.0.1:{prt} + local bypass)")
             } else {
@@ -859,6 +876,14 @@ fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<Str
                     let f = args.first().ok_or(format!(
                         "usage: {PROG} {label} import <file>   (one domain per line)"
                     ))?;
+                    // `_list_add_file` dies before reading. `read` on a missing
+                    // path returns an empty string, and an empty import is a
+                    // perfectly valid "0 new" — so a typo in the filename was
+                    // reported as success, exit 0, audit END. `die`, for the
+                    // same ABORT line as the shell.
+                    if !Path::new(f).is_file() {
+                        die(cfg, &format!("no such file: {f}"));
+                    }
                     Op::Import {
                         lines: read(Path::new(f)).lines().map(|s| s.to_string()).collect(),
                         source: f.clone(),
@@ -886,6 +911,15 @@ fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<Str
                     if e.tightened.contains(&l) {
                         let _ = set_mode(&p, 0o600);
                     }
+                }
+            }
+            // The hotspot lane, which `_lane_dedupe` walks last: an entry added
+            // to a routing lane is pulled out of it too.
+            if lanes.hotspot != e.lanes.hotspot {
+                let p = hotspot_file(cfg);
+                std::fs::write(&p, &e.lanes.hotspot).map_err(|x| format!("write: {x}"))?;
+                if e.hotspot_tightened {
+                    let _ = set_mode(&p, 0o600);
                 }
             }
             // The "also covered by geosite:…" hint, which rowt-rs did not print
@@ -939,6 +973,14 @@ fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<Str
                         }
                     }
                 }
+            }
+            // A hotspot change is not a routing change: the shell re-applies
+            // the OS bypass list for it (`_hotspot_apply`) instead of
+            // reloading, and says so on stdout after the edit's own lines.
+            // Not gated on --no-reload — that flag spares the router bounce,
+            // and the TUI's batched reload never touches the proxy.
+            if lanes.hotspot != e.lanes.hotspot {
+                out.push(lifecycle::hotspot_apply(&Ctx::new(cfg.to_path_buf())));
             }
             Ok(out.join("\n"))
         }
@@ -1220,7 +1262,12 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
             }
             if lifecycle::host_running(&ctx).is_none() {
                 eprintln!("==> starting router for the test…");
-                if lifecycle::router_up(&ctx).is_err() {
+                // `cmd_router up >/dev/null 2>&1` — the shell throws the whole
+                // start away, and so must this: the router it may start is a
+                // side effect of the measurement, not part of the report, and
+                // its render/proxy lines were landing on `ping`'s STDOUT.
+                let started = crate::redirected(Path::new("/dev/null"), || lifecycle::router_up(&ctx));
+                if started.is_err() {
                     die(&cfg, "could not start router");
                 }
             }
@@ -1309,6 +1356,9 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                 }
                 false
             };
+            // Same bypass as `proxy env`: local names, the captive probes, the
+            // hotspot lane.
+            let np = rowt_core::hotspot::no_proxy(&rowt_platform::bypass_want(&hotspot_bypass(&cfg)));
             let exec_with = |http: Option<(&str, String)>| -> ! {
                 let mut c = std::process::Command::new(&rest[0]);
                 c.args(&rest[1..]);
@@ -1319,6 +1369,9 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                         }
                         for k in ["all_proxy", "ALL_PROXY"] {
                             c.env(k, &all);
+                        }
+                        for k in ["no_proxy", "NO_PROXY"] {
+                            c.env(k, &np);
                         }
                     }
                     None => {
@@ -1431,7 +1484,7 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
         "config" => {
             let src = ["servers.json", "manual.json", "import-review.json", "subs.txt",
                        "outbound.json", "escape-domains.txt", "corp-domains.txt",
-                       "block-domains.txt"];
+                       "block-domains.txt", "hotspot-domains.txt"];
             match rest.first().map(|s| s.as_str()).unwrap_or("list") {
                 "list" => {
                     let mut o = format!("config bundle — '{PROG} config export' packs the present ones:");
@@ -2004,7 +2057,7 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                 let force = rest.iter().any(|a| a == "--force" || a == "-f");
                 return Ok(lifecycle::cmd_proxy_on(&ctx, force));
             }
-            let (out, ok) = cmd_proxy(action, rest.get(1).map(|s| s.as_str()))?;
+            let (out, ok) = cmd_proxy(&cfg, action, rest.get(1).map(|s| s.as_str()))?;
             if !ok {
                 println!("{out}");
                 std::process::exit(1);

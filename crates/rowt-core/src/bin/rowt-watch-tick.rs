@@ -9,6 +9,7 @@
 //! Output vocabulary (one per line):
 //!   journal <state> | log <text> | audit <text>
 //!   captive-proxy-off <svc> | captive-proxy-on <svc> | clear-stale-proxy <svc>
+//!   open-portal <url>
 //!   recover <reason> | corp-sync | write-net-id <id> | reload <reason>
 //!   next <stop|settle>
 
@@ -36,6 +37,7 @@ fn render(a: &Action) -> String {
         Action::Audit(t) => format!("audit {t}"),
         Action::CaptiveProxyOff(x) => format!("captive-proxy-off {x}"),
         Action::CaptiveProxyOn(x) => format!("captive-proxy-on {x}"),
+        Action::OpenPortal(u) => format!("open-portal {u}"),
         Action::ClearStaleProxy(x) => format!("clear-stale-proxy {x}"),
         Action::Recover(r) => format!("recover {r}"),
         Action::CorpSync => "corp-sync".to_string(),
@@ -62,6 +64,7 @@ fn run() -> Result<String, String> {
     let obs = Observation {
         proxy_intent: s(o, "proxy_intent"),
         captive: o.get("captive").and_then(|c| c.as_str()).map(CaptiveState::parse),
+        portal_url: opt(o, "portal_url"),
         active_service: opt(o, "active_service"),
         proxy_any_on: b(o, "proxy_any_on"),
         host_running: b(o, "host_running"),

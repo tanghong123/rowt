@@ -108,7 +108,7 @@ pub enum Filter {
 }
 
 /// `grep -E '/[0-9]+$'` — a trailing slash-and-digits marks a CIDR.
-fn is_cidr(s: &str) -> bool {
+pub(crate) fn is_cidr(s: &str) -> bool {
     match s.rsplit_once('/') {
         Some((_, suffix)) => !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()),
         None => false,

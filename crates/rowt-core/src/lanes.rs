@@ -10,12 +10,17 @@
 
 use crate::classify::Lane;
 
-/// The three editable lane lists, as file contents.
+/// The three editable lane lists, as file contents — plus the hotspot lane.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Lanes {
     pub escape: String,
     pub corp: String,
     pub block: String,
+    /// Never a TARGET here — the shell edits it through the same `edit_list`,
+    /// but rowt-rs hands `hotspot` to the shell — yet `_lane_dedupe` walks it
+    /// last, so an entry added to a routing lane is pulled out of it like out
+    /// of any other (its OS-level bypass would make the routing entry dead).
+    pub hotspot: String,
 }
 
 impl Lanes {
@@ -228,6 +233,8 @@ pub struct Edit {
     /// compares modes, and a lane list is not secret enough to be worth
     /// diverging over. Reproduced, not corrected (PORTING.md §6.7).
     pub tightened: Vec<Lane>,
+    /// The same for the hotspot lane, which is not a `Lane`.
+    pub hotspot_tightened: bool,
 }
 
 /// Apply one operation to one lane.
@@ -235,6 +242,7 @@ pub fn apply(lanes: &Lanes, target: Lane, op: &Op) -> Edit {
     let mut out = lanes.clone();
     let mut msgs = Vec::new();
     let mut tightened: Vec<Lane> = Vec::new();
+    let mut hotspot_tightened = false;
     macro_rules! tighten {
         ($l:expr) => {
             if !tightened.contains(&$l) {
@@ -297,6 +305,12 @@ pub fn apply(lanes: &Lanes, target: Lane, op: &Op) -> Edit {
                         msgs.push(format!("  moved out of {} lane: {e}", lane.as_str()));
                     }
                 }
+                // …and out of the hotspot lane, which the shell walks last.
+                if has_line(&out.hotspot, &e) {
+                    out.hotspot = drop_line(&out.hotspot, &e);
+                    hotspot_tightened = true;
+                    msgs.push(format!("  moved out of hotspot lane: {e}"));
+                }
             }
             if importing {
                 let source = match op {
@@ -342,7 +356,7 @@ pub fn apply(lanes: &Lanes, target: Lane, op: &Op) -> Edit {
             msgs.push(format!("  {} list cleared (comments kept)", target.as_str()));
         }
     }
-    Edit { lanes: out, messages: msgs, tightened }
+    Edit { lanes: out, messages: msgs, tightened, hotspot_tightened }
 }
 
 /// `dump` — the active entries, comments and blanks removed.
@@ -365,7 +379,17 @@ mod tests {
             escape: "# hdr\nexample.com\n".into(),
             corp: "# hdr\ncorp.example\n".into(),
             block: "# hdr\nads.example\n".into(),
+            hotspot: "# hdr\nportal.example\n".into(),
         }
+    }
+
+    #[test]
+    fn adding_to_a_routing_lane_pulls_it_out_of_hotspot_too() {
+        let e = apply(&lanes(), Lane::Escape, &Op::Add { entries: vec!["portal.example".into()], force: false });
+        assert!(e.lanes.escape.contains("portal.example"));
+        assert!(!e.lanes.hotspot.contains("portal.example"));
+        assert!(e.hotspot_tightened);
+        assert_eq!(e.messages, vec!["  added: portal.example", "  moved out of hotspot lane: portal.example"]);
     }
 
     #[test]

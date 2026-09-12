@@ -132,7 +132,7 @@ pub fn assemble(head: &[String], dom: &[String], cidr: &[String]) -> String {
 /// The corp VPN's tunnel: the utun/ipsec/ppp carrying the most non-default
 /// routes, excluding Tailscale's CGNAT interface, and only when it carries at
 /// least three — fewer than that is a point-to-point link, not a corp network.
-fn vpn_iface() -> String {
+pub(crate) fn vpn_iface() -> String {
     let list = out("ifconfig", &["-l"]);
     let (mut best, mut bestn) = (String::new(), 0i64);
     for ifc in list.split_whitespace() {
@@ -260,13 +260,16 @@ fn sync_labels(cfg: &Path) -> Vec<String> {
     if v.is_empty() { vec!["corp".into()] } else { v }
 }
 
-/// The suffixes the user has explicitly tunnelled or blocked. Their choice wins
-/// over an auto-discovered corp domain — a network must not be able to
-/// de-tunnel something you deliberately put in the escape lane.
+/// The suffixes the user has explicitly tunnelled, blocked or put in the
+/// hotspot lane. Their choice wins over an auto-discovered corp domain — a
+/// network must not be able to de-tunnel something you deliberately put in the
+/// escape lane, and a venue's own domain is exactly what the venue advertises
+/// over DHCP while it is the one that has to bypass the proxy.
 fn esc_block_suffixes(cfg: &Path) -> Vec<String> {
     use rowt_core::render::{parse_list, Filter};
     let mut v: Vec<String> = parse_list(&read(&cfg.join("escape-domains.txt")), Filter::Domain);
     v.extend(parse_list(&read(&cfg.join("block-domains.txt")), Filter::Domain));
+    v.extend(parse_list(&read(&cfg.join("hotspot-domains.txt")), Filter::Domain));
     v.sort();
     v.dedup();
     v
@@ -399,7 +402,7 @@ pub fn run(ctx: &Ctx, o: &Opts) -> Result<String, String> {
     }
     if !o.quiet {
         for d in &dropped {
-            eprintln!("error: corp sync: '{d}' is DHCP-advertised but you keep it in escape/block — your rule wins");
+            eprintln!("error: corp sync: '{d}' is DHCP-advertised but you keep it in escape/block/hotspot — your rule wins");
         }
     }
     std::fs::write(&path, &want).map_err(|e| format!("write {}: {e}", path.display()))?;

@@ -39,6 +39,11 @@ impl CaptiveState {
 pub struct Observation {
     pub proxy_intent: String,
     pub captive: Option<CaptiveState>,
+    /// On `captive`: the portal's login page, as the probe saw it — the
+    /// redirect target when it was redirected, else the probe URL itself (a
+    /// portal serving its page under that URL answers the browser the same
+    /// way). None otherwise.
+    pub portal_url: Option<String>,
     pub active_service: Option<String>,
     /// `_proxy_any_on` — is any protocol currently proxied?
     pub proxy_any_on: bool,
@@ -91,6 +96,9 @@ pub enum Action {
     CaptiveProxyOff(String),
     /// `_captive_proxy_on` — put it back once the portal clears.
     CaptiveProxyOn(String),
+    /// `_captive_open_portal` — hand the login page to the browser: the
+    /// request the OS lost while the proxy was in the way.
+    OpenPortal(String),
     /// A proxy left pointing at a dead router after a reboot.
     ClearStaleProxy(String),
     /// `_watch_recover <reason> cmd_reload`.
@@ -162,6 +170,21 @@ pub fn guard(obs: &Observation, st: &State, cfg: &Config) -> Outcome {
             // re-asserted proxy hides the login page.
             if !s.captive_flag {
                 s.captive_flag = true;
+                // The login page to hand to the browser — the request the OS
+                // made before the drop died on the proxy, and nothing retries
+                // it. Once per episode (it sits inside the transition), and
+                // only for a page: anything that is not http(s) is not one.
+                // Announced with the drop's own lines, BEFORE the drop; the
+                // `open` itself comes after it — the browser must not race a
+                // proxy that is still on.
+                let page = obs.portal_url.as_deref()
+                    .filter(|u| u.starts_with("http://") || u.starts_with("https://"));
+                fn announce(a: &mut Vec<Action>, page: Option<&str>) {
+                    if let Some(u) = page {
+                        a.push(Action::Log(format!("captive portal: opening its login page in the browser — {u}")));
+                        a.push(Action::Audit(format!("watchdog: captive portal — opened {u} in the browser")));
+                    }
+                }
                 match (&obs.active_service, obs.proxy_any_on) {
                     (Some(svc), true) => {
                         a.push(Action::Log(format!(
@@ -170,11 +193,18 @@ pub fn guard(obs: &Observation, st: &State, cfg: &Config) -> Outcome {
                         a.push(Action::Audit(format!(
                             "watchdog: captive portal — system proxy off on '{svc}' (intent stays on; auto-restore on clear)"
                         )));
+                        announce(&mut a, page);
                         a.push(Action::CaptiveProxyOff(svc.clone()));
                     }
-                    _ => a.push(Action::Log(
-                        "captive portal detected — proxy already off; waiting for login".into(),
-                    )),
+                    _ => {
+                        a.push(Action::Log(
+                            "captive portal detected — proxy already off; waiting for login".into(),
+                        ));
+                        announce(&mut a, page);
+                    }
+                }
+                if let Some(u) = page {
+                    a.push(Action::OpenPortal(u.to_string()));
                 }
             }
             return Outcome { actions: a, state: s, next: Next::Stop };
@@ -332,6 +362,7 @@ mod tests {
         Observation {
             proxy_intent: "on".into(),
             captive: Some(CaptiveState::Clear),
+            portal_url: None,
             active_service: Some("Wi-Fi".into()),
             proxy_any_on: true,
             host_running: true,
@@ -394,6 +425,40 @@ mod tests {
         assert!(!r.actions.iter().any(|a| matches!(a, Action::CaptiveProxyOff(_))));
         assert_eq!(logs(&r), vec!["captive portal detected — proxy already off; waiting for login"]);
         assert!(r.state.captive_flag);
+        // With a page: announced after the detection line, opened last.
+        o.portal_url = Some("http://portal.fake/login".into());
+        let r = guard(&o, &State::default(), &Config::default());
+        assert_eq!(logs(&r), vec![
+            "captive portal detected — proxy already off; waiting for login",
+            "captive portal: opening its login page in the browser — http://portal.fake/login",
+        ]);
+        assert_eq!(r.actions.last(), Some(&Action::OpenPortal("http://portal.fake/login".into())));
+    }
+
+    /// The portal page is opened on the drop — with the proxy on or already
+    /// off — once per episode, and only when the probe named an http(s) URL.
+    #[test]
+    fn the_login_page_is_opened_once_per_episode_and_only_for_a_page() {
+        let opens = |o: &Outcome| o.actions.iter().filter(|a| matches!(a, Action::OpenPortal(_))).count();
+        let mut o = running();
+        o.captive = Some(CaptiveState::Captive);
+        o.portal_url = Some("http://portal.fake/login".into());
+        let r = guard(&o, &State::default(), &Config::default());
+        assert!(r.actions.contains(&Action::CaptiveProxyOff("Wi-Fi".into())));
+        assert!(r.actions.contains(&Action::OpenPortal("http://portal.fake/login".into())));
+        // The drop comes first: the browser must not race a proxy still on.
+        let at = |k: &dyn Fn(&Action) -> bool| r.actions.iter().position(|a| k(a)).unwrap();
+        assert!(at(&|a| matches!(a, Action::CaptiveProxyOff(_))) < at(&|a| matches!(a, Action::OpenPortal(_))));
+        // second tick in the same episode: nothing further
+        assert_eq!(opens(&guard(&o, &r.state, &Config::default())), 0);
+        // proxy already off: still opened — the page is the point
+        o.proxy_any_on = false;
+        assert_eq!(opens(&guard(&o, &State::default(), &Config::default())), 1);
+        // not a page
+        o.portal_url = Some("javascript:alert(1)".into());
+        assert_eq!(opens(&guard(&o, &State::default(), &Config::default())), 0);
+        o.portal_url = None;
+        assert_eq!(opens(&guard(&o, &State::default(), &Config::default())), 0);
     }
 
     #[test]

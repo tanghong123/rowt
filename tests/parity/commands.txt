@@ -33,6 +33,7 @@ explain_public_ip ro     explain 203.0.113.99
 escape_list       ro     escape list
 corp_list         ro     corp list
 block_list        ro     block list
+hotspot_list      ro     hotspot list
 direct_list       ro     direct list
 escape_errors     ro     escape errors
 server_list       ro     server list
@@ -54,6 +55,7 @@ proxy_on          mut    proxy on --force
 proxy_off         mut    proxy off
 escape_add        mut    escape add added.example
 escape_rm         mut    escape rm example.com
+hotspot_add       mut    hotspot add venue.example
 corp_sync         mut    corp sync
 use_server        mut    use beta
 skill_status      mut    skill status

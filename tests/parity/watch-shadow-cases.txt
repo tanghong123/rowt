@@ -16,6 +16,7 @@
 # only on a real machine — see selftest step 10b.
 PARITY_SCENARIO=proxy-on ROWT_CAPTIVE_URL=http://127.0.0.1:8099/portal watch tick | captive portal detected — dropping system proxy
 PARITY_SCENARIO=captive-episode ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick | captive portal cleared
+ROWT_CAPTIVE_URL=http://127.0.0.1:8099/redirect watch tick | opening its login page in the browser — http://portal.fake/login
 ROWT_CAPTIVE_URL=http://127.0.0.1:9/x watch tick
 # The only case that reaches phase two, and the one the netcheck observation
 # exists for: the machine has MOVED (watch.net holds a different address pair)
@@ -29,3 +30,13 @@ PARITY_SCENARIO=watch-net-moved ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success w
 # "network change (iface 'en0' -> 'en0')" — an interface that had not moved, in a
 # message about the interface moving. Four real divergence bundles read that way.
 PARITY_SCENARIO=watch-proxy-repoint ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick | no longer points at rowt
+# The default probe URL is a NAME, so this is the one case that resolves it at
+# the NIC's DHCP resolver and pins the answer with --resolve (the other cases
+# probe 127.0.0.1 and skip the lookup); a portal page under that URL must still
+# read as the drop.
+PARITY_SCENARIO=captive-dhcp-dns watch tick | captive portal detected — dropping system proxy
+# The re-probe burst: the sandbox has no watch.net, so every tick is "just
+# moved", and ROWT_CAPTIVE_RETRY=0,0 asks for two more probes of a URL that
+# never answers. Nothing to log — the burst is silent by design — so the trace
+# is what pins it: three probes, and three unknowns still hands-off.
+ROWT_CAPTIVE_RETRY=0,0 ROWT_CAPTIVE_URL=http://127.0.0.1:9/x watch tick | probes=3

@@ -1,0 +1,10 @@
+# Synthetic parity fixture — documentation ranges (RFC 5737) only.
+# A corp lane where an earlier `corp sync` mirrored the venue's DHCP-advertised
+# domain into the auto-managed block; the same domain now sits in the hotspot
+# lane, so the next sync must drop it here ("your rule wins").
+corp.example
+198.51.100.0/24
+10.99.0.0/16
+
+# --- rowt corp sync: DHCP search domains (auto-managed, do not edit below) ---
+intranet.corp.example

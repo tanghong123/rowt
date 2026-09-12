@@ -36,6 +36,12 @@ pub trait Platform {
     /// the right choice. Decides a mode, so it belongs to the platform, not the
     /// pure core: it dials the network over a named interface.
     fn direct_reaches_escape(&self, canaries: &[String], timeout: u32) -> bool;
+    /// The resolver the interface's DHCP server advertised — the hotspot's own
+    /// DNS, where a captive portal's hijack lives. None when it advertised none.
+    fn dhcp_dns(&self, iface: &str) -> Option<String>;
+    /// The first IPv4 address `host` resolves to at exactly `ns`; None when it
+    /// does not answer (or answers with nothing but a CNAME chain).
+    fn resolve_at(&self, ns: &str, host: &str) -> Option<String>;
 }
 
 fn out(cmd: &str, args: &[&str]) -> Option<String> {
@@ -243,6 +249,24 @@ impl Platform for Mac {
     fn boot_id(&self) -> Option<String> {
         first_digits(&out("sysctl", &["-n", "kern.boottime"])?)
     }
+
+    fn dhcp_dns(&self, iface: &str) -> Option<String> {
+        if iface.is_empty() {
+            return None;
+        }
+        // `| head -1`: the option can list several; the first is the one the
+        // resolver would ask first.
+        let body = out("ipconfig", &["getoption", iface, "domain_name_server"])?;
+        let first = body.lines().next().unwrap_or("").trim();
+        (!first.is_empty()).then(|| first.to_string())
+    }
+
+    fn resolve_at(&self, ns: &str, host: &str) -> Option<String> {
+        // Two seconds, one try: this runs inside the watchdog's probe, on a
+        // network that may be a walled garden whose resolver does not answer.
+        let at = format!("@{ns}");
+        first_ipv4(&out("dig", &["+short", "+time=2", "+tries=1", &at, host])?)
+    }
 }
 
 /// `sed -n 's/[^0-9]*\([0-9][0-9]*\).*/\1/p'` — the first run of digits.
@@ -318,18 +342,19 @@ mod tests {
     /// while the proxy is on.
     #[test]
     fn the_bypass_list_covers_mdns_private_space_and_the_captive_probes() {
-        let want = bypass_want();
+        let want = bypass_want(&[]);
+        let has = |e: &str| want.iter().any(|w| w == e);
         for entry in ["*.local", "*.arpa", "localhost", "127.0.0.1", "169.254/16"] {
-            assert!(want.contains(&entry), "missing {entry}");
+            assert!(has(entry), "missing {entry}");
         }
         for cidr in ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"] {
-            assert!(want.contains(&cidr), "missing {cidr}");
+            assert!(has(cidr), "missing {cidr}");
         }
         // One per OS that probes for a portal — drop any and that OS's captive
         // sheet never appears while rowt is up.
         for probe in ["captive.apple.com", "connectivitycheck.gstatic.com",
                       "detectportal.firefox.com", "www.msftconnecttest.com"] {
-            assert!(want.contains(&probe), "missing captive probe {probe}");
+            assert!(has(probe), "missing captive probe {probe}");
         }
         // No duplicates: the comparison in `bypass_ok` sorts both sides and
         // tests for equality, so a repeat would make it permanently unequal to
@@ -339,6 +364,18 @@ mod tests {
         let n = sorted.len();
         sorted.dedup();
         assert_eq!(sorted.len(), n, "bypass_want has a duplicate");
+    }
+
+    /// The hotspot lane rides after the fixed set, in the order it is given,
+    /// and cannot double a fixed entry — the shell's `awk '!seen[$0]++'`.
+    #[test]
+    fn hotspot_entries_follow_the_fixed_set_and_never_repeat_it() {
+        let extra: Vec<String> =
+            ["*.portal.example", "captive.apple.com", "portal.example"].iter().map(|s| s.to_string()).collect();
+        let fixed = bypass_want(&[]);
+        let want = bypass_want(&extra);
+        assert_eq!(&want[..fixed.len()], &fixed[..]);
+        assert_eq!(&want[fixed.len()..], &["*.portal.example".to_string(), "portal.example".to_string()]);
     }
 
     #[test]
@@ -449,21 +486,39 @@ pub fn read_bypass(service: &str) -> String {
 }
 
 /// `_proxy_bypass_ok`: the configured list, sorted, equals what rowt wants.
-pub fn bypass_ok(service: &str) -> bool {
+/// `extra` is the hotspot lane, already shaped for `networksetup`
+/// (`rowt_core::hotspot::bypass_entries`) — the caller reads it, this crate
+/// stays free of rowt's config layout.
+pub fn bypass_ok(service: &str, extra: &[String]) -> bool {
     let body = out("networksetup", &["-getproxybypassdomains", service]).unwrap_or_default();
     let mut have: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
     have.sort_unstable();
-    let mut want: Vec<&str> = bypass_want().to_vec();
+    let want = bypass_want(extra);
+    let mut want: Vec<&str> = want.iter().map(|s| s.as_str()).collect();
     want.sort_unstable();
     have == want
 }
 
-/// `_proxy_bypass_want` — one source of truth for what must never be proxied.
-pub fn bypass_want() -> &'static [&'static str] {
-    &[
-        "*.local", "169.254/16", "127.0.0.1", "localhost", "*.arpa",
-        "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
-        "captive.apple.com", "connectivitycheck.gstatic.com",
-        "detectportal.firefox.com", "www.msftconnecttest.com",
-    ]
+/// The fixed half of the bypass list: local/mDNS/private space, and the
+/// captive-portal probe hosts of every OS that has one.
+const BYPASS_FIXED: [&str; 12] = [
+    "*.local", "169.254/16", "127.0.0.1", "localhost", "*.arpa",
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+    "captive.apple.com", "connectivitycheck.gstatic.com",
+    "detectportal.firefox.com", "www.msftconnecttest.com",
+];
+
+/// `_proxy_bypass_want` — one source of truth for what must never be proxied:
+/// the fixed set, then the hotspot lane's entries in the order given. A repeat
+/// of a fixed entry is dropped (the shell's `awk '!seen[$0]++'`): `bypass_ok`
+/// compares whole sorted lists, and a duplicate would never equal what
+/// `networksetup` reports back.
+pub fn bypass_want(extra: &[String]) -> Vec<String> {
+    let mut v: Vec<String> = BYPASS_FIXED.iter().map(|s| s.to_string()).collect();
+    for e in extra {
+        if !v.iter().any(|h| h == e) {
+            v.push(e.clone());
+        }
+    }
+    v
 }

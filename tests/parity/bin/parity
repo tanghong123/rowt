@@ -191,6 +191,7 @@ run_in() {       # $1=outdir (sandbox already built)  rest=rowt args — stdout 
     case "$1" in [A-Z_]*=*) ENVS+=("$1"); shift ;; *) break ;; esac
   done
   env -i \
+    ROWT_CAPTIVE_RETRY= \
     ${ENVS[@]+"${ENVS[@]}"} \
     HOME="$out/home" \
     XDG_CONFIG_HOME="$out/home" \
@@ -215,6 +216,7 @@ run_one() {      # $1=outdir  rest=rowt args
   # and process-group handling a `tail -f`-style command needs — it keeps one
   # from wedging the harness, and from outliving it.
   env -i \
+    ROWT_CAPTIVE_RETRY= \
     ${ENVS[@]+"${ENVS[@]}"} \
     HOME="$out/home" \
     XDG_CONFIG_HOME="$out/home" \
@@ -1138,11 +1140,20 @@ cmd_watch_shadow() {
     # a corp_sync reload ends the tick before phase two — still produces a plan
     # and a trace that agree about nothing much, and reports `identical`. That
     # happened: the netcheck case passed while never reaching netcheck.
-    local expect=""
+    #
+    # `probes=N` instead of a substring: the tick must have probed the captive
+    # URL exactly N times. The re-probe burst is silent by design (a log line
+    # there would be an action the planner never took), so the trace is the
+    # only place it shows, and without this a shell that stopped bursting
+    # would pass every gate.
+    local expect="" probes=""
     case "$line" in
       *\|*) expect="$(printf '%s' "${line##*|}" | sed -e 's/^ *//' -e 's/ *$//')"
              line="$(printf '%s' "${line%|*}" | sed -e 's/ *$//')" ;;
     esac
+    case "$expect" in probes=*) probes="${expect#probes=}"; expect="" ;; esac
+    local purl="http://captive.apple.com/hotspot-detect.html"
+    case "$line" in *ROWT_CAPTIVE_URL=*) purl="${line##*ROWT_CAPTIVE_URL=}"; purl="${purl%% *}" ;; esac
     local out; out="$(mktemp -d "${TMPDIR:-/tmp}/parity-shadow.XXXXXX")"
     # shellcheck disable=SC2086 — the case line is intentionally word-split
     run_one "$out" ROWT_WATCH_SHADOW=1 $line
@@ -1156,6 +1167,9 @@ cmd_watch_shadow() {
     elif grep -q DIVERGED "$log"; then
       fails=$((fails + 1)); echo "[$id] DIVERGED"
       sed 's/^/    /' "$log" | head -20
+      echo "    artifacts: $out"
+    elif [ -n "$probes" ] && [ "$(grep -c "^curl .* $purl\$" "$out/trace" 2>/dev/null || true)" != "$probes" ]; then
+      fails=$((fails + 1)); echo "[$id] identical, but the tick probed $purl $(grep -c "^curl .* $purl\$" "$out/trace" 2>/dev/null || true) time(s), not $probes"
       echo "    artifacts: $out"
     elif [ -n "$expect" ] && ! grep -qF "$expect" "$out/home/rowt/log/watch.log" 2>/dev/null; then
       fails=$((fails + 1)); echo "[$id] identical, but the tick never reached what this case is for"
@@ -1252,7 +1266,8 @@ cmd_cli_diff() {
   while IFS= read -r line; do
     case "$line" in ''|'#'*) continue ;; esac
     total=$((total + 1))
-    local A B scen="" tmo="$TIMEOUT" unordered=0 cmdline="$line"
+    local A B scen="" tmo="$TIMEOUT" unordered=0 notrace=0 cmdline="$line"
+    local -a cenv=()
     # Leading KEY=VALUE tokens select the machine state (PARITY_SCENARIO) or the
     # alarm (PARITY_TIMEOUT). The second exists for the streaming commands:
     # `<lane> log` is `tail -f`, so BOTH sides must be killed by the alarm and a
@@ -1261,7 +1276,35 @@ cmd_cli_diff() {
       case "$cmdline" in
         PARITY_SCENARIO=*) scen="${cmdline%% *}"; scen="${scen#PARITY_SCENARIO=}"; cmdline="${cmdline#* }" ;;
         PARITY_TIMEOUT=*)  tmo="${cmdline%% *}";  tmo="${tmo#PARITY_TIMEOUT=}";    cmdline="${cmdline#* }" ;;
-        PARITY_UNORDERED=1) unordered=1; cmdline="${cmdline#* }" ;;
+        # The `=1` markers must match with a command AFTER them, which is how
+        # every case is written. `PARITY_UNORDERED=1)` alone does not: a case
+        # pattern without a wildcard matches the whole line, so for six cases
+        # the marker was never stripped and `rowt PARITY_UNORDERED=1 ping` ran
+        # on both sides — two identical usage errors, reported as identical.
+        # Three commands (ping, probe, up) were credited to cli-diff on the
+        # strength of that. Strip by NAME, and tolerate a bare marker rather
+        # than looping forever on it.
+        PARITY_UNORDERED=1|PARITY_UNORDERED=1\ *)
+          unordered=1; cmdline="${cmdline#PARITY_UNORDERED=1}"; cmdline="${cmdline# }" ;;
+        # Compare everything EXCEPT the argv trace. One command needs this and
+        # the harness refuses it for any other: `watch tick`. The two
+        # implementations disagree about WHEN the machine is read, by design —
+        # the shell reads each fact lazily in the branch that uses it, while the
+        # port snapshots the whole Observation at one instant, which is the
+        # discipline `watch-shadow` and PORTING.md §6.5 rest on. So the tick's
+        # trace carries reads the shell never makes on that path, and always
+        # will. What it must still agree on is everything a user or the next
+        # tick can see — stdout, exit status, the config tree, the audit log —
+        # and that half was broken until 2026-09-12 (four state deltas,
+        # including an unported discovery journal). The tick's argv is gated
+        # elsewhere: `platform-diff` for the OS seams and `watch-shadow` for the
+        # real tick against the real planner.
+        PARITY_NOTRACE=1|PARITY_NOTRACE=1\ *)
+          notrace=1; cmdline="${cmdline#PARITY_NOTRACE=1}"; cmdline="${cmdline# }" ;;
+        # …and a ROWT_* token is the environment the case runs under, on both
+        # sides: the watchdog's probe target and retry schedule are chosen by
+        # environment, not argv, and a tick is otherwise unreachable from here.
+        ROWT_*=*)          cenv+=("${cmdline%% *}"); cmdline="${cmdline#* }" ;;
         *) break ;;
       esac
     done
@@ -1308,7 +1351,8 @@ cmd_cli_diff() {
     ( env -i HOME="$A/home" XDG_CONFIG_HOME="$A/home" \
         PATH="$A/shims:/usr/bin:/bin:/usr/sbin:/sbin" TERM=dumb LC_ALL=C TZ=UTC \
         PARITY_TRACE="$A/trace" PARITY_ENV="$A/env" \
-        ROWT_GEOSITE_BASE="$DEAD_URL" \
+        ROWT_GEOSITE_BASE="$DEAD_URL" ROWT_CAPTIVE_RETRY= \
+        ${cenv[@]+"${cenv[@]}"} \
         ROWT_PY="${PARITY_BASH_PY:-1}" \
         ${PARITY_BASH_IMPL:+ROWT_IMPL="$PARITY_BASH_IMPL"} \
         perl -e "$TMO" "$tmo" \
@@ -1322,7 +1366,8 @@ cmd_cli_diff() {
     ( env -i HOME="$B/home" XDG_CONFIG_HOME="$B/home" \
         PATH="$B/shims:/usr/bin:/bin:/usr/sbin:/sbin" TERM=dumb LC_ALL=C TZ=UTC \
         PARITY_TRACE="$B/trace" PARITY_ENV="$B/env" \
-        ROWT_GEOSITE_BASE="$DEAD_URL" \
+        ROWT_GEOSITE_BASE="$DEAD_URL" ROWT_CAPTIVE_RETRY= \
+        ${cenv[@]+"${cenv[@]}"} \
         perl -e "$TMO" "$tmo" \
         "$rs" $cmdline > "$B/out" 2>/dev/null < /dev/null ) 2>/dev/null || brc=$?
     echo "$arc" > "$A/rc"; echo "$brc" > "$B/rc"
@@ -1383,7 +1428,17 @@ cmd_cli_diff() {
     if [ "$unordered" = 1 ]; then
       sort -o "$A/trace.n" "$A/trace.n"; sort -o "$B/trace.n" "$B/trace.n"
     fi
-    diff -q "$A/trace.n" "$B/trace.n" >/dev/null 2>&1 || bad="$bad trace"
+    # A blanket exemption would rot into "make it green"; it is allowed for the
+    # one command whose argv divergence is a recorded design decision, and the
+    # harness refuses it anywhere else rather than trusting a convention.
+    if [ "$notrace" = 1 ]; then
+      case "$cmdline" in
+        *"watch tick"*) ;;
+        *) die "PARITY_NOTRACE is only for 'watch tick' (see cli-cases.txt); got: $cmdline" ;;
+      esac
+    else
+      diff -q "$A/trace.n" "$B/trace.n" >/dev/null 2>&1 || bad="$bad trace"
+    fi
     # And the audit log, so the BEGIN/END bracketing around mutating commands is
     # proven rather than asserted. The elapsed seconds are wall clock, so they go.
     # Volatile by construction: the clock, the two pids, and the elapsed seconds.

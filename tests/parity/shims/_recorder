@@ -20,7 +20,16 @@ trace="${PARITY_TRACE:-/dev/null}"
 envdir="${PARITY_ENV:-}"
 
 # %q-quote so an argument containing spaces stays one field in the trace.
-{ printf '%s' "$name"; for a in "$@"; do printf ' %q' "$a"; done; printf '\n'; } >> "$trace"
+#
+# Built into ONE string and written ONCE, because the commands that fan out —
+# `ping`, `probe`, `up` — run these concurrently and every `printf` is its own
+# write(2). A group redirection emitted one write per argument, so parallel
+# recorders interleaved INSIDE a line and the trace came out as
+# `digdig +short +time=2 +short …`. Sorting cannot repair that, which is why
+# `PARITY_UNORDERED` alone was not enough once those cases actually ran. A
+# single write under O_APPEND (`>>`) is atomic for a line this size.
+_line="$(printf '%s' "$name"; for a in "$@"; do printf ' %q' "$a"; done)"
+printf '%s\n' "$_line" >> "$trace"
 
 # sudo is recorded and then delegates to the shim for the command it wraps, so
 # `sudo -n /usr/sbin/networksetup -setwebproxystate X off` behaves like the

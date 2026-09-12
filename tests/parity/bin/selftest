@@ -31,6 +31,9 @@
 #   22.  leak _source into manual.json  -> cli-diff must fire
 #   23.  unescape a help page's \$      -> cli-diff must fire
 #   24.  (structural) native() must not claim an arm run() cannot answer
+#   30.  drop a hotspot entry's *. twin  -> cli-diff must fire (proxy on's argv)
+#   31.  stop re-probing after a network change -> watch-shadow must fire (probes=3)
+#   32.  drop the discovery journal's state key   -> the watch tick cases must fire
 #
 # Everything happens in a throwaway copy of the repo; the real tree is never
 # touched. Run it after changing the harness itself.
@@ -847,6 +850,96 @@ else
     bad "cli-diff passed with PY_VLESS pointed at the wrong tool"
   else
     ok "cli-diff catches a helper wired to the wrong tool"
+  fi
+  cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+fi
+
+echo "30. a hotspot entry's *. twin must reach networksetup"
+cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+if [ ! -x "$ROOT/target/release/rowt-rs" ]; then
+  echo "  skip — no release build"
+else
+  # The hotspot lane's only effect is the argv `proxy on` hands to
+  # `-setproxybypassdomains`, and macOS matches a bare name exactly: ship the
+  # lane without the `*.` twin and the feature is green while doing nothing for
+  # `www.<venue>`. Both implementations shape the entries independently, so a
+  # shell that stops emitting the twin must disagree with rowt-rs in the trace.
+  CASE_HS='PARITY_SCENARIO=hotspot-lane proxy on --force'
+  if ! PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" PARITY_CASES="$(only "$CASE_HS")" \
+       "$P" cli-diff >/dev/null 2>&1; then
+    bad "cli-diff already fails before the mutation"
+  else
+    perl -0pi -e 's/\{ print; print "\*\." \$0 \}/{ print }/' "$tmp/bin/rowt"
+    if grep -qF '{ print; print "*." $0 }' "$tmp/bin/rowt"; then
+      bad "could not drop the *. twin (_hotspot_bypass_entries moved?)"
+    elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" PARITY_CASES="$(only "$CASE_HS")" \
+         "$P" cli-diff >/dev/null 2>&1; then
+      bad "cli-diff passed with the hotspot lane's *. twin dropped"
+    else
+      ok "cli-diff catches a hotspot entry shaped without its *. twin"
+    fi
+  fi
+  cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+fi
+
+echo "31. the re-probe burst after a network change must be visible"
+cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+if [ ! -x "$rwatch" ]; then
+  echo "  skip — no release build"
+else
+  # The burst is silent by design — no log line, no planner action — so every
+  # decision gate is blind to it, and only the trace's probe count can tell a
+  # shell that retries from one that has quietly stopped. `probes=3` in the
+  # shadow case is that check; here the retry gate is turned off and the gate
+  # must notice.
+  ln -sf "$rwatch" "$tmp/bin/rowt-watch-tick"
+  if ! "$P" watch-shadow 'ROWT_CAPTIVE_RETRY=0,0' >/dev/null 2>&1; then
+    bad "watch-shadow's burst case already fails before the mutation"
+  else
+    perl -0pi -e 's/if \[ "\$moved" = 1 \]; then/if [ "\$moved" = 2 ]; then/' "$tmp/bin/rowt"
+    if grep -qF 'if [ "$moved" = 1 ]; then' "$tmp/bin/rowt"; then
+      bad "could not disable the retry gate (_captive_state moved?)"
+    elif "$P" watch-shadow 'ROWT_CAPTIVE_RETRY=0,0' >/dev/null 2>&1; then
+      bad "watch-shadow passed with the re-probe burst removed"
+    else
+      ok "watch-shadow catches a probe that no longer re-tries after a network change"
+    fi
+  fi
+  cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+fi
+
+echo "32. the watchdog tick's config-tree parity must be gated"
+cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+# …and the Python, which step 14 widened and nothing restores. Mutations
+# accumulate down this file, and the discovery journal this step is about is
+# built from net-detect on the bash side (cli-diff keeps the Pythons there) and
+# from rowt_core::netdetect on the other. A stale mutation that changed the
+# classification would make the BASELINE fail and read as "already broken".
+cp "$ROOT/config/net-detect.py" "$tmp/config/net-detect.py"
+if [ ! -x "$ROOT/target/release/rowt-rs" ]; then
+  echo "  skip — no release build"
+else
+  # The tick cases carry PARITY_NOTRACE=1, so what they still compare is the
+  # config tree, the audit log, stdout and the exit status. That is the half
+  # that was actually broken — a `watch.health` of 0 where the shell removes
+  # the file, a recovery stamp under the wrong NAME, a `captive=` key rewritten
+  # every tick, and a discovery journal written in a second schema with no
+  # `discovery_sig` at all. Drop that state key from the shell and the cases
+  # must go red, or the exemption has quietly turned them into no-ops.
+  CASE_TICK='PARITY_NOTRACE=1 ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick'
+  if ! PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" PARITY_CASES="$(only "$CASE_TICK")" \
+       "$P" cli-diff >/dev/null 2>&1; then
+    bad "the watch tick case already fails before the mutation"
+  else
+    perl -0pi -e 's/  sset discovery_sig "\$sig"\n//' "$tmp/bin/rowt"
+    if grep -qF 'sset discovery_sig "$sig"' "$tmp/bin/rowt"; then
+      bad "could not drop the discovery_sig write (_discovery_journal moved?)"
+    elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" PARITY_CASES="$(only "$CASE_TICK")" \
+         "$P" cli-diff >/dev/null 2>&1; then
+      bad "cli-diff passed with the discovery journal's state key dropped"
+    else
+      ok "the tick cases catch a discovery journal that stops recording its signature"
+    fi
   fi
   cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
 fi

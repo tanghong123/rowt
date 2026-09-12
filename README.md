@@ -62,6 +62,7 @@ rowt-share-on                 # tailnet-only TCP forward :17890 -> rowt :7890 (r
 rowt escape add youtube.com   # send another site through the personal tunnel
 rowt corp add '*.intranet.example.com' '10.0.0.0/8'   # send a domain or CIDR into the corp VPN
 rowt block add ads.example.com   # sinkhole an ad/telemetry domain (no DNS, no dial)
+rowt hotspot add unitedwifi.com  # a venue's captive portal: reached WITHOUT the proxy, so its login page loads
 rowt use JP                   # pick a server (rowt ping shows the fastest)
 rowt status                   # is it working? (mode / server / proxy / reachability)
 rowt speed <url>              # is a lane FAST enough — and is rowt the cause? (it says which)
@@ -234,6 +235,30 @@ So the flow is:
 `rowt monitor`'s split of **`router`** (is the tunnel engine up) vs **`sys
 proxy`** (is system traffic being pointed at it) makes this mode legible at a
 glance.
+
+With `rowt watch install` the dance is automatic: the watchdog probes for a
+portal on every tick (resolving the probe host at the Wi-Fi's own DHCP
+resolver, where the portal's hijack lives, and re-probing a few times right
+after a network change), drops the system proxy when it sees one, **opens the
+portal's login page in your browser** (the request the OS made before the drop
+died on the proxy, and nothing retries it), and restores the proxy once login
+clears. That still leaves a gap of up to a tick before the page appears, and
+it needs the watchdog to be installed and the portal to show up in its probe —
+so for venues you keep coming back to, put the portal's hostname in the
+**hotspot lane**:
+
+```sh
+rowt hotspot add unitedwifi.com      # macOS bypass list gets unitedwifi.com AND *.unitedwifi.com
+rowt proxy status                    # the bypass list as macOS holds it
+```
+
+Every entry goes on macOS's proxy *bypass* list, so the OS and every
+system-proxy app reach the portal directly, proxy on or off — the login page
+loads on the first request and there is no race to win. It is not a routing
+lane: nothing in it is rendered, an edit refreshes the bypass list instead of
+restarting the router, and `corp sync` stops mirroring a venue's DHCP-advertised
+domain into the corp lane while it sits here. CLI tools ignore the macOS list;
+`rowt proxy env` and `rowt run` export the same entries as `no_proxy` for them.
 
 ## Three-way routing
 
@@ -565,7 +590,7 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 | `report` | full offline diagnostic (deps, configs, per-server reachability, DNS, through-proxy tests, log + audit tail) → `~/.config/rowt/diag-*.txt`, **secrets masked**, for sharing. |
 | `audit [-n N\|all\|path\|clear]` | the **mutation trail** — one line per state-changing op, whether you ran it or the `watch` agent did, with `BEGIN`/`END`/`ABORT`, timing, and a `by=<parent>(<tty>)` field that says whether it was hands-on (`by=zsh`) or the watchdog (`by=launchd`). `BEGIN` is written before the work, so even a command that hangs leaves a trace. Read-only commands aren't recorded. → `~/.config/rowt/log/audit.log`. |
 | `metrics [status\|top\|path\|query]` | **per-domain traffic history** — a `collector` sidecar records bytes in/out per domain/lane into a tiered SQLite store (5s → 1y). `status` shows liveness; `top [secs]` the heaviest domains; `path` the store path + schema; `query "<SQL>"` a read-only SQL passthrough. Surfaced interactively in `monitor` via the `v` flip. See [Traffic metrics](#traffic-metrics). |
-| `config [list\|export\|import]` | **back up / move the whole setup** to another machine. `export` bundles just the source-of-truth files (server pool, subscriptions, escape/corp/block lane rules) into a `.tgz`; `import <file>` restores them and re-renders. Skips the machine-specific `host.json`/`state`/binary — those regenerate via `render`/`up`. Bundle holds credentials: move it encrypted. |
+| `config [list\|export\|import]` | **back up / move the whole setup** to another machine. `export` bundles just the source-of-truth files (server pool, subscriptions, escape/corp/block/hotspot lane rules) into a `.tgz`; `import <file>` restores them and re-renders. Skips the machine-specific `host.json`/`state`/binary — those regenerate via `render`/`up`. Bundle holds credentials: move it encrypted. |
 | `monitor` | **full-screen TUI** (`htop`-style) — the live view of everything at once: connections + throughput, errors/blocked over a rolling window, and server health, plus confirmed, reversible controls (server switch, lane routing, proxy toggle). See [Monitor (TUI)](#monitor-tui). |
 | `run <command> [args…]` | run a command through whatever proxy path actually reaches the internet — probes, in order, the current shell proxy env → the macOS system proxy → rowt's port (if the router is up and the system proxy is off) → direct, and execs the command with the first where the target host answers (default `https://www.google.com/`; override `ROWT_RUN_TARGET`). Aborts without running if none work. Handy for CLI tools (`claude`, `git`, `npm`…) that ignore the system proxy: `rowt run claude`. |
 
@@ -592,6 +617,7 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 | command | what it does |
 | --- | --- |
 | `escape` / `corp` / `block` (no verb) | list the lane. |
+| `hotspot <list\|add\|rm\|import\|clear\|dump>` | **captive-portal hosts that bypass the proxy at the OS level**, so a venue's login page loads while rowt is up: each entry goes on macOS's proxy bypass list as `x.com` *and* `*.x.com` (`--domain` = that exact host only; an IP/CIDR as written). Not a routing lane — nothing is rendered, an edit re-applies the bypass list (where rowt owns the proxy) instead of restarting the router, `corp sync` stops mirroring a DHCP-advertised domain that sits here, and `proxy env`/`run` export the list as `no_proxy`. Same single-lane rule as the others. See [Captive portals](#captive-portals-hotel--airplane-wi-fi). |
 | `… add <d>…` / `… rm <d>…` | add / remove domains (corp also takes CIDRs). Reloads if running. |
 | `… add --domain <d>…` | match the **whole host only**, not its subdomains — stored as `domain:<host>`, rendered as a sing-box `domain` rule instead of `domain_suffix`. `--domain-suffix` names the default explicitly. Applies to every entry of that `add`/`rm`, from any position. |
 | `… add --force <d>…` | add an entry that is a **whole namespace**. Lane entries are suffixes, so `com` is every `.com` and `co.uk` is every `.co.uk`; both are declined unless you say `--force`. |
@@ -731,7 +757,11 @@ place), or `sys proxy` to toggle it (hover-highlights).
   previews the change); a second press of the same key or `↵` commits, `Esc`
   cancels. Edits are batched — one router reload fires ~7s after the last edit
   settles.
-- `E` / `C` / `B` / `D` — the same four edits on the host's **parent suffix**
+- `t` — put the locked domain on the **hotspot** lane (macOS's proxy bypass
+  list, so a venue's captive-portal page loads with the proxy on; see
+  [Captive portals](#captive-portals-hotel--airplane-wi-fi)). Same arm/commit
+  flow; the bypass list is refreshed on the spot, and `d` clears it too.
+- `E` / `C` / `B` / `D` / `T` — the same five edits on the host's **parent suffix**
   rather than the host: `x.y.z.com` → `z.com`, so one keystroke covers the whole
   service. Registry second levels stay whole (`x.y.z.co.uk` → `z.co.uk`, never
   `co.uk`). The entry is bare: sing-box matches `domain_suffix` on a label
@@ -853,8 +883,10 @@ config/corp-domains.txt    template for bucket 2 (corp), domains + CIDRs
 lima/rowt-vm.yaml        bridged Lima VM template (mode vm)
 ```
 
-The live, user-editable copies of the two `*-domains.txt` lists live at
-`~/.config/rowt/`; the repo files are just first-run templates.
+The live, user-editable copies of the `*-domains.txt` lists live at
+`~/.config/rowt/`; the repo files are just first-run templates. The hotspot
+lane (`hotspot-domains.txt`, the captive-portal hosts that bypass the proxy)
+has no template — `rowt hotspot add` creates it.
 
 > ⚠️ Routing around a mandated corporate VPN may violate acceptable-use policy.
 > This tool is for a **personal machine at home**; confirm it's sanctioned before

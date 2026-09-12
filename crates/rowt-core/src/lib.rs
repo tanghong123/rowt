@@ -8,10 +8,12 @@
 //! `tests/parity` rather than by inspection.
 
 pub mod bplist;
+pub mod cksum;
 pub mod classify;
 pub mod foreign;
 pub mod foreignio;
 pub mod geosite;
+pub mod hotspot;
 pub mod importmerge;
 pub mod laneerr;
 pub mod lanes;

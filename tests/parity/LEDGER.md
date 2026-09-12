@@ -57,6 +57,9 @@ from the source and are not listed.
 | `block errors` | yes | block_errors |
 | `block log` | yes | block_log |
 | `block stats` | yes | block_stats |
+| `hotspot errors` | **no** | — |
+| `hotspot log` | **no** | — |
+| `hotspot stats` | **no** | — |
 | `direct errors` | yes | direct_errors |
 | `direct log` | yes | direct_log |
 | `direct stats` | yes | direct_stats |

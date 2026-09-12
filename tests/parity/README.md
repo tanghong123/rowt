@@ -47,6 +47,25 @@ single-lane invariant disabled, a captive log line reworded. It asserts each
 mutation actually landed first: a pattern that matched nothing looks exactly
 like a gate that failed to fire.
 
+Two case markers change what is compared, and both are narrow on purpose.
+`PARITY_UNORDERED=1` compares the trace as a SET, for the commands that fan out
+(`ping`, `probe`, `up`) and whose write order is the scheduler's. `PARITY_NOTRACE=1`
+skips the trace entirely, and the harness **refuses it for anything but
+`watch tick`** — whose argv divergence is a design decision recorded in
+PORTING.md, not a gap. Both markers had a parsing bug until 2026-09-12: the case
+pattern carried no wildcard, so the marker was never stripped and six cases ran
+`rowt PARITY_UNORDERED=1 ping`, comparing two identical usage errors and
+reporting them identical. Three commands were credited to cli-diff on that
+basis; fixing the parse turned four of the six red — on a real stdout divergence
+(`ping` let the router it starts for the test print onto stdout, where the shell
+sends the whole start to /dev/null) and on a fidelity bug in the recorder itself.
+`shims/_recorder` built each trace line with one `printf` per argument inside a
+group redirection, i.e. one `write(2)` per argument, so the very commands
+`PARITY_UNORDERED` exists for — the ones that fan out — interleaved INSIDE a
+line: `digdig +short +time=2 +short …`. Sorting cannot repair a corrupted line.
+The shim now formats the line into one string and writes it once, which
+`O_APPEND` makes atomic at this size.
+
 `watch-shadow` is the gate that most depends on this. It asserts the production
 shadow's own verdict, and the thing it exists to catch — an observation captured
 at the wrong instant — is invisible unless the sandbox changes underneath the
@@ -186,9 +205,9 @@ reconcile and the watchdog's decision table. Each has a gate:
 | `merge-diff` | the review FILE, plus the streams, vs the Python | 1,500 generated cases |
 | `foreign-diff` | stdout + stderr + exit status, over client config TREES | 1,200 generated cases |
 | `sr-diff` | stdout + stderr + exit status, over Shadowrocket installs | 1,200 generated cases |
-| `watch-diff` | decisions, read back from watch.log + trace | 5 cases |
-| `platform-diff` | the argv the platform layer produces | 8 cases |
-| `cli-diff` | stdout, status, the config tree (content + mode), argv trace, audit log | 241 cases |
+| `watch-diff` | decisions, read back from watch.log + trace | 6 cases |
+| `platform-diff` | the argv the platform layer produces | 10 cases |
+| `cli-diff` | stdout, status, the config tree (content + mode), argv trace, audit log | 330 cases |
 
 `merge-diff` is the only gate whose primary artifact is a file written in
 place: `cmd_import` reads the accumulation straight back with jq, and a human

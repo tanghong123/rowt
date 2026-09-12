@@ -696,7 +696,8 @@ pub fn proxy_on(ctx: &Ctx, force: bool) -> String {
         return "no active network service — connect a network first".into();
     };
     let pointing = p.proxy_pointing_ok(&svc, ctx.port);
-    let bypass = rowt_platform::bypass_ok(&svc);
+    let extra = crate::hotspot_bypass(&ctx.cfg);
+    let bypass = rowt_platform::bypass_ok(&svc, &extra);
     if pointing && bypass {
         return format!("  ✓ '{svc}' already proxied to 127.0.0.1:{} with local bypass — no change (no sudo)", ctx.port);
     }
@@ -712,8 +713,7 @@ pub fn proxy_on(ctx: &Ctx, force: bool) -> String {
         out.push_str(&format!("  proxy already pointing at 127.0.0.1:{} — left as is\n", ctx.port));
     }
     if !bypass {
-        let want: Vec<String> = rowt_platform::bypass_want().iter().map(|s| s.to_string()).collect();
-        let _ = p.proxy_set_bypass(&svc, &want);
+        let _ = p.proxy_set_bypass(&svc, &rowt_platform::bypass_want(&extra));
         if guarded() {
             out.push_str("  (system proxy left alone — ROWT_NO_SYSPROXY=1)");
         } else {
@@ -723,6 +723,28 @@ pub fn proxy_on(ctx: &Ctx, force: bool) -> String {
         out.push_str("  ✓ local/mDNS bypass already set — left as is");
     }
     out
+}
+
+/// `_hotspot_apply` — after a hotspot-lane change, refresh the live bypass
+/// list, but only where rowt already owns the proxy. With the proxy off or
+/// pointed elsewhere the list is picked up by the next `proxy on` — writing it
+/// now would be editing a proxy configuration that is not rowt's.
+pub fn hotspot_apply(ctx: &Ctx) -> String {
+    let p = Mac;
+    let svc = p.active_service().filter(|s| p.proxy_pointing_ok(s, ctx.port));
+    let Some(svc) = svc else {
+        return format!("  (system proxy not pointing at rowt — the bypass list is applied by the next '{} proxy on')", crate::PROG);
+    };
+    let extra = crate::hotspot_bypass(&ctx.cfg);
+    if rowt_platform::bypass_ok(&svc, &extra) {
+        return format!("  ✓ proxy bypass already current for '{svc}'");
+    }
+    let _ = p.proxy_set_bypass(&svc, &rowt_platform::bypass_want(&extra));
+    if guarded() {
+        "  (system proxy left alone — ROWT_NO_SYSPROXY=1)".into()
+    } else {
+        format!("  ✓ proxy bypass refreshed for '{svc}' (hotspot lane)")
+    }
 }
 
 /// The escape selector's current pick, via the clash API. None when the router

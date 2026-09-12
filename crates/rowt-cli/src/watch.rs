@@ -78,6 +78,11 @@ fn plist_body(ctx: &Ctx, self_bin: &Path) -> String {
               "ROWT_DNS_DIRECT", "ROWT_DNS_LOCAL", "ROWT_GFW_CANARIES", "ROWT_GFW_TIMEOUT",
               "SINGBOX_VERSION", "ROWT_LOG_LEVEL", "ROWT_WATCH_INTERVAL", "ROWT_HEALTH_FAILS",
               "ROWT_HEALTH_COOLDOWN", "ROWT_HEALTH_TIMEOUT", "ROWT_HEALTH_URL",
+              // The captive knobs reach the agent too. They did not until
+              // 3.5.0, so `ROWT_CAPTIVE_CHECK=0` — which DESIGN.md §11 offers
+              // as the way to switch portal handling off — did nothing unless
+              // you hand-edited the plist.
+              "ROWT_CAPTIVE_CHECK", "ROWT_CAPTIVE_URL", "ROWT_CAPTIVE_TIMEOUT", "ROWT_CAPTIVE_RETRY",
               "ROWT_WATCH_SHADOW", "ROWT_RENDER_SHADOW"] {
         if let Ok(val) = std::env::var(v) {
             if !val.is_empty() {
@@ -148,27 +153,130 @@ fn uid() -> String {
 
 // ------------------------------------------------------------------ observing
 
-/// `_captive_state` — is a walled garden in the way?
+/// `_captive_state` — is a walled garden in the way, and where is its page?
 ///
 /// Apple's probe answers 200 with a body containing "Success". A 200 with
-/// anything ELSE is a portal serving its login page under the real URL, and a
-/// 3xx is a portal redirecting. Anything else — including no answer at all —
-/// is `unknown`, and unknown means hands-off: acting on a guess here would
-/// drop the proxy on a flaky network.
-fn captive_state() -> CaptiveState {
+/// anything ELSE is a portal serving its login page under the real URL, a
+/// 3xx is a portal redirecting, and a 511 is one saying so in as many words
+/// (RFC 6585). Anything else — including no answer at all — is `unknown`, and
+/// unknown means hands-off: acting on a guess here would drop the proxy on a
+/// flaky network. A 403 is deliberately unknown: a corp web filter answers the
+/// probe with one too, and acting on it would hold the proxy off all day.
+///
+/// With `captive`, the second half is the portal's page: the redirect target
+/// when there was one, else the probe URL (a portal serving its page under
+/// that URL answers the browser the same way).
+///
+/// `iface` is the physical interface (None: offline); `moved` says the network
+/// just changed (net_id differs from the one netcheck last wrote).
+///
+/// The probe host is resolved at the NIC's DHCP resolver — the hotspot's own
+/// DNS, where the hijack lives; the system resolver is not that server once a
+/// VPN is up or the user pinned one, and a probe resolved elsewhere sails past
+/// the hijack and reads "clear" from inside a walled garden — and pinned with
+/// `--resolve` (macOS curl has no --dns-servers). No resolver, no answer, or an
+/// IP-literal probe URL means the plain probe, exactly as before.
+///
+/// Right after a network change an `unknown` — the link still settling, the
+/// portal's DNS not yet answering — is re-probed after `ROWT_CAPTIVE_RETRY`
+/// seconds each, so the drop lands on THIS tick and not on the next timer tick
+/// two minutes later. Only then: mid-episode and in steady state one probe per
+/// tick is the budget, and `unknown` there is the hands-off answer it always
+/// was. Silent on purpose — a log line here would be an action the planner
+/// never took.
+fn captive_state(iface: Option<&str>, moved: bool) -> (CaptiveState, Option<String>) {
     if env_or("ROWT_CAPTIVE_CHECK", "1") != "1" {
-        return CaptiveState::Unknown;
+        return (CaptiveState::Unknown, None);
     }
     let url = env_or("ROWT_CAPTIVE_URL", "http://captive.apple.com/hotspot-detect.html");
-    let t = env_or("ROWT_CAPTIVE_TIMEOUT", "3");
-    let o = Command::new("curl")
-        .args(["-s", "--noproxy", "*", "--max-time", &t, "-w", "\n%{http_code}", &url])
-        .stderr(Stdio::null()).output();
-    let Ok(o) = o else { return CaptiveState::Unknown };
-    if !o.status.success() {
-        return CaptiveState::Unknown;
+    let t = env_or("ROWT_CAPTIVE_TIMEOUT", "6");
+    let named = probe_host_port(&url);
+    let pin = || -> Option<String> {
+        let (host, port) = named.as_ref()?;
+        let ns = Mac.dhcp_dns(iface.unwrap_or(""))?;
+        let ip = Mac.resolve_at(&ns, host)?;
+        Some(format!("{host}:{port}:{ip}"))
+    };
+    let mut resolve = pin();
+    // `${ROWT_CAPTIVE_RETRY-5,10}`: unset means the default, set-but-empty
+    // means no retry (the parity sandbox says so, or every unknown would cost
+    // it fifteen seconds).
+    let delays = if moved {
+        retry_delays(&std::env::var("ROWT_CAPTIVE_RETRY").unwrap_or_else(|_| "5,10".into()))
+    } else {
+        Vec::new()
+    };
+    let mut r = probe_once(&url, &t, resolve.as_deref());
+    for d in delays {
+        if r.0 != CaptiveState::Unknown {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(d));
+        // The resolver may be what was not answering yet: a probe that could
+        // not be pinned tries again to pin itself, or the burst would re-probe
+        // via the system resolver — the case the pin exists for.
+        if resolve.is_none() {
+            resolve = pin();
+        }
+        r = probe_once(&url, &t, resolve.as_deref());
     }
-    probe_verdict(&String::from_utf8_lossy(&o.stdout))
+    r
+}
+
+/// curl's `--write-out` format, and it is a LITERAL backslash-n, not a newline.
+///
+/// The shell writes it inside single quotes (bin/rowt, `_captive_probe_once`),
+/// so curl receives `\` `n` and expands the escape itself. Passing a real
+/// newline here produces byte-identical OUTPUT — curl expands one and passes
+/// the other through — but a different argv, and the parity harness compares
+/// the argv the two implementations produce. Keep the bytes the shell sends.
+const PROBE_W: &str = "\\n%{http_code}\\nredirect=%{redirect_url}";
+
+/// The exact argv for one probe, so it can be asserted in a test rather than
+/// only observed through the harness. `resolve` is curl's `host:port:ip`.
+fn probe_args<'a>(url: &'a str, timeout: &'a str, resolve: Option<&'a str>) -> Vec<&'a str> {
+    let mut args: Vec<&str> = vec!["-s", "--noproxy", "*", "--max-time", timeout];
+    if let Some(r) = resolve {
+        args.extend(["--resolve", r]);
+    }
+    args.extend(["-w", PROBE_W, url]);
+    args
+}
+
+/// One probe. `resolve` is curl's `host:port:ip`, placed right before `-w`.
+fn probe_once(url: &str, timeout: &str, resolve: Option<&str>) -> (CaptiveState, Option<String>) {
+    let args = probe_args(url, timeout, resolve);
+    let o = Command::new("curl").args(&args).stderr(Stdio::null()).output();
+    let Ok(o) = o else { return (CaptiveState::Unknown, None) };
+    if !o.status.success() {
+        return (CaptiveState::Unknown, None);
+    }
+    probe_verdict(&String::from_utf8_lossy(&o.stdout), url)
+}
+
+/// The probe URL's `host` and `port` for `--resolve` — None when there is
+/// nothing to resolve: no host, an IPv6 literal, or a dotted-quad literal
+/// (the sandbox's `127.0.0.1:8099`, and any `ROWT_CAPTIVE_URL` pinned by IP).
+/// The shell: `${url#*://}` up to the first `/`, split at the colon, else
+/// 443 for https and 80 otherwise; a name is `*[!0-9.]*`.
+fn probe_host_port(url: &str) -> Option<(String, String)> {
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let hp = rest.split('/').next().unwrap_or("");
+    let (host, port) = match hp.split_once(':') {
+        Some((h, p)) => (h.to_string(), p.rsplit(':').next().unwrap_or("").to_string()),
+        None => (hp.to_string(), if url.starts_with("https://") { "443" } else { "80" }.to_string()),
+    };
+    if host.is_empty() || host.starts_with('[') || host.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        return None;
+    }
+    Some((host, port))
+}
+
+/// `ROWT_CAPTIVE_RETRY`: seconds, comma- (or space-) separated. A token that
+/// is not a whole number is skipped, as the shell's `case` skips it — never
+/// a `sleep` that fails and takes the tick with it.
+fn retry_delays(spec: &str) -> Vec<u64> {
+    spec.split(|c: char| c == ',' || c.is_whitespace()).filter_map(|t| t.parse().ok()).collect()
 }
 
 /// `jq -e '.delay // empty'` on the clash delay-test's answer.
@@ -184,23 +292,38 @@ fn delay_answered(out: &str) -> bool {
         .is_some_and(|d| !matches!(d, serde_json::Value::Null | serde_json::Value::Bool(false)))
 }
 
-/// The verdict alone, given what `curl -w '\n%{http_code}'` wrote.
+/// The verdict and the page, given what `curl -w '\n%{http_code}\nredirect=%{redirect_url}'`
+/// wrote for `url`.
 ///
 /// Split from the call so it can be tested: this is the decision that drops
 /// the system proxy, and the alternative to a test is toggling a real portal.
-fn probe_verdict(body: &str) -> CaptiveState {
-    // `${out##*$'\n'}` / `${out%$'\n'*}` — split at the LAST newline, because
-    // the body itself contains plenty.
-    let (payload, code) = match body.rfind('\n') {
-        Some(i) => (&body[..i], body[i + 1..].trim()),
-        None => ("", body.trim()),
+fn probe_verdict(body: &str, url: &str) -> (CaptiveState, Option<String>) {
+    // `$(…)` strips trailing newlines, then `${out##*$'\n'}` / `${out%$'\n'*}`
+    // peel the LAST line twice — the redirect, then the code — because the
+    // body itself contains plenty of newlines. The redirect line carries a
+    // prefix so that an empty redirect is still a line and not a trailing
+    // newline the substitution would have eaten.
+    let body = body.trim_end_matches('\n');
+    let split = |s: &str| -> (String, String) {
+        match s.rfind('\n') {
+            Some(i) => (s[..i].to_string(), s[i + 1..].to_string()),
+            None => (String::new(), s.to_string()),
+        }
     };
-    match code {
+    let (rest, redir) = split(body);
+    let redir = redir.strip_prefix("redirect=").map(str::to_string).unwrap_or(redir);
+    let (payload, code) = split(&rest);
+    let code = code.trim();
+    let verdict = match code {
         "200" if payload.contains("Success") => CaptiveState::Clear,
         "200" => CaptiveState::Captive,
         c if c.len() == 3 && c.starts_with("30") => CaptiveState::Captive,
+        "511" => CaptiveState::Captive,
         _ => CaptiveState::Unknown,
-    }
+    };
+    let page = (verdict == CaptiveState::Captive)
+        .then(|| if redir.is_empty() { url.to_string() } else { redir });
+    (verdict, page)
 }
 
 /// `net_id` — a signature for "which network am I on", so a home→hotspot move
@@ -209,14 +332,14 @@ fn net_id(iface: &str) -> String {
     if iface.is_empty() {
         return String::new();
     }
-    let ssid = out("networksetup", &["-getairportnetwork", iface]);
-    let ssid = ssid.rsplit(": ").next().unwrap_or("").trim().to_string();
     let addr = out("ipconfig", &["getifaddr", iface]).trim().to_string();
     let router = out("ipconfig", &["getoption", iface, "router"]).trim().to_string();
+    let ssid = out("networksetup", &["-getairportnetwork", iface]);
+    let ssid = ssid.rsplit(": ").next().unwrap_or("").trim().to_string();
     format!("{ssid} {addr}/{router}").trim().to_string()
 }
 
-fn observe(ctx: &Ctx, cap: Option<CaptiveState>, health_ok: bool) -> Observation {
+fn observe(ctx: &Ctx, cap: Option<CaptiveState>, portal: Option<String>, health_ok: bool) -> Observation {
     let p = Mac;
     let svc = p.active_service();
     let iface = p.detect_iface();
@@ -228,9 +351,10 @@ fn observe(ctx: &Ctx, cap: Option<CaptiveState>, health_ok: bool) -> Observation
     Observation {
         proxy_intent: ctx.sget("proxy_intent"),
         captive: cap,
+        portal_url: portal,
         proxy_any_on: svc.as_ref().map(|s| p.proxy_any_on(s)).unwrap_or(false),
         proxy_pointing_ok: svc.as_ref().map(|s| p.proxy_pointing_ok(s, ctx.port)).unwrap_or(false),
-        proxy_bypass_ok: svc.as_ref().map(|s| rowt_platform::bypass_ok(s)).unwrap_or(false),
+        proxy_bypass_ok: svc.as_ref().map(|s| rowt_platform::bypass_ok(s, &crate::hotspot_bypass(&ctx.cfg))).unwrap_or(false),
         active_service: svc,
         host_running: lifecycle::host_running(ctx).is_some(),
         intent: ctx.sget("intent"),
@@ -244,25 +368,82 @@ fn observe(ctx: &Ctx, cap: Option<CaptiveState>, health_ok: bool) -> Observation
     }
 }
 
+/// The recovery-cooldown stamp. `watch.restart` is the name the SHELL uses
+/// (`WATCH_RESTART`); this read `watch.recovery` for three releases, a file
+/// bin/rowt never writes — so a native tick always loaded 0 and the
+/// `ROWT_HEALTH_COOLDOWN` gate could never hold it back.
+fn restart_file(ctx: &Ctx) -> PathBuf {
+    ctx.cfg.join("watch.restart")
+}
+fn health_file(ctx: &Ctx) -> PathBuf {
+    ctx.cfg.join("watch.health")
+}
+
 fn load_state(ctx: &Ctx) -> State {
     State {
         captive_flag: ctx.sget("captive") == "1",
-        health_fails: read(&ctx.cfg.join("watch.health")).trim().parse().unwrap_or(0),
+        health_fails: read(&health_file(ctx)).trim().parse().unwrap_or(0),
         last_net_id: {
             let n = read(&ctx.cfg.join("watch.net")).trim().to_string();
             if n.is_empty() { None } else { Some(n) }
         },
-        last_recovery: read(&ctx.cfg.join("watch.recovery")).trim().parse().unwrap_or(0),
+        last_recovery: read(&restart_file(ctx)).trim().parse().unwrap_or(0),
     }
 }
 
-fn save_state(ctx: &Ctx, st: &State) {
-    lifecycle::sset(ctx, "captive", if st.captive_flag { "1" } else { "" });
-    let _ = std::fs::write(ctx.cfg.join("watch.health"), format!("{}\n", st.health_fails));
-    let _ = std::fs::write(ctx.cfg.join("watch.recovery"), format!("{}\n", st.last_recovery));
+/// Persist the two counters and the captive flag — but only where they CHANGED
+/// since `disk` was read, because that is what the shell does and the config
+/// tree is compared byte for byte.
+///
+/// The shell has no `save_state`: it writes each value at the site that changes
+/// it, so a tick that changes nothing leaves no trace. Writing unconditionally
+/// looks harmless and is not. `sset` appends the key at the end of `state`, so
+/// re-writing an unchanged value MOVES it and the file differs; a `0` streak
+/// written where the shell `rm`s the file leaves a file the shell never
+/// creates; and, worst, `Action::Reload` deletes `watch.health` to clear the
+/// streak — an unconditional save immediately wrote the pre-reload count back,
+/// so the next single failure re-entered recovery instead of counting 1/3.
+///
+/// Lossless by construction: `load_state` rebuilds every field from disk at the
+/// top of each tick, so a field that matches what is already there has nothing
+/// to save. `disk` tracks what this tick has written, since the tick saves
+/// twice (after the guard, then after netcheck).
+fn save_state(ctx: &Ctx, disk: &mut State, new: &State) {
+    if new.captive_flag != disk.captive_flag {
+        lifecycle::sset(ctx, "captive", if new.captive_flag { "1" } else { "" });
+        disk.captive_flag = new.captive_flag;
+    }
+    if new.health_fails != disk.health_fails {
+        // `rm -f "$WATCH_HEALTH"` (bin/rowt) — a cleared streak is an ABSENT
+        // file, not a zero.
+        if new.health_fails == 0 {
+            let _ = std::fs::remove_file(health_file(ctx));
+        } else {
+            let _ = std::fs::write(health_file(ctx), format!("{}\n", new.health_fails));
+        }
+        disk.health_fails = new.health_fails;
+    }
+    if new.last_recovery != disk.last_recovery {
+        let _ = std::fs::write(restart_file(ctx), format!("{}\n", new.last_recovery));
+        disk.last_recovery = new.last_recovery;
+    }
 }
 
 // ------------------------------------------------------------------ effects
+
+/// `perform`, minus the two actions the tick has already carried out at the
+/// instant the shell carries them out: the discovery journal (before the
+/// observation) and corp_sync (before the netcheck observation). Both stay in
+/// the plan — the shadow compares plans — so the skip lives here rather than
+/// in the FSM.
+fn perform_planned(ctx: &Ctx, actions: &[Action]) {
+    for a in actions {
+        if matches!(a, Action::Journal(_) | Action::CorpSync) {
+            continue;
+        }
+        perform(ctx, std::slice::from_ref(a));
+    }
+}
 
 fn perform(ctx: &Ctx, actions: &[Action]) {
     for a in actions {
@@ -277,6 +458,15 @@ fn perform(ctx: &Ctx, actions: &[Action]) {
             }
             Action::CaptiveProxyOn(svc) => {
                 let _ = Mac.proxy_states_on(svc, true);
+            }
+            // `open` lands in the user's session (the LaunchAgent is an Aqua
+            // agent), so the browser gets the page the OS never got to ask for.
+            Action::OpenPortal(u) => {
+                let ok = Command::new("open").arg(u).stdout(Stdio::null()).stderr(Stdio::null())
+                    .status().map(|s| s.success()).unwrap_or(false);
+                if !ok {
+                    watch_log(ctx, &format!("captive: could not open the browser for {u}"));
+                }
             }
             Action::ClearStaleProxy(svc) => {
                 let _ = Mac.proxy_states_off(svc, true);
@@ -339,23 +529,53 @@ fn perform(ctx: &Ctx, actions: &[Action]) {
     }
 }
 
-/// The discovery journal: what this network advertises, appended only when the
-/// signature CHANGES. In steady state it writes nothing, which is what makes it
-/// readable months later.
+/// The discovery journal (`_discovery_journal`): one JSONL line in
+/// log/discovery.log each time what the network and VPN advertise CHANGES.
+/// In steady state it writes nothing, which is what makes it readable months
+/// later.
+///
+/// This used to be a different journal rather than a port of that one — a
+/// pipe-separated line built from raw `scutil --dns` greps, timestamped
+/// without the zone, deduped against the last line of the file instead of the
+/// `discovery_sig` state key, and with no `vpn_iface` field at all. Two
+/// implementations were writing one log in two schemas, and nothing could read
+/// the result. The shape below is the shell's, field for field:
+///
+///   {"net":…,"vpn_iface":…,"captive":…,"dhcp":[…],"scoped":[…],"ns":[…]}
+///
+/// `dhcp` is what DHCP advertised (`physical_search`), `scoped` is the internal
+/// domains that did NOT come from DHCP — jq's `(.internal_domains // []) -
+/// (.physical_search // [])`, which preserves the left order — and `ns` is the
+/// corp nameservers. Dedupe is a POSIX `cksum` of those bytes, compared against
+/// `discovery_sig` in `state`, so a rotated or truncated log does not make the
+/// next tick re-journal a network that has not changed.
 fn journal(ctx: &Ctx, cap: CaptiveState) {
-    let iface = Mac.detect_iface().unwrap_or_default();
-    let sig = format!("{} | {} | {}", net_id(&iface), cap.as_str(),
-                      out("scutil", &["--dns"]).lines()
-                          .filter(|l| l.contains("search domain") || l.contains("nameserver"))
-                          .collect::<Vec<_>>().join(","));
-    let p = ctx.logdir().join("discovery.log");
-    let last = read(&p).lines().next_back().unwrap_or("").to_string();
-    if last.ends_with(&sig) {
+    if env_or("ROWT_DISCOVERY_LOG", "1") != "1" {
         return;
     }
+    let d = rowt_core::netdetect::parse(&out("scutil", &["--dns"]));
+    let nid = net_id(&Mac.detect_iface().unwrap_or_default());
+    let vpn = crate::corp::vpn_iface();
+    let scoped: Vec<&String> = d.internal_domains.iter().filter(|x| !d.physical_search.contains(x)).collect();
+    let line = serde_json::json!({
+        "net": nid,
+        "vpn_iface": vpn,
+        "captive": cap.as_str(),
+        "dhcp": d.physical_search,
+        "scoped": scoped,
+        "ns": d.corp_nameservers,
+    })
+    .to_string();
+    let sig = rowt_core::cksum::posix(line.as_bytes()).to_string();
+    if ctx.sget("discovery_sig") == sig {
+        return;
+    }
+    lifecycle::sset(ctx, "discovery_sig", &sig);
+    let dir = ctx.logdir();
+    let _ = std::fs::create_dir_all(&dir);
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
-        let _ = writeln!(f, "{}  {sig}", crate::sh_date("+%Y-%m-%d %H:%M:%S"));
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("discovery.log")) {
+        let _ = writeln!(f, "{} {line}", crate::sh_date("+%Y-%m-%dT%H:%M:%S%z"));
     }
 }
 
@@ -536,13 +756,43 @@ fn tick(ctx: &Ctx) {
     }
     let cfg = cfg_of(ctx);
     let mut st = load_state(ctx);
+    let mut disk = st.clone();
 
-    let cap = captive_state();
-    let obs = observe(ctx, Some(cap), true);
+    // A deliberately-off proxy is a normal running state, and the shell exits
+    // here — before it reads anything about the machine. Read it first, or the
+    // tick probes a captive portal and resolves a hostname on behalf of a user
+    // who asked rowt to keep its hands off. The FSM agrees (guard returns an
+    // empty plan for this), so exiting early changes no decision.
+    if ctx.sget("proxy_intent") == "off" {
+        let _ = std::fs::remove_dir(&lock);
+        return;
+    }
+
+    // The interface and whether the network MOVED (net_id vs watch.net, which
+    // netcheck wrote on the last tick that got that far) are read here, before
+    // the probe: the resolver comes from the interface, and the re-probe burst
+    // is only for a network that just changed.
+    let iface = Mac.detect_iface();
+    let moved = iface.as_deref().is_some_and(|i| st.last_net_id.as_deref() != Some(net_id(i).as_str()));
+    let (cap, portal) = captive_state(iface.as_deref(), moved);
+    // The re-probe burst is the one place a healthy tick spends tens of
+    // seconds (≈33 s worst case). Restart the stale-lock clock after it, so
+    // "older than a minute" keeps measuring the tick the reclaim comment
+    // describes and a concurrent tick cannot reclaim a lock that is merely
+    // busy.
+    if let Ok(f) = std::fs::File::open(&lock) {
+        let _ = f.set_modified(std::time::SystemTime::now());
+    }
+    // Journal HERE, where the shell journals — right after the verdict and
+    // before anything is read about the proxy. It stays in the plan as
+    // `Action::Journal` because that is what the shadow comparison matches
+    // against; `perform` skips it below rather than running it twice.
+    journal(ctx, cap);
+    let obs = observe(ctx, Some(cap), portal.clone(), true);
     let g = guard(&obs, &st, &cfg);
-    perform(ctx, &g.actions);
+    perform_planned(ctx, &g.actions);
     st = g.state;
-    save_state(ctx, &st);
+    save_state(ctx, &mut disk, &st);
     if g.next == Next::Stop {
         let _ = std::fs::remove_dir(&lock);
         return;
@@ -556,16 +806,21 @@ fn tick(ctx: &Ctx) {
         let _ = std::fs::remove_dir(&lock);
         return;
     }
+    // Run corp_sync where the shell runs it: BEFORE the netcheck observation,
+    // because it can take the router down and the observation has to judge the
+    // machine that exists afterwards. netcheck emits `Action::CorpSync` to
+    // record that it happened — `perform_planned` skips it, or every tick
+    // would sync twice.
     let _ = crate::corp::sync(ctx, true);
     if lifecycle::host_running(ctx).is_none() {
         let _ = std::fs::remove_dir(&lock);
         return;
     }
     let hb = ctx.mode() == "local" || health_ok(ctx);
-    let obs2 = observe(ctx, Some(cap), hb);
+    let obs2 = observe(ctx, Some(cap), portal, hb);
     let n = netcheck(&obs2, &st, &cfg);
-    perform(ctx, &n.actions);
-    save_state(ctx, &n.state);
+    perform_planned(ctx, &n.actions);
+    save_state(ctx, &mut disk, &n.state);
     let _ = std::fs::remove_dir(&lock);
 }
 
@@ -578,30 +833,100 @@ mod tests {
     /// the only other way to exercise it is a real portal.
     #[test]
     fn a_portal_is_told_apart_from_a_working_network() {
-        let v = |s: &str| format!("{:?}", probe_verdict(s));
+        let v = |s: &str| format!("{:?}", probe_verdict(s, "http://probe.example/x").0);
         // Apple's probe: 200 with "Success" in the body and nothing else.
-        assert_eq!(v("<HTML><HEAD><TITLE>Success</TITLE></HEAD></HTML>\n\n200"), "Clear");
+        assert_eq!(v("<HTML><HEAD><TITLE>Success</TITLE></HEAD></HTML>\n\n200\nredirect="), "Clear");
         // A portal serving its login page under the real URL — 200, wrong body.
-        assert_eq!(v("<html>Please sign in to the hotel wifi</html>\n302 moved\n200"), "Captive");
-        // …and one that redirects instead.
-        assert_eq!(v("\n302"), "Captive");
-        assert_eq!(v("\n307"), "Captive");
+        assert_eq!(v("<html>Please sign in to the hotel wifi</html>\n302 moved\n200\nredirect="), "Captive");
+        // …one that redirects instead, and one that says so (RFC 6585).
+        assert_eq!(v("\n302\nredirect=http://portal.fake/login"), "Captive");
+        assert_eq!(v("\n307\nredirect="), "Captive");
+        assert_eq!(v("<html>Network Authentication Required</html>\n511\nredirect="), "Captive");
         // Anything else is UNKNOWN, and unknown means hands off. A 404 or a
         // timeout is not evidence of a portal, and acting on it would drop the
-        // proxy because the network was briefly unreachable.
-        assert_eq!(v("\n404"), "Unknown");
-        assert_eq!(v("\n500"), "Unknown");
+        // proxy because the network was briefly unreachable. 403 is a corp web
+        // filter as often as a portal, so it stays here on purpose.
+        assert_eq!(v("\n404\nredirect="), "Unknown");
+        assert_eq!(v("\n403\nredirect="), "Unknown");
+        assert_eq!(v("\n500\nredirect="), "Unknown");
         assert_eq!(v(""), "Unknown");
         assert_eq!(v("\n"), "Unknown");
         // `3` alone is not `30x`: the shell tests three characters.
-        assert_eq!(v("\n3"), "Unknown");
+        assert_eq!(v("\n3\nredirect="), "Unknown");
     }
 
     /// The body is split at the LAST newline, not the first — Apple's page is
     /// multi-line, and splitting at the first would read HTML as a status code.
+    /// And a trailing newline (the fixtures have one; `$()` eats it) is not a line.
     #[test]
     fn the_status_code_is_the_last_line_not_the_first() {
-        assert_eq!(format!("{:?}", probe_verdict("line one\nline two\nSuccess\n200")), "Clear");
+        assert_eq!(format!("{:?}", probe_verdict("line one\nline two\nSuccess\n200\nredirect=", "u").0), "Clear");
+        assert_eq!(format!("{:?}", probe_verdict("line one\nline two\nSuccess\n200\nredirect=\n", "u").0), "Clear");
+    }
+
+    /// The page to open: the redirect when the portal named one, else the
+    /// probe URL a portal answered under — and nothing when there is no portal.
+    #[test]
+    fn the_portal_page_is_the_redirect_or_else_the_probe_url() {
+        let p = |s: &str| probe_verdict(s, "http://probe.example/x").1;
+        assert_eq!(p("\n302\nredirect=http://portal.fake/login"), Some("http://portal.fake/login".into()));
+        assert_eq!(p("<html>sign in</html>\n200\nredirect="), Some("http://probe.example/x".into()));
+        assert_eq!(p("<html>Success</html>\n200\nredirect="), None);
+        assert_eq!(p("\n404\nredirect="), None);
+    }
+
+    /// What `--resolve` pins: the probe URL's host and port — and nothing for
+    /// an IP-literal URL, which is every sandbox case and any user pin by
+    /// address. Resolving those would add a lookup to every trace for a
+    /// hostname that is not one.
+    #[test]
+    fn only_a_named_probe_host_gets_resolved() {
+        let hp = |u: &str| probe_host_port(u).map(|(h, p)| format!("{h}:{p}"));
+        assert_eq!(hp("http://captive.apple.com/hotspot-detect.html").as_deref(), Some("captive.apple.com:80"));
+        assert_eq!(hp("https://connectivitycheck.example/generate_204").as_deref(), Some("connectivitycheck.example:443"));
+        assert_eq!(hp("http://portal.example:8080/x").as_deref(), Some("portal.example:8080"));
+        assert_eq!(hp("http://portal.example").as_deref(), Some("portal.example:80"));
+        assert_eq!(hp("http://127.0.0.1:8099/portal"), None);
+        assert_eq!(hp("http://203.0.113.9/"), None);
+        assert_eq!(hp("http://[::1]:8099/x"), None);
+        assert_eq!(hp("http:///x"), None);
+        assert_eq!(hp(""), None);
+    }
+
+    /// The probe's argv, byte for byte — because the harness compares argv and
+    /// because the `-w` value is a LITERAL backslash-n, the way the shell's
+    /// single quotes deliver it. curl expands the escape itself, so a real
+    /// newline here produces the same OUTPUT and a different command line; that
+    /// mismatch is what kept a `watch tick` case out of cli-cases.txt.
+    #[test]
+    fn the_probe_command_line_is_the_one_the_shell_writes() {
+        assert_eq!(PROBE_W.as_bytes()[0], b'\\', "the -w format starts with a literal backslash");
+        assert!(!PROBE_W.contains('\n'), "a real newline here is a different argv than the shell's");
+        assert_eq!(PROBE_W, "\\n%{http_code}\\nredirect=%{redirect_url}");
+        assert_eq!(
+            probe_args("http://127.0.0.1:8099/portal", "6", None),
+            ["-s", "--noproxy", "*", "--max-time", "6", "-w", PROBE_W, "http://127.0.0.1:8099/portal"]
+        );
+        // `--resolve` sits immediately before `-w`, as it does in the shell.
+        assert_eq!(
+            probe_args("http://captive.apple.com/x", "6", Some("captive.apple.com:80:203.0.113.5")),
+            ["-s", "--noproxy", "*", "--max-time", "6", "--resolve", "captive.apple.com:80:203.0.113.5",
+             "-w", PROBE_W, "http://captive.apple.com/x"]
+        );
+    }
+
+    /// The burst schedule, read the way the shell reads it: `tr ',' ' '`
+    /// then word-split, non-numbers skipped. Empty means no retry — that is
+    /// what the sandbox sets, and a default there would cost every unknown
+    /// tick fifteen seconds.
+    #[test]
+    fn the_retry_schedule_is_seconds_and_junk_is_skipped() {
+        assert_eq!(retry_delays("5,10"), vec![5, 10]);
+        assert_eq!(retry_delays("0,0"), vec![0, 0]);
+        assert_eq!(retry_delays("3 6 9"), vec![3, 6, 9]);
+        assert_eq!(retry_delays("5,,10, x ,2"), vec![5, 10, 2]);
+        assert_eq!(retry_delays(""), Vec::<u64>::new());
+        assert_eq!(retry_delays("soon"), Vec::<u64>::new());
     }
 
     /// `jq -e '.delay // empty'`, which is not the same as "delay is truthy".

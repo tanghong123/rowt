@@ -98,6 +98,37 @@ proxy check
 proxy status
 escape import tests/parity/fixtures/import-list.txt
 corp import tests/parity/fixtures/import-list.txt
+# A file that is not there is an error (die, ABORT in the audit log), not an
+# import of nothing: rowt-rs read "" from the missing path and reported "0 new".
+escape import tests/parity/fixtures/no-such-file.txt
+
+# The watchdog tick, compared on everything the machine KEEPS: stdout, exit
+# status, the whole config tree (content and mode) and the audit log.
+#
+# `PARITY_NOTRACE=1` is allowed here and nowhere else — the harness refuses it
+# for any other command. The two implementations genuinely read the machine at
+# different moments: the shell reads each fact lazily in the branch that needs
+# it, the port snapshots one Observation up front, which is the discipline
+# `watch-shadow` and PORTING.md §6.5 depend on. The tick's argv is gated by
+# `platform-diff` (the OS seams) and `watch-shadow` (the real tick, the real
+# planner) instead.
+#
+# What these DID catch, all of it invisible until the cases existed: an
+# unported discovery journal (a second schema written into the same log, and no
+# `discovery_sig`), a `watch.health` of "0" where the shell removes the file, a
+# recovery stamp written to `watch.recovery` while the shell reads
+# `watch.restart`, and a `captive=` key rewritten on every tick.
+PARITY_NOTRACE=1 ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
+PARITY_NOTRACE=1 ROWT_CAPTIVE_URL=http://127.0.0.1:9/x watch tick
+PARITY_NOTRACE=1 PARITY_SCENARIO=captive-dhcp-dns watch tick
+PARITY_NOTRACE=1 PARITY_SCENARIO=proxy-on ROWT_CAPTIVE_URL=http://127.0.0.1:8099/portal watch tick
+PARITY_NOTRACE=1 PARITY_SCENARIO=captive-episode ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
+# …and the one tick that needs NO exemption, because a hands-off tick reads
+# NOTHING: with `proxy_intent=off` both sides must leave an empty trace. The
+# port used to check that flag only while assembling its observation — after
+# the captive probe and a DNS lookup — so a user who turned the proxy off still
+# got 25 shimmed calls, a portal probe among them, on every tick.
+PARITY_SCENARIO=watch-intent-off ROWT_CAPTIVE_URL=http://127.0.0.1:8099/portal watch tick
 
 # static text and log readers, extracted from the shell at build time
 shell-init
@@ -460,6 +491,41 @@ corp suggest
 corp sync --nosuchflag
 watch
 watch status
+
+# The hotspot lane: captive-portal hosts on the OS proxy bypass list. Not
+# routed — an edit refreshes the bypass list where rowt owns the proxy, never
+# reloads. rowt-rs hands the arm itself to the shell; what it owns and has to
+# agree on is everything that READS the lane: proxy on/check/env, the pull-out
+# a routing-lane add performs (and the bypass refresh that follows it), corp
+# sync's subtraction, and the bundle list. The scenario's proxy already points
+# at rowt, so every refresh is a `-setproxybypassdomains` in the argv trace —
+# whose ORDER pins the lowercased, byte-sorted shaping of the entries.
+hotspot
+hotspot list
+PARITY_SCENARIO=hotspot-lane hotspot list
+PARITY_SCENARIO=hotspot-lane hotspot dump
+hotspot add Venue.Example --domain login.venue.example
+hotspot add geosite:ads 203.0.113.0/24 198.51.100.7
+hotspot add
+PARITY_SCENARIO=hotspot-lane hotspot add portal.example
+PARITY_SCENARIO=hotspot-lane hotspot rm portal.example absent.example
+PARITY_SCENARIO=hotspot-lane hotspot clear
+hotspot rm portal.example
+hotspot errors
+hotspot nosucharm
+PARITY_SCENARIO=hotspot-lane escape add portal.example
+# --no-reload spares the router bounce only: the bypass refresh that a pull-out
+# (or a hotspot edit) owes still happens — the TUI's batched reload would not.
+PARITY_SCENARIO=hotspot-lane escape add --no-reload portal.example
+PARITY_SCENARIO=hotspot-lane hotspot add --no-reload venue.example
+PARITY_SCENARIO=hotspot-lane corp add --domain login.hotspot.example
+PARITY_SCENARIO=hotspot-lane block import tests/parity/fixtures/import-list.txt
+PARITY_SCENARIO=hotspot-lane proxy env
+PARITY_SCENARIO=hotspot-lane proxy check
+PARITY_SCENARIO=hotspot-lane proxy on --force
+PARITY_SCENARIO=hotspot-lane corp sync --dry-run
+PARITY_SCENARIO=hotspot-lane corp sync --no-reload
+PARITY_SCENARIO=hotspot-lane config list
 watch nosucharm
 onboard
 PARITY_SCENARIO=router-up onboard
