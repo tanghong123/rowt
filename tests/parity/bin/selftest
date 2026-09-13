@@ -34,6 +34,7 @@
 #   30.  drop a hotspot entry's *. twin  -> cli-diff must fire (proxy on's argv)
 #   31.  stop re-probing after a network change -> watch-shadow must fire (probes=3)
 #   32.  drop the discovery journal's state key   -> the watch tick cases must fire
+#   33.  make the DNS-free fallback give up        -> watch-shadow must fire
 #
 # Everything happens in a throwaway copy of the repo; the real tree is never
 # touched. Run it after changing the harness itself.
@@ -939,6 +940,31 @@ else
       bad "cli-diff passed with the discovery journal's state key dropped"
     else
       ok "the tick cases catch a discovery journal that stops recording its signature"
+    fi
+  fi
+  cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+fi
+
+echo "33. the DNS-free fallback probe must be what detects a no-DNS garden"
+cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+if [ ! -x "$rwatch" ]; then
+  echo "  skip — no release build"
+else
+  # A hotel that refuses to resolve until you log in leaves the named probe
+  # unable to send anything, so `captive` can only come from the fallback. Make
+  # the fallback concede and the case must go red — otherwise something else is
+  # detecting the portal and the fallback is not being tested at all.
+  ln -sf "$rwatch" "$tmp/bin/rowt-watch-tick"
+  if ! "$P" watch-shadow 'captive-no-dns' >/dev/null 2>&1; then
+    bad "the no-DNS case already fails before the mutation"
+  else
+    perl -0pi -e 's/  case "\$code" in 30\[0-9\]\|511\) ;; \*\) return 0 ;; esac/  return 0/' "$tmp/bin/rowt"
+    if grep -qF 'case "$code" in 30[0-9]|511) ;; *) return 0 ;; esac' "$tmp/bin/rowt"; then
+      bad "could not disable the fallback verdict (_captive_probe_ipfallback moved?)"
+    elif "$P" watch-shadow 'captive-no-dns' >/dev/null 2>&1; then
+      bad "watch-shadow passed with the DNS-free fallback disabled"
+    else
+      ok "watch-shadow catches a fallback that stops recognising an intercepted redirect"
     fi
   fi
   cp "$ROOT/bin/rowt" "$tmp/bin/rowt"

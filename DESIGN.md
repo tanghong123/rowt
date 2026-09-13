@@ -564,6 +564,17 @@ you know, take the race out of it altogether.
    **network change** (net_id ≠ the one netcheck last wrote) an `unknown` is
    re-probed after `ROWT_CAPTIVE_RETRY` seconds each (default `5,10`), so the
    drop lands on the tick WatchPaths fired and not two minutes later.
+   And when the named probe cannot get a request out at all, a **DNS-free
+   fallback** asks again without any lookup: a portal's gateway intercepts
+   port 80 for an unauthenticated client whatever the destination, so a request
+   to `ROWT_CAPTIVE_FALLBACK` (default `http://192.0.2.1/`, TEST-NET-1, which is
+   never routed) still draws the redirect. This is the case a real hotel
+   produced on 2026-09-14: it refused every lookup until login, so the probe
+   never sent a request and the verdict sat at `unknown` for six minutes while
+   the portal waited. The fallback is deliberately stricter than the named
+   probe — **only a redirect or 511 counts, never a 200** — because without a
+   name behind it a 200 could be a router admin page or a hotel TV, and acting
+   on that would drop the proxy on a network that was merely slow.
    On the drop it also **opens the portal's login page in the browser** — the
    redirect target the probe was sent to, or the probe URL itself when the
    portal served its page under it — because the request the OS made before
@@ -589,6 +600,7 @@ you know, take the race out of it altogether.
 | decision | why |
 |---|---|
 | probe **direct**, never via the proxy | the question is "is a portal between `en0` and the internet", not "does the proxy work" |
+| a **DNS-free fallback** when the named probe cannot send at all | the pin above assumes the garden HIJACKS DNS; plenty of them simply refuse to resolve until you authenticate, and then there is no request to classify and no redirect to see. An intercepted request to an address that is never routed needs no name and still draws the portal out. Strict on purpose (redirect or 511 only): on a healthy network nothing can answer that address, so it cannot invent a portal, and a 200 from an unidentified box is not evidence of one |
 | resolve the probe host at the **NIC's DHCP resolver**, not the system one | the portal announces itself by hijacking *its own* DNS; a system resolver pinned elsewhere (a VPN's, a manual `8.8.8.8`) answers truthfully and the probe reads "clear" behind the wall. Falls back to the plain probe when there is no DHCP resolver or it does not answer, so nothing that worked before is lost |
 | re-probe an `unknown` only **right after a network change** | the link is still settling and the portal's DNS may not answer yet; three tries (15 s of waiting, ≈33 s worst case with every probe timing out, and a probe that could not be pinned re-resolves before each retry) put the drop on THIS tick instead of the next timer tick. Not mid-episode or in steady state: there `unknown` is the hands-off answer it always was, and one probe per tick is the budget. (Mid-episode `net_id` stays "moved" — netcheck never runs while captive — but a captive tick answers `captive`, not `unknown`, so it does not burst.) The burst is silent: a log line would be an action the planner never took |
 | `unknown` (timeout/offline) is **never** captive | a flaky network or a dead probe host must not be able to drop your proxy; only definite portal evidence acts |
@@ -611,7 +623,8 @@ closes the episode.
 
 Knobs: `ROWT_CAPTIVE_CHECK=0` disables all of it; `ROWT_CAPTIVE_URL` /
 `ROWT_CAPTIVE_TIMEOUT` re-point/re-pace the probe; `ROWT_CAPTIVE_RETRY` is the
-post-change burst (comma-separated seconds, default `5,10`; empty = one probe).
+post-change burst (comma-separated seconds, default `5,10`; empty = one probe);
+`ROWT_CAPTIVE_FALLBACK` is the DNS-free target (default `http://192.0.2.1/`).
 All four are baked into the LaunchAgent by `rowt watch install` if they are set
 in the shell that installs it (they were NOT before 3.5.0, so setting
 `ROWT_CAPTIVE_CHECK=0` had no effect on the installed watchdog); change one and

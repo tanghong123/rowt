@@ -40,3 +40,7 @@ PARITY_SCENARIO=captive-dhcp-dns watch tick | captive portal detected — droppi
 # never answers. Nothing to log — the burst is silent by design — so the trace
 # is what pins it: three probes, and three unknowns still hands-off.
 ROWT_CAPTIVE_RETRY=0,0 ROWT_CAPTIVE_URL=http://127.0.0.1:9/x watch tick | probes=3
+# A garden that blocks DNS rather than hijacking it. The named probe never gets
+# a request out, so the verdict comes entirely from the DNS-free fallback; this
+# is the case that took six real minutes to detect before that existed.
+PARITY_SCENARIO=captive-no-dns watch tick | captive portal detected — dropping system proxy

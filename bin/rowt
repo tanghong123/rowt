@@ -48,6 +48,8 @@
 #      ROWT_CAPTIVE_TIMEOUT  captive probe cap, seconds (default 6)
 #      ROWT_CAPTIVE_RETRY  re-probe delays after a network change when the probe did not
 #                          answer, comma-separated seconds (default 5,10; empty = no retry)
+#      ROWT_CAPTIVE_FALLBACK  DNS-free probe used when the named one cannot resolve
+#                          (default http://192.0.2.1/ — TEST-NET-1, never routed)
 #      ROWT_DISCOVERY_LOG  journal advertised domains/resolvers per network: 1=on, 0=off
 #      ROWT_HEALTH_FAILS  consecutive probe failures before auto-recover (default 3)
 #      ROWT_HEALTH_COOLDOWN  min seconds between auto-recoveries (default 600)
@@ -56,7 +58,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.5.1"
+ROWT_VERSION="3.5.2"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -2745,6 +2747,34 @@ _captive_probe_once() { # $1=url $2=host:port:ip for --resolve, or empty
 # Only then: mid-episode and in steady state one probe per tick is the budget,
 # and `unknown` there is the hands-off answer it always was. Silent on purpose
 # — a log line here would be an action the planner never took.
+# The DNS-free probe, for the garden that will not resolve anything until you
+# log in. A portal's gateway intercepts port 80 for an unauthenticated client
+# WHATEVER the destination, so this needs no name lookup at all — which is the
+# entire point. Observed 2026-09-14: a hotel refused every lookup pre-login, so
+# the named probe never sent a request and the verdict sat at `unknown` for six
+# minutes while the portal was sitting there ready to redirect.
+#
+# The target is TEST-NET-1 (RFC 5737) — reserved for documentation and never
+# routed — so on a healthy network NOTHING can answer it. That is what makes
+# this safe to act on: it cannot invent a portal that is not there.
+#
+# And only a REDIRECT counts. Without DNS a 200 from an unidentified box is
+# evidence of nothing (a hotel TV, a router admin page, a transparent cache),
+# and acting on it would drop the system proxy on a network that was merely
+# slow. A portal that answers 200 inline is missed here and caught by the named
+# probe a tick later, which is the safe direction to be wrong in.
+_captive_probe_ipfallback() { # $1=host, for a plausible Host header
+  local url="${ROWT_CAPTIVE_FALLBACK:-http://192.0.2.1/}" out code redir
+  out="$(curl -s --noproxy '*' --max-time "${ROWT_CAPTIVE_TIMEOUT:-6}" ${1:+-H "Host: $1"} -w '\n%{http_code}\nredirect=%{redirect_url}' "$url" 2>/dev/null)" || return 0
+  redir="${out##*$'\n'}"; redir="${redir#redirect=}"; out="${out%$'\n'*}"
+  code="${out##*$'\n'}"
+  case "$code" in 30[0-9]|511) ;; *) return 0 ;; esac
+  echo captive
+  # Only a real redirect target is worth opening: the fallback URL itself is an
+  # address nobody can reach, so handing it to the browser would be a blank tab.
+  [ -n "$redir" ] && printf '%s\n' "$redir"
+  return 0
+}
 _captive_pin() { # $1=iface $2=host $3=port -> host:port:ip for --resolve, or nothing
   local ns ip
   ns="$(_captive_dhcp_dns "$1")"; [ -n "$ns" ] || return 0
@@ -2774,6 +2804,13 @@ _captive_state() {
       [ "$named" = 1 ] && [ -z "$rsv" ] && rsv="$(_captive_pin "$ifc" "$host" "$port")"
       out="$(_captive_probe_once "$url" "$rsv")"
     done
+  fi
+  # Still nothing, and the probe needed a name to get anywhere: ask again
+  # without DNS. Only reached when the named probe failed, so a network where
+  # names resolve pays nothing for this.
+  if [ "${out%%$'\n'*}" = unknown ] && [ "$named" = 1 ]; then
+    local fb; fb="$(_captive_probe_ipfallback "$host")"
+    [ -n "$fb" ] && out="$fb"
   fi
   printf '%s\n' "$out"
   return 0
@@ -4123,7 +4160,7 @@ cmd_watch() {
       done
       local envxml v val
       envxml="    <key>PATH</key><string>$agent_path</string>"
-      for v in XDG_CONFIG_HOME ROWT_PORT ROWT_CLASH_PORT ROWT_FINAL ROWT_IFACE ROWT_DNS_DIRECT ROWT_DNS_LOCAL ROWT_GFW_CANARIES ROWT_GFW_TIMEOUT SINGBOX_VERSION ROWT_LOG_LEVEL ROWT_WATCH_INTERVAL ROWT_HEALTH_FAILS ROWT_HEALTH_COOLDOWN ROWT_HEALTH_TIMEOUT ROWT_HEALTH_URL ROWT_CAPTIVE_CHECK ROWT_CAPTIVE_URL ROWT_CAPTIVE_TIMEOUT ROWT_CAPTIVE_RETRY ROWT_WATCH_SHADOW ROWT_RENDER_SHADOW; do
+      for v in XDG_CONFIG_HOME ROWT_PORT ROWT_CLASH_PORT ROWT_FINAL ROWT_IFACE ROWT_DNS_DIRECT ROWT_DNS_LOCAL ROWT_GFW_CANARIES ROWT_GFW_TIMEOUT SINGBOX_VERSION ROWT_LOG_LEVEL ROWT_WATCH_INTERVAL ROWT_HEALTH_FAILS ROWT_HEALTH_COOLDOWN ROWT_HEALTH_TIMEOUT ROWT_HEALTH_URL ROWT_CAPTIVE_CHECK ROWT_CAPTIVE_URL ROWT_CAPTIVE_TIMEOUT ROWT_CAPTIVE_RETRY ROWT_CAPTIVE_FALLBACK ROWT_WATCH_SHADOW ROWT_RENDER_SHADOW; do
         val="${!v:-}"; [ -n "$val" ] && envxml="$envxml
     <key>$v</key><string>$val</string>"
       done

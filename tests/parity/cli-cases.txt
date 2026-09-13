@@ -129,6 +129,11 @@ PARITY_NOTRACE=1 PARITY_SCENARIO=captive-episode ROWT_CAPTIVE_URL=http://127.0.0
 # the captive probe and a DNS lookup — so a user who turned the proxy off still
 # got 25 shimmed calls, a portal probe among them, on every tick.
 PARITY_SCENARIO=watch-intent-off ROWT_CAPTIVE_URL=http://127.0.0.1:8099/portal watch tick
+# The hotel that will not resolve anything until you log in: the named probe
+# cannot send a request at all (dig answers nothing, curl exits 7), and only the
+# DNS-free fallback — an intercepted request to an address that is never routed
+# — sees the redirect. Both sides must reach `captive` and open the SAME target.
+PARITY_NOTRACE=1 PARITY_SCENARIO=captive-no-dns watch tick
 
 # static text and log readers, extracted from the shell at build time
 shell-init

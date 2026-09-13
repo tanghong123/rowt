@@ -88,6 +88,7 @@ fn plist_body(ctx: &Ctx, self_bin: &Path) -> String {
               // as the way to switch portal handling off — did nothing unless
               // you hand-edited the plist.
               "ROWT_CAPTIVE_CHECK", "ROWT_CAPTIVE_URL", "ROWT_CAPTIVE_TIMEOUT", "ROWT_CAPTIVE_RETRY",
+              "ROWT_CAPTIVE_FALLBACK",
               "ROWT_WATCH_SHADOW", "ROWT_RENDER_SHADOW"] {
         if let Ok(val) = std::env::var(v) {
             if !val.is_empty() {
@@ -225,6 +226,16 @@ fn captive_state(iface: Option<&str>, moved: bool) -> (CaptiveState, Option<Stri
         }
         r = probe_once(&url, &t, resolve.as_deref());
     }
+    // Still nothing, and the probe needed a name to get anywhere: ask again
+    // without DNS. Only reached when the named probe failed, so a network where
+    // names resolve pays nothing for this.
+    if r.0 == CaptiveState::Unknown {
+        if let Some((host, _)) = named.as_ref() {
+            if let Some(fb) = probe_ip_fallback(host, &t) {
+                r = fb;
+            }
+        }
+    }
     r
 }
 
@@ -277,6 +288,40 @@ fn probe_host_port(url: &str) -> Option<(String, String)> {
     Some((host, port))
 }
 
+/// The DNS-free probe, for the garden that will not resolve anything until you
+/// log in. A portal's gateway intercepts port 80 for an unauthenticated client
+/// WHATEVER the destination, so this needs no name lookup at all — which is the
+/// entire point. Observed 2026-09-14: a hotel refused every lookup pre-login,
+/// so the named probe never sent a request and the verdict sat at `unknown` for
+/// six minutes while the portal was ready to redirect.
+///
+/// The target is TEST-NET-1 (RFC 5737), reserved for documentation and never
+/// routed, so on a healthy network NOTHING can answer it — that is what makes
+/// it safe to act on. And only a REDIRECT counts: without DNS a 200 from an
+/// unidentified box is evidence of nothing, and acting on it would drop the
+/// system proxy on a network that was merely slow.
+fn probe_ip_fallback(host: &str, timeout: &str) -> Option<(CaptiveState, Option<String>)> {
+    let url = env_or("ROWT_CAPTIVE_FALLBACK", "http://192.0.2.1/");
+    let hostarg = format!("Host: {host}");
+    let mut args: Vec<&str> = vec!["-s", "--noproxy", "*", "--max-time", timeout];
+    if !host.is_empty() {
+        args.extend(["-H", hostarg.as_str()]);
+    }
+    args.extend(["-w", PROBE_W, &url]);
+    let o = Command::new("curl").args(&args).stderr(Stdio::null()).output().ok()?;
+    if !o.status.success() {
+        return None;
+    }
+    let (code, redir) = split_probe(&String::from_utf8_lossy(&o.stdout));
+    let portal = code == "511" || (code.len() == 3 && code.starts_with("30"));
+    if !portal {
+        return None;
+    }
+    // Only a real redirect target is worth opening: the fallback URL itself is
+    // an address nobody can reach, so the browser would get a blank tab.
+    Some((CaptiveState::Captive, (!redir.is_empty()).then(|| redir)))
+}
+
 /// `ROWT_CAPTIVE_RETRY`: seconds, comma- (or space-) separated. A token that
 /// is not a whole number is skipped, as the shell's `case` skips it — never
 /// a `sleep` that fails and takes the tick with it.
@@ -302,12 +347,9 @@ fn delay_answered(out: &str) -> bool {
 ///
 /// Split from the call so it can be tested: this is the decision that drops
 /// the system proxy, and the alternative to a test is toggling a real portal.
-fn probe_verdict(body: &str, url: &str) -> (CaptiveState, Option<String>) {
-    // `$(…)` strips trailing newlines, then `${out##*$'\n'}` / `${out%$'\n'*}`
-    // peel the LAST line twice — the redirect, then the code — because the
-    // body itself contains plenty of newlines. The redirect line carries a
-    // prefix so that an empty redirect is still a line and not a trailing
-    // newline the substitution would have eaten.
+/// Peel curl's `-w` tail off the body: the redirect line, then the code. Shared
+/// so the fallback cannot drift from the main probe's parsing.
+fn split_probe(body: &str) -> (String, String) {
     let body = body.trim_end_matches('\n');
     let split = |s: &str| -> (String, String) {
         match s.rfind('\n') {
@@ -317,8 +359,21 @@ fn probe_verdict(body: &str, url: &str) -> (CaptiveState, Option<String>) {
     };
     let (rest, redir) = split(body);
     let redir = redir.strip_prefix("redirect=").map(str::to_string).unwrap_or(redir);
-    let (payload, code) = split(&rest);
-    let code = code.trim();
+    let (_payload, code) = split(&rest);
+    (code.trim().to_string(), redir)
+}
+
+fn probe_verdict(body: &str, url: &str) -> (CaptiveState, Option<String>) {
+    // `$(…)` strips trailing newlines, then `${out##*$'\n'}` / `${out%$'\n'*}`
+    // peel the LAST line twice — the redirect, then the code — because the
+    // body itself contains plenty of newlines. The redirect line carries a
+    // prefix so that an empty redirect is still a line and not a trailing
+    // newline the substitution would have eaten.
+    let (code, redir) = split_probe(body);
+    // The body matters only for the 200 case, and only to tell Apple's Success
+    // page from a portal serving its own under the same URL.
+    let payload = body;
+    let code = code.as_str();
     let verdict = match code {
         "200" if payload.contains("Success") => CaptiveState::Clear,
         "200" => CaptiveState::Captive,
@@ -918,6 +973,40 @@ mod tests {
             ["-s", "--noproxy", "*", "--max-time", "6", "--resolve", "captive.apple.com:80:203.0.113.5",
              "-w", PROBE_W, "http://captive.apple.com/x"]
         );
+    }
+
+    /// The DNS-free fallback's rule, which is deliberately stricter than the
+    /// named probe's: ONLY a redirect counts. Without DNS a 200 could be a
+    /// router admin page or a hotel TV, and treating that as a portal would
+    /// drop the system proxy on a network that was merely slow. The page to
+    /// open is the redirect target or nothing — never the fallback URL, which
+    /// is an address nobody can reach.
+    #[test]
+    fn the_dns_free_fallback_acts_only_on_a_redirect() {
+        let v = |body: &str| {
+            let (code, redir) = split_probe(body);
+            let portal = code == "511" || (code.len() == 3 && code.starts_with("30"));
+            portal.then(|| (!redir.is_empty()).then(|| redir))
+        };
+        // A portal redirecting an intercepted request: act, and open its target.
+        assert_eq!(v("\n302\nredirect=http://portal.example/login"), Some(Some("http://portal.example/login".into())));
+        assert_eq!(v("\n511\nredirect="), Some(None));
+        // Everything else is NOT evidence without a name behind it.
+        assert_eq!(v("<html>router admin</html>\n200\nredirect="), None);
+        assert_eq!(v("<html>Success</html>\n200\nredirect="), None);
+        assert_eq!(v("\n404\nredirect="), None);
+        assert_eq!(v("\n403\nredirect="), None);
+        assert_eq!(v(""), None);
+    }
+
+    /// One parser for both probes: a drift here would let the fallback read a
+    /// code the main probe would not.
+    #[test]
+    fn both_probes_peel_the_write_out_tail_the_same_way() {
+        assert_eq!(split_probe("body\n200\nredirect="), ("200".into(), "".into()));
+        assert_eq!(split_probe("a\nb\n302\nredirect=http://x/y"), ("302".into(), "http://x/y".into()));
+        // A trailing newline is not a line.
+        assert_eq!(split_probe("body\n200\nredirect=\n"), ("200".into(), "".into()));
     }
 
     /// The burst schedule, read the way the shell reads it: `tr ',' ' '`
