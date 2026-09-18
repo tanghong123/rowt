@@ -5,8 +5,10 @@ Guidance for Claude Code (claude.ai/code) working in this repository.
 This file covers **developing and releasing rowt itself**. For how the tool
 *behaves* — lanes, config layout, and the operational rules (e.g. never run
 `up`/`reload`/`restart` as a killable background task: the daemon inherits the
-task's pipe, so killing the task kills sing-box) — use the **`rowt` skill** in
-`skills/rowt/`. Don't duplicate that here.
+task's pipe, so killing the task kills sing-box — and for the same reason never
+*pipe* one of them, or a lane edit that restarts: the log splitter holds the
+pipe open and the command never returns, so redirect to a file) — use the
+**`rowt` skill** in `skills/rowt/`. Don't duplicate that here.
 
 ## Repo layout
 
@@ -26,8 +28,11 @@ task's pipe, so killing the task kills sing-box) — use the **`rowt` skill** in
   `*.txt`. Most are being replaced by `rowt-rs` helpers; `bin/rowt` prefers the
   Rust path and falls back to these.
 - **`tests/parity/`** — the differential harness (see below).
-- **`skills/rowt/`** — the end-user skill, symlinked into `~/.agents/skills/`.
-  Keep it in sync with `rowt help` / `rowt onboard` when commands change.
+- **`skills/rowt/`** — the end-user skill. `~/.agents/skills/rowt` is a symlink
+  to the **brew-installed** copy (`/opt/homebrew/opt/rowt/libexec/skills/rowt`),
+  *not* to this tree — so editing it here changes nothing live until the next
+  release + `brew upgrade`. Keep it in sync with `rowt help` / `rowt onboard`
+  when commands change.
 - **`share/knack/rowt.toml`** — the knack foreign-owner recipe, printed by
   `rowt skill recipe`. The formula installs `share/` into `libexec`, so adding a
   file here that the CLI reads means changing `Formula/rowt.rb` in the same pass.
