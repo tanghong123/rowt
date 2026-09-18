@@ -58,7 +58,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.5.2"
+ROWT_VERSION="3.5.3"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -3519,9 +3519,20 @@ or add directly:  $PROG server add '<vless://|vmess://|anytls://|hysteria2://…
     _ob 0 "rowt agent skill linked (an agent can drive setup)" "$PROG skill status   ·   $PROG skill install to re-link"
   else _ob 1 "link the rowt agent skill (let an agent drive setup)" "$PROG skill install"; fi
 
-  # 9. corp lane — auto-discovered from the network's DHCP search domains + VPN routes
-  local auto_dom; auto_dom="$(_dhcp_search_domains 2>/dev/null | paste -sd', ' - 2>/dev/null)"
-  if [ -n "$auto_dom" ]; then
+  # 9. corp lane. The box reports the LANE — entries on disk — not the network.
+  #    It used to test only whether *this* network advertises DHCP search
+  #    domains, so a fully configured lane read as unconfigured every time the
+  #    laptop was off the corp LAN, which is most of the time. The search
+  #    domains stay on the line as detail (they are what `corp suggest` and the
+  #    auto-fill consume) but they no longer decide the checkbox.
+  local auto_dom corp_n corp_note=""
+  auto_dom="$(_dhcp_search_domains 2>/dev/null | paste -sd', ' - 2>/dev/null)"
+  # grep -c exits 1 on zero matches; capture the count and drop the status.
+  corp_n="$(grep -cvE '^[[:space:]]*(#|$)' "$CORP_DOMAINS" 2>/dev/null || true)"
+  if [ -n "$auto_dom" ]; then corp_note="; this network advertises $auto_dom"; fi
+  if [ "${corp_n:-0}" -gt 0 ]; then
+    _ob 0 "corp lane configured ($corp_n entries$corp_note)" "$PROG corp list   ·   $PROG corp suggest   (on corp LAN/VPN)"
+  elif [ -n "$auto_dom" ]; then
     _ob 0 "corp auto-setup active (this network advertises $auto_dom)" "$PROG corp suggest   ·   add extras: $PROG corp add '*.corp.example.com' 10.0.0.0/8"
   else
     _ob 1 "corp lane — auto-fills when you connect your work network/VPN" "$PROG corp suggest   (on corp LAN/VPN)   ·   $PROG corp add '*.corp.example.com' 10.0.0.0/8"
@@ -3555,6 +3566,7 @@ Everyday:
     $PROG speed <url>       is a lane FAST enough to use? (reachability can't see a stalled lane)
     $PROG reload            re-apply after switching Wi-Fi / wired / corp VPN on-off
     $PROG monitor           live TUI (--theme dark|light|auto)   ·   $PROG proxy on | off    macOS system proxy
+    $PROG metrics           per-domain traffic history; the collector runs with the router   ·   $PROG metrics top
     $PROG config export     move the whole setup to another Mac (holds secrets — send encrypted)
     $PROG down              stop everything
 EOF

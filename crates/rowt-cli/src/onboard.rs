@@ -208,7 +208,19 @@ pub fn run(ctx: &Ctx, here: &Path) -> String {
     } else {
         String::new()
     };
-    if !auto_dom.is_empty() {
+    // The box reports the LANE — entries on disk — not the network. It used to
+    // test only whether *this* network advertises search domains, so a fully
+    // configured lane read as unconfigured every time the laptop was off the
+    // corp LAN, which is most of the time. The search domains stay on the line
+    // as detail; they no longer decide the checkbox. Counts non-blank,
+    // non-comment lines, matching the shell's `grep -cvE '^[[:space:]]*(#|$)'`.
+    let corp_n = read(&cfg.join("corp-domains.txt")).lines()
+        .filter(|l| { let t = l.trim(); !t.is_empty() && !t.starts_with('#') }).count();
+    let corp_note = if auto_dom.is_empty() { String::new() } else { format!("; this network advertises {auto_dom}") };
+    if corp_n > 0 {
+        ob(&mut o, true, &format!("corp lane configured ({corp_n} entries{corp_note})"),
+           &format!("{PROG} corp list   ·   {PROG} corp suggest   (on corp LAN/VPN)"));
+    } else if !auto_dom.is_empty() {
         ob(&mut o, true, &format!("corp auto-setup active (this network advertises {auto_dom})"),
            &format!("{PROG} corp suggest   ·   add extras: {PROG} corp add '*.corp.example.com' 10.0.0.0/8"));
     } else {
