@@ -958,8 +958,16 @@ else
   if ! "$P" watch-shadow 'captive-no-dns' >/dev/null 2>&1; then
     bad "the no-DNS case already fails before the mutation"
   else
-    perl -0pi -e 's/  case "\$code" in 30\[0-9\]\|511\) ;; \*\) return 0 ;; esac/  return 0/' "$tmp/bin/rowt"
-    if grep -qF 'case "$code" in 30[0-9]|511) ;; *) return 0 ;; esac' "$tmp/bin/rowt"; then
+    # Anchor on the line's SHAPE, not its exact text: the previous version
+    # pinned every character, so adding telemetry inside the `*)` arm made the
+    # substitution match nothing. The old guard then tested for the ABSENCE of
+    # the old text — which was already absent — waved the no-op through, and
+    # the step failed as "the gate did not catch it". That reads as a gate
+    # regression and sends you hunting in the wrong file. Compare the bytes
+    # instead: a mutation that changed nothing must say so.
+    _pre="$(cksum < "$tmp/bin/rowt")"
+    perl -0pi -e 's/^  case "\$code" in 30\[0-9\]\|511\).*esac$/  return 0/m' "$tmp/bin/rowt"
+    if [ "$_pre" = "$(cksum < "$tmp/bin/rowt")" ]; then
       bad "could not disable the fallback verdict (_captive_probe_ipfallback moved?)"
     elif "$P" watch-shadow 'captive-no-dns' >/dev/null 2>&1; then
       bad "watch-shadow passed with the DNS-free fallback disabled"

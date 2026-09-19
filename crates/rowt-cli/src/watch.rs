@@ -46,6 +46,35 @@ fn watch_log_path(ctx: &Ctx) -> PathBuf {
     ctx.logdir().join("watch.log")
 }
 
+/// WHY a probe came back the way it did — the shell's `_captive_log`.
+///
+/// Its own file on purpose, and the reasons are structural rather than
+/// stylistic: `watch.log` is what watch-diff reconstructs bash's ACTIONS from,
+/// so a line there would have to be modelled in the planner for what is pure
+/// telemetry; and the discovery journal's line is hashed into `discovery_sig`,
+/// so changing that schema re-journals every tick. `log/` is pruned from the
+/// parity snapshot, so this file is outside every compared surface.
+fn captive_log(logdir: &Path, msg: &str) {
+    use std::io::Write;
+    let line = format!("{}  {msg}\n", crate::sh_date("+%Y-%m-%d %H:%M:%S"));
+    let _ = std::fs::create_dir_all(logdir);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(logdir.join("captive.log")) {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
+/// curl's exit status is the discriminator worth keeping; the same few names
+/// the shell gives them, so the two files read identically.
+fn curl_why(rc: i32) -> String {
+    match rc {
+        6 => "could not resolve host".into(),
+        7 => "could not connect".into(),
+        28 => "timed out".into(),
+        35 => "TLS handshake failed".into(),
+        _ => format!("curl exit {rc}"),
+    }
+}
+
 fn watch_log(ctx: &Ctx, msg: &str) {
     use std::io::Write;
     let line = format!("{}  {msg}\n", crate::sh_date("+%Y-%m-%d %H:%M:%S"));
@@ -190,8 +219,10 @@ fn uid() -> String {
 /// tick is the budget, and `unknown` there is the hands-off answer it always
 /// was. Silent on purpose — a log line here would be an action the planner
 /// never took.
-fn captive_state(iface: Option<&str>, moved: bool) -> (CaptiveState, Option<String>) {
+fn captive_state(log: &Path, iface: Option<&str>, moved: bool) -> (CaptiveState, Option<String>) {
     if env_or("ROWT_CAPTIVE_CHECK", "1") != "1" {
+        // Deliberately unlogged: this is a configuration fact, not a probe
+        // outcome, and a line per tick would bury the ones that matter.
         return (CaptiveState::Unknown, None);
     }
     let url = env_or("ROWT_CAPTIVE_URL", "http://captive.apple.com/hotspot-detect.html");
@@ -212,7 +243,7 @@ fn captive_state(iface: Option<&str>, moved: bool) -> (CaptiveState, Option<Stri
     } else {
         Vec::new()
     };
-    let mut r = probe_once(&url, &t, resolve.as_deref());
+    let mut r = probe_once(log, "first", &url, &t, resolve.as_deref());
     for d in delays {
         if r.0 != CaptiveState::Unknown {
             break;
@@ -224,14 +255,14 @@ fn captive_state(iface: Option<&str>, moved: bool) -> (CaptiveState, Option<Stri
         if resolve.is_none() {
             resolve = pin();
         }
-        r = probe_once(&url, &t, resolve.as_deref());
+        r = probe_once(log, &format!("retry+{d}s"), &url, &t, resolve.as_deref());
     }
     // Still nothing, and the probe needed a name to get anywhere: ask again
     // without DNS. Only reached when the named probe failed, so a network where
     // names resolve pays nothing for this.
     if r.0 == CaptiveState::Unknown {
         if let Some((host, _)) = named.as_ref() {
-            if let Some(fb) = probe_ip_fallback(host, &t) {
+            if let Some(fb) = probe_ip_fallback(log, host, &t) {
                 r = fb;
             }
         }
@@ -260,14 +291,29 @@ fn probe_args<'a>(url: &'a str, timeout: &'a str, resolve: Option<&'a str>) -> V
 }
 
 /// One probe. `resolve` is curl's `host:port:ip`, placed right before `-w`.
-fn probe_once(url: &str, timeout: &str, resolve: Option<&str>) -> (CaptiveState, Option<String>) {
+fn probe_once(log: &Path, label: &str, url: &str, timeout: &str, resolve: Option<&str>) -> (CaptiveState, Option<String>) {
     let args = probe_args(url, timeout, resolve);
+    let rsv = resolve.map(|r| format!(" resolve={r}")).unwrap_or_default();
     let o = Command::new("curl").args(&args).stderr(Stdio::null()).output();
-    let Ok(o) = o else { return (CaptiveState::Unknown, None) };
+    let Ok(o) = o else {
+        captive_log(log, &format!("unknown   {label}: could not run curl url={url}{rsv}"));
+        return (CaptiveState::Unknown, None);
+    };
     if !o.status.success() {
+        // The status is the whole point: 6 is DNS, 7 a black hole, 28 a
+        // timeout, and the shell used to throw all three away as `unknown`.
+        let rc = o.status.code().unwrap_or(-1);
+        captive_log(log, &format!("unknown   {label}: {} (rc={rc}) url={url}{rsv}", curl_why(rc)));
         return (CaptiveState::Unknown, None);
     }
-    probe_verdict(&String::from_utf8_lossy(&o.stdout), url)
+    let v = probe_verdict(&String::from_utf8_lossy(&o.stdout), url);
+    // A clear verdict needs no explaining; everything else is what a later
+    // reader is trying to account for.
+    if v.0 != CaptiveState::Clear {
+        let (code, _) = split_probe(&String::from_utf8_lossy(&o.stdout));
+        captive_log(log, &format!("{}   {label}: HTTP {code} url={url}{rsv}", v.0.as_str()));
+    }
+    v
 }
 
 /// The probe URL's `host` and `port` for `--resolve` — None when there is
@@ -300,7 +346,7 @@ fn probe_host_port(url: &str) -> Option<(String, String)> {
 /// it safe to act on. And only a REDIRECT counts: without DNS a 200 from an
 /// unidentified box is evidence of nothing, and acting on it would drop the
 /// system proxy on a network that was merely slow.
-fn probe_ip_fallback(host: &str, timeout: &str) -> Option<(CaptiveState, Option<String>)> {
+fn probe_ip_fallback(log: &Path, host: &str, timeout: &str) -> Option<(CaptiveState, Option<String>)> {
     let url = env_or("ROWT_CAPTIVE_FALLBACK", "http://192.0.2.1/");
     let hostarg = format!("Host: {host}");
     let mut args: Vec<&str> = vec!["-s", "--noproxy", "*", "--max-time", timeout];
@@ -310,11 +356,16 @@ fn probe_ip_fallback(host: &str, timeout: &str) -> Option<(CaptiveState, Option<
     args.extend(["-w", PROBE_W, &url]);
     let o = Command::new("curl").args(&args).stderr(Stdio::null()).output().ok()?;
     if !o.status.success() {
+        let rc = o.status.code().unwrap_or(-1);
+        captive_log(log, &format!("unknown   dns-free: {} (rc={rc}) url={url}", curl_why(rc)));
         return None;
     }
     let (code, redir) = split_probe(&String::from_utf8_lossy(&o.stdout));
     let portal = code == "511" || (code.len() == 3 && code.starts_with("30"));
     if !portal {
+        // "the fallback ran and declined" and "the fallback never ran" look the
+        // same from the outside and mean very different things.
+        captive_log(log, &format!("unknown   dns-free: HTTP {code} — not a redirect, verdict unchanged url={url}"));
         return None;
     }
     // Only a real redirect target is worth opening: the fallback URL itself is
@@ -411,6 +462,17 @@ fn observe(ctx: &Ctx, cap: Option<CaptiveState>, portal: Option<String>, health_
     Observation {
         proxy_intent: ctx.sget("proxy_intent"),
         captive: cap,
+        // With the check off every verdict is `unknown` by construction, so the
+        // planner must be told the difference between "we looked and could not
+        // reach anything" and "we never looked".
+        captive_check_disabled: env_or("ROWT_CAPTIVE_CHECK", "1") != "1",
+        // Only probed when it could matter: `hold_for_network` short-circuits
+        // on a clear verdict, so a healthy tick pays no ping for this. The
+        // shell applies the same condition, or the two would disagree about
+        // the argv a tick produces.
+        gateway_ok: !health_ok
+            && cap != Some(CaptiveState::Clear)
+            && iface.as_deref().and_then(|i| p.gateway(i)).map(|gw| p.gateway_alive(&gw)).unwrap_or(false),
         portal_url: portal,
         proxy_any_on: svc.as_ref().map(|s| p.proxy_any_on(s)).unwrap_or(false),
         proxy_pointing_ok: svc.as_ref().map(|s| p.proxy_pointing_ok(s, ctx.port)).unwrap_or(false),
@@ -432,6 +494,12 @@ fn observe(ctx: &Ctx, cap: Option<CaptiveState>, portal: Option<String>, health_
 /// (`WATCH_RESTART`); this read `watch.recovery` for three releases, a file
 /// bin/rowt never writes — so a native tick always loaded 0 and the
 /// `ROWT_HEALTH_COOLDOWN` gate could never hold it back.
+/// (c)'s timestamp, beside `watch.restart` and for the same reason: "recent"
+/// has to outlive the tick that observed it.
+fn netchange_file(ctx: &Ctx) -> PathBuf {
+    ctx.cfg.join("watch.netchange")
+}
+
 fn restart_file(ctx: &Ctx) -> PathBuf {
     ctx.cfg.join("watch.restart")
 }
@@ -448,6 +516,7 @@ fn load_state(ctx: &Ctx) -> State {
             if n.is_empty() { None } else { Some(n) }
         },
         last_recovery: read(&restart_file(ctx)).trim().parse().unwrap_or(0),
+        last_net_change: read(&netchange_file(ctx)).trim().parse().unwrap_or(0),
     }
 }
 
@@ -482,6 +551,10 @@ fn save_state(ctx: &Ctx, disk: &mut State, new: &State) {
             let _ = std::fs::write(health_file(ctx), format!("{}\n", new.health_fails));
         }
         disk.health_fails = new.health_fails;
+    }
+    if new.last_net_change != disk.last_net_change {
+        let _ = std::fs::write(netchange_file(ctx), format!("{}\n", new.last_net_change));
+        disk.last_net_change = new.last_net_change;
     }
     if new.last_recovery != disk.last_recovery {
         let _ = std::fs::write(restart_file(ctx), format!("{}\n", new.last_recovery));
@@ -834,7 +907,7 @@ fn tick(ctx: &Ctx) {
     // is only for a network that just changed.
     let iface = Mac.detect_iface();
     let moved = iface.as_deref().is_some_and(|i| st.last_net_id.as_deref() != Some(net_id(i).as_str()));
-    let (cap, portal) = captive_state(iface.as_deref(), moved);
+    let (cap, portal) = captive_state(&ctx.logdir(), iface.as_deref(), moved);
     // The re-probe burst is the one place a healthy tick spends tens of
     // seconds (≈33 s worst case). Restart the stale-lock clock after it, so
     // "older than a minute" keeps measuring the tick the reclaim comment
@@ -981,6 +1054,21 @@ mod tests {
     /// drop the system proxy on a network that was merely slow. The page to
     /// open is the redirect target or nothing — never the fallback URL, which
     /// is an address nobody can reach.
+    /// `log/captive.log` is written by BOTH implementations and read by one
+    /// person grepping one file, so the vocabulary has to be the same on both
+    /// sides — these are the words `_curl_why` prints in bin/rowt. The numbers
+    /// are the ones that actually separate one dead network from another: a
+    /// name that would not resolve, a SYN into a black hole, and a timeout.
+    #[test]
+    fn the_probe_log_names_a_failure_the_way_the_shell_names_it() {
+        assert_eq!(curl_why(6), "could not resolve host");
+        assert_eq!(curl_why(7), "could not connect");
+        assert_eq!(curl_why(28), "timed out");
+        assert_eq!(curl_why(35), "TLS handshake failed");
+        // Anything else still says which status it was, rather than swallowing it.
+        assert_eq!(curl_why(52), "curl exit 52");
+    }
+
     #[test]
     fn the_dns_free_fallback_acts_only_on_a_redirect() {
         let v = |body: &str| {

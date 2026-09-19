@@ -58,7 +58,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.5.3"
+ROWT_VERSION="3.5.4"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -159,6 +159,14 @@ AUTO_INTERVAL="${ROWT_AUTO_INTERVAL:-20m}"       # how often 'auto' re-probes al
 # so it can be relaxed without hurting network-change response.
 WATCH_INTERVAL="${ROWT_WATCH_INTERVAL:-120}"     # seconds between liveness probes (plist StartInterval)
 HEALTH_FAILS="${ROWT_HEALTH_FAILS:-3}"           # consecutive failed probes before an auto-restart
+# How far past HEALTH_FAILS a network-hold may run before recovery is allowed
+# anyway — the escape hatch, and it must equal rowt_core::watch::HOLD_MULTIPLE.
+HOLD_MULTIPLE=3
+# (c): how long after a network change a portal is still the likelier story.
+# Generous next to the health streak — three failed probes at the default
+# interval is already six minutes, so a tighter window would expire before
+# recovery is ever considered. Must equal rowt_core::watch::NET_CHANGE_WINDOW.
+NET_CHANGE_WINDOW=900
 HEALTH_COOLDOWN="${ROWT_HEALTH_COOLDOWN:-600}"   # min seconds between auto-restarts (anti-thrash)
 HEALTH_TIMEOUT="${ROWT_HEALTH_TIMEOUT:-8}"       # per-probe delay-test timeout, seconds (generous: a slow-but-live tunnel must not read as wedged)
 HEALTH_URL="${ROWT_HEALTH_URL:-https://www.gstatic.com/generate_204}"    # target the liveness delay-test fetches THROUGH the escape server
@@ -2120,6 +2128,29 @@ cmd_probe() {
 SPEED_BYTES="${ROWT_SPEED_BYTES:-3000000}"        # per-sample cap (~3 MB)
 SPEED_TIMEOUT="${ROWT_SPEED_TIMEOUT:-8}"          # per-sample seconds
 
+# The default panel, when `speed` is given no URL of its own.
+#
+# It used to be ONE endpoint, which made a bare `rowt speed` two things it should
+# not have been: a single point of failure — a target merely having a bad minute
+# is indistinguishable from a slow lane — and a measurement of exactly one lane,
+# whichever the user's own rules happened to send that host down.
+#
+# So: one China-hosted object and one US-hosted one, for geography, plus one that
+# a China config normally tunnels, so the per-lane roll-up has two lanes to
+# compare. These are NOT promises about your rules — the LANE column reports
+# where each one actually went, and the roll-up says so if they all went the
+# same way.
+#   mirrors.aliyun.com     Hangzhou CN, 36 MB, honours Range — direct in any
+#                          sane config, and the local baseline
+#   ash-speed.hetzner.com  Ashburn US, 100 MB, honours Range, and reachable
+#                          BOTH bypassed and proxied from behind the GFW, which
+#                          most US hosts are not
+#   speed.cloudflare.com   anycast; tunnelled by many China configs, and still
+#                          answers bypassed — so the escape-vs-direct ratio has
+#                          a control instead of a dead column. Ignores Range, so
+#                          that sample is bounded by ROWT_SPEED_TIMEOUT.
+SPEED_URLS_DEFAULT="https://mirrors.aliyun.com/ubuntu/ls-lR.gz https://ash-speed.hetzner.com/100MB.bin https://speed.cloudflare.com/__down?bytes=10000000"
+
 # Print "<bytes> <B/s> <code>" for one URL. $2=1 bypasses the router.
 _speed_one() {
   local url="$1" bypass="${2:-0}" out
@@ -2133,6 +2164,42 @@ _speed_one() {
       --connect-timeout 5 -m "$SPEED_TIMEOUT" "$url" 2>/dev/null || true)"
   fi
   printf '%s' "${out:-0 0 000}"
+}
+
+# N samples of one cell, reduced to the MEDIAN of the ones that COMPLETED.
+#
+# One sample is noise. The help has always admitted a lane's own repeats vary by
+# ~1.4x, which is wide enough for a single row to blame or exonerate a lane over
+# a target that was merely having a bad minute from here. The median of N is the
+# cheapest thing that survives one bad sample; the MEAN is not, because a stalled
+# fetch lands at zero and drags the cell with it.
+#
+# `_speed_one` reports a failure as `0 0 000`, and folding those in as zero would
+# print "slow" where the truth is "unreachable" — an escape-routed host behind
+# the GFW has a dead BYPASSED column every single time. So failures are counted
+# and excluded from the median, and the caller says how many.
+#
+# Prints: "<median B/s> <completed> <attempted> <http code>"
+_speed_cell() { # $1=url  $2=bypass  $3=repeat
+  local url="$1" bypass="$2" n="$3" i=0 _sz _bps _code code=000
+  local vals=()
+  while [ "$i" -lt "$n" ]; do
+    read -r _sz _bps _code <<EOF
+$(_speed_one "$url" "$bypass")
+EOF
+    case "${_code:-000}" in
+      000|'') ;;
+      *) _bps="${_bps%%.*}"
+         if [ "${_bps:-0}" -gt 0 ] 2>/dev/null; then vals+=("$_bps"); code="$_code"; fi ;;
+    esac
+    i=$((i+1))
+  done
+  # Guard the empty case before expanding: this is bash 3.2 under `set -u`,
+  # where "${vals[@]}" on an empty array is an error, not an empty list.
+  if [ "${#vals[@]}" -eq 0 ]; then printf '0 0 %s 000' "$n"; return 0; fi
+  printf '%s %s %s %s' \
+    "$(printf '%s\n' "${vals[@]}" | sort -n | awk -v k=$(( (${#vals[@]} + 1) / 2 )) 'NR==k{print; exit}')" \
+    "${#vals[@]}" "$n" "$code"
 }
 
 # The attribution for one row, from the two samples that row just took.
@@ -2168,6 +2235,17 @@ _speed_verdict() { # $1=proxied B/s  $2=bypassed B/s  $3=proxied code  $4=bypass
   }'
 }
 
+# printf pads `%-Ns` by BYTES, and the em dash `_speed_human` prints for a dead
+# cell is three of them — so a failed cell came out two columns short and the
+# table skewed. `${#t}` counts CHARACTERS, so pad with that instead. Only matters
+# now that a failed cell is a normal thing to see rather than a rarity.
+_speed_pad() { # $1=text  $2=width
+  local t="$1" w="$2" n
+  n=$(( w - ${#t} ))
+  if [ "$n" -lt 0 ]; then n=0; fi
+  printf '%s%*s' "$t" "$n" ''
+}
+
 # Human bytes/second. Deliberately coarse: this is a triage signal, not a benchmark.
 _speed_human() {
   awk -v b="${1:-0}" 'BEGIN{
@@ -2181,35 +2259,120 @@ _speed_human() {
 # rowt speed [url …] — sustained throughput per lane, proxied vs bypassed.
 cmd_speed() {
   host_running || die "router is not running — '$PROG up' first"
+  # Flags BEFORE the URL list: `urls=("$@")` used to swallow `--repeat 3` whole
+  # and then try to fetch it.
+  local repeat=1
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --repeat)   [ "$#" -ge 2 ] || die "--repeat needs a number — usage: $PROG speed [--repeat N] [url …]"
+                  repeat="$2"; shift 2 ;;
+      --repeat=*) repeat="${1#*=}"; shift ;;
+      --)         shift; break ;;
+      -*)         die "unknown flag '$1' — usage: $PROG speed [--repeat N] [url …]" ;;
+      *)          break ;;
+    esac
+  done
+  case "$repeat" in ''|*[!0-9]*) die "--repeat wants a positive integer, got '$repeat'" ;; esac
+  [ "$repeat" -ge 1 ] || die "--repeat wants a positive integer, got '$repeat'"
   local urls=("$@")
   if [ "${#urls[@]}" -eq 0 ]; then
-    urls=("${ROWT_SPEED_URL:-https://speed.cloudflare.com/__down?bytes=10000000}")
+    # Split on whitespace so ROWT_SPEED_URL can name a default SET rather than
+    # one URL. `read -a` splits without letting the shell glob a URL's `?`.
+    read -r -a urls <<<"${ROWT_SPEED_URL:-$SPEED_URLS_DEFAULT}"
   fi
-  info "sampling up to $((SPEED_BYTES/1000000)) MB per URL, ${SPEED_TIMEOUT}s cap — a stalled lane shows as a small number, not an error"
+  # Say what this is about to spend before it spends it.
+  # Integer MB read "0 MB" for any cap under a megabyte; say KB down there.
+  local cap; cap="$(awk -v b="$SPEED_BYTES" 'BEGIN{ if (b < 1000000) printf "%d KB", b/1000; else printf "%g MB", b/1000000 }')"
+  info "$(( ${#urls[@]} * repeat * 2 )) fetches — ${#urls[@]} url(s) x $repeat x2 (through rowt, then bypassed), up to $cap and ${SPEED_TIMEOUT}s each; a stalled lane shows as a small number, not an error"
   echo
-  printf '  %-42s %-12s %-12s %s\n' "URL" "VIA ROWT" "BYPASSED" "LANE"
-  local u lane pr by prs bys prc byc shown hit
+  printf '  %s %s %s %s\n' "$(_speed_pad URL 42)" "$(_speed_pad "VIA ROWT" 12)" "$(_speed_pad BYPASSED 12)" "LANE"
+  local u lane pr by prs bys prc byc shown hit prok prn byok byn
+  local -a rows=()
   for u in "${urls[@]}"; do
     lane="$(printf '%s' "$u" | sed -E 's#^[a-zA-Z]+://##; s#/.*$##; s#:[0-9]+$##' | tr 'A-Z' 'a-z')"
     # Same predictor `explain` uses, so the LANE column can never disagree with it.
     if hit="$(_longest_domain_hit "$lane" 2>/dev/null)"; then lane="${hit%% *}"
     else lane="$FINAL_ROUTE"; fi
-    read -r _ prs prc <<EOF
-$(_speed_one "$u" 0)
+    read -r prs prok prn prc <<EOF
+$(_speed_cell "$u" 0 "$repeat")
 EOF
-    read -r _ bys byc <<EOF
-$(_speed_one "$u" 1)
+    read -r bys byok byn byc <<EOF
+$(_speed_cell "$u" 1 "$repeat")
 EOF
-    pr="$(_speed_human "${prs%%.*}")"; by="$(_speed_human "${bys%%.*}")"
+    pr="$(_speed_human "$prs")"; by="$(_speed_human "$bys")"
     shown="$(printf '%s' "$u" | cut -c1-42)"
-    printf '  %-42s %-12s %-12s %s\n' "$shown" "$pr" "$by" "$lane"
+    printf '  %s %s %s %s\n' "$(_speed_pad "$shown" 42)" "$(_speed_pad "$pr" 12)" "$(_speed_pad "$by" 12)" "$lane"
+    # Only when something failed: a sample that did not complete is excluded from
+    # the median, and a silent exclusion is how "unreachable" reads as "slow".
+    if [ "$prok" -lt "$prn" ] || [ "$byok" -lt "$byn" ]; then
+      printf '    %s\n' "· completed $prok/$prn through rowt, $byok/$byn bypassed — failed samples are excluded from the median, not counted as zero"
+    fi
     printf '    %s\n' "$(_speed_verdict "$prs" "$bys" "$prc" "$byc")"
+    # Keep the RATIO per URL, not just the two rates. A lane's targets are not
+    # comparable to each other — a Hangzhou mirror and a Virginia host differ by
+    # two orders of magnitude on the same lane — but their ratios are, because
+    # each one divides out its own target's speed. Rounded the way _speed_verdict
+    # rounds, so a row and the roll-up can never print different numbers for the
+    # same fetch. -1 means one of the two fetches died, so there is no ratio.
+    rows+=("$lane $prs $bys $(awk -v p="$prs" -v b="$bys" 'BEGIN{ if (p>0 && b>0) printf "%.0f", 100*p/b; else print -1 }')")
   done
+  # Per-lane roll-up. With one URL this would just restate the row, so it only
+  # earns its space once there are several — which is exactly when one target
+  # having a bad minute can mislead, and when "escape vs direct" becomes a
+  # question about lanes rather than about one endpoint.
+  if [ "${#urls[@]}" -gt 1 ]; then
+    echo
+    echo "  per lane — the tunnel as a fraction of the same fetch bypassed:"
+    local L cnt lanelist rmed rlo rhi tlo thi spread
+    lanelist="$(printf '%s\n' "${rows[@]}" | awk '{print $1}' | sort -u)"
+    for L in $lanelist; do
+      cnt="$(printf '%s\n' "${rows[@]}" | awk -v l="$L" '$1==l{c++} END{print c+0}')"
+      # Median of the RATIOS, with the low and high kept: a wide spread is the
+      # reader's signal that this lane's targets disagree and the median is not
+      # standing in for much.
+      rmed="$(printf '%s\n' "${rows[@]}" | awk -v l="$L" '$1==l && $4>=0 {print $4}' | sort -n | awk '{a[NR]=$0} END{ if (NR) print a[int((NR+1)/2)]; else print -1 }')"
+      rlo="$( printf '%s\n' "${rows[@]}" | awk -v l="$L" '$1==l && $4>=0 {print $4}' | sort -n | awk 'NR==1{print; exit}')"
+      rhi="$( printf '%s\n' "${rows[@]}" | awk -v l="$L" '$1==l && $4>=0 {print $4}' | sort -rn | awk 'NR==1{print; exit}')"
+      tlo="$( printf '%s\n' "${rows[@]}" | awk -v l="$L" '$1==l && $2>0  {print $2}' | sort -n | awk 'NR==1{print; exit}')"
+      thi="$( printf '%s\n' "${rows[@]}" | awk -v l="$L" '$1==l && $2>0  {print $2}' | sort -rn | awk 'NR==1{print; exit}')"
+      spread=""
+      if [ -n "${rlo:-}" ] && [ "${rlo:-0}" != "${rhi:-0}" ]; then spread=", ratios ${rlo}%–${rhi}%"; fi
+      if [ -n "${tlo:-}" ] && [ "${tlo:-0}" != "${thi:-0}" ]; then
+        spread="$spread, tunnel $(_speed_human "$tlo")–$(_speed_human "$thi")"
+      elif [ -n "${tlo:-}" ]; then
+        spread="$spread, tunnel $(_speed_human "$tlo")"
+      fi
+      printf '    %s %s url(s)%s\n' "$(_speed_pad "$L" 8)" "$cnt" "$spread"
+      # The same rule as a row — one ratio, no absolute floor — fed the median
+      # ratio against a notional 100, so the wording and the 50% line are shared
+      # rather than reimplemented.
+      if [ "${rmed:--1}" -ge 0 ]; then
+        printf '      %s\n' "$(_speed_verdict "$rmed" 100 200 200)"
+      else
+        echo "      · no verdict — no URL on this lane completed both fetches"
+      fi
+      if [ "$L" = direct ]; then
+        echo "      · both columns are the same physical path for this lane, so this"
+        echo "        measures rowt's own overhead — it is not one lane against another."
+      fi
+    done
+    # Lanes are the reader's own rules, so no fixed set of URLs can promise two
+    # of them. Say so rather than let a one-lane table pass for a comparison.
+    if [ "$(printf '%s\n' "$lanelist" | wc -l | tr -d ' ')" -le 1 ]; then
+      echo "    · every URL here routed the same way, so there are no two lanes to"
+      echo "      compare. Add one your rules send the other way — '$PROG route <host>'"
+      echo "      tells you where a host lands before you spend a fetch on it."
+    fi
+  fi
   echo
+  echo "  VIA ROWT is the lane your rules chose for that host; BYPASSED is the same"
+  echo "  fetch straight out the physical NIC, which IS the direct path. So on an"
+  echo "  escape-routed URL the two columns are already the tunnel against direct."
   echo "  A lane can pass every other rowt check and still fail here: reachability"
   echo "  probes use small responses and cannot see a throughput collapse."
   echo "  Below 50% of the bypassed column is called out as rowt's own bottleneck."
-  echo "  A single lane's repeats vary by ~1.4x, so a tighter line would report noise."
+  echo "  A single lane's repeats vary by ~1.4x, so a tighter line would report noise;"
+  echo "  '--repeat N' takes the MEDIAN of N samples per cell when one run is not enough."
   echo "  rowt never refuses or re-routes a lane for being slow: this is a diagnosis,"
   echo "  and it never changes the exit status."
 }
@@ -2716,9 +2879,41 @@ _captive_resolve_at() { # $1=nameserver $2=host
 # substitution. `-w` writes the code and the redirect after the body on lines
 # of their own; the redirect line carries a prefix so that an empty redirect is
 # still a line, not a trailing newline `$()` would strip.
-_captive_probe_once() { # $1=url $2=host:port:ip for --resolve, or empty
-  local url="$1" rsv="${2:-}" out code body redir verdict
-  out="$(curl -s --noproxy '*' --max-time "${ROWT_CAPTIVE_TIMEOUT:-6}" ${rsv:+--resolve "$rsv"} -w '\n%{http_code}\nredirect=%{redirect_url}' "$url" 2>/dev/null)" || { echo unknown; return 0; }
+# WHY a probe came back the way it did. The verdict alone is three words wide,
+# so an 'unknown' could not be told apart afterwards: a name that would not
+# resolve, a SYN into a black hole, a six-second timeout and a non-HTTP answer
+# all looked identical. Diagnosing the 2026-09-14 hotel took a log-archaeology
+# session for exactly that reason, and the conclusion it produced was the best
+# reading of the evidence rather than something the logs stated.
+#
+# Its own file on purpose. NOT watch.log: watch-diff reconstructs bash's actions
+# from that file and compares them against the planner's plan, so a line there
+# is a new ACTION to model in rowt-core — for what is pure telemetry. NOT the
+# discovery journal either: its line is hashed into state's discovery_sig, so
+# changing that schema makes every tick re-journal an unchanged network. `log/`
+# is pruned from the parity snapshot (`! -path './log/*'`) and watch-diff reads
+# only watch.log, so this file sits outside every compared surface.
+_captive_log() { mkdir -p "$LOGDIR" 2>/dev/null || true; printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOGDIR/captive.log"; }
+
+# curl's exit status is the discriminator worth keeping; name the few that
+# actually distinguish one dead network from another.
+_curl_why() {
+  case "${1:-}" in
+    6)  echo "could not resolve host" ;;
+    7)  echo "could not connect" ;;
+    28) echo "timed out" ;;
+    35) echo "TLS handshake failed" ;;
+    *)  echo "curl exit $1" ;;
+  esac
+}
+
+_captive_probe_once() { # $1=url $2=host:port:ip for --resolve, or empty $3=label
+  local url="$1" rsv="${2:-}" label="${3:-probe}" out code body redir verdict rc=0
+  out="$(curl -s --noproxy '*' --max-time "${ROWT_CAPTIVE_TIMEOUT:-6}" ${rsv:+--resolve "$rsv"} -w '\n%{http_code}\nredirect=%{redirect_url}' "$url" 2>/dev/null)" || rc=$?
+  if [ "$rc" != 0 ]; then
+    _captive_log "unknown   $label: $(_curl_why "$rc") (rc=$rc) url=$url${rsv:+ resolve=$rsv}"
+    echo unknown; return 0
+  fi
   redir="${out##*$'\n'}"; redir="${redir#redirect=}"; out="${out%$'\n'*}"
   code="${out##*$'\n'}"; body="${out%$'\n'*}"
   case "$code" in
@@ -2731,6 +2926,9 @@ _captive_probe_once() { # $1=url $2=host:port:ip for --resolve, or empty
     30[0-9]|511) verdict=captive ;;
     *) verdict=unknown ;;
   esac
+  # A clear verdict needs no explaining; everything else is what a later reader
+  # is trying to account for.
+  [ "$verdict" = clear ] || _captive_log "$verdict   $label: HTTP $code url=$url${rsv:+ resolve=$rsv}"
   echo "$verdict"
   [ "$verdict" = captive ] && printf '%s\n' "${redir:-$url}"
   return 0
@@ -2764,11 +2962,18 @@ _captive_probe_once() { # $1=url $2=host:port:ip for --resolve, or empty
 # slow. A portal that answers 200 inline is missed here and caught by the named
 # probe a tick later, which is the safe direction to be wrong in.
 _captive_probe_ipfallback() { # $1=host, for a plausible Host header
-  local url="${ROWT_CAPTIVE_FALLBACK:-http://192.0.2.1/}" out code redir
-  out="$(curl -s --noproxy '*' --max-time "${ROWT_CAPTIVE_TIMEOUT:-6}" ${1:+-H "Host: $1"} -w '\n%{http_code}\nredirect=%{redirect_url}' "$url" 2>/dev/null)" || return 0
+  local url="${ROWT_CAPTIVE_FALLBACK:-http://192.0.2.1/}" out code redir rc=0
+  out="$(curl -s --noproxy '*' --max-time "${ROWT_CAPTIVE_TIMEOUT:-6}" ${1:+-H "Host: $1"} -w '\n%{http_code}\nredirect=%{redirect_url}' "$url" 2>/dev/null)" || rc=$?
+  if [ "$rc" != 0 ]; then
+    _captive_log "unknown   dns-free: $(_curl_why "$rc") (rc=$rc) url=$url"
+    return 0
+  fi
   redir="${out##*$'\n'}"; redir="${redir#redirect=}"; out="${out%$'\n'*}"
   code="${out##*$'\n'}"
-  case "$code" in 30[0-9]|511) ;; *) return 0 ;; esac
+  # Anything but a redirect leaves the verdict where it was — say so, because
+  # "the fallback ran and declined" and "the fallback never ran" look the same
+  # from the outside and mean very different things.
+  case "$code" in 30[0-9]|511) ;; *) _captive_log "unknown   dns-free: HTTP $code — not a redirect, verdict unchanged url=$url"; return 0 ;; esac
   echo captive
   # Only a real redirect target is worth opening: the fallback URL itself is an
   # address nobody can reach, so handing it to the browser would be a blank tab.
@@ -2792,7 +2997,7 @@ _captive_state() {
   # or a dotted quad (every sandbox case) has nothing to resolve.
   case "$host" in ''|\[*) ;; *[!0-9.]*) named=1 ;; esac
   [ "$named" = 1 ] && rsv="$(_captive_pin "$ifc" "$host" "$port")"
-  out="$(_captive_probe_once "$url" "$rsv")"
+  out="$(_captive_probe_once "$url" "$rsv" first)"
   if [ "$moved" = 1 ]; then
     for d in $(printf '%s' "${ROWT_CAPTIVE_RETRY-5,10}" | tr ',' ' '); do
       case "$d" in ''|*[!0-9]*) continue ;; esac
@@ -2802,7 +3007,7 @@ _captive_state() {
       # be pinned tries again to pin itself, or the burst would re-probe via the
       # system resolver — the case the pin exists for.
       [ "$named" = 1 ] && [ -z "$rsv" ] && rsv="$(_captive_pin "$ifc" "$host" "$port")"
-      out="$(_captive_probe_once "$url" "$rsv")"
+      out="$(_captive_probe_once "$url" "$rsv" "retry+${d}s")"
     done
   fi
   # Still nothing, and the probe needed a name to get anywhere: ask again
@@ -3832,6 +4037,7 @@ WATCH_LOG="$LOGDIR/watch.log"
 WATCH_NET="$CFG/watch.net"                   # last-seen network identity (for the log)
 WATCH_HEALTH="$CFG/watch.health"             # consecutive liveness-probe failures (streak counter)
 WATCH_RESTART="$CFG/watch.restart"           # epoch of the last auto-restart (cooldown gate)
+WATCH_NETCHANGE="$CFG/watch.netchange"       # epoch of the last network change ((c): a portal is likely just after one)
 
 # mkdir first: the log directory is created by `up`, and a tick can run before
 # any `up` ever has (a fresh config, or a tree built by hand). Appending into a
@@ -4012,14 +4218,16 @@ _watch_shadow() {
       --argjson health "$([ "${_SH2_HEALTH:-ok}" = ok ] && echo true || echo false)" \
       --argjson fails "${_SH_FAILS0:-0}" \
       --argjson lastrec "${_SH_LASTREC0:-0}" \
+      --argjson lastnetchg "${_SH_LASTNETCHG0:-0}" \
+      --argjson gwok "${_SH2_GWOK:-false}" \
       --argjson now "${_SH2_NOW:-$(date +%s)}" \
       '{obs:{proxy_intent:"", captive:"clear", active_service:$svc, proxy_any_on:true,
              host_running:true, intent:"up", boot_matches:true, iface:$ifc,
              proxy_pointing_ok:$pointing, proxy_bypass_ok:$bypass,
-             bound_iface:$cur, net_id:$nid, health_ok:$health, now:$now,
+             bound_iface:$cur, net_id:$nid, health_ok:$health, now:$now, gateway_ok:$gwok,
              mode:(if $mode == "" then "host" else $mode end)},
         state:{captive_flag:false, health_fails:$fails, last_net_id:$last,
-               last_recovery:$lastrec}}' > "$obs2" 2>/dev/null
+               last_recovery:$lastrec, last_net_change:$lastnetchg}}' > "$obs2" 2>/dev/null
     "$wb" --obs "$obs2" --phase netcheck 2>/dev/null >> "$plan" || true
     # Kept, not deleted: this is the observation the diverging half of the plan
     # was decided from, and a bundle without it sends the next reader to the
@@ -4117,10 +4325,62 @@ _watch_recover() {
 
 # Liveness check, called by 'watch tick' when the network did NOT change (a
 # change already triggers a full reload). $1 = active physical interface.
-_watch_health() {
+# The default gateway reached THROUGH $1 — not `route get default`, which hands
+# back whatever owns the default right now (routinely a VPN utun here), which
+# would point the probe at the wrong link entirely.
+_watch_gateway() { # $1=iface
+  [ -n "${1:-}" ] || return 0
+  netstat -rn -f inet 2>/dev/null | awk -v i="$1" '$1=="default" && $NF==i{print $2; exit}'
+}
+
+# Does that gateway answer? One echo, one second, no name lookup: this runs in a
+# tick that has already spent its patience on the captive probe.
+_watch_gateway_alive() { # $1=gateway
+  [ -n "${1:-}" ] || return 1
+  ping -c 1 -t 1 -n "$1" >/dev/null 2>&1
+}
+
+# Should recovery be held because the NETWORK, not the tunnel, is the problem?
+# Mirrors `rowt_core::watch::hold_for_network`; watch-diff compares the two, so
+# the conditions AND their order have to match.
+#
+# Recovery is for a tunnel wedged while the network works. That needs POSITIVE
+# evidence the physical path is fine, and a `clear` verdict is exactly it: a
+# direct, unproxied fetch of a known host succeeded. "not captive" is not the
+# same claim — `unknown` means we reached nothing at all, and no amount of
+# restarting sing-box fixes a broken uplink.
+# (c): did the network change recently enough for a portal to be the likelier
+# explanation than a wedged tunnel?
+_watch_moved_recently() { # $1=now
+  local t; t="$(cat "$WATCH_NETCHANGE" 2>/dev/null || echo 0)"
+  case "$t" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$t" -ne 0 ] || return 1
+  [ "$(( ${1:-0} - t ))" -lt "$NET_CHANGE_WINDOW" ]
+}
+
+_watch_hold_for_network() { # $1=captive verdict  $2=failures  $3=gateway_ok(0|1)  $4=now
+  # The floor: with the check off every verdict is `unknown` by construction,
+  # so keying on the verdict alone would read "never recover" and silently
+  # disable self-healing for anyone who switched portal detection off.
+  [ "${ROWT_CAPTIVE_CHECK:-1}" = 1 ] || return 1
+  # The evidence recovery is waiting for.
+  if [ "${1:-}" = clear ]; then return 1; fi
+  # The floor under the floor: a probe host that has become permanently
+  # unreachable degrades back to the old behaviour instead of wedging recovery
+  # for good. Only reachable while the tunnel is ALSO failing, so a dead probe
+  # host on a healthy tunnel never gets here.
+  if [ "${2:-0}" -ge "$(( HEALTH_FAILS * HOLD_MULTIPLE ))" ]; then return 1; fi
+  # (b) + (c): `unknown` alone is ambiguous — a garden that blocks DNS, a dead
+  # uplink and a genuinely wedged tunnel all produce it, and only the first
+  # wants recovery suppressed. Corroborate before suppressing.
+  if [ "${3:-0}" != 1 ] && ! _watch_moved_recently "${4:-0}"; then return 1; fi
+  return 0
+}
+
+_watch_health() { # $1=iface  $2=captive verdict
   # Offline (no interface IP) — a restart can't help and a returning network
   # fires its own resolver-change reload, so just reset the streak and bail.
-  local ip; ip="$(ipconfig getifaddr "${1:-}" 2>/dev/null || true)"
+  local cap="${2:-}" ip; ip="$(ipconfig getifaddr "${1:-}" 2>/dev/null || true)"
   # Offline and healthy both reset the streak and plan nothing, so neither
   # records an action — matching the FSM, which only changes state there.
   [ -n "$ip" ] || { rm -f "$WATCH_HEALTH"; _SH2_HEALTH=offline; return 0; }
@@ -4131,6 +4391,23 @@ _watch_health() {
   if [ "$fails" -lt "$HEALTH_FAILS" ]; then
     _watch_log "escape tunnel probe failed ($fails/$HEALTH_FAILS)"
     _wact "log escape tunnel probe failed ($fails/$HEALTH_FAILS)"
+    return 0
+  fi
+  # (b): only probed when it could matter — the rule short-circuits on a clear
+  # verdict, so a healthy tick pays no ping. rowt-rs applies the same condition.
+  local gwok=0 gw now; now="${_SH2_NOW:-$(date +%s)}"
+  if [ "$cap" != clear ]; then
+    gw="$(_watch_gateway "${1:-}")"
+    if [ -n "$gw" ] && _watch_gateway_alive "$gw"; then gwok=1; fi
+  fi
+  _SH2_GWOK="$([ "$gwok" = 1 ] && echo true || echo false)"
+  if _watch_hold_for_network "$cap" "$fails" "$gwok" "$now"; then
+    # The 2026-09-14 hotel, exactly: the reload could not possibly succeed, and
+    # it burned the 600s cooldown and logged a failure that reads as a tunnel
+    # problem.
+    local m="tunnel wedged ($fails consecutive probe failures) — but the captive probe reached nothing either (captive=${cap:-none}), so the NETWORK is the suspect and a reload cannot fix an uplink; holding off recovery"
+    _watch_log "$m"
+    _wact "log $m"
     return 0
   fi
   _watch_recover "tunnel wedged ($fails consecutive probe failures)" cmd_reload
@@ -4304,6 +4581,7 @@ PLIST
       # own result and it would count the same failure twice.
       _SH_FAILS0="$(cat "$WATCH_HEALTH" 2>/dev/null || echo 0)"
       _SH_LASTREC0="$(cat "$WATCH_RESTART" 2>/dev/null || echo 0)"
+      _SH_LASTNETCHG0="$(cat "$WATCH_NETCHANGE" 2>/dev/null || echo 0)"
       _SH2_HEALTH=ok
       trap 'rmdir "$CFG/watch.lock" 2>/dev/null || true
             [ "${ROWT_WATCH_SHADOW:-$(sget shadow_watch)}" = 1 ] && [ -n "$_SH_CAP" ] && _watch_shadow || true
@@ -4442,6 +4720,9 @@ PLIST
       svc="$(active_service 2>/dev/null || true)"
       nid="$(net_id "$ifc")"                       # e.g. "MyWifi 192.168.1.42/192.168.1.1"
       last="$(cat "$WATCH_NET" 2>/dev/null || true)"
+      # (c): stamp the MOVE, not just the identity — "recent" has to outlive
+      # this tick, and the health streak takes three of them to build.
+      [ "$last" = "$nid" ] || printf '%s\n' "${_SH2_NOW:-$(date +%s)}" > "$WATCH_NETCHANGE" 2>/dev/null || true
       printf '%s\n' "$nid" > "$WATCH_NET" 2>/dev/null || true
       # Both netcheck openers are recorded HERE, not where each happens.
       # `corp_sync` can take the router down and the tick then exits before this
@@ -4486,7 +4767,7 @@ PLIST
         # reload can't see.
         # local mode has no tunnel to probe; leaving this on would fail every
         # tick and drive _watch_recover into a permanent reload loop.
-        [ "$(sget mode)" = "local" ] || _watch_health "$ifc" || true
+        [ "$(sget mode)" = "local" ] || _watch_health "$ifc" "$cap" || true
         _wact "next stop"
         exit 0
       fi
@@ -5207,7 +5488,7 @@ probe). Tunables: ROWT_PING_URL, ROWT_PING_TIMEOUT.
 EOF
 ;;
     speed) cat <<EOF
-$PROG speed [url …] — sustained throughput per lane, proxied vs bypassed.
+$PROG speed [--repeat N] [url …] — sustained throughput per lane, proxied vs bypassed.
 
 Every other rowt health signal is REACHABILITY: a small request completes or it
 doesn't. That is blind to a lane which answers 200 on small responses while
@@ -5217,6 +5498,14 @@ caller's timeout — the lane looks perfect and is unusable.
 Fetches a capped range (~3 MB by default) from each URL twice:
 through the router, and with the proxy BYPASSED. That second column is what
 localises a slow lane.
+
+BYPASSED goes straight out the physical NIC, which IS the direct path — so on a
+URL your rules send through the tunnel, the two columns are already escape
+against direct, on the same target. Give it more than one URL and it also prints
+a per-lane roll-up: the median of each column across that lane's URLs, with the
+same verdict rule. The direct lane's roll-up says so explicitly, because there
+both columns are the same physical path and the row measures rowt's overhead
+rather than one lane against another.
 
 Each row then gets a verdict, because dividing the two columns by hand is how a
 slow corp tunnel got reported as a rowt bug. Below HALF the bypassed rate is
@@ -5231,10 +5520,27 @@ degraded lane is still the lane your rules chose, and the alternative is either
 stranding you or leaking the traffic somewhere your policy excluded. So this is
 a diagnosis and nothing else: '$PROG speed' exits 0 whatever it finds.
 
-With no URL it samples a public speed endpoint (the direct/escape path). Pass
-one URL per lane you care about — a corp host and a public one together give
-you the comparison that matters. Tunables: ROWT_SPEED_BYTES, ROWT_SPEED_TIMEOUT,
-ROWT_SPEED_URL.
+One sample of a target that is merely having a bad minute reads exactly like a
+slow lane. '--repeat N' takes N samples per cell and reports the MEDIAN, not the
+mean — a stalled fetch lands at zero and would drag an average down with it. A
+sample that does not complete at all is excluded rather than counted as zero,
+and the row says how many completed: "unreachable" and "slow" are different
+answers and must not be averaged into each other.
+
+With no URL it samples a default panel of three: a China-hosted object, a
+US-hosted one, and one that most China configs tunnel — so a bare '$PROG speed'
+spans both geography and, usually, both lanes, instead of resting on a single
+endpoint that might just be having a bad minute. They are not promises about
+your rules: the LANE column reports where each actually went, and the roll-up
+tells you if they all went the same way.
+
+Pass your own URLs to override the panel entirely — a corp host and a public one
+together give you the comparison that matters. The LANE column is predicted from
+each URL's host by the same rules '$PROG route' uses, so the URL chooses the
+lane: to measure a lane, name a host that lane already carries.
+
+Tunables: ROWT_SPEED_BYTES, ROWT_SPEED_TIMEOUT, and ROWT_SPEED_URL — which takes
+a whitespace-separated SET of default URLs, not just one.
 EOF
 ;;
     probe) cat <<EOF

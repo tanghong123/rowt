@@ -42,6 +42,16 @@ pub trait Platform {
     /// The first IPv4 address `host` resolves to at exactly `ns`; None when it
     /// does not answer (or answers with nothing but a CNAME chain).
     fn resolve_at(&self, ns: &str, host: &str) -> Option<String>;
+    /// The default gateway reached THROUGH `iface`. None when that interface
+    /// carries no default route.
+    fn gateway(&self, iface: &str) -> Option<String>;
+    /// Does that gateway answer a single ICMP echo?
+    ///
+    /// This is the second signal the walled-garden reading needs: a gateway
+    /// that answers while the probe host does not says the local link is up and
+    /// something UPSTREAM is gating us — a garden. Nothing answering at all is
+    /// a dead uplink, and the two want opposite responses from the watchdog.
+    fn gateway_alive(&self, gw: &str) -> bool;
 }
 
 fn out(cmd: &str, args: &[&str]) -> Option<String> {
@@ -266,6 +276,35 @@ impl Platform for Mac {
         // network that may be a walled garden whose resolver does not answer.
         let at = format!("@{ns}");
         first_ipv4(&out("dig", &["+short", "+time=2", "+tries=1", &at, host])?)
+    }
+
+    fn gateway(&self, iface: &str) -> Option<String> {
+        if iface.is_empty() {
+            return None;
+        }
+        // The default route BOUND TO THIS INTERFACE, not `route get default`,
+        // which hands back whatever owns the default right now — on this
+        // machine that is routinely a VPN utun, and the probe would then be
+        // asking about the wrong link entirely.
+        let body = out("netstat", &["-rn", "-f", "inet"])?;
+        body.lines().find_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            (f.first() == Some(&"default") && f.last() == Some(&iface))
+                .then(|| f.get(1).map(|s| s.to_string()))
+                .flatten()
+        })
+    }
+
+    fn gateway_alive(&self, gw: &str) -> bool {
+        if gw.is_empty() {
+            return false;
+        }
+        // One echo, one second, no name lookup — this runs inside a tick that
+        // has already spent its patience on the captive probe, and the answer
+        // is binary.
+        Command::new("ping").args(["-c", "1", "-t", "1", "-n", gw])
+            .stdout(Stdio::null()).stderr(Stdio::null())
+            .status().map(|s| s.success()).unwrap_or(false)
     }
 }
 

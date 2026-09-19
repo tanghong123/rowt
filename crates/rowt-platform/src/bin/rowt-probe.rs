@@ -33,6 +33,8 @@ fn main() -> ExitCode {
         }
         Some("dhcp-dns") => println!("{}", p.dhcp_dns(&svc(1)).unwrap_or_default()),
         Some("resolve-at") => println!("{}", p.resolve_at(&svc(1), &svc(2)).unwrap_or_default()),
+        Some("gateway") => println!("{}", p.gateway(&svc(1)).unwrap_or_default()),
+        Some("gateway-alive") => println!("{}", p.gateway_alive(&svc(1))),
         _ => {
             eprintln!("usage: rowt-probe <service|iface|boot-id|proxy-any-on|proxy-pointing-ok|proxy-on|captive-off|captive-on> [service] | dhcp-dns <iface> | resolve-at <ns> <host>");
             return ExitCode::FAILURE;

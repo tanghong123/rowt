@@ -64,6 +64,10 @@ fn run() -> Result<String, String> {
     let obs = Observation {
         proxy_intent: s(o, "proxy_intent"),
         captive: o.get("captive").and_then(|c| c.as_str()).map(CaptiveState::parse),
+        // Absent in a fixture means the check is ON, which is what every case
+        // written before this flag existed describes.
+        captive_check_disabled: b(o, "captive_check_disabled"),
+        gateway_ok: b(o, "gateway_ok"),
         portal_url: opt(o, "portal_url"),
         active_service: opt(o, "active_service"),
         proxy_any_on: b(o, "proxy_any_on"),
@@ -86,6 +90,7 @@ fn run() -> Result<String, String> {
         health_fails: sv.get("health_fails").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
         last_net_id: opt(sv, "last_net_id"),
         last_recovery: sv.get("last_recovery").and_then(|x| x.as_i64()).unwrap_or(0),
+        last_net_change: sv.get("last_net_change").and_then(|x| x.as_i64()).unwrap_or(0),
     };
 
     let cfg = Config::default();

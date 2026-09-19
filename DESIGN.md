@@ -609,6 +609,10 @@ you know, take the race out of it altogether.
 | drop **once per episode** (`captive` state guards the transition) | if you manually `proxy on` mid-login, the watchdog must not fight you |
 | `proxy_intent` is **never touched** | intent is *the user's wish*; the `captive` state key records *why reality differs*. This also keeps the intent-off early-out intact: a deliberately-off proxy skips all of this |
 | recovery/reload **suppressed** while captive | tunnel probes and reloads all dead-end against the wall; they would burn the recovery cooldown and re-assert the proxy over the login page |
+| recovery needs a **`clear`** verdict, not merely "not captive" | recovery is for a tunnel wedged *while the network works*. `unknown` means the probe reached nothing at all, and no amount of restarting sing-box fixes a broken uplink. Observed 2026-09-14: three failed tunnel probes in a hotel garden fired a reload that could not possibly succeed, burned the 600 s cooldown, and logged a failure that reads as a tunnel problem |
+| an `unknown` must be **corroborated** before it suppresses recovery | `unknown` is ambiguous — a garden that blocks DNS, a dead uplink, and a genuinely wedged tunnel all produce it, and only the first wants recovery held. Either the **default gateway answers** while the probe host does not (the local link is up, something upstream is gating us), or the **network changed within 15 min** (a portal is likely then; a wedge is not). With neither, the old behaviour stands |
+| the suppression **expires** at 3× the health threshold | a probe host that becomes permanently unreachable must degrade back to the old behaviour rather than wedge self-healing for good. Only reachable while the tunnel is also failing, so a dead probe host on a healthy tunnel never gets here |
+| `ROWT_CAPTIVE_CHECK=0` **exempts** all of the above | with the check off every verdict is `unknown` by construction, so keying on the verdict alone would read "never recover" — silently disabling self-healing for anyone who turned portal detection off, which is far worse than one wasted reload. Carried as its own observation field, not as a missing verdict: a missing verdict is what gates the **discovery journal** |
 | restore **only if the router is up** | never point the system proxy at a dead port; the normal recovery path handles that case after the fall-through |
 | restore **falls through to a normal tick** | anything that drifted while walled off (bypass list, bind iface, proxy pointing) gets reconciled immediately, not at the next tick |
 
@@ -638,6 +642,17 @@ the manual dance is `rowt proxy off` → log in → `proxy on`.
   host (and its `*.` twin) must be in it, or the hotspot lane is not applied
   (`rowt proxy on` re-applies it; `rowt hotspot list` shows the lane).
 - `~/.config/rowt/log/watch.log` — "captive portal detected/cleared" lines.
+- `~/.config/rowt/log/captive.log` — **why** a probe came back the way it did:
+  one line per non-clear probe, naming the attempt (`first`, `retry+5s`,
+  `dns-free`), curl's exit status (6 could not resolve, 7 could not connect,
+  28 timed out) or the HTTP status, and the pinned resolver when there was one.
+  `unknown` used to be three words wide and indistinguishable — a name that
+  would not resolve, a black-holed SYN and a six-second timeout all looked the
+  same, which is why diagnosing the 2026-09-14 hotel took log archaeology and
+  produced a reading of the evidence rather than a fact. Telemetry only: it is
+  deliberately NOT `watch.log` (watch-diff reconstructs bash's *actions* from
+  that file) and NOT the discovery journal (its line is hashed into
+  `discovery_sig`), so it sits outside every compared surface.
 - `rowt audit` — the drop/restore pair with `by=launchd` attribution.
 - Reproduce the probe by hand:
   `curl -s --noproxy '*' --max-time 6 -w '\n%{http_code}\nredirect=%{redirect_url}' http://captive.apple.com/hotspot-detect.html`

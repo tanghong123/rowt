@@ -17,3 +17,5 @@ captive-restore    | _captive_proxy_on Wi-Fi     | captive-on Wi-Fi
 gfw-canaries       | _direct_reaches_escape      | gfw
 dhcp-dns           | _captive_dhcp_dns en0       | dhcp-dns en0
 resolve-at         | _captive_resolve_at 192.0.2.1 captive.apple.com | resolve-at 192.0.2.1 captive.apple.com
+gateway            | _watch_gateway en0          | gateway en0
+gateway-alive      | _watch_gateway_alive 192.0.2.1 | gateway-alive 192.0.2.1

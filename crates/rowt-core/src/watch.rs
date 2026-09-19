@@ -39,6 +39,24 @@ impl CaptiveState {
 pub struct Observation {
     pub proxy_intent: String,
     pub captive: Option<CaptiveState>,
+    /// `ROWT_CAPTIVE_CHECK=0` — portal detection is switched off, so `captive`
+    /// is `unknown` unconditionally and carries no information about the
+    /// network at all.
+    ///
+    /// It is a field rather than `captive: None` because `None` is what gates
+    /// the DISCOVERY JOURNAL in `guard` (`if let Some(cap) … Action::Journal`),
+    /// and switching portal detection off must not switch network discovery
+    /// off. Named for the DISABLED state on purpose: `Observation` derives
+    /// `Default`, so a new bool is `false`, and `false` here means "the check
+    /// is on" — which is what every existing watch-case fixture describes. The
+    /// opposite name would have every fixture silently claim the check was off
+    /// and the recovery rule below would never fire in any of them.
+    pub captive_check_disabled: bool,
+    /// (b): does the default gateway answer an echo? A gateway that replies
+    /// while the probe host does not says the local link is up and something
+    /// UPSTREAM is gating us — a walled garden. Nothing answering at all is a
+    /// dead uplink, and the two want opposite responses from the watchdog.
+    pub gateway_ok: bool,
     /// On `captive`: the portal's login page, as the probe saw it — the
     /// redirect target when it was redirected, else the probe URL itself (a
     /// portal serving its page under that URL answers the browser the same
@@ -71,6 +89,12 @@ pub struct State {
     pub health_fails: u32,
     pub last_net_id: Option<String>,
     pub last_recovery: i64,
+    /// (c): when the network last changed under us. A portal is likely just
+    /// after joining a network; a wedged tunnel is not. Persisted beside
+    /// `last_recovery` because "recent" has to outlive the tick — the health
+    /// streak takes three ticks to build, so by the time recovery is even
+    /// considered the move that caused the portal is already minutes old.
+    pub last_net_change: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +147,67 @@ pub struct Outcome {
     pub actions: Vec<Action>,
     pub state: State,
     pub next: Next,
+}
+
+/// How far past the health threshold a hold may run before recovery is allowed
+/// anyway. The escape hatch of (a): a probe host that has become permanently
+/// unreachable must degrade back to the old behaviour rather than wedge
+/// self-healing for good. At the defaults that is 9 failed ticks — about
+/// eighteen minutes — before rowt stops believing the network story.
+const HOLD_MULTIPLE: u32 = 3;
+
+/// Should recovery be held because the NETWORK, not the tunnel, is the problem?
+///
+/// Recovery exists for a tunnel that is wedged while the network works — a
+/// server-side connection death, a stuck UDP socket. That needs POSITIVE
+/// evidence the physical path is fine, and a `clear` verdict is exactly that:
+/// a direct, unproxied fetch of a known host succeeded. "not captive" is not
+/// the same claim. `unknown` means we could not reach anything at all, and no
+/// amount of restarting sing-box fixes a broken uplink.
+///
+/// `guard` stops the tick on a captive verdict, so what reaches here is
+/// `clear`, `unknown`, or nothing.
+/// (c): how long after a network change a portal is still the likelier story.
+/// Generous next to the health streak — three failed probes at the default
+/// interval is already six minutes, so a tighter window would expire before
+/// recovery is ever considered and (c) would never fire at all.
+const NET_CHANGE_WINDOW: i64 = 900;
+
+/// (c): did the network change recently enough for a portal to be the likelier
+/// explanation than a wedged tunnel?
+fn moved_recently(obs: &Observation, st: &State) -> bool {
+    st.last_net_change != 0 && obs.now - st.last_net_change < NET_CHANGE_WINDOW
+}
+
+fn hold_for_network(obs: &Observation, st: &State, fails: u32, cfg: &Config) -> bool {
+    // (a), the floor. With the check off every verdict is `unknown` by
+    // construction, so the rule would read "never recover" — silently
+    // disabling self-healing for anyone who turned portal detection off, which
+    // is a far worse failure than one wasted reload.
+    if obs.captive_check_disabled {
+        return false;
+    }
+    // The evidence recovery is waiting for.
+    if obs.captive == Some(CaptiveState::Clear) {
+        return false;
+    }
+    // (a), the escape hatch. Note this can only be reached while the tunnel is
+    // ALSO failing — `health_ok` short-circuits before this branch — so a dead
+    // probe host on a healthy tunnel never gets here at all.
+    if fails >= cfg.health_fails.saturating_mul(HOLD_MULTIPLE) {
+        return false;
+    }
+    // (b) + (c). `unknown` on its own is ambiguous: a garden that blocks DNS, a
+    // dead uplink and a genuinely wedged tunnel all produce it, and only the
+    // first wants recovery suppressed. So require corroboration before
+    // suppressing — either the local link is demonstrably up while the probe
+    // host is not (b), or we moved recently, which is when a portal is likely
+    // and a wedge is not (c). With neither, the old behaviour stands and a
+    // reload is as good a guess as any.
+    if !obs.gateway_ok && !moved_recently(obs, st) {
+        return false;
+    }
+    true
 }
 
 /// `_watch_recover`'s cooldown: too soon after the last one and it only says so.
@@ -276,6 +361,12 @@ pub fn netcheck(obs: &Observation, st: &State, cfg: &Config) -> Outcome {
     let mut a = vec![Action::CorpSync, Action::WriteNetId(obs.net_id.clone())];
     let mut s = st.clone();
 
+    // (c): stamp the move BEFORE any branch reads it, so "recent" means the
+    // same thing however this tick ends.
+    if st.last_net_id.as_deref() != Some(obs.net_id.as_str()) {
+        s.last_net_change = obs.now;
+    }
+
     let iface_moved = matches!((&obs.iface, &obs.bound_iface), (Some(i), b) if Some(i) != b.as_ref());
     let proxy_wrong = obs.active_service.is_some() && !(obs.proxy_pointing_ok && obs.proxy_bypass_ok);
     let need = iface_moved || proxy_wrong;
@@ -313,13 +404,26 @@ pub fn netcheck(obs: &Observation, st: &State, cfg: &Config) -> Outcome {
                     )));
                 } else {
                     let n = s.health_fails;
-                    recover_or_hold(
-                        &mut a,
-                        &mut s,
-                        obs,
-                        cfg,
-                        &format!("tunnel wedged ({n} consecutive probe failures)"),
-                    );
+                    if hold_for_network(obs, &s, n, cfg) {
+                        // The 2026-09-14 hotel, exactly: captive=unknown, three
+                        // failed tunnel probes, a reload that could not possibly
+                        // succeed because the machine had no path to anything —
+                        // and it burned the 600s cooldown and logged a failure
+                        // that reads as a tunnel problem.
+                        a.push(Action::Log(format!(
+                            "tunnel wedged ({n} consecutive probe failures) — but the captive probe reached nothing either \
+                             (captive={}), so the NETWORK is the suspect and a reload cannot fix an uplink; holding off recovery",
+                            obs.captive.map(|c| c.as_str()).unwrap_or("none")
+                        )));
+                    } else {
+                        recover_or_hold(
+                            &mut a,
+                            &mut s,
+                            obs,
+                            cfg,
+                            &format!("tunnel wedged ({n} consecutive probe failures)"),
+                        );
+                    }
                 }
             }
         }
@@ -362,6 +466,10 @@ mod tests {
         Observation {
             proxy_intent: "on".into(),
             captive: Some(CaptiveState::Clear),
+            captive_check_disabled: false,
+            // A machine that is up normally has a gateway that answers; the
+            // interesting cases set it false deliberately.
+            gateway_ok: true,
             portal_url: None,
             active_service: Some("Wi-Fi".into()),
             proxy_any_on: true,
@@ -604,6 +712,117 @@ mod tests {
         }
         let r = netcheck(&o, &st, &cfg);
         assert!(r.actions.iter().any(|a| matches!(a, Action::Recover(s) if s.contains("wedged"))));
+    }
+
+    /// Reach the streak with the captive probe in whatever state, and report
+    /// the tick that crosses the threshold.
+    fn wedged(o: &Observation, cfg: &Config) -> Outcome {
+        let mut st = State { last_net_id: Some(o.net_id.clone()), ..Default::default() };
+        for _ in 1..cfg.health_fails {
+            st = netcheck(o, &st, cfg).state;
+        }
+        netcheck(o, &st, cfg)
+    }
+
+    /// The 2026-09-14 hotel, in one test. Three failed tunnel probes — but the
+    /// captive probe reached nothing either, so the machine had no path to
+    /// anything and a reload could not possibly have succeeded. It fired
+    /// anyway, burned the 600s cooldown, and logged a failure that reads as a
+    /// tunnel problem.
+    #[test]
+    fn a_wedged_tunnel_holds_off_when_the_captive_probe_reached_nothing_either() {
+        let mut o = running();
+        o.health_ok = false;
+        o.captive = Some(CaptiveState::Unknown);
+        o.gateway_ok = true; // (b): the local link is up, something upstream gates us
+        let r = wedged(&o, &Config::default());
+        assert!(!r.actions.iter().any(|a| matches!(a, Action::Recover(_))),
+                "a reload cannot fix an uplink");
+        assert!(logs(&r).iter().any(|l| l.contains("NETWORK is the suspect")));
+    }
+
+    /// `unknown` is only evidence when someone actually looked. With
+    /// `ROWT_CAPTIVE_CHECK=0` every verdict is `unknown` by construction, so
+    /// keying the rule on the verdict alone would silently disable self-healing
+    /// for anyone who turned portal detection off — far worse than one wasted
+    /// reload, and invisible while it happened.
+    #[test]
+    fn switching_portal_detection_off_must_not_switch_self_healing_off() {
+        let mut o = running();
+        o.health_ok = false;
+        o.captive = Some(CaptiveState::Unknown);
+        o.gateway_ok = true;
+        o.captive_check_disabled = true;
+        let r = wedged(&o, &Config::default());
+        assert!(r.actions.iter().any(|a| matches!(a, Action::Recover(_))));
+    }
+
+    /// (b) and (c) are what make `unknown` mean something. With neither — the
+    /// gateway silent too, and no recent move — nothing distinguishes a garden
+    /// from a dead uplink or a genuinely wedged tunnel, so the old behaviour
+    /// stands and a reload is as good a guess as any.
+    #[test]
+    fn an_unknown_with_nothing_to_corroborate_it_still_recovers() {
+        let mut o = running();
+        o.health_ok = false;
+        o.captive = Some(CaptiveState::Unknown);
+        o.gateway_ok = false;
+        let r = wedged(&o, &Config::default());
+        assert!(r.actions.iter().any(|a| matches!(a, Action::Recover(_))));
+    }
+
+    /// (c) on its own is enough: the gateway may be silent because the portal
+    /// blackholes everything, but a network we joined minutes ago is far likelier
+    /// to be showing us a login page than to have wedged the tunnel.
+    #[test]
+    fn a_recent_move_corroborates_the_garden_on_its_own() {
+        let mut o = running();
+        o.health_ok = false;
+        o.captive = Some(CaptiveState::Unknown);
+        o.gateway_ok = false;
+        o.now = 10_000;
+        let cfg = Config::default();
+        // A move one minute ago, with the net id already recorded so netcheck
+        // does not re-stamp it this tick.
+        let mut st = State {
+            last_net_id: Some(o.net_id.clone()),
+            last_net_change: o.now - 60,
+            ..Default::default()
+        };
+        for _ in 1..cfg.health_fails {
+            st = netcheck(&o, &st, &cfg).state;
+        }
+        let r = netcheck(&o, &st, &cfg);
+        assert!(!r.actions.iter().any(|a| matches!(a, Action::Recover(_))));
+        // …and the same move, long enough ago, stops corroborating anything.
+        let mut stale = st.clone();
+        stale.last_net_change = o.now - NET_CHANGE_WINDOW - 1;
+        let r2 = netcheck(&o, &stale, &cfg);
+        assert!(r2.actions.iter().any(|a| matches!(a, Action::Recover(_))));
+    }
+
+    /// And the floor under the floor: a probe host that has become permanently
+    /// unreachable must degrade back to the old behaviour rather than wedge
+    /// recovery for good.
+    #[test]
+    fn a_hold_gives_up_once_the_network_story_has_run_long_enough() {
+        let mut o = running();
+        o.health_ok = false;
+        o.captive = Some(CaptiveState::Unknown);
+        o.gateway_ok = true;
+        let cfg = Config::default();
+        let mut st = State { last_net_id: Some(o.net_id.clone()), ..Default::default() };
+        let mut recovered = None;
+        for tick in 1..=(cfg.health_fails * HOLD_MULTIPLE + 2) {
+            let r = netcheck(&o, &st, &cfg);
+            if r.actions.iter().any(|a| matches!(a, Action::Recover(_))) {
+                recovered = Some(tick);
+                break;
+            }
+            st = r.state;
+        }
+        assert_eq!(recovered, Some(cfg.health_fails * HOLD_MULTIPLE),
+                   "recovery must resume at the multiple, neither sooner nor never");
     }
 
     #[test]

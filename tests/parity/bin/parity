@@ -54,7 +54,7 @@ TIMEOUT="${PARITY_TIMEOUT:-25}"
 
 # Every command that reads or changes machine state. Anything not listed runs
 # for real — fine for jq/awk/python3, which are deterministic given their input.
-SHIMS="sudo networksetup launchctl limactl scutil ipconfig ifconfig route netstat
+SHIMS="sudo networksetup launchctl limactl scutil ipconfig ifconfig route netstat ping
 sysctl dscacheutil dig curl open brew tailscale pkill killall softwareupdate
 system_profiler security osascript defaults sing-box"
 
