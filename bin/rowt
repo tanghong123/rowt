@@ -4462,7 +4462,7 @@ _router_bytes_total() {
 # unreportable. `sample` needs no configuration; the goroutine dump is far more
 # useful but only exists when ROWT_PPROF was set at render time.
 _watch_capture_spin() { # $1=pid $2=pct
-  local out="$LOGDIR/spin-$(date +%Y%m%d-%H%M%S).txt"
+  local out; out="$LOGDIR/spin-$(date +%Y%m%d-%H%M%S).txt"
   {
     echo "rowt $ROWT_VERSION — router spin capture $(date '+%F %T %z')"
     echo "pid=$1  interval-average cpu=${2}%  threshold=${CPU_SPIN_PCT}%"
