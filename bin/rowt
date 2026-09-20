@@ -3756,6 +3756,9 @@ cmd_onboard() {
   # here, which hid a 1.14.1 that spins on this network (see sb_known_bad).
   local sbv; sbv="$(sb_version "$SB" 2>/dev/null || true)"
   if sb_pinned "$SB"; then _ob 0 "sing-box $SINGBOX_VERSION ready (pinned)" "$PROG fetch host   (re-fetch)"
+  elif [ -z "$sbv" ] && sb_pinned "$HERE/bin/sing-box"; then
+    # fresh install: the formula's bundle is pinned and gets copied on first 'up' — no download
+    _ob 0 "sing-box $SINGBOX_VERSION bundled (pinned; installed on the first '$PROG up')" "$PROG up"
   elif [ -n "$sbv" ] && sb_known_bad "$sbv" >/dev/null; then
     _ob 1 "sing-box $sbv must be replaced — $(sb_known_bad "$sbv")" "$PROG fetch host   (with GitHub reachable; '$PROG reload' does it too)"; pending=$((pending+1))
   elif [ -n "$sbv" ]; then
@@ -4049,7 +4052,8 @@ cmd_status() {
   # Which engine, and is it the pin. A brew upgrade once swapped in a 1.14.1
   # that spins on this network, and nothing on this screen said so.
   local sbv sbline; sbv="$(sb_version "$SB" 2>/dev/null || true)"
-  if [ -z "$sbv" ]; then sbline="MISSING (fetched on the next '$PROG up')"
+  if [ -z "$sbv" ] && sb_pinned "$HERE/bin/sing-box"; then sbline="$SINGBOX_VERSION bundled (pinned; installed on the next '$PROG up')"
+  elif [ -z "$sbv" ]; then sbline="MISSING (fetched on the next '$PROG up')"
   elif sb_pinned "$SB"; then sbline="$sbv (pinned)"
   elif sb_known_bad "$sbv" >/dev/null; then sbline="$sbv — KNOWN BAD, pin is $SINGBOX_VERSION: $(sb_known_bad "$sbv")   → $PROG fetch host"
   else sbline="$sbv (pin is $SINGBOX_VERSION — '$PROG fetch host' re-syncs)"; fi
