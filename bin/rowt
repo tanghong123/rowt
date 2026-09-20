@@ -168,6 +168,22 @@ HOLD_MULTIPLE=3
 # recovery is ever considered. Must equal rowt_core::watch::NET_CHANGE_WINDOW.
 NET_CHANGE_WINDOW=900
 HEALTH_COOLDOWN="${ROWT_HEALTH_COOLDOWN:-600}"   # min seconds between auto-restarts (anti-thrash)
+# Opt-in sing-box pprof listener, e.g. ROWT_PPROF=9091. Off by default: it is an
+# unauthenticated debug port. Worth turning on when chasing a spin — Go's pprof
+# carries its own symbol table, so /debug/pprof/goroutine?debug=2 names the
+# goroutine even though the shipped binary is Mach-O stripped (`sample` cannot:
+# it walks native frames only and Go stacks are invisible to it).
+PPROF_LISTEN="${ROWT_PPROF:-}"
+# Spin self-heal. A router can be pathological WITHOUT being unreachable: on
+# 2026-09-20 sing-box held ~200% CPU for 7 minutes while every probe returned
+# HTTP 200, so the liveness watchdog — which only asks "does it answer?" —
+# could not see it. CPU alone is the wrong trigger (a proxy legitimately burns
+# CPU moving bytes), so "sick" means high CPU *doing no work*: both gates, for
+# CPU_SPIN_TICKS ticks in a row.
+CPU_SPIN_PCT="${ROWT_CPU_SPIN_PCT:-150}"        # interval-average %CPU (200 = two cores)
+CPU_SPIN_BYTES="${ROWT_CPU_SPIN_BYTES:-65536}"  # bytes/s below this counts as "no work"
+CPU_SPIN_TICKS="${ROWT_CPU_SPIN_TICKS:-2}"      # consecutive pathological ticks before acting
+CPU_HEAL_COOLDOWN="${ROWT_CPU_HEAL_COOLDOWN:-86400}"  # floor between spin heals (see _watch_spin)
 HEALTH_TIMEOUT="${ROWT_HEALTH_TIMEOUT:-8}"       # per-probe delay-test timeout, seconds (generous: a slow-but-live tunnel must not read as wedged)
 HEALTH_URL="${ROWT_HEALTH_URL:-https://www.gstatic.com/generate_204}"    # target the liveness delay-test fetches THROUGH the escape server
 
@@ -1516,7 +1532,7 @@ assemble_host() {
     --arg ifc "$ifc" \
     --arg final "$FINAL_ROUTE" \
     --arg clash "$clash" \
-    --arg secret "$secret" \
+    --arg secret "$secret" --arg pprof "$PPROF_LISTEN" \
     --arg lvl "$LOG_LEVEL" \
     --arg ads "$ads" \
     --arg dns_direct "$dns_srv" \
@@ -1612,8 +1628,9 @@ assemble_host() {
              + (($geo_sets + (if $ads != "" then [{type:"local", tag:"geosite-ads", format:"binary", path:$ads}] else [] end)) as $allsets
                 | if ($allsets|length) > 0 then {rule_set:$allsets} else {} end))
     }
-    + (if $clash=="" then {}
-       else {experimental:{clash_api:{external_controller:$clash, secret:$secret}}} end)'
+    + ( ( (if $clash=="" then {} else {clash_api:{external_controller:$clash, secret:$secret}} end)
+        + (if $pprof=="" then {} else {debug:{listen:("127.0.0.1:" + $pprof)}} end) ) as $exp
+        | if ($exp|length) == 0 then {} else {experimental:$exp} end )'
 }
 
 _render_bin() { # the Rust render, located like the monitor: shipped, or built alongside
@@ -4053,6 +4070,9 @@ WATCH_NETCHANGE="$CFG/watch.netchange"       # epoch of the last network change 
 WATCH_PLIST_VERSION="2"
 WATCH_PLIST_MARK="rowt-watch-plist v$WATCH_PLIST_VERSION"
 WATCH_SELFHEAL="$CFG/watch.plistheal"        # epoch of the last plist self-heal (anti-loop)
+WATCH_CPU="$CFG/watch.cpu"                   # last CPU/traffic sample: "epoch cpusecs pid bytes"
+WATCH_CPUSTREAK="$CFG/watch.cpustreak"       # consecutive pathological (spin) ticks
+WATCH_CPUHEAL="$CFG/watch.cpuheal"           # epoch of the last spin heal (one-shot latch)
 
 # mkdir first: the log directory is created by `up`, and a tick can run before
 # any `up` ever has (a fresh config, or a tree built by hand). Appending into a
@@ -4338,6 +4358,99 @@ _watch_recover() {
   _AUDIT_OP=""
 }
 
+# Cumulative CPU seconds for $1, from ps TIME ([[dd-]hh:]mm:ss.ff). Empty if gone.
+_proc_cpu_secs() {
+  ps -p "${1:-0}" -o time= 2>/dev/null | awk '
+    NF { t=$1; d=0
+         if (t ~ /-/) { split(t,a,"-"); d=a[1]; t=a[2] }
+         n=split(t,b,":")
+         s = (n==3 ? b[1]*3600 + b[2]*60 + b[3] : b[1]*60 + b[2])
+         printf "%d\n", d*86400 + s; exit }'
+}
+
+# Bytes moved since the router started (clash totals), for the "is it doing any
+# work?" half of the spin test. Empty when the API does not answer.
+_router_bytes_total() {
+  clash_curl GET /connections 2>/dev/null \
+    | jq -r '((.downloadTotal // 0) + (.uploadTotal // 0)) | floor' 2>/dev/null || true
+}
+
+# Everything worth having about a spinning router, written before we restart it
+# — otherwise the self-heal destroys the only evidence and the bug stays
+# unreportable. `sample` needs no configuration; the goroutine dump is far more
+# useful but only exists when ROWT_PPROF was set at render time.
+_watch_capture_spin() { # $1=pid $2=pct
+  local out="$LOGDIR/spin-$(date +%Y%m%d-%H%M%S).txt"
+  {
+    echo "rowt $ROWT_VERSION — router spin capture $(date '+%F %T %z')"
+    echo "pid=$1  interval-average cpu=${2}%  threshold=${CPU_SPIN_PCT}%"
+    echo; echo "== ps =="; ps -p "$1" -o pid,pcpu,etime,time,rss,command 2>/dev/null
+    echo; echo "== clash connections =="
+    clash_curl GET /connections 2>/dev/null | jq -c '{downloadTotal, uploadTotal, n:(.connections|length)}' 2>/dev/null
+    if [ -n "$PPROF_LISTEN" ]; then
+      echo; echo "== pprof goroutine dump =="
+      curl --noproxy '*' -sS -m 10 "http://127.0.0.1:$PPROF_LISTEN/debug/pprof/goroutine?debug=2" 2>&1 | head -400
+    else
+      echo; echo "== pprof: not enabled (render with ROWT_PPROF=<port> to name the spinning goroutine) =="
+    fi
+    echo; echo "== sample (native frames; Go stacks are invisible to it) =="
+    sample "$1" 5 -file /dev/stdout 2>/dev/null | head -250
+  } > "$out" 2>&1
+  # Keep the last few only: the latch makes these rare, but never let a
+  # diagnostic dump grow the config tree without bound.
+  ( cd "$LOGDIR" 2>/dev/null && /bin/ls -t spin-*.txt 2>/dev/null | tail -n +6 | while IFS= read -r f; do rm -f "$f"; done ) || true
+  echo "$out"
+}
+
+# Restart a router that is UP and answering but burning CPU doing nothing.
+# Called only from the healthy branch of _watch_health, so "the network works"
+# is already proven — the same standard the reload path holds itself to.
+#
+# Deliberately conservative, because the failure mode of a false positive is
+# killing live connections:
+#   * needs BOTH high CPU and near-zero throughput (busy != sick),
+#   * CPU is an interval average from cumulative ps TIME, not `ps %CPU` (which
+#     is a decaying figure that stays high after a process has already calmed),
+#   * needs CPU_SPIN_TICKS consecutive ticks,
+#   * and fires ONCE: the latch clears only when a tick sees a healthy router,
+#     so a deterministic spin degrades rather than flapping the link every
+#     10 minutes. A spinning-but-working router is degraded, not down.
+_watch_spin() { # $1=pid
+  local pid="$1" now cpu bytes last_e last_c last_p last_b pct bps
+  [ -n "$pid" ] || return 0
+  now="$(date +%s)"; cpu="$(_proc_cpu_secs "$pid")"; bytes="$(_router_bytes_total)"
+  [ -n "$cpu" ] || return 0
+  read -r last_e last_c last_p last_b < <(cat "$WATCH_CPU" 2>/dev/null || echo "")
+  printf '%s %s %s %s\n' "$now" "$cpu" "$pid" "${bytes:-0}" > "$WATCH_CPU" 2>/dev/null || true
+  # A new pid (or no prior sample) has no interval to average over yet.
+  [ -n "${last_e:-}" ] && [ "${last_p:-}" = "$pid" ] || { rm -f "$WATCH_CPUSTREAK"; return 0; }
+  local dt=$(( now - last_e )); [ "$dt" -gt 0 ] || return 0
+  pct=$(( (cpu - last_c) * 100 / dt ))
+  bps=$(( ( ${bytes:-0} - ${last_b:-0} ) / dt )); [ "$bps" -lt 0 ] && bps=0
+  if [ "$pct" -lt "$CPU_SPIN_PCT" ] || [ "$bps" -ge "$CPU_SPIN_BYTES" ]; then
+    # Healthy tick: clear the streak AND release the one-shot latch, so a real
+    # recurrence weeks later still gets its single attempt.
+    [ -f "$WATCH_CPUSTREAK" ] && rm -f "$WATCH_CPUSTREAK"
+    [ -f "$WATCH_CPUHEAL" ] && [ "$pct" -lt "$CPU_SPIN_PCT" ] && rm -f "$WATCH_CPUHEAL"
+    return 0
+  fi
+  local n; n="$(( $(cat "$WATCH_CPUSTREAK" 2>/dev/null || echo 0) + 1 ))"
+  printf '%s\n' "$n" > "$WATCH_CPUSTREAK" 2>/dev/null || true
+  if [ "$n" -lt "$CPU_SPIN_TICKS" ]; then
+    _watch_log "router busy but idle: ${pct}% cpu, ${bps} B/s ($n/$CPU_SPIN_TICKS)"
+    return 0
+  fi
+  local last; last="$(cat "$WATCH_CPUHEAL" 2>/dev/null || echo 0)"
+  if [ "$(( now - last ))" -lt "$CPU_HEAL_COOLDOWN" ]; then
+    _watch_log "router spinning (${pct}% cpu, ${bps} B/s) but already healed once $(( (now - last) / 60 ))m ago — leaving it (degraded beats flapping)"
+    return 0
+  fi
+  printf '%s\n' "$now" > "$WATCH_CPUHEAL" 2>/dev/null || true
+  local cap; cap="$(_watch_capture_spin "$pid" "$pct")"
+  _watch_log "router spinning: ${pct}% cpu with ${bps} B/s over ${dt}s — evidence in $cap"
+  _watch_recover "router spinning (${pct}% cpu, no traffic)" cmd_restart
+}
+
 # Liveness check, called by 'watch tick' when the network did NOT change (a
 # change already triggers a full reload). $1 = active physical interface.
 # The default gateway reached THROUGH $1 — not `route get default`, which hands
@@ -4399,7 +4512,14 @@ _watch_health() { # $1=iface  $2=captive verdict
   # Offline and healthy both reset the streak and plan nothing, so neither
   # records an action — matching the FSM, which only changes state there.
   [ -n "$ip" ] || { rm -f "$WATCH_HEALTH"; _SH2_HEALTH=offline; return 0; }
-  if _watch_probe; then rm -f "$WATCH_HEALTH"; _SH2_HEALTH=ok; return 0; fi  # healthy — clear streak
+  if _watch_probe; then
+    rm -f "$WATCH_HEALTH"; _SH2_HEALTH=ok                                    # healthy — clear streak
+    # The probe answering proves the network AND the tunnel work. That is
+    # exactly the state the spin hides in, so this is the only place the spin
+    # test may run: it can never be blamed on an uplink.
+    _watch_spin "$(cat "$(host_pidfile)" 2>/dev/null || true)"
+    return 0
+  fi
   _SH2_HEALTH=fail
   local fails; fails="$(( $(cat "$WATCH_HEALTH" 2>/dev/null || echo 0) + 1 ))"
   printf '%s\n' "$fails" > "$WATCH_HEALTH" 2>/dev/null || true
@@ -4452,7 +4572,7 @@ _watch_plist_body() {
   done
   local envxml v val
   envxml="    <key>PATH</key><string>$agent_path</string>"
-  for v in XDG_CONFIG_HOME ROWT_PORT ROWT_CLASH_PORT ROWT_FINAL ROWT_IFACE ROWT_DNS_DIRECT ROWT_DNS_LOCAL ROWT_GFW_CANARIES ROWT_GFW_TIMEOUT SINGBOX_VERSION ROWT_LOG_LEVEL ROWT_WATCH_INTERVAL ROWT_HEALTH_FAILS ROWT_HEALTH_COOLDOWN ROWT_HEALTH_TIMEOUT ROWT_HEALTH_URL ROWT_CAPTIVE_CHECK ROWT_CAPTIVE_URL ROWT_CAPTIVE_TIMEOUT ROWT_CAPTIVE_RETRY ROWT_CAPTIVE_FALLBACK ROWT_WATCH_SHADOW ROWT_RENDER_SHADOW; do
+  for v in XDG_CONFIG_HOME ROWT_PORT ROWT_CLASH_PORT ROWT_FINAL ROWT_IFACE ROWT_DNS_DIRECT ROWT_DNS_LOCAL ROWT_GFW_CANARIES ROWT_GFW_TIMEOUT SINGBOX_VERSION ROWT_LOG_LEVEL ROWT_WATCH_INTERVAL ROWT_HEALTH_FAILS ROWT_HEALTH_COOLDOWN ROWT_HEALTH_TIMEOUT ROWT_HEALTH_URL ROWT_CAPTIVE_CHECK ROWT_CAPTIVE_URL ROWT_CAPTIVE_TIMEOUT ROWT_CAPTIVE_RETRY ROWT_CAPTIVE_FALLBACK ROWT_WATCH_SHADOW ROWT_RENDER_SHADOW ROWT_PPROF ROWT_CPU_SPIN_PCT ROWT_CPU_SPIN_BYTES ROWT_CPU_SPIN_TICKS ROWT_CPU_HEAL_COOLDOWN; do
     val="${!v:-}"; [ -n "$val" ] && envxml="$envxml
     <key>$v</key><string>$val</string>"
   done
