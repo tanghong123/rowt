@@ -278,7 +278,7 @@ pub fn cmd_render(ctx: &Ctx) -> Result<String, String> {
     // running `sing-box check` on it, so a missing binary would surface as
     // "generated host.json failed validation" — a config problem, on a machine
     // whose only problem is that it has not downloaded the router yet.
-    crate::fetch::ensure_singbox(&ctx.cfg)?;
+    crate::fetch::ensure_singbox(&ctx.cfg, &crate::here_dir(), false)?;
     eprintln!("==> rendering configs (mode={mode}, port={}, servers={servers_n})", ctx.port);
     let host = build_host(ctx)?;
 
@@ -789,7 +789,7 @@ pub fn router_up(ctx: &Ctx) -> Result<String, String> {
     // A missing or too-old sing-box is the single most common reason a fresh
     // machine cannot come up, and it is fixable here: fetch it before the start
     // rather than reporting a spawn failure the user cannot act on.
-    crate::fetch::ensure_singbox(&ctx.cfg)?;
+    crate::fetch::ensure_singbox(&ctx.cfg, &crate::here_dir(), false)?;
     eprintln!("==> starting rule-router on 127.0.0.1:{}", ctx.port);
     let mut child = start_router(ctx, true)?;
     let pid = child.id();
@@ -986,7 +986,7 @@ pub fn cmd_setup(ctx: &Ctx, here: &Path, args: &[String]) -> Result<String, Stri
                           p = crate::PROG));
     }
     // sing-box up front (may need internet); fails fast with guidance if offline
-    crate::fetch::ensure_singbox(&ctx.cfg)?;
+    crate::fetch::ensure_singbox(&ctx.cfg, &crate::here_dir(), false)?;
     // Best-effort: grab the ad-block rule-set while a VPN is (probably) still
     // up. Non-fatal — the block hand-list works without it, and `fetch host`
     // retries later.

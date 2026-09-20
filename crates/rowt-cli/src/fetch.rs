@@ -99,35 +99,108 @@ pub fn ver_ge(a: &str, b: &str) -> bool {
     true
 }
 
-/// Ensure a usable sing-box at `$CFG/bin/sing-box`, in the shell's order:
-/// an existing one, a pre-downloaded tarball, a system install, then GitHub.
-pub fn ensure_singbox(cfg: &Path) -> Result<(), String> {
+/// The pinned engine version: `SINGBOX_VERSION` in bin/rowt (env override honoured).
+pub fn pinned_version() -> String {
+    env_or("SINGBOX_VERSION", "1.13.14")
+}
+
+/// `sing-box version` → its version token, "" if not runnable (the shell's `sb_version`).
+pub fn sb_version(p: &Path) -> String {
+    if !p.is_file() {
+        return String::new();
+    }
+    let v = Command::new(p).arg("version").stderr(Stdio::null()).output().ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+    version_of(&v).to_string()
+}
+
+/// Exactly the pinned version? SINGBOX_VERSION is a PIN, not a floor.
+pub fn sb_pinned(p: &Path) -> bool {
+    let v = sb_version(p);
+    !v.is_empty() && v == pinned_version()
+}
+
+/// Versions rowt must not run when it has any choice — the reason, or None.
+/// 1.14.x: the DNS transport's shared UDP recvLoop treats a 0-byte read as a
+/// malformed datagram and retries with no backoff, so once a network filter
+/// kills the idle socket under it (a corp EDR agent does, 10 s after a DNS
+/// reply — measured 2026-09-20) sing-box spins at 100%+ CPU forever while every
+/// probe still answers. 1.13.x reads per query and is immune.
+pub fn sb_known_bad(v: &str) -> Option<&'static str> {
+    if v.starts_with("1.14.") {
+        Some("1.14.x spins at 100%+ CPU once a network filter kills its idle UDP DNS socket (corp EDR agents do, 10s after a reply); 1.13.x is immune")
+    } else {
+        None
+    }
+}
+
+fn now_epoch() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+fn recent(stamp: &Path, secs: u64) -> bool {
+    let t: u64 = std::fs::read_to_string(stamp).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+    now_epoch().saturating_sub(t) < secs
+}
+
+/// Ensure the PINNED sing-box at `$CFG/bin/sing-box` — the shell's
+/// `ensure_singbox_host`, in its order: an already-pinned copy; the copy the
+/// formula ships in `<here>/bin` (offline, and immune to whatever version
+/// brew's own sing-box formula is this week); a pre-downloaded tarball; a system
+/// sing-box only when it IS the pin; GitHub — at most hourly from the render
+/// path, since a reload must not stall ~25 s in China, unless `force` (`fetch
+/// host`); and offline, the best usable engine present, loudly. It used to
+/// symlink ANY brew sing-box >= 1.12, which is how a spinning 1.14.1 arrived.
+pub fn ensure_singbox(cfg: &Path, here: &Path, force: bool) -> Result<(), String> {
     let sb = cfg.join("bin/sing-box");
-    if sb_ok(&sb) {
+    if sb_pinned(&sb) {
         return Ok(());
     }
-    let ver = env_or("SINGBOX_VERSION", "1.13.14");
+    let ver = pinned_version();
+    let have = sb_version(&sb);
+    if !have.is_empty() {
+        match sb_known_bad(&have) {
+            Some(why) => eprintln!("warning: sing-box {have} at {} must be replaced: {why}", sb.display()),
+            None => eprintln!("==> sing-box {have} at {} is not the pinned {ver} — re-syncing", sb.display()),
+        }
+    }
     let dir = format!("sing-box-{ver}-darwin-{}", darch());
     let tgz = format!("{dir}.tar.gz");
     let tmp = std::env::temp_dir().join(format!("rowt-sb-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&tmp);
     let _ = std::fs::create_dir_all(cfg.join("bin"));
+    let sys = which("sing-box");
 
+    // (0) the bundled copy — COPIED, not linked: `here` is a Cellar path that
+    // changes on every `brew upgrade`.
+    let bundled = here.join("bin/sing-box");
+    if sb_pinned(&bundled) {
+        let _ = std::fs::remove_file(&sb);
+        std::fs::copy(&bundled, &sb).map_err(|e| format!("install sing-box: {e}"))?;
+        let _ = crate::set_mode(&sb, 0o755);
+        let _ = std::fs::remove_dir_all(&tmp);
+        eprintln!("==> using the bundled sing-box {ver}");
+        return Ok(());
+    }
+
+    let stamp = cfg.join("singbox.fetchtry");
     let local = std::env::var("SINGBOX_TARBALL").unwrap_or_default();
     if !local.is_empty() && Path::new(&local).is_file() {
         eprintln!("==> using SINGBOX_TARBALL={local}");
         std::fs::copy(&local, tmp.join(&tgz)).map_err(|e| e.to_string())?;
-    } else if let Some(sys) = which("sing-box").filter(|p| sb_ok(p)) {
+    } else if let Some(sys) = sys.as_ref().filter(|p| sb_pinned(p)) {
         let _ = std::fs::remove_file(&sb);
-        std::os::unix::fs::symlink(&sys, &sb).map_err(|e| e.to_string())?;
-        let v = Command::new(&sb).arg("version").output().ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
-        let v = v.lines().next().unwrap_or("").split_whitespace().nth(2).unwrap_or("");
-        eprintln!("==> using system sing-box {v} ({})", sys.display());
+        std::os::unix::fs::symlink(sys, &sb).map_err(|e| e.to_string())?;
         let _ = std::fs::remove_dir_all(&tmp);
+        eprintln!("==> using system sing-box {ver} ({}) — the pinned version", sys.display());
+        return Ok(());
+    } else if !force && !have.is_empty() && sb_ok(&sb) && recent(&stamp, 3600) {
+        let _ = std::fs::remove_dir_all(&tmp);
+        eprintln!("warning: keeping sing-box {have} for now (pin {ver} not fetched — last attempt < 1h ago; '{PROG} fetch host' retries)");
         return Ok(());
     } else {
         eprintln!("==> fetching sing-box {ver} (needs internet — e.g. Shadowrocket on)");
+        let _ = std::fs::write(&stamp, format!("{}\n", now_epoch()));
         let mut got = false;
         let custom = std::env::var("SINGBOX_URL").unwrap_or_default();
         for b in download_sources(&ver, &tgz, &custom) {
@@ -140,6 +213,25 @@ pub fn ensure_singbox(cfg: &Path) -> Result<(), String> {
         }
         if !got {
             let _ = std::fs::remove_dir_all(&tmp);
+            // offline: keep / adopt the best usable engine we have — loudly.
+            let fb: Option<PathBuf> = if sb_ok(&sb) {
+                Some(sb.clone())
+            } else if let Some(s) = sys.as_ref().filter(|p| sb_ok(p)) {
+                let _ = std::fs::remove_file(&sb);
+                std::os::unix::fs::symlink(s, &sb).map_err(|e| e.to_string())?;
+                Some(s.clone())
+            } else {
+                None
+            };
+            if let Some(fb) = fb {
+                let v = sb_version(&sb);
+                eprintln!("warning: could not reach GitHub for the pinned sing-box {ver} — using {v} ({}) for now", fb.display());
+                if let Some(why) = sb_known_bad(&v) {
+                    eprintln!("warning: sing-box {v} is known-bad: {why}");
+                    eprintln!("warning: re-run '{PROG} fetch host' with a working VPN to get {ver}");
+                }
+                return Ok(());
+            }
             return Err(format!("could not fetch sing-box — turn a VPN on, then '{PROG} fetch host'"));
         }
     }
@@ -149,13 +241,17 @@ pub fn ensure_singbox(cfg: &Path) -> Result<(), String> {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err("could not unpack the sing-box tarball".into());
     }
+    // rm first: $SB may be a symlink into /opt/homebrew/bin, and `copy` writes
+    // THROUGH a symlink — that would overwrite brew's binary.
+    let _ = std::fs::remove_file(&sb);
     std::fs::copy(tmp.join(&dir).join("sing-box"), &sb)
         .map_err(|e| format!("install sing-box: {e}"))?;
     let _ = crate::set_mode(&sb, 0o755);
     let _ = std::fs::remove_dir_all(&tmp);
-    if !sb_ok(&sb) {
-        return Err(format!("installed sing-box at {} is not usable", sb.display()));
+    if !sb_pinned(&sb) {
+        return Err(format!("downloaded sing-box is not {ver} ({})", sb_version(&sb)));
     }
+    eprintln!("==> sing-box {ver} ready at {}", sb.display());
     Ok(())
 }
 

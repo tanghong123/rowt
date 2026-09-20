@@ -1048,13 +1048,13 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
             let what = rest.first().map(|s| s.as_str()).unwrap_or("both");
             match what {
                 "host" => {
-                    fetch::ensure_singbox(&cfg)?;
+                    fetch::ensure_singbox(&cfg, &here_dir(), true)?;
                     fetch::ads_ruleset(&cfg, true)?;
                     fetch::all_geosites(&cfg);
                 }
                 "vm" => fetch::vm_artifacts(&cfg)?,
                 "both" | "all" | "" => {
-                    fetch::ensure_singbox(&cfg)?;
+                    fetch::ensure_singbox(&cfg, &here_dir(), true)?;
                     fetch::ads_ruleset(&cfg, true)?;
                     fetch::all_geosites(&cfg);
                     fetch::vm_artifacts(&cfg)?;
@@ -1914,6 +1914,25 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                     Some(pid) => format!("running (pid {pid})"),
                     None => "stopped".into(),
                 }, ctx.port));
+            // Which engine, and is it the pin — a brew upgrade once swapped in a
+            // 1.14.1 that spins on this network, and nothing here said so.
+            {
+                let sb = ctx.sb();
+                let sbv = fetch::sb_version(&sb);
+                let ver = fetch::pinned_version();
+                let sbline = if sbv.is_empty() && fetch::sb_pinned(&here_dir().join("bin/sing-box")) {
+                    format!("{ver} bundled (pinned; installed on the next '{PROG} up')")
+                } else if sbv.is_empty() {
+                    format!("MISSING (fetched on the next '{PROG} up')")
+                } else if fetch::sb_pinned(&sb) {
+                    format!("{sbv} (pinned)")
+                } else if let Some(why) = fetch::sb_known_bad(&sbv) {
+                    format!("{sbv} — KNOWN BAD, pin is {ver}: {why}   → {PROG} fetch host")
+                } else {
+                    format!("{sbv} (pin is {ver} — '{PROG} fetch host' re-syncs)")
+                };
+                o.push(format!("engine:       sing-box {sbline}"));
+            }
             let p = Mac;
             if let Some(svc) = p.active_service() {
                 let body = rowt_platform::read_proxy(&svc, "-getsecurewebproxy");

@@ -112,13 +112,23 @@ pub fn run(ctx: &Ctx, here: &Path) -> String {
         pending += 1;
     }
 
-    // 2. sing-box present — auto-fetched, but that needs GitHub reachable
+    // 2. sing-box: the PINNED version, not merely a usable one — any brew sing-box
+    //    used to pass here, which hid a 1.14.1 that spins on this network.
     let sb = ctx.sb();
-    if fetch::sb_ok(&sb) {
-        let v = Command::new(&sb).arg("version").stderr(Stdio::null()).output().ok()
-            .map(|x| String::from_utf8_lossy(&x.stdout).into_owned()).unwrap_or_default();
-        let v = v.lines().next().unwrap_or("").split_whitespace().nth(2).unwrap_or("");
-        ob(&mut o, true, &format!("sing-box ready ({v})"), &format!("{PROG} fetch host   (re-fetch)"));
+    let sbv = fetch::sb_version(&sb);
+    let ver = fetch::pinned_version();
+    if fetch::sb_pinned(&sb) {
+        ob(&mut o, true, &format!("sing-box {ver} ready (pinned)"), &format!("{PROG} fetch host   (re-fetch)"));
+    } else if sbv.is_empty() && fetch::sb_pinned(&here.join("bin/sing-box")) {
+        // fresh install: the formula's bundle is pinned and gets copied on first 'up'
+        ob(&mut o, true, &format!("sing-box {ver} bundled (pinned; installed on the first '{PROG} up')"), &format!("{PROG} up"));
+    } else if let Some(why) = (!sbv.is_empty()).then(|| fetch::sb_known_bad(&sbv)).flatten() {
+        ob(&mut o, false, &format!("sing-box {sbv} must be replaced — {why}"),
+           &format!("{PROG} fetch host   (with GitHub reachable; '{PROG} reload' does it too)"));
+        pending += 1;
+    } else if !sbv.is_empty() {
+        ob(&mut o, false, &format!("sing-box {sbv} in place, but the pinned version is {ver}"), &format!("{PROG} fetch host"));
+        pending += 1;
     } else {
         ob(&mut o, false, "fetch sing-box (needs GitHub reachable — have a VPN ON)",
            &format!("{PROG} fetch host   ('{PROG} up' also fetches it)"));
@@ -171,7 +181,13 @@ pub fn run(ctx: &Ctx, here: &Path) -> String {
 
     // 6. the watchdog
     let plist = home.join(format!("Library/LaunchAgents/{}.plist", crate::watch::LABEL));
-    if plist.is_file() {
+    if plist.is_file() && crate::watch::plist_stale(&plist) {
+        // Existence was the whole test here, so a plist written by an older rowt
+        // showed a green check for two months while launchd killed every router
+        // the watchdog started. Call it out instead.
+        ob(&mut o, false, "watcher installed but STALE (written by an older rowt) — re-sync it",
+           &format!("{PROG} watch install   ·   a tick also re-syncs it on its own"));
+    } else if plist.is_file() {
         ob(&mut o, true, "auto-reload + recovery watcher installed",
            &format!("{PROG} watch status   ·   {PROG} watch install to re-sync"));
     } else {
