@@ -180,7 +180,7 @@ PPROF_LISTEN="${ROWT_PPROF:-}"
 # could not see it. CPU alone is the wrong trigger (a proxy legitimately burns
 # CPU moving bytes), so "sick" means high CPU *doing no work*: both gates, for
 # CPU_SPIN_TICKS ticks in a row.
-CPU_SPIN_PCT="${ROWT_CPU_SPIN_PCT:-150}"        # interval-average %CPU (200 = two cores)
+CPU_SPIN_PCT="${ROWT_CPU_SPIN_PCT:-80}"         # interval-average %CPU; the real single-socket spin is exactly 100
 CPU_SPIN_BYTES="${ROWT_CPU_SPIN_BYTES:-65536}"  # bytes/s below this counts as "no work"
 CPU_SPIN_TICKS="${ROWT_CPU_SPIN_TICKS:-2}"      # consecutive pathological ticks before acting
 CPU_HEAL_COOLDOWN="${ROWT_CPU_HEAL_COOLDOWN:-86400}"  # floor between spin heals (see _watch_spin)
@@ -328,31 +328,78 @@ migrate() {
 # semver >= compare ($1 >= $2)
 ver_ge() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]; }
 
+sb_version() { "$1" version 2>/dev/null | awk 'NR==1{print $3}'; }   # empty if not runnable
 sb_ok() { # a usable sing-box binary at $1 ? (present, >= 1.12 for AnyTLS/schema)
   [ -x "$1" ] || return 1
-  local v; v="$("$1" version 2>/dev/null | awk 'NR==1{print $3}')"
+  local v; v="$(sb_version "$1")"
   [ -n "$v" ] && ver_ge "$v" "1.12.0"
+}
+# Exactly the pinned version? SINGBOX_VERSION is a PIN, not a floor.
+sb_pinned() { [ -x "${1:-}" ] && [ "$(sb_version "$1")" = "$SINGBOX_VERSION" ]; }
+# Versions rowt must not run when it has any choice. Prints why; rc 0 = bad.
+#   1.14.x — the DNS transport's new shared UDP recvLoop treats a 0-byte read as
+#   a malformed datagram and retries with no backoff. Once something kills the
+#   idle socket under it (a macOS EDR network filter does, 10 s after a DNS
+#   reply — measured 2026-09-20 on a corp Mac), sing-box spins at 100%+ CPU
+#   forever, silently, while every probe still answers. 1.13.x reads per query
+#   and never sits on an idle socket, so it is immune.
+sb_known_bad() {
+  case "${1:-}" in
+    1.14.*) echo "1.14.x spins at 100%+ CPU once a network filter kills its idle UDP DNS socket (corp EDR agents do, 10s after a reply); 1.13.x is immune" ;;
+    *) return 1 ;;
+  esac
 }
 
 # Ensure a usable sing-box at $SB. Needs internet the first time — run
 # `rowt fetch` while you have connectivity (e.g. Shadowrocket on), then setup
 # works offline. Honors: an existing $SB, a system `sing-box` (brew), the
 # SINGBOX_TARBALL / SINGBOX_URL overrides, then GitHub + mirrors.
+# Ensure the PINNED sing-box at $SB. SINGBOX_VERSION is a pin, not a floor: a
+# brew-installed sing-box is used only when it IS that version; otherwise the pin
+# is fetched. It used to symlink ANY brew sing-box >= 1.12 — so a routine
+# `brew upgrade sing-box` silently swapped the engine under rowt, which is how
+# 1.14.1 and its CPU spin arrived. Offline with no pinned copy, it falls back
+# to the best usable engine present, loudly: a degraded router beats no router.
 ensure_singbox_host() {
-  sb_ok "$SB" && return 0
+  sb_pinned "$SB" && return 0
+
+  local have="" reason
+  [ -x "$SB" ] && have="$(sb_version "$SB")"
+  if [ -n "$have" ]; then
+    if reason="$(sb_known_bad "$have")"; then warn "sing-box $have at $SB must be replaced: $reason"
+    else info "sing-box $have at $SB is not the pinned $SINGBOX_VERSION — re-syncing"; fi
+  fi
 
   local arch; case "$(uname -m)" in arm64) arch=arm64 ;; x86_64) arch=amd64 ;; *) die "unsupported arch: $(uname -m)" ;; esac
   local dir="sing-box-${SINGBOX_VERSION}-darwin-${arch}" tgz="sing-box-${SINGBOX_VERSION}-darwin-${arch}.tar.gz"
   local tmp; tmp="$(mktemp -d)"
+  local sys=""; command -v sing-box >/dev/null 2>&1 && sys="$(command -v sing-box)"
+
+  # (0) the copy the formula ships next to this script (libexec/bin/sing-box):
+  # pinned by construction, present offline, no dependency on whatever version
+  # brew's own sing-box formula happens to be this week. COPIED, not symlinked:
+  # $HERE is a Cellar path that changes on every `brew upgrade`.
+  if sb_pinned "$HERE/bin/sing-box"; then
+    rm -f "$SB"; cp "$HERE/bin/sing-box" "$SB"; chmod +x "$SB"; rm -rf "$tmp"
+    info "using the bundled sing-box $SINGBOX_VERSION"
+    return 0
+  fi
 
   # (a) a pre-downloaded tarball
   if [ -n "${SINGBOX_TARBALL:-}" ] && [ -f "$SINGBOX_TARBALL" ]; then
     info "using SINGBOX_TARBALL=$SINGBOX_TARBALL"
     cp "$SINGBOX_TARBALL" "$tmp/$tgz"
-  # (b) a system sing-box (e.g. `brew install sing-box`) that's new enough
-  elif command -v sing-box >/dev/null 2>&1 && sb_ok "$(command -v sing-box)"; then
-    ln -sf "$(command -v sing-box)" "$SB"; rm -rf "$tmp"
-    info "using system sing-box $("$SB" version | awk 'NR==1{print $3}') ($(command -v sing-box))"
+  # (b) a system sing-box (e.g. `brew install sing-box`) — only if it IS the pin
+  elif [ -n "$sys" ] && sb_pinned "$sys"; then
+    rm -f "$SB"; ln -sf "$sys" "$SB"; rm -rf "$tmp"
+    info "using system sing-box $SINGBOX_VERSION ($sys) — the pinned version"
+    return 0
+  elif [ "${_SB_FORCE_FETCH:-0}" != 1 ] && [ -n "$have" ] && sb_ok "$SB" \
+       && [ "$(( $(date +%s) - $(cat "$CFG/singbox.fetchtry" 2>/dev/null || echo 0) ))" -lt 3600 ]; then
+    # A usable (non-pinned) engine is in place and we tried GitHub within the
+    # hour: don't stall this render on another attempt. 'fetch host' forces one.
+    rm -rf "$tmp"
+    warn "keeping sing-box $have for now (pin $SINGBOX_VERSION not fetched — last attempt < 1h ago; '$PROG fetch host' retries)"
     return 0
   else
     # (c) download from GitHub over whatever connectivity you have. We deliberately
@@ -360,6 +407,7 @@ ensure_singbox_host() {
     # traffic, so it should come from the real source (fetch it while Shadowrocket
     # is on) or a source you explicitly trust via SINGBOX_URL / SINGBOX_TARBALL.
     info "fetching sing-box $SINGBOX_VERSION (needs internet — e.g. Shadowrocket on)"
+    date +%s > "$CFG/singbox.fetchtry" 2>/dev/null || true
     local got=0 b
     for b in "${SINGBOX_URL:-}" \
              "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/${tgz}"; do
@@ -372,10 +420,23 @@ ensure_singbox_host() {
     done
     if [ "$got" -ne 1 ]; then
       rm -rf "$tmp"
+      # (d) offline: keep / adopt the best usable engine we have — loudly.
+      local fb=""
+      if sb_ok "$SB"; then fb="$SB"
+      elif [ -n "$sys" ] && sb_ok "$sys"; then rm -f "$SB"; ln -sf "$sys" "$SB"; fb="$sys"; fi
+      if [ -n "$fb" ]; then
+        local v; v="$(sb_version "$SB")"
+        warn "could not reach GitHub for the pinned sing-box $SINGBOX_VERSION — using $v ($fb) for now"
+        if reason="$(sb_known_bad "$v")"; then
+          warn "sing-box $v is known-bad: $reason"
+          warn "re-run '$PROG fetch host' with a working VPN to get $SINGBOX_VERSION"
+        fi
+        return 0
+      fi
       err "could not reach GitHub to download sing-box (your network likely blocks it)."
       err "do ONE of these:"
       err "  • turn Shadowrocket ON, run '$PROG fetch', then turn it off and '$PROG up'"
-      err "  • brew install sing-box    (rowt will use it)"
+      err "  • brew install sing-box    (rowt uses it when it is $SINGBOX_VERSION, else as a stopgap)"
       err "  • download sing-box-${SINGBOX_VERSION}-darwin-${arch}.tar.gz yourself and"
       err "    run:  SINGBOX_TARBALL=/path/to/that.tar.gz $PROG fetch"
       die "sing-box unavailable"
@@ -385,9 +446,11 @@ ensure_singbox_host() {
   tar -xzf "$tmp/$tgz" -C "$tmp" 2>/dev/null || { rm -rf "$tmp"; die "could not extract sing-box tarball"; }
   local found; found="$tmp/$dir/sing-box"; [ -f "$found" ] || found="$(find "$tmp" -name sing-box -type f | head -1)"
   [ -n "$found" ] && [ -f "$found" ] || { rm -rf "$tmp"; die "sing-box binary not found in tarball"; }
-  cp "$found" "$SB"; chmod +x "$SB"; rm -rf "$tmp"
-  sb_ok "$SB" || die "downloaded sing-box is not usable"
-  info "sing-box $("$SB" version | awk 'NR==1{print $3}') ready at $SB"
+  # rm first: $SB may be a symlink into /opt/homebrew/bin, and `cp` onto a
+  # symlink writes THROUGH it — that would overwrite brew's binary.
+  rm -f "$SB"; cp "$found" "$SB"; chmod +x "$SB"; rm -rf "$tmp"
+  sb_pinned "$SB" || die "downloaded sing-box is not $SINGBOX_VERSION ($(sb_version "$SB"))"
+  info "sing-box $SINGBOX_VERSION ready at $SB"
 }
 
 # Fetch/install sing-box now (run while you have connectivity).
@@ -484,9 +547,9 @@ EOF
 # works after you switch to the corp VPN (Shadowrocket off).
 cmd_fetch() {
   case "${1:-both}" in
-    host)         ensure_singbox_host; fetch_ads_ruleset --required; fetch_all_geosites ;;
+    host)         _SB_FORCE_FETCH=1 ensure_singbox_host; fetch_ads_ruleset --required; fetch_all_geosites ;;
     vm)           fetch_vm_artifacts ;;
-    both|all|"")  ensure_singbox_host; fetch_ads_ruleset --required; fetch_all_geosites; fetch_vm_artifacts ;;
+    both|all|"")  _SB_FORCE_FETCH=1 ensure_singbox_host; fetch_ads_ruleset --required; fetch_all_geosites; fetch_vm_artifacts ;;
     *) die "usage: $PROG fetch [host|vm|both]" ;;
   esac
   info "done — you can now run '$PROG up' without internet to GitHub."
@@ -3689,7 +3752,14 @@ cmd_onboard() {
   else _ob 1 "install rowt" "brew install tanghong123/tap/rowt   (or from the repo: ./install.sh)"; pending=$((pending+1)); fi
 
   # 2. sing-box present (host binary) — auto-fetched, but needs GitHub reachable
-  if sb_ok "$SB" 2>/dev/null; then _ob 0 "sing-box ready ($("$SB" version 2>/dev/null | awk 'NR==1{print $3}'))" "$PROG fetch host   (re-fetch)"
+  # The PINNED version, not merely a usable one: any brew sing-box used to pass
+  # here, which hid a 1.14.1 that spins on this network (see sb_known_bad).
+  local sbv; sbv="$(sb_version "$SB" 2>/dev/null || true)"
+  if sb_pinned "$SB"; then _ob 0 "sing-box $SINGBOX_VERSION ready (pinned)" "$PROG fetch host   (re-fetch)"
+  elif [ -n "$sbv" ] && sb_known_bad "$sbv" >/dev/null; then
+    _ob 1 "sing-box $sbv must be replaced — $(sb_known_bad "$sbv")" "$PROG fetch host   (with GitHub reachable; '$PROG reload' does it too)"; pending=$((pending+1))
+  elif [ -n "$sbv" ]; then
+    _ob 1 "sing-box $sbv in place, but the pinned version is $SINGBOX_VERSION" "$PROG fetch host"; pending=$((pending+1))
   else _ob 1 "fetch sing-box (needs GitHub reachable — have a VPN ON)" "$PROG fetch host   ('$PROG up' also fetches it)"; pending=$((pending+1)); fi
 
   # 3. at least one server configured — importing from an existing client is easiest
@@ -3976,6 +4046,14 @@ cmd_status() {
   local now; now="$(clash_selected)"; [ -n "$now" ] && echo "active:       $now"
   [ "$mode" = "vm" ] && echo "vm ip:        $(sget vm_ip)"
   echo "router:       $(host_running && echo "running (pid $(cat "$(host_pidfile)"))" || echo stopped) on 127.0.0.1:$PORT"
+  # Which engine, and is it the pin. A brew upgrade once swapped in a 1.14.1
+  # that spins on this network, and nothing on this screen said so.
+  local sbv sbline; sbv="$(sb_version "$SB" 2>/dev/null || true)"
+  if [ -z "$sbv" ]; then sbline="MISSING (fetched on the next '$PROG up')"
+  elif sb_pinned "$SB"; then sbline="$sbv (pinned)"
+  elif sb_known_bad "$sbv" >/dev/null; then sbline="$sbv — KNOWN BAD, pin is $SINGBOX_VERSION: $(sb_known_bad "$sbv")   → $PROG fetch host"
+  else sbline="$sbv (pin is $SINGBOX_VERSION — '$PROG fetch host' re-syncs)"; fi
+  echo "engine:       sing-box $sbline"
   local svc; svc="$(active_service 2>/dev/null || true)"
   [ -n "$svc" ] && printf 'system proxy: %s (%s)\n' "$(networksetup -getsecurewebproxy "$svc" 2>/dev/null | awk '/Enabled/{print $2}' | head -1)" "$svc"
   [ -n "$svc" ] && _proxy_pac_on "$svc" && echo "auto-proxy:   ⚠ a PAC is enabled on '$svc' and macOS resolves it BEFORE rowt's proxy — traffic may bypass the lanes ('$PROG proxy check' for detail)"
@@ -4449,8 +4527,12 @@ _watch_spin() { # $1=pid
   fi
   printf '%s\n' "$now" > "$WATCH_CPUHEAL" 2>/dev/null || true
   local cap; cap="$(_watch_capture_spin "$pid" "$pct")"
-  _watch_log "router spinning: ${pct}% cpu with ${bps} B/s over ${dt}s — evidence in $cap"
-  _watch_recover "router spinning (${pct}% cpu, no traffic)" cmd_restart
+  local sbv why; sbv="$(sb_version "$SB")"; why="$(sb_known_bad "$sbv" || true)"
+  _watch_log "router spinning: ${pct}% cpu with ${bps} B/s over ${dt}s (sing-box ${sbv:-?}${why:+ — KNOWN BAD: $why}) — evidence in $cap"
+  # reload, not restart: reload re-renders, and render re-validates the engine
+  # (ensure_singbox_host) — so a spin on a known-bad sing-box gets the pinned
+  # version swapped in, instead of a restart that is good for ten seconds.
+  _watch_recover "router spinning (${pct}% cpu, no traffic)" cmd_reload
 }
 
 # Liveness check, called by 'watch tick' when the network did NOT change (a
