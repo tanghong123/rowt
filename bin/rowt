@@ -3709,7 +3709,12 @@ or add directly:  $PROG server add '<vless://|vmess://|anytls://|hysteria2://…
   else _ob 1 "pick an escape server" "$PROG ping   →   $PROG use <tag>   (or $PROG use auto)"; fi
 
   # 6. auto-reload / recovery watcher
-  if [ -f "$WATCH_PLIST" ]; then _ob 0 "auto-reload + recovery watcher installed" "$PROG watch status   ·   $PROG watch install to re-sync"
+  if [ -f "$WATCH_PLIST" ] && _watch_plist_stale; then
+    # Existence was the whole test here, so a plist written by an older rowt
+    # showed a green check for two months while the watchdog killed every router
+    # it started. Call it out instead.
+    _ob 1 "watcher installed but STALE (written by an older rowt) — re-sync it" "$PROG watch install   ·   a tick also re-syncs it on its own"
+  elif [ -f "$WATCH_PLIST" ]; then _ob 0 "auto-reload + recovery watcher installed" "$PROG watch status   ·   $PROG watch install to re-sync"
   else _ob 1 "install the auto-reload + recovery watcher" "$PROG watch install"; fi
 
   # 7. shell integration (aliases + tab-completion) — match either the pasted
@@ -4038,6 +4043,16 @@ WATCH_NET="$CFG/watch.net"                   # last-seen network identity (for t
 WATCH_HEALTH="$CFG/watch.health"             # consecutive liveness-probe failures (streak counter)
 WATCH_RESTART="$CFG/watch.restart"           # epoch of the last auto-restart (cooldown gate)
 WATCH_NETCHANGE="$CFG/watch.netchange"       # epoch of the last network change ((c): a portal is likely just after one)
+# Generation of the plist this rowt writes. BUMP IT whenever the generated plist
+# changes, so an agent installed by an older rowt is recognised as stale and
+# self-heals on the next tick. A marker beats diffing the whole body: the body
+# legitimately varies with the installing shell's env (ROWT_* passthrough), so a
+# diff would call it stale forever and rewrite on every tick.
+#   v2 = adds AbandonProcessGroup (without it launchd SIGKILLs the router a tick
+#        starts, the moment that tick exits — silent ~10-minute outages).
+WATCH_PLIST_VERSION="2"
+WATCH_PLIST_MARK="rowt-watch-plist v$WATCH_PLIST_VERSION"
+WATCH_SELFHEAL="$CFG/watch.plistheal"        # epoch of the last plist self-heal (anti-loop)
 
 # mkdir first: the log directory is created by `up`, and a tick can run before
 # any `up` ever has (a fresh config, or a tree built by hand). Appending into a
@@ -4423,41 +4438,30 @@ $u ALL=(root) NOPASSWD: /usr/sbin/networksetup -setsocksfirewallproxy *, /usr/sb
 EOF
 }
 
-cmd_watch() {
-  local action="${1:-status}"; [ "$#" -gt 0 ] && shift || true
-  case "$action" in
-    install|refresh)
-      # 'refresh' re-renders the plist + reloads the agent WITHOUT touching the
-      # sudoers (no sudo) — used after `brew upgrade` to pick up this version and
-      # clear any launchd backoff from the binary swap. No-op if never installed.
-      local refresh=0; [ "$action" = refresh ] && refresh=1
-      # Remember an explicitly-set shadow choice in state. The post-upgrade
-      # 'watch refresh' runs with no environment, so an env-only flag would
-      # quietly end a shadow window at the next brew upgrade.
-      [ -n "${ROWT_WATCH_SHADOW:-}" ]  && sset shadow_watch  "$ROWT_WATCH_SHADOW"
-      [ -n "${ROWT_RENDER_SHADOW:-}" ] && sset shadow_render "$ROWT_RENDER_SHADOW"
-      if [ "$refresh" = 1 ] && [ ! -f "$WATCH_PLIST" ]; then info "watch not installed — nothing to refresh"; return 0; fi
-      local self; self="$(_watch_self)"
-      [ -x "$self" ] || die "cannot resolve the rowt binary path ($self)"
-      # LaunchAgents don't inherit your shell PATH/env, so bake in a PATH that
-      # finds jq/python3 (Homebrew) and pass through the config-location + tuning
-      # env this rowt was configured with, so the agent renders the same thing.
-      local agent_path d; agent_path="$(dirname "$self")"
-      for d in "$(brew --prefix 2>/dev/null)/bin" /opt/homebrew/bin /usr/local/bin /usr/bin /bin /usr/sbin /sbin; do
-        [ -n "$d" ] || continue
-        case ":$agent_path:" in *":$d:"*) ;; *) agent_path="$agent_path:$d" ;; esac
-      done
-      local envxml v val
-      envxml="    <key>PATH</key><string>$agent_path</string>"
-      for v in XDG_CONFIG_HOME ROWT_PORT ROWT_CLASH_PORT ROWT_FINAL ROWT_IFACE ROWT_DNS_DIRECT ROWT_DNS_LOCAL ROWT_GFW_CANARIES ROWT_GFW_TIMEOUT SINGBOX_VERSION ROWT_LOG_LEVEL ROWT_WATCH_INTERVAL ROWT_HEALTH_FAILS ROWT_HEALTH_COOLDOWN ROWT_HEALTH_TIMEOUT ROWT_HEALTH_URL ROWT_CAPTIVE_CHECK ROWT_CAPTIVE_URL ROWT_CAPTIVE_TIMEOUT ROWT_CAPTIVE_RETRY ROWT_CAPTIVE_FALLBACK ROWT_WATCH_SHADOW ROWT_RENDER_SHADOW; do
-        val="${!v:-}"; [ -n "$val" ] && envxml="$envxml
+# The LaunchAgent plist this rowt would install. Factored out of `watch install`
+# so the staleness check and the tick's self-heal generate from one source.
+# LaunchAgents don't inherit your shell PATH/env, so bake in a PATH that finds
+# jq (Homebrew) and pass through the config-location + tuning env this rowt was
+# configured with, so the agent renders the same thing.
+_watch_plist_body() {
+  local self; self="$(_watch_self)"
+  local agent_path d; agent_path="$(dirname "$self")"
+  for d in "$(brew --prefix 2>/dev/null)/bin" /opt/homebrew/bin /usr/local/bin /usr/bin /bin /usr/sbin /sbin; do
+    [ -n "$d" ] || continue
+    case ":$agent_path:" in *":$d:"*) ;; *) agent_path="$agent_path:$d" ;; esac
+  done
+  local envxml v val
+  envxml="    <key>PATH</key><string>$agent_path</string>"
+  for v in XDG_CONFIG_HOME ROWT_PORT ROWT_CLASH_PORT ROWT_FINAL ROWT_IFACE ROWT_DNS_DIRECT ROWT_DNS_LOCAL ROWT_GFW_CANARIES ROWT_GFW_TIMEOUT SINGBOX_VERSION ROWT_LOG_LEVEL ROWT_WATCH_INTERVAL ROWT_HEALTH_FAILS ROWT_HEALTH_COOLDOWN ROWT_HEALTH_TIMEOUT ROWT_HEALTH_URL ROWT_CAPTIVE_CHECK ROWT_CAPTIVE_URL ROWT_CAPTIVE_TIMEOUT ROWT_CAPTIVE_RETRY ROWT_CAPTIVE_FALLBACK ROWT_WATCH_SHADOW ROWT_RENDER_SHADOW; do
+    val="${!v:-}"; [ -n "$val" ] && envxml="$envxml
     <key>$v</key><string>$val</string>"
-      done
-      mkdir -p "$(dirname "$WATCH_PLIST")"
-      cat > "$WATCH_PLIST" <<PLIST
+  done
+  cat <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
+<!-- $WATCH_PLIST_MARK — generated by rowt $ROWT_VERSION; 'rowt watch install' rewrites it.
+     The marker is how a tick spots an agent written by an older rowt and re-syncs it. -->
 <dict>
   <key>Label</key><string>$WATCH_LABEL</string>
   <key>ProgramArguments</key>
@@ -4489,6 +4493,63 @@ $envxml
 </dict>
 </plist>
 PLIST
+}
+
+# Re-sync an agent an older rowt installed, from inside a tick. This is the ONLY
+# path that reliably reaches existing users: the formula's post_install runs
+# `watch refresh`, but under `brew` that never rewrites the plist (a scrubbed
+# HOME/env; the failure is swallowed by the formula's `rescue`), so the
+# AbandonProcessGroup fix sat undelivered for two months while every
+# watchdog-started router was SIGKILLed seconds later. A tick runs as the user,
+# unsandboxed, with the real HOME — so it can fix its own agent.
+#
+# The reload MUST be detached: `launchctl bootout` kills this tick's process
+# group, so doing it inline would unload the agent and never reach `bootstrap`,
+# leaving no watchdog at all. Fork into a new session (macOS ships no setsid
+# binary; perl is already this script's timeout mechanism) and let that outlive
+# the tick. Rate-limited so a plist that somehow never takes cannot loop.
+_watch_selfheal_plist() {
+  _watch_plist_stale || return 0
+  local now last; now="$(date +%s)"; last="$(cat "$WATCH_SELFHEAL" 2>/dev/null || echo 0)"
+  [ "$(( now - last ))" -lt 3600 ] && return 0
+  printf '%s\n' "$now" > "$WATCH_SELFHEAL" 2>/dev/null || true
+  local tmp; tmp="$WATCH_PLIST.new.$$"
+  _watch_plist_body > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+  grep -q "$WATCH_PLIST_MARK" "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+  mv -f "$tmp" "$WATCH_PLIST" || { rm -f "$tmp"; return 0; }
+  _watch_log "agent plist was written by an older rowt — rewrote it for $ROWT_VERSION; reloading out-of-band"
+  local uid; uid="$(id -u)"
+  perl -e 'use POSIX (); my $p = fork(); exit 0 if $p; POSIX::setsid(); exec @ARGV' \
+       /bin/sh -c "sleep 5; launchctl bootout gui/$uid/$WATCH_LABEL 2>/dev/null; launchctl bootstrap gui/$uid '$WATCH_PLIST' 2>/dev/null || launchctl load -w '$WATCH_PLIST' 2>/dev/null" \
+       >/dev/null 2>&1 &
+}
+
+# Was the installed agent generated by an older rowt (different plist shape)?
+# Marker-based on purpose — see WATCH_PLIST_VERSION.
+_watch_plist_stale() {
+  [ -f "$WATCH_PLIST" ] || return 1          # not installed is not "stale"
+  grep -q "$WATCH_PLIST_MARK" "$WATCH_PLIST" 2>/dev/null && return 1
+  return 0
+}
+
+cmd_watch() {
+  local action="${1:-status}"; [ "$#" -gt 0 ] && shift || true
+  case "$action" in
+    install|refresh)
+      # 'refresh' re-renders the plist + reloads the agent WITHOUT touching the
+      # sudoers (no sudo) — used after `brew upgrade` to pick up this version and
+      # clear any launchd backoff from the binary swap. No-op if never installed.
+      local refresh=0; [ "$action" = refresh ] && refresh=1
+      # Remember an explicitly-set shadow choice in state. The post-upgrade
+      # 'watch refresh' runs with no environment, so an env-only flag would
+      # quietly end a shadow window at the next brew upgrade.
+      [ -n "${ROWT_WATCH_SHADOW:-}" ]  && sset shadow_watch  "$ROWT_WATCH_SHADOW"
+      [ -n "${ROWT_RENDER_SHADOW:-}" ] && sset shadow_render "$ROWT_RENDER_SHADOW"
+      if [ "$refresh" = 1 ] && [ ! -f "$WATCH_PLIST" ]; then info "watch not installed — nothing to refresh"; return 0; fi
+      local self; self="$(_watch_self)"
+      [ -x "$self" ] || die "cannot resolve the rowt binary path ($self)"
+      mkdir -p "$(dirname "$WATCH_PLIST")"
+      _watch_plist_body > "$WATCH_PLIST"
       # scoped passwordless sudo for the proxy toggles (validated before install);
       # skipped on 'refresh' so a post-upgrade reload never needs a password.
       if [ "$refresh" = 0 ]; then
@@ -4531,6 +4592,12 @@ PLIST
       elif [ -f "$WATCH_PLIST" ]; then echo "watch: installed but NOT loaded — '$PROG watch install' to (re)load"
       else echo "watch: not installed — '$PROG watch install' to enable auto-reload"; fi
       echo "  agent:   $([ -f "$WATCH_PLIST" ] && echo "$WATCH_PLIST" || echo "(none)")"
+      # A plist from an older rowt is the failure that hides: the agent loads and
+      # reports LOADED while missing settings this version needs.
+      if _watch_plist_stale; then
+        echo "  version: STALE — written by an older rowt (no '$WATCH_PLIST_MARK')."
+        echo "           A tick re-syncs it automatically; to do it now: $PROG watch install"
+      fi
       echo "  sudoers: $([ -f "$WATCH_SUDOERS" ] && echo "$WATCH_SUDOERS (passwordless proxy toggles)" || echo "(none — service-change reloads may prompt)")"
       [ -f "$WATCH_LOG" ] && { echo "  recent:"; tail -5 "$WATCH_LOG" | sed 's/^/    /'; }
       ;;
@@ -4562,6 +4629,9 @@ PLIST
       # still resolves if it fires at top-level scope after a fall-through path.
       # Snapshot what the shadow needs BEFORE the tick changes any of it, and
       # compare on the way out. No-op unless ROWT_WATCH_SHADOW=1.
+      # Before anything else: if this agent predates the current plist shape,
+      # rewrite it. Costs a grep on a healthy tick.
+      _watch_selfheal_plist
       _SH_CAPTIVE0="$(sget captive 2>/dev/null || true)"
       # `2>/dev/null` silences wc, NOT the shell's own complaint about an input
       # redirection it cannot open — so on a config tree that has never had a
