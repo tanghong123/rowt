@@ -152,7 +152,12 @@ installed as `tanghong123/tap`. Only when the user says to.
 6. Update `Formula/rowt.rb`: source `url` + `sha256`, the
    `resource "rowt-monitor"` `url` + `sha256` (`$MON_SHA`), and the
    `assert_match "rowt X.Y.Z"` test. Keep `caveats`/`depends_on` current with any
-   new user-facing command. `git pull --rebase` the tap first, commit
+   new user-facing command. **When `SINGBOX_VERSION` in `bin/rowt` changes, update
+   both `resource "sing-box"` blocks (arm64 + amd64 `url` and `sha256`) in the same
+   pass** — the formula bundles the pinned engine (it no longer `depends_on
+   "sing-box"`, whose version brew picks) and rowt copies it from `libexec/bin`;
+   if the two disagree, `onboard` reports the bundle as non-pinned and rowt tries
+   GitHub instead. `git pull --rebase` the tap first, commit
    `rowt X.Y.Z`, push.
 7. Validate: `brew update && brew fetch tanghong123/tap/rowt` (errors on either
    sha mismatch) and `brew info tanghong123/tap/rowt` (shows `stable X.Y.Z`).

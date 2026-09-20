@@ -147,8 +147,14 @@ full command set.
 > image and installs sing-box into the guest from that cache — the VM never
 > reaches GitHub itself.
 >
-> Alternatives if GitHub is blocked: `brew install sing-box` (rowt will use it),
-> or download the tarball yourself and `SINGBOX_TARBALL=/path/to/it rowt fetch host`.
+> The engine itself needs no download: the Homebrew formula bundles the pinned
+> sing-box (`SINGBOX_VERSION` in `bin/rowt`) and rowt copies it into place on
+> first run. A brew-installed `sing-box` is used only when it is exactly that
+> version — rowt refuses 1.14.x as **known-bad**: it spins at 100%+ CPU behind a
+> corporate EDR network filter (the filter kills an idle UDP DNS socket 10 s after
+> a reply; 1.14's shared DNS reader never notices and retries forever). `rowt status`
+> shows an `engine:` line saying which version is running and whether it is the pin.
+> Without the bundle and with GitHub blocked: `SINGBOX_TARBALL=/path/to/it rowt fetch host`.
 > Other deps (`brew`, `jq`, `python3`, `curl`) ship with macOS; mode `vm` also
 > `brew install`s Lima.
 
