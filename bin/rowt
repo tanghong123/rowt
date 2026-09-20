@@ -4384,17 +4384,17 @@ _watch_capture_spin() { # $1=pid $2=pct
   {
     echo "rowt $ROWT_VERSION — router spin capture $(date '+%F %T %z')"
     echo "pid=$1  interval-average cpu=${2}%  threshold=${CPU_SPIN_PCT}%"
-    echo; echo "== ps =="; ps -p "$1" -o pid,pcpu,etime,time,rss,command 2>/dev/null
+    echo; echo "== ps =="; ps -p "$1" -o pid,pcpu,etime,time,rss,command 2>/dev/null || true
     echo; echo "== clash connections =="
-    clash_curl GET /connections 2>/dev/null | jq -c '{downloadTotal, uploadTotal, n:(.connections|length)}' 2>/dev/null
+    clash_curl GET /connections 2>/dev/null | jq -c '{downloadTotal, uploadTotal, n:(.connections|length)}' 2>/dev/null || true
     if [ -n "$PPROF_LISTEN" ]; then
       echo; echo "== pprof goroutine dump =="
-      curl --noproxy '*' -sS -m 10 "http://127.0.0.1:$PPROF_LISTEN/debug/pprof/goroutine?debug=2" 2>&1 | head -400
+      curl --noproxy '*' -sS -m 10 "http://127.0.0.1:$PPROF_LISTEN/debug/pprof/goroutine?debug=2" 2>&1 | head -400 || true
     else
       echo; echo "== pprof: not enabled (render with ROWT_PPROF=<port> to name the spinning goroutine) =="
     fi
     echo; echo "== sample (native frames; Go stacks are invisible to it) =="
-    sample "$1" 5 -file /dev/stdout 2>/dev/null | head -250
+    sample "$1" 5 -file /dev/stdout 2>/dev/null | head -250 || true
   } > "$out" 2>&1
   # Keep the last few only: the latch makes these rare, but never let a
   # diagnostic dump grow the config tree without bound.
@@ -4418,9 +4418,11 @@ _watch_capture_spin() { # $1=pid $2=pct
 _watch_spin() { # $1=pid
   local pid="$1" now cpu bytes last_e last_c last_p last_b pct bps
   [ -n "$pid" ] || return 0
-  now="$(date +%s)"; cpu="$(_proc_cpu_secs "$pid")"; bytes="$(_router_bytes_total)"
+  now="$(date +%s)"; cpu="$(_proc_cpu_secs "$pid" || true)"; bytes="$(_router_bytes_total || true)"
   [ -n "$cpu" ] || return 0
-  read -r last_e last_c last_p last_b < <(cat "$WATCH_CPU" 2>/dev/null || echo "")
+  # `read` returns 1 at EOF, and `set -e` is on: without the guard a missing or
+  # empty sample file would abort the whole tick on its very first run.
+  read -r last_e last_c last_p last_b < <(cat "$WATCH_CPU" 2>/dev/null || true) || true
   printf '%s %s %s %s\n' "$now" "$cpu" "$pid" "${bytes:-0}" > "$WATCH_CPU" 2>/dev/null || true
   # A new pid (or no prior sample) has no interval to average over yet.
   [ -n "${last_e:-}" ] && [ "${last_p:-}" = "$pid" ] || { rm -f "$WATCH_CPUSTREAK"; return 0; }
