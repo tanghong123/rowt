@@ -410,6 +410,28 @@ as the only VPN, "direct" just meant "off my tunnel". escape splits that
 
   Network *changes* are handled separately and instantly by the same agent's
   `WatchPaths` reload. Requires `rowt watch install`.
+
+  Every tick that **finishes** stamps `~/.config/rowt/watch.tick` on its way
+  out (the shell's EXIT trap; the Rust tick's one `finish_tick`). That mtime is
+  the only liveness signal the agent has: `launchctl list` says a job is
+  *registered*, not that ticks complete; a quiet, healthy tick deliberately logs
+  nothing to `watch.log`; and `watch.lock` exists only while a tick runs. `rowt
+  monitor` reads it for the header's `watch` cell — `on · 1m`, or `stalled ·
+  14m` once no tick has completed in twice the `StartInterval`. Stamped at exit
+  rather than entry so "stalled" means exactly one thing. An agent the 3.5.5
+  self-heal left unloaded (2026-09-21) sat invisible for an hour; this would
+  have shown it within four minutes.
+
+  That self-heal — a tick rewriting an agent plist an older rowt installed —
+  re-bootstraps the agent from a detached child, because `bootout` kills the
+  tick's own process group. The child waits for the old job to be *gone*
+  before it bootstraps (`bootout` is asynchronous; a bootstrap over a job still
+  tearing down fails), gives up after 10 s rather than bootstrap over a job
+  that will not leave, verifies with `launchctl list`, and writes the real
+  outcome to `watch.log` itself — the tick that spawned it is dead by then.
+  `rowt status` carries a `watchdog:` line (loaded / NOT loaded / not
+  installed, plus whether the plist is from an older rowt), since a status that
+  said nothing about the agent read as healthy through that hour.
 - **Captive portals (hotel/airport Wi-Fi).** Pre-login walled gardens make the
   login popup vanish and the portal page unloadable while the proxy is on. rowt
   handles this automatically — probe hosts on the proxy bypass so the popup

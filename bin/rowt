@@ -58,7 +58,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.5.5"
+ROWT_VERSION="3.5.6"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -4074,6 +4074,21 @@ cmd_status() {
       echo "via proxy:    HTTP $vc (google, escape lane)$([ "$vc" = 000 ] && echo '  — tunnel not reachable')"
     fi
   fi
+  # The watchdog. Loaded is the floor, the plist's generation the second word;
+  # a status that said nothing here looked healthy through an hour with no agent
+  # at all (2026-09-21). Last, so the launchctl call sits at the same point in
+  # both implementations' argv.
+  if launchctl list "$WATCH_LABEL" >/dev/null 2>&1; then
+    if _watch_plist_stale; then
+      echo "watchdog:     loaded — plist from an older rowt; a tick re-syncs it ($PROG watch status)"
+    else
+      echo "watchdog:     loaded"
+    fi
+  elif [ -f "$WATCH_PLIST" ]; then
+    echo "watchdog:     NOT loaded — installed, but launchd is not running it; fix: $PROG watch refresh"
+  else
+    echo "watchdog:     not installed — $PROG watch install"
+  fi
 }
 
 # Bounce the tunnel in place — restart whichever mode is active, no re-render,
@@ -4725,10 +4740,38 @@ _watch_selfheal_plist() {
   _watch_plist_body > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
   grep -q "$WATCH_PLIST_MARK" "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
   mv -f "$tmp" "$WATCH_PLIST" || { rm -f "$tmp"; return 0; }
-  _watch_log "agent plist was written by an older rowt — rewrote it for $ROWT_VERSION; reloading out-of-band"
-  local uid; uid="$(id -u)"
+  _watch_log "agent plist was written by an older rowt — rewrote it for $ROWT_VERSION; re-bootstrapping the agent out-of-band (outcome follows)"
+  # The detached child does the re-bootstrap and WRITES THE VERIFIED OUTCOME to
+  # watch.log itself — the tick that spawned it is gone by then, so nothing else
+  # can. This used to be "bootout; bootstrap" with every stream discarded and a
+  # success-shaped line written before the attempt: on 2026-09-21 that left the
+  # agent unloaded for an hour with nothing anywhere saying so.
+  #
+  # bootout is asynchronous. A bootstrap issued while launchd is still tearing
+  # the old job down fails, so wait for the job to be GONE — with a ceiling: a
+  # job that will not leave is reported and left alone, never bootstrapped over.
   perl -e 'use POSIX (); my $p = fork(); exit 0 if $p; POSIX::setsid(); exec @ARGV' \
-       /bin/sh -c "sleep 5; launchctl bootout gui/$uid/$WATCH_LABEL 2>/dev/null; launchctl bootstrap gui/$uid '$WATCH_PLIST' 2>/dev/null || launchctl load -w '$WATCH_PLIST' 2>/dev/null" \
+       /bin/sh -c '
+    uid="$1"; label="$2"; plist="$3"; log="$4"; ver="$5"
+    say() { printf "%s  %s\n" "$(date "+%Y-%m-%d %H:%M:%S")" "$*" >> "$log" 2>/dev/null || true; }
+    sleep 2
+    launchctl bootout "gui/$uid/$label" >/dev/null 2>&1 || true
+    n=0
+    while launchctl print "gui/$uid/$label" >/dev/null 2>&1; do
+      n=$((n + 1))
+      if [ "$n" -ge 20 ]; then
+        say "self-heal: agent $label did not unload within 10s — NOT bootstrapping over it. Watchdog state unknown; fix: rowt watch refresh"
+        exit 0
+      fi
+      sleep 0.5
+    done
+    out="$(launchctl bootstrap "gui/$uid" "$plist" 2>&1)"; rc=$?
+    if launchctl list "$label" >/dev/null 2>&1; then
+      say "self-heal: agent re-bootstrapped for rowt $ver — loaded"
+    else
+      say "self-heal FAILED: bootstrap rc=$rc${out:+ ($out)} — WATCHDOG NOT LOADED. Fix: rowt watch refresh"
+    fi
+  ' _ "$(id -u)" "$WATCH_LABEL" "$WATCH_PLIST" "$WATCH_LOG" "$ROWT_VERSION" \
        >/dev/null 2>&1 &
 }
 
@@ -4861,7 +4904,15 @@ cmd_watch() {
       _SH_LASTREC0="$(cat "$WATCH_RESTART" 2>/dev/null || echo 0)"
       _SH_LASTNETCHG0="$(cat "$WATCH_NETCHANGE" 2>/dev/null || echo 0)"
       _SH2_HEALTH=ok
-      trap 'rmdir "$CFG/watch.lock" 2>/dev/null || true
+      # `watch.tick` is stamped on the way OUT, whatever the tick did: a tick
+      # that finished. `rowt monitor` reads its mtime for the watch cell's age —
+      # `launchctl list` only says the job is registered, a quiet tick logs
+      # nothing, and `watch.lock` is gone between ticks. Stamped here rather
+      # than at entry so "stalled" means exactly one thing: ticks are not
+      # completing — which is how an agent left unloaded by the self-heal
+      # (2026-09-21) would have shown within four minutes instead of never.
+      trap 'touch "$CFG/watch.tick" 2>/dev/null || true
+            rmdir "$CFG/watch.lock" 2>/dev/null || true
             [ "${ROWT_WATCH_SHADOW:-$(sget shadow_watch)}" = 1 ] && [ -n "$_SH_CAP" ] && _watch_shadow || true
             rm -f "${_SH_ACTS:-}" "${_SH_OBS:-}" "${_SH_OBS2:-}" 2>/dev/null || true' EXIT
 

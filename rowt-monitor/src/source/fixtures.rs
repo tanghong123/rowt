@@ -168,9 +168,11 @@ impl Source for FixtureSource {
                 active_ok: Some(true),
                 proxy: "on".into(),
                 watch: "on".into(),
+                watch_age: None,
                 collector: "on".into(),
                 name_reserve: 8, // matches the golden (JP-Tokyo, ms at col 55)
             },
+            monitor_stale: None,
             all,
             lanes,
             conns,

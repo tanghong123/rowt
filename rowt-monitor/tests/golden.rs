@@ -621,3 +621,62 @@ fn the_confirm_bar_flags_an_over_broad_entry_before_you_commit() {
     assert_ne!(entry_fg(&typed("bbc.co.uk")), theme::block(), "a real domain does not");
     assert_ne!(entry_fg(&typed("z.com")), theme::block());
 }
+
+/// The identity band's watch cell is masked from the byte diff (row 4), so it
+/// gets the dedicated assertions the masking convention asks for: the three
+/// states, the age suffix, and the top-rule notice for a monitor that has
+/// outlived its install — drawn only when set, which is why the goldens never
+/// see it. Coordinates: the right value column is x0+70; row 4 is the
+/// collector/watch row (the collector test pins (47,4) on the same row).
+#[test]
+fn watch_cell_states_and_stale_monitor_notice() {
+    let mut app = App::new(Box::new(FixtureSource::still()));
+    let draw = |app: &App| {
+        let mut term = Terminal::new(TestBackend::new(96, 41)).unwrap();
+        term.draw(|f| {
+            let area = f.area();
+            ui::draw(f.buffer_mut(), area, app, true);
+        })
+        .unwrap();
+        term.backend().buffer().clone()
+    };
+    // Per cell, joined from a COLUMN: a String's `[70..]` is a byte offset, and
+    // the borders and separators before column 70 are multi-byte glyphs.
+    let from = |buf: &ratatui::buffer::Buffer, y: u16, x: u16| -> String {
+        (x..96).map(|c| buf.cell((c, y)).unwrap().symbol().to_string()).collect()
+    };
+
+    // Fixture default: "on", no heartbeat known, so no age — and the same green
+    // the collector cell uses.
+    let buf = draw(&app);
+    assert_eq!(buf.cell((70, 4)).unwrap().symbol(), "o");
+    assert_eq!(buf.cell((70, 4)).unwrap().fg, theme::direct());
+    assert_eq!(buf.cell((72, 4)).unwrap().symbol(), " ", "no age suffix without a heartbeat");
+    assert!(app.snap.monitor_stale.is_none());
+
+    // Loaded but no tick has completed: stalled, with the age, in the off colour.
+    app.snap.identity.watch = "stalled".into();
+    app.snap.identity.watch_age = Some(14 * 60);
+    let buf = draw(&app);
+    let r = from(&buf, 4, 70);
+    assert!(r.starts_with("stalled · 14m"), "got {r:?}");
+    assert_eq!(buf.cell((70, 4)).unwrap().fg, theme::up());
+
+    // On with a fresh heartbeat carries the age too, still green.
+    app.snap.identity.watch = "on".into();
+    app.snap.identity.watch_age = Some(50);
+    let buf = draw(&app);
+    let r = from(&buf, 4, 70);
+    assert!(r.starts_with("on · 50s"), "got {r:?}");
+    assert_eq!(buf.cell((70, 4)).unwrap().fg, theme::direct());
+
+    // The stale-monitor notice: on the top rule, right-aligned, warning colour.
+    app.snap.monitor_stale = Some("monitor 3.5.2 ≠ installed 3.5.5 · restart".into());
+    let buf = draw(&app);
+    let top = from(&buf, 0, 0);
+    assert!(top.contains("┤ monitor 3.5.2 ≠ installed 3.5.5 · restart ├"), "got {top:?}");
+    let col = (0..96).find(|&x| buf.cell((x, 0)).unwrap().symbol() == "m").expect("notice drawn");
+    assert_eq!(buf.cell((col, 0)).unwrap().fg, theme::up());
+    // …and the frame's own corner survives underneath it.
+    assert_eq!(buf.cell((95, 0)).unwrap().symbol(), "╮");
+}

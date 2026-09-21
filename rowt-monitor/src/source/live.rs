@@ -62,6 +62,9 @@ pub struct LiveSource {
     // rate computation: previous cumulative byte counts per connection id
     prev: HashMap<String, (u64, u64)>,
     prev_at: Option<Instant>,
+    /// See `monitor_stale()`: checked once a minute, not thirty times.
+    stale_checked_at: Option<Instant>,
+    monitor_stale: Option<String>,
 
     // Per-domain cumulative bytes carried over from CLOSED connections, so the
     // table can total a domain across short-lived connections. `conn_last` is the
@@ -122,6 +125,8 @@ impl LiveSource {
             fallback: FixtureSource::new(),
             prev: HashMap::new(),
             prev_at: None,
+            stale_checked_at: None,
+            monitor_stale: None,
             conn_history: HashMap::new(),
             conn_last: HashMap::new(),
             errors_buf: Vec::new(),
@@ -150,6 +155,18 @@ impl LiveSource {
             sysproxy_started: false,
             ctl_out: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// A monitor that has outlived its install (see `detect_stale_monitor`).
+    /// Once a minute: a readlink is cheap, but there is no reason to do it on
+    /// every 2s data tick.
+    fn monitor_stale(&mut self) -> Option<String> {
+        if self.stale_checked_at.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
+            return self.monitor_stale.clone();
+        }
+        self.stale_checked_at = Some(Instant::now());
+        self.monitor_stale = detect_stale_monitor();
+        self.monitor_stale.clone()
     }
 
     /// Run a `rowt` command off the UI thread and queue its outcome for the
@@ -788,6 +805,8 @@ impl Source for LiveSource {
         // thread so a `rowt proxy on/off` shows up within ~2s.
         self.ensure_sysproxy_watcher();
         let proxy = self.sysproxy.lock().map(|s| s.clone()).unwrap_or_else(|_| "off".to_string());
+        let (watch, watch_age) = read_watch_status(&self.cfg);
+        let monitor_stale = self.monitor_stale();
 
         Snapshot {
             identity: Identity {
@@ -801,10 +820,12 @@ impl Source for LiveSource {
                 router_up,
                 active_ok: h.active_ok,
                 proxy,
-                watch: read_watch_status(),
+                watch,
+                watch_age,
                 collector: read_collector_status(router_up),
                 name_reserve,
             },
+            monitor_stale,
             all,
             lanes,
             conns,
@@ -1131,24 +1152,86 @@ fn fmt_uptime(secs: u64) -> String {
     }
 }
 
-/// Watchdog LaunchAgent state for the header: "on" (loaded/active), "off"
-/// (installed but not loaded), or "—" (not installed). Cheap: one `launchctl
-/// list` call, plus a plist stat only when it isn't loaded.
-fn read_watch_status() -> String {
+/// The header's watch cell, from three facts, as (state, age). Pure, so the
+/// table below can be tested. `age` is seconds since the last COMPLETED tick —
+/// the heartbeat rowt stamps on its way out. `launchctl list` alone only says
+/// the job is registered: an agent whose ticks die, or whose router launchd
+/// keeps SIGKILLing, reads "on" by that test forever. None = no heartbeat known
+/// (an older rowt never writes one), and that reads as `on`, not `stalled` —
+/// the day you upgrade, every machine would otherwise read stalled until its
+/// first tick lands.
+pub fn watch_cell(loaded: bool, installed: bool, age: Option<u64>, interval: u64) -> (&'static str, Option<u64>) {
+    if !loaded {
+        return (if installed { "off" } else { "\u{2014}" }, None);
+    }
+    match age {
+        Some(a) if a > interval.saturating_mul(2) => ("stalled", Some(a)),
+        Some(a) => ("on", Some(a)),
+        None => ("on", None),
+    }
+}
+
+/// Seconds since `watch.tick` was last stamped — the tick's exit heartbeat.
+fn heartbeat_age(cfg: &std::path::Path) -> Option<u64> {
+    std::fs::metadata(cfg.join("watch.tick")).ok()?.modified().ok()?.elapsed().ok().map(|e| e.as_secs())
+}
+
+/// The agent's StartInterval, from the plist launchd actually holds. The stall
+/// threshold is twice this; hard-coding 120 would misread a machine that set
+/// ROWT_WATCH_INTERVAL. Network changes fire ticks sooner (WatchPaths), never
+/// later, so the interval is the longest a healthy agent stays silent.
+fn tick_interval() -> u64 {
+    let plist = std::env::var_os("HOME")
+        .map(|h| PathBuf::from(h).join("Library/LaunchAgents/club.annaslife.rowt.watch.plist"));
+    let body = plist.and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+    body.split("StartInterval").nth(1)
+        .and_then(|r| r.split("<integer>").nth(1))
+        .and_then(|r| r.split('<').next())
+        .and_then(|d| d.trim().parse().ok())
+        .unwrap_or(120)
+}
+
+/// Watchdog LaunchAgent state for the header, as (state, age): "on" (loaded and
+/// ticking), "stalled" (loaded, but no tick has completed in 2x the interval),
+/// "off" (installed but not loaded), or "\u{2014}" (not installed). One
+/// `launchctl list` call, one plist stat, one heartbeat stat.
+fn read_watch_status(cfg: &std::path::Path) -> (String, Option<u64>) {
     const LABEL: &str = "club.annaslife.rowt.watch";
     let loaded = std::process::Command::new("launchctl")
         .args(["list", LABEL])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
-    if loaded {
-        return "on".into();
-    }
-    // Not loaded: distinguish "installed but stopped" from "never installed".
     let installed = std::env::var_os("HOME")
         .map(|h| PathBuf::from(h).join("Library/LaunchAgents").join(format!("{LABEL}.plist")))
         .is_some_and(|p| p.exists());
-    if installed { "off".into() } else { "—".into() }
+    let (state, age) = watch_cell(loaded, installed, heartbeat_age(cfg), tick_interval());
+    (state.to_string(), age)
+}
+
+/// This process's executable against the rowt-monitor on PATH, both
+/// canonicalized: a fresh process may report the symlink, and a binary whose
+/// install was removed under it (a `brew upgrade` beneath a TUI left open for
+/// days) fails to canonicalize at all — that failure IS the signal, not an
+/// error. No rowt-monitor on PATH means nothing to compare against.
+fn detect_stale_monitor() -> Option<String> {
+    let me = std::env::current_exe().ok()?;
+    let ver = |p: &std::path::Path| {
+        p.to_string_lossy().split("/Cellar/rowt/").nth(1).and_then(|s| s.split('/').next()).map(|s| s.to_string())
+    };
+    let mine = std::fs::canonicalize(&me).ok();
+    let on_path = std::env::var_os("PATH")
+        .and_then(|p| std::env::split_paths(&p).map(|d| d.join("rowt-monitor")).find(|c| c.is_file()))
+        .and_then(|c| std::fs::canonicalize(c).ok());
+    match (mine, on_path) {
+        (None, _) => Some(format!("monitor {} \u{00b7} its install is gone \u{00b7} restart",
+                                  ver(&me).unwrap_or_else(|| "binary".into()))),
+        (Some(m), Some(p)) if m != p => Some(match (ver(&m), ver(&p)) {
+            (Some(a), Some(b)) => format!("monitor {a} \u{2260} installed {b} \u{00b7} restart"),
+            _ => "monitor is not the installed one \u{00b7} restart".into(),
+        }),
+        _ => None,
+    }
 }
 
 /// Metrics-sidecar status, by heartbeat freshness rather than a pidfile: the
@@ -1246,5 +1329,31 @@ mod tests {
         assert!(should_force_probe(true, false, false, s(Duration::from_secs(61))));
         // Never forced yet (None) → due immediately when the probe is failing.
         assert!(should_force_probe(true, true, false, None));
+    }
+}
+
+#[cfg(test)]
+mod watch_cell_tests {
+    use super::watch_cell;
+
+    /// The whole reason the cell exists: `launchctl list` cannot tell a
+    /// registered job from a working one. Every row here is a state the old
+    /// "on"/"off" cell rendered identically to its neighbour.
+    #[test]
+    fn loaded_is_not_the_same_as_ticking() {
+        // Not loaded: installed or not, and no age either way.
+        assert_eq!(watch_cell(false, true, Some(5), 120), ("off", None));
+        assert_eq!(watch_cell(false, false, None, 120), ("\u{2014}", None));
+        // Loaded and ticking: on, with the age shown.
+        assert_eq!(watch_cell(true, true, Some(50), 120), ("on", Some(50)));
+        assert_eq!(watch_cell(true, true, Some(240), 120), ("on", Some(240)), "exactly 2x is still on");
+        // Loaded but no tick has completed in over 2x the interval: stalled.
+        assert_eq!(watch_cell(true, true, Some(241), 120), ("stalled", Some(241)));
+        assert_eq!(watch_cell(true, true, Some(14 * 60), 120), ("stalled", Some(840)));
+        // The threshold follows the configured interval, not a constant.
+        assert_eq!(watch_cell(true, true, Some(500), 300), ("on", Some(500)));
+        // No heartbeat known (an older rowt never writes one) reads as on, not
+        // stalled — or every machine would read stalled the day it upgrades.
+        assert_eq!(watch_cell(true, true, None, 120), ("on", None));
     }
 }

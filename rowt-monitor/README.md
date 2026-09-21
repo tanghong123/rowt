@@ -122,7 +122,15 @@ to toggle it (hover-highlights).
 
 - One **outer frame** (the only rounded corners); everything inside connects to
   it with `├ ┤` rules — no inset boxes.
-- **Identity band** (neofetch-style logo + session facts) on top.
+- **Identity band** (neofetch-style logo + session facts) on top. Its `watch`
+  cell reports the watchdog agent as *alive*, not merely loaded: `on · 1m` is
+  the time since the last tick **completed** (rowt stamps `watch.tick` on its
+  way out), `stalled · 14m` (orange) means launchd holds the job but no tick
+  has finished in twice its interval, `off` means installed but not loaded,
+  `—` not installed. Plain `on` with no age means an older rowt that writes no
+  heartbeat. And a monitor left open across a `brew upgrade` announces it on
+  the top rule — `┤ monitor 3.5.2 ≠ installed 3.5.5 · restart ├` — rather than
+  presenting a days-old binary as current.
 - **`live connections`** and **`errors & blocked`** panes — side by side,
   split by a center rule (tab labels shorten on narrow terminals).
 - Full-width **`server health`** strip, merged onto the closing `┴` rule. When the

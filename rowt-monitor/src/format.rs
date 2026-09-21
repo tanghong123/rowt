@@ -44,3 +44,30 @@ pub fn compact(bytes_per_s: f64) -> String {
         format!("{:.0}B", b)
     }
 }
+
+/// A tick age for the header: "50s", "14m", "3h". Coarse on purpose — it is a
+/// liveness signal ("is the watchdog still completing ticks?"), not a clock.
+pub fn age_short(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{}h", secs / 3600)
+    }
+}
+
+#[cfg(test)]
+mod age_tests {
+    use super::age_short;
+
+    #[test]
+    fn it_rounds_down_to_the_unit_a_glance_needs() {
+        assert_eq!(age_short(0), "0s");
+        assert_eq!(age_short(59), "59s");
+        assert_eq!(age_short(60), "1m");
+        assert_eq!(age_short(14 * 60 + 59), "14m");
+        assert_eq!(age_short(3600), "1h");
+        assert_eq!(age_short(2 * 3600 + 3599), "2h");
+    }
+}

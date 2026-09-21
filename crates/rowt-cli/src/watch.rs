@@ -30,6 +30,26 @@ pub fn plist_stale(plist: &Path) -> bool {
 }
 pub const SUDOERS: &str = "/etc/sudoers.d/rowt";
 
+/// The `watchdog:` line of `rowt status` — the shell's, word for word. Loaded
+/// is the floor and the plist's generation the second word; a status that
+/// said nothing here looked healthy through an hour with no agent at all
+/// (2026-09-21). The `launchctl list` is the caller's LAST effectful call so it
+/// sits at the same point in both implementations' argv.
+pub fn status_line() -> String {
+    let plist = plist_path();
+    if quiet("launchctl", &["list", LABEL]) {
+        if plist.is_file() && plist_stale(&plist) {
+            format!("watchdog:     loaded \u{2014} plist from an older rowt; a tick re-syncs it ({PROG} watch status)")
+        } else {
+            "watchdog:     loaded".to_string()
+        }
+    } else if plist.is_file() {
+        format!("watchdog:     NOT loaded \u{2014} installed, but launchd is not running it; fix: {PROG} watch refresh")
+    } else {
+        format!("watchdog:     not installed \u{2014} {PROG} watch install")
+    }
+}
+
 fn plist_path() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_default())
         .join(format!("Library/LaunchAgents/{LABEL}.plist"))
@@ -885,6 +905,18 @@ pub fn cmd(ctx: &Ctx, self_bin: &Path, action: &str) -> Result<String, String> {
     }
 }
 
+/// A tick that FINISHED, whatever it did. Stamps `watch.tick` and releases the
+/// debounce lock — the shell does both in its EXIT trap, so this is the one
+/// place every exit path must go through. `rowt monitor` reads the file's mtime
+/// for the watch cell's age: `launchctl list` only says the job is registered,
+/// a quiet tick logs nothing, and `watch.lock` does not exist between ticks.
+/// Stamped on the way out rather than at entry so "stalled" means exactly one
+/// thing: ticks are not completing.
+fn finish_tick(ctx: &Ctx, lock: &Path) {
+    let _ = std::fs::File::create(ctx.cfg.join("watch.tick"));
+    let _ = std::fs::remove_dir(lock);
+}
+
 fn tick(ctx: &Ctx) {
     // The debounce lock is taken UP FRONT, so the crash-recovery, stale-proxy
     // and reload paths can never overlap a concurrent tick — a StartInterval
@@ -917,7 +949,7 @@ fn tick(ctx: &Ctx) {
     // who asked rowt to keep its hands off. The FSM agrees (guard returns an
     // empty plan for this), so exiting early changes no decision.
     if ctx.sget("proxy_intent") == "off" {
-        let _ = std::fs::remove_dir(&lock);
+        finish_tick(ctx, &lock);
         return;
     }
 
@@ -947,7 +979,7 @@ fn tick(ctx: &Ctx) {
     st = g.state;
     save_state(ctx, &mut disk, &st);
     if g.next == Next::Stop {
-        let _ = std::fs::remove_dir(&lock);
+        finish_tick(ctx, &lock);
         return;
     }
 
@@ -956,7 +988,7 @@ fn tick(ctx: &Ctx) {
     // longer exists.
     std::thread::sleep(std::time::Duration::from_secs(2));
     if lifecycle::host_running(ctx).is_none() {
-        let _ = std::fs::remove_dir(&lock);
+        finish_tick(ctx, &lock);
         return;
     }
     // Run corp_sync where the shell runs it: BEFORE the netcheck observation,
@@ -966,7 +998,7 @@ fn tick(ctx: &Ctx) {
     // would sync twice.
     let _ = crate::corp::sync(ctx, true);
     if lifecycle::host_running(ctx).is_none() {
-        let _ = std::fs::remove_dir(&lock);
+        finish_tick(ctx, &lock);
         return;
     }
     let hb = ctx.mode() == "local" || health_ok(ctx);
@@ -974,7 +1006,7 @@ fn tick(ctx: &Ctx) {
     let n = netcheck(&obs2, &st, &cfg);
     perform_planned(ctx, &n.actions);
     save_state(ctx, &mut disk, &n.state);
-    let _ = std::fs::remove_dir(&lock);
+    finish_tick(ctx, &lock);
 }
 
 #[cfg(test)]

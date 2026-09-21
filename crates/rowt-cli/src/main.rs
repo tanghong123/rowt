@@ -1980,6 +1980,7 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                 } else { "" };
                 o.push(format!("via proxy:    HTTP {vc} ({lane}){tail}"));
             }
+            o.push(watch::status_line());
             Ok(o.join("\n"))
         }
         "shell-init" => match rest.first().map(|s| s.as_str()) {

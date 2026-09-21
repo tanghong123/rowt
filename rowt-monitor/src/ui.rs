@@ -90,6 +90,16 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &App, present: bool) -> Hit {
     put(buf, xl, y0, "╭", border);
     hfill(buf, xl + 1, xr - 1, y0, '─', border);
     put(buf, xr, y0, "╮", border);
+    // A monitor that has outlived its install says so on the top rule, in the
+    // warning colour, and ONLY then: fixtures never set it, so the goldens
+    // never see it. Right-aligned so the logo and the fact columns stay put.
+    if let Some(s) = &app.snap.monitor_stale {
+        let label = format!("\u{2524} {s} \u{251c}");
+        let w = label.chars().count() as u16;
+        if xr > xl + w + 2 {
+            put(buf, xr - 1 - w, y0, &label, theme::fg(theme::up()));
+        }
+    }
     for y in (y0 + 1)..=(y0 + 5) {
         put(buf, xl, y, "│", border);
         put(buf, xr, y, "│", border);
@@ -299,7 +309,13 @@ fn draw_identity(buf: &mut Buffer, x0: u16, y0: u16, xr: u16, app: &App, present
     put(buf, x0 + 37, y0 + 4, "collector", dimmer);
     put(buf, x0 + 47, y0 + 4, &id.collector, status_color(&id.collector));
     put(buf, rl, y0 + 4, "watch", dimmer);
-    put(buf, rv, y0 + 4, &id.watch, status_color(&id.watch));
+    // The age is the part that makes this cell mean something: "on" alone only
+    // says launchd holds the job. Colour keys on the state word, not the text.
+    let watch = match id.watch_age {
+        Some(a) => format!("{} \u{00b7} {}", id.watch, crate::format::age_short(a)),
+        None => id.watch.clone(),
+    };
+    put(buf, rv, y0 + 4, &watch, status_color(&id.watch));
 }
 
 /// Shared on/off/— coloring for the watch + collector status values: green =
@@ -308,6 +324,7 @@ fn status_color(v: &str) -> Style {
     match v {
         "on" => theme::fg(theme::direct()),
         "off" => theme::fg(theme::up()),
+        "stalled" => theme::fg(theme::up()),
         _ => theme::fg(theme::dim()),
     }
 }

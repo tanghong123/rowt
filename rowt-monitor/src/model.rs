@@ -326,7 +326,11 @@ pub struct Identity {
     /// (→ ERROR), None = not probed yet. Drives the LIVE/ERROR distinction.
     pub active_ok: Option<bool>,
     pub proxy: String,       // e.g. "on · Wi-Fi"
-    pub watch: String,       // watchdog LaunchAgent: "on" | "off" | "—"
+    pub watch: String,       // watchdog LaunchAgent: "on" | "stalled" | "off" | "—"
+    /// Seconds since the last COMPLETED watchdog tick (rowt stamps `watch.tick`
+    /// on its way out). None = no heartbeat known: an older rowt never writes
+    /// one, and that must read as `on`, not `stalled`.
+    pub watch_age: Option<u64>,
     pub collector: String,   // metrics sidecar: "on" | "off" | "—" (by last-write freshness)
     /// Columns reserved for the active server name in the header, so the ms
     /// column doesn't jump as the active server changes. Sized to the pool's
@@ -340,6 +344,11 @@ pub struct Identity {
 #[derive(Clone, Debug)]
 pub struct Snapshot {
     pub identity: Identity,
+    /// Set when THIS monitor binary is not the rowt-monitor on PATH — it has
+    /// outlived its install (a `brew upgrade` under a TUI that stayed open for
+    /// days). About the monitor, not rowt, so it lives here rather than in
+    /// `Identity`. Fixtures never set it, so the goldens never see it.
+    pub monitor_stale: Option<String>,
     pub all: AllAgg,
     pub lanes: Vec<LaneAgg>,
     pub conns: Vec<Conn>,
