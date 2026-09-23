@@ -1496,14 +1496,38 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                     Ok(o)
                 }
                 "export" => {
-                    let names: Vec<&str> = src.iter().copied().filter(|f| cfg.join(f).is_file()).collect();
-                    if names.is_empty() {
-                        die(&cfg, &format!("no config files found under {}", cfg.display()));
+                    // [file] and --no-servers, in any order. --no-servers drops
+                    // the server POOL so the bundle is only the lane rules (no
+                    // credentials, safe to share or commit) — the same set the
+                    // credentials warning is about. First non-flag is the file,
+                    // as the shell's `$1` was.
+                    const POOL: [&str; 5] =
+                        ["servers.json", "manual.json", "import-review.json", "subs.txt", "outbound.json"];
+                    let mut no_servers = false;
+                    let mut out: Option<String> = None;
+                    for a in &rest[1..] {
+                        match a.as_str() {
+                            "--no-servers" => no_servers = true,
+                            f if f.starts_with('-') => die(
+                                &cfg,
+                                &format!("unknown flag: {f}  (usage: {PROG} config export [file] [--no-servers])"),
+                            ),
+                            f => {
+                                if out.is_none() {
+                                    out = Some(f.to_string());
+                                }
+                            }
+                        }
                     }
-                    let out = match rest.get(1) {
-                        Some(o) => o.clone(),
-                        None => format!("rowt-config-{}.tgz", sh_date("+%Y%m%d-%H%M%S")),
-                    };
+                    let names: Vec<&str> = src.iter().copied()
+                        .filter(|f| cfg.join(f).is_file())
+                        .filter(|f| !(no_servers && POOL.contains(f)))
+                        .collect();
+                    if names.is_empty() {
+                        die(&cfg, &format!("no config files to export{}",
+                            if no_servers { " — no lane files present" } else { "" }));
+                    }
+                    let out = out.unwrap_or_else(|| format!("rowt-config-{}.tgz", sh_date("+%Y%m%d-%H%M%S")));
                     let ok = std::process::Command::new("tar")
                         .arg("czf").arg(&out).arg("-C").arg(&cfg).args(&names)
                         .status().map(|s| s.success()).unwrap_or(false);
@@ -1511,9 +1535,12 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                         die(&cfg, &format!("could not write {out}"));
                     }
                     let _ = set_mode(Path::new(&out), 0o600);
-                    Ok(format!(
-                        "wrote {out}  ({})\n  packed: {}\n  ⚠ contains server credentials + subscription tokens — move it over an\n    encrypted channel (scp / rsync -e ssh) and delete it afterward.",
-                        du_h(Path::new(&out)), names.join(" ")))
+                    let tail = if no_servers {
+                        "\n  lanes only — no server pool, no credentials; safe to share or commit."
+                    } else {
+                        "\n  ⚠ contains server credentials + subscription tokens — move it over an\n    encrypted channel (scp / rsync -e ssh) and delete it afterward."
+                    };
+                    Ok(format!("wrote {out}  ({})\n  packed: {}{tail}", du_h(Path::new(&out)), names.join(" ")))
                 }
                 // The other direction: unpack a bundle here, tighten what it
                 // brought, and re-render. Overwrites matching files, so it asks

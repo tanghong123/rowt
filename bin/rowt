@@ -58,7 +58,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.5.6"
+ROWT_VERSION="3.5.7"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -5750,7 +5750,10 @@ box's clash secret, mode, bound interface), and runtime bin/cache/log/metrics �
 those are regenerated on the target.
 
   $PROG config list              show which source files would be packed  [default]
-  $PROG config export [file]     write a .tgz (default rowt-config-<date>.tgz)
+  $PROG config export [file] [--no-servers]  write a .tgz (default rowt-config-<date>.tgz)
+                                 --no-servers packs only the lane rules (escape/
+                                 corp/block/hotspot) — no server pool, no
+                                 credentials; safe to share or commit
   $PROG config import <file> [-y]  restore a bundle here, then re-render
 
 Move it to the other box (over an encrypted channel — it holds server
@@ -6260,15 +6263,37 @@ cmd_config() {
       ;;
     export)
       shift
-      local out="${1:-rowt-config-$(date +%Y%m%d-%H%M%S).tgz}" names=() f
-      for f in "${src[@]}"; do [ -f "$f" ] && names+=("$(basename "$f")"); done
-      [ "${#names[@]}" -gt 0 ] || die "no config files found under $CFG"
+      # [file] and --no-servers, in any order. --no-servers drops the server
+      # POOL (servers/manual/import-review/subs/outbound) so the bundle is only
+      # the lane rules — no credentials, so it is safe to share or commit. The
+      # pool files are exactly the ones the credentials warning is about.
+      local out="" no_servers=0
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --no-servers) no_servers=1 ;;
+          -*) die "unknown flag: $1  (usage: $PROG config export [file] [--no-servers])" ;;
+          *)  [ -z "$out" ] && out="$1" ;;
+        esac
+        shift
+      done
+      out="${out:-rowt-config-$(date +%Y%m%d-%H%M%S).tgz}"
+      local pool=" $SERVERS $MANUAL $SR_REVIEW $SUBS_FILE $OUTBOUND " names=() f
+      for f in "${src[@]}"; do
+        [ -f "$f" ] || continue
+        [ "$no_servers" = 1 ] && case "$pool" in *" $f "*) continue ;; esac
+        names+=("$(basename "$f")")
+      done
+      [ "${#names[@]}" -gt 0 ] || die "no config files to export$([ "$no_servers" = 1 ] && echo ' — no lane files present')"
       tar czf "$out" -C "$CFG" "${names[@]}" || die "could not write $out"
       chmod 600 "$out" 2>/dev/null || true
       echo "wrote $out  ($(du -h "$out" 2>/dev/null | awk '{print $1}'))"
       echo "  packed: ${names[*]}"
-      echo "  ⚠ contains server credentials + subscription tokens — move it over an"
-      echo "    encrypted channel (scp / rsync -e ssh) and delete it afterward."
+      if [ "$no_servers" = 1 ]; then
+        echo "  lanes only — no server pool, no credentials; safe to share or commit."
+      else
+        echo "  ⚠ contains server credentials + subscription tokens — move it over an"
+        echo "    encrypted channel (scp / rsync -e ssh) and delete it afterward."
+      fi
       ;;
     import)
       shift
