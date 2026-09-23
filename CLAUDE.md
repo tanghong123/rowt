@@ -157,8 +157,11 @@ installed as `tanghong123/tap`. Only when the user says to.
    pass** — the formula bundles the pinned engine (it no longer `depends_on
    "sing-box"`, whose version brew picks) and rowt copies it from `libexec/bin`;
    if the two disagree, `onboard` reports the bundle as non-pinned and rowt tries
-   GitHub instead. `git pull --rebase` the tap first, commit
-   `rowt X.Y.Z`, push.
+   GitHub instead. If the formula carries a `revision N` line (from a prior
+   formula-only fix — a packaging or sing-box change with no rowt source bump),
+   **delete it** in this pass: a new version resets the revision to 0, so
+   `3.5.9` + a leftover `revision 1` would wrongly pour as `3.5.9_1`.
+   `git pull --rebase` the tap first, commit `rowt X.Y.Z`, push.
 7. Validate: `brew update && brew fetch tanghong123/tap/rowt` (errors on either
    sha mismatch) and `brew info tanghong123/tap/rowt` (shows `stable X.Y.Z`).
 
