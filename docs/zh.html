@@ -925,12 +925,12 @@ rowt probe         <span class="c"># 当前环境适用哪种</span></div></div>
 <section class="slide" data-i="21"><div class="eyebrow">进阶</div><div class="body"><h2>迁移与交接</h2>
 <div class="cols c2">
 <div><h3>把整套配置搬到另一台机器</h3>
-<p><code>config export</code> 只打包真正的源头：服务器池、订阅，以及三个通道文件。
-渲染产物、运行状态与二进制均与机器绑定，在新机器上会重新生成。</p>
-<div class="cmd">rowt config list             <span class="c"># 查看打包范围</span>
-rowt config export           <span class="c"># → 一个 .tgz</span>
-rowt config import setup.tgz <span class="c"># 恢复并重新渲染</span></div>
-<p class="note">包内含凭证与订阅令牌，传输时请加密。</p></div>
+<p><code>config export</code> 只打包真正的源头：服务器池、订阅，以及各通道规则。
+加上 <code>--no-servers</code> 只分享分流规则、不含任何凭证。渲染产物、运行状态与二进制均与机器绑定，在新机器上会重新生成。</p>
+<div class="cmd">rowt config list                 <span class="c"># 查看打包范围</span>
+rowt config export --no-servers  <span class="c"># → .tgz，无服务器池</span>
+rowt config import setup.tgz     <span class="c"># 合并并重新渲染</span></div>
+<p class="note">导入默认<strong>合并</strong>进你的通道、并保留你的服务器池——有冲突会先确认；<code>--replace</code> 则改为整包覆盖。完整包内含凭证，传输时请加密。</p></div>
 <div><h3>交给 agent 操作</h3>
 <p>rowt 附带一份 <strong>agent skill</strong>：链接之后，编码 agent 可以用同一套命令完成安装、
 排查通道、解释某条分流决策。</p>

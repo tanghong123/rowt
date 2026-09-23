@@ -914,12 +914,12 @@ switching networks.</p></div></div></div><div class="foot"><span>rowt</span><spa
 <div class="cols c2">
 <div><h3>Take your setup to another machine</h3>
 <p><code>config export</code> bundles only the source of truth — the server pool, subscriptions and the
-three lane files. The rendered config, state and binaries are machine-specific and regenerate
-themselves.</p>
-<div class="cmd">rowt config list             <span class="c"># what would go in</span>
-rowt config export           <span class="c"># → a .tgz</span>
-rowt config import setup.tgz <span class="c"># restore + re-render</span></div>
-<p class="note">The bundle holds credentials and subscription tokens. Move it encrypted.</p></div>
+lane rules. Add <code>--no-servers</code> to share just the rules, with no credentials. The rendered
+config, state and binaries are machine-specific and regenerate themselves.</p>
+<div class="cmd">rowt config list                 <span class="c"># what would go in</span>
+rowt config export --no-servers  <span class="c"># → .tgz, no server pool</span>
+rowt config import setup.tgz     <span class="c"># MERGE + re-render</span></div>
+<p class="note">Import <strong>merges</strong> into your lanes and keeps your server pool — conflicts are confirmed first; <code>--replace</code> overwrites instead. A full bundle holds credentials — move it encrypted.</p></div>
 <div><h3>Let an agent drive it</h3>
 <p>rowt ships an <strong>agent skill</strong>: link it and a coding agent can run the setup, diagnose a
 lane, or explain a routing decision using the same commands you would.</p>
