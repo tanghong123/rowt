@@ -420,7 +420,7 @@ config import tests/parity/fixtures/config-bundle.tgz -y
 config import -y tests/parity/fixtures/config-bundle.tgz
 # The flag loop keeps the LAST path it saw, so this imports the second one.
 config import tests/parity/fixtures/not-a-bundle.tgz tests/parity/fixtures/config-bundle.tgz -y
-# Over a config with nothing in its lanes: the bundle's lists replace them.
+# Over a config with nothing in its lanes: merge into empty is the bundle's lists.
 PARITY_SCENARIO=lanes-empty config import tests/parity/fixtures/config-bundle.tgz -y
 #
 # A bundle whose servers.json is an empty array. It renders — `render` guards on
@@ -428,6 +428,26 @@ PARITY_SCENARIO=lanes-empty config import tests/parity/fixtures/config-bundle.tg
 # import reports ✓ rather than the fresh-box advice. Bug-for-bug, PORTING.md
 # §6.7, and the reason there is now a `render` case for the same fixture below.
 config import tests/parity/fixtures/bundle-no-servers.tgz -y
+# import MERGES by default now: each lane list unions into the sandbox's own
+# (single-lane, deduped, conflicts listed), the server pool is left as-is. The
+# bare `-y` cases above exercise that path. rowt-rs delegates the whole
+# subcommand to the shell (lane editing — hotspot — is the shell's job), so the
+# two are the same bytes by construction; cli-diff still compares the config
+# tree the merge leaves. --replace is the old wholesale overwrite.
+config import tests/parity/fixtures/config-bundle.tgz -y --replace
+config import --replace tests/parity/fixtures/config-bundle.tgz -y
+config import tests/parity/fixtures/bundle-no-servers.tgz -y --replace
+# A bundle whose lanes CROSS the sandbox's seed exercises the conflict path:
+# escape carries ads.example (seeded in block) and corp carries example.com
+# (seeded in escape), so folding each pulls the entry out of its old lane. With
+# -y the moves are listed and applied; without it the no-tty read is "no", so the
+# conflicts are listed, nothing is swapped, and it exits 1 with the tree intact.
+# (Both sides are the same shell — rowt-rs delegates the whole subcommand — so
+# this pins that the delegation keeps handing it through, not the merge logic
+# itself: the union/dedup/single-lane semantics are the shell's, exercised
+# directly rather than differentially.)
+config import tests/parity/fixtures/conflict-bundle.tgz -y
+config import tests/parity/fixtures/conflict-bundle.tgz
 metrics
 metrics status
 metrics path

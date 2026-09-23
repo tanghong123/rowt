@@ -54,22 +54,6 @@ pub fn set_audit_op(s: &str) {
 /// terminal cannot open it, and the shell treats that failure as "no". So this
 /// is not a question a pipe or a cron job can accidentally answer yes to —
 /// which is also what makes it comparable in a gate, where there is no tty.
-fn confirmed(input: &str, cfg: &Path) -> bool {
-    use std::io::{BufRead, Write};
-    print!("import {input} into {} — overwrites matching config files. Continue? [y/N] ",
-           cfg.display());
-    let _ = std::io::stdout().flush();
-    let ans = std::fs::File::open("/dev/tty")
-        .ok()
-        .and_then(|f| {
-            let mut s = String::new();
-            std::io::BufReader::new(f).read_line(&mut s).ok().map(|_| s)
-        })
-        .unwrap_or_default();
-    // `read` strips the newline and the surrounding IFS whitespace.
-    matches!(ans.trim(), "y" | "Y" | "yes" | "YES")
-}
-
 /// Run `f` with stdout and stderr pointed at /dev/null, which is what
 /// `cmd_render >/dev/null 2>&1` does in the shell. A returned string is still
 /// returned; this only silences what the callee writes to the fds itself.
@@ -149,7 +133,11 @@ fn native(cmd: &str, sub: &str) -> bool {
         "server" => matches!(sub, "" | "list" | "dump" | "add" | "rm" | "remove" | "clear" | "import"),
         "sub" => matches!(sub, "" | "list" | "dump" | "add" | "rm" | "remove" | "update" | "clear" | "import"),
         "use" | "ping" | "run" | "skill" | "report" | "uninstall" | "fetch" | "probe" | "vm" | "watch" | "onboard" => true,
-        "config" => matches!(sub, "" | "list" | "export" | "import"),
+        // `import` is NOT native: it delegates to the shell (lane editing —
+        // hotspot — is the shell's job), and it must delegate HERE, before the
+        // audit BEGIN, or the shell would open a SECOND BEGIN/END pair. `list`
+        // and `export` stay native.
+        "config" => matches!(sub, "" | "list" | "export"),
         "metrics" => true,
         "router" => matches!(sub, "" | "up" | "down" | "restart" | "status" | "log"),
         // A name none of the above claims is one of two things, and they want
@@ -1546,86 +1534,15 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                 // brought, and re-render. Overwrites matching files, so it asks
                 // first — on /dev/tty, not stdin, because the answer must come
                 // from a person even when the command was handed a pipe.
-                "import" => {
-                    let mut yes = false;
-                    let mut input = String::new();
-                    for a in &rest[1..] {
-                        match a.as_str() {
-                            "-y" | "--yes" => yes = true,
-                            f if f.starts_with('-') => die(&cfg, &format!("unknown flag: {f}")),
-                            // Last one wins, as the shell's loop leaves it.
-                            f => input = f.to_string(),
-                        }
-                    }
-                    if input.is_empty() {
-                        die(&cfg, &format!("usage: {PROG} config import <file.tgz> [-y]"));
-                    }
-                    if !Path::new(&input).is_file() {
-                        die(&cfg, &format!("no such file: {input}"));
-                    }
-                    // Two questions, in the shell's order: is it a readable
-                    // gzipped tar at all, and does it carry a file only a rowt
-                    // bundle would have? The second stops `config import` from
-                    // unpacking an arbitrary archive over the config directory.
-                    // The shell asks them with two `tar tzf` runs; one listing
-                    // answers both, and `tar` is not a traced command, so there
-                    // is nothing observable between the two shapes.
-                    let listing = std::process::Command::new("tar")
-                        .arg("tzf").arg(&input).stderr(std::process::Stdio::null()).output();
-                    let Ok(listing) = listing.ok().filter(|o| o.status.success()).ok_or(()) else {
-                        die(&cfg, &format!("{input} is not a readable .tgz"));
-                    };
-                    // `grep -qE '(^|/)(servers\.json|escape-domains\.txt)$'` —
-                    // the name at the end of a path component, not anywhere in
-                    // the line.
-                    let marks = ["servers.json", "escape-domains.txt"];
-                    let looks_right = String::from_utf8_lossy(&listing.stdout).lines().any(|l| {
-                        marks.iter().any(|m| {
-                            l.strip_suffix(m).is_some_and(|p| p.is_empty() || p.ends_with('/'))
-                        })
-                    });
-                    if !looks_right {
-                        die(&cfg, &format!("{input} doesn't look like a rowt config bundle"));
-                    }
-                    if !yes && !confirmed(&input, &cfg) {
-                        // Not an error: the shell prints this on stdout and
-                        // returns 1, so it must not come back as an `error:`
-                        // line — and it must not exit past the audit END the
-                        // way `die` would.
-                        println!("aborted.");
-                        return Err(SILENT.into());
-                    }
-                    let _ = std::fs::create_dir_all(&cfg);
-                    // `tar` rather than a Rust implementation, as `export` does:
-                    // which modes and ownership come back out of the archive is
-                    // this command's behavior, not an implementation detail.
-                    let ok = std::process::Command::new("tar")
-                        .arg("xzf").arg(&input).arg("-C").arg(&cfg)
-                        .status().map(|s| s.success()).unwrap_or(false);
-                    if !ok {
-                        die(&cfg, "extract failed");
-                    }
-                    // Whatever mode the archive carried, the four files that
-                    // hold credentials and subscription tokens land at 0600.
-                    for f in ["servers.json", "manual.json", "import-review.json", "subs.txt"] {
-                        let p = cfg.join(f);
-                        if p.is_file() {
-                            lifecycle::private(&p);
-                        }
-                    }
-                    let mut o = format!("imported into {}.", cfg.display());
-                    // `cmd_render >/dev/null 2>&1`: the render's progress lines
-                    // belong to `render`, not to the middle of an import report.
-                    let ctx = Ctx::new(cfg.clone());
-                    o.push_str(&match quietly(|| lifecycle::cmd_render(&ctx)).is_ok() {
-                        true => "\n  ✓ regenerated host.json".to_string(),
-                        false => format!("\n  (couldn't render yet — that's fine on a fresh box: '{PROG} fetch' installs sing-box)"),
-                    });
-                    o.push_str(&format!(
-                        "\nnext: '{PROG} up'  (fresh machine) — or '{PROG} restart' if rowt is already running."));
-                    Ok(o)
-                }
-                _ => die(&cfg, &format!("usage: {PROG} config [ list | export [file] | import <file> [-y] ]")),
+                // `config import` (default MERGE, and everything but the
+                // trivial --replace) edits the LANE lists, and lane editing —
+                // hotspot especially — is the shell's job in rowt-rs (see
+                // `rowt_core::lanes`, where hotspot is "never a target"). So the
+                // whole subcommand delegates: one implementation of the merge,
+                // the staging/atomic swap and the conflict prompt, with no way
+                // for the two to drift. `config export`/`list` stay native.
+                "import" => delegate(&std::env::args().skip(1).collect::<Vec<String>>()),
+                _ => die(&cfg, &format!("usage: {PROG} config [ list | export [file] [--no-servers] | import <file> [-y] [--replace] ]")),
             }
         }
         // Per-domain traffic history. The store is SQLite and every arm is a
@@ -2224,7 +2141,11 @@ mod tests {
         assert!(native("router", "up"));
         assert!(native("router", "status"));
         assert!(!native("router", "nosucharm"));
-        assert!(native("config", "import"));
+        assert!(native("config", "export"));  // native: filters the pool files
+        // `config import` delegates entirely to bash — its merge path recursively
+        // re-runs `<lane> import` and touches the hotspot lane, which the pure
+        // engine never owns as a target — so it is handed through, NOT claimed.
+        assert!(!native("config", "import"));
         assert!(!native("config", "nosucharm"));
         assert!(native("corp", "sync"));      // corp-only, not escape/block
         assert!(!native("escape", "sync"));

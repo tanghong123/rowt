@@ -58,7 +58,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.5.7"
+ROWT_VERSION="3.5.8"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -3867,7 +3867,7 @@ Everyday:
     $PROG reload            re-apply after switching Wi-Fi / wired / corp VPN on-off
     $PROG monitor           live TUI (--theme dark|light|auto)   ·   $PROG proxy on | off    macOS system proxy
     $PROG metrics           per-domain traffic history; the collector runs with the router   ·   $PROG metrics top
-    $PROG config export     move the whole setup to another Mac (holds secrets — send encrypted)
+    $PROG config export     move the setup to another Mac — 'config import' merges it in (holds secrets — encrypt)
     $PROG down              stop everything
 EOF
 
@@ -5754,7 +5754,14 @@ those are regenerated on the target.
                                  --no-servers packs only the lane rules (escape/
                                  corp/block/hotspot) — no server pool, no
                                  credentials; safe to share or commit
-  $PROG config import <file> [-y]  restore a bundle here, then re-render
+  $PROG config import <file> [-y] [--replace]  MERGE a bundle's lane lists into
+                                 yours (default), then re-render. Union, deduped,
+                                 single-lane; conflicts (an entry that is in a
+                                 different lane here) are listed and confirmed;
+                                 the server pool is left as-is (use 'server
+                                 import' to merge servers).
+                                 --replace overwrites matching files instead —
+                                 a whole-bundle restore, the move-machines path.
 
 Move it to the other box (over an encrypted channel — it holds server
 credentials and subscription tokens), then:
@@ -6297,27 +6304,111 @@ cmd_config() {
       ;;
     import)
       shift
-      local yes=0 in=""
-      while [ "$#" -gt 0 ]; do case "$1" in -y|--yes) yes=1 ;; -*) die "unknown flag: $1" ;; *) in="$1" ;; esac; shift; done
-      [ -n "$in" ] || die "usage: $PROG config import <file.tgz> [-y]"
+      # DEFAULT is merge (union the lane lists with yours). --replace restores a
+      # whole bundle over the config, the move-to-another-Mac path.
+      local yes=0 replace=0 in=""
+      while [ "$#" -gt 0 ]; do case "$1" in -y|--yes) yes=1 ;; --replace) replace=1 ;; -*) die "unknown flag: $1" ;; *) in="$1" ;; esac; shift; done
+      [ -n "$in" ] || die "usage: $PROG config import <file.tgz> [-y] [--replace]"
       [ -f "$in" ] || die "no such file: $in"
       tar tzf "$in" >/dev/null 2>&1 || die "$in is not a readable .tgz"
-      tar tzf "$in" 2>/dev/null | grep -qE '(^|/)(servers\.json|escape-domains\.txt)$' \
+      # A bundle is identified by the server pool (servers.json) OR ANY lane's
+      # rules — the two things it carries. The original check named only
+      # escape-domains.txt, which rejected a `--no-servers` export of a corp-only
+      # setup (no pool, empty escape) — exactly what --no-servers is for. The
+      # other lane files close that. subs.txt / the secondary pool JSONs are not
+      # distinctive enough to stand alone (a bare URL list is not a bundle).
+      tar tzf "$in" 2>/dev/null | grep -qE '(^|/)(servers\.json|(escape|corp|block|hotspot)-domains\.txt)$' \
         || die "$in doesn't look like a rowt config bundle"
-      if [ "$yes" != 1 ]; then
-        printf 'import %s into %s — overwrites matching config files. Continue? [y/N] ' "$in" "$CFG"
-        local ans=""; read -r ans </dev/tty 2>/dev/null || ans=""
-        case "$ans" in y|Y|yes|YES) ;; *) echo "aborted."; return 1 ;; esac
-      fi
       mkdir -p "$CFG"
-      tar xzf "$in" -C "$CFG" || die "extract failed"
+      if [ "$replace" = 1 ]; then
+        if [ "$yes" != 1 ]; then
+          printf 'import %s into %s — REPLACES matching config files. Continue? [y/N] ' "$in" "$CFG"
+          local ans=""; read -r ans 2>/dev/null </dev/tty || ans=""
+          case "$ans" in y|Y|yes|YES) ;; *) echo "aborted."; return 1 ;; esac
+        fi
+        tar xzf "$in" -C "$CFG" || die "extract failed"
+      else
+        # Merge onto a STAGING copy of the current lanes, then swap — so the live
+        # config is untouched until the very end. Each lane is folded in through
+        # the SAME `<lane> import` the CLI uses (normalize + dedup + single-lane
+        # pull), run against the staging config with --no-reload so it only edits
+        # files. The server pool is NOT touched: merge combines routing rules; use
+        # --replace to restore a whole bundle, or `server import` to merge servers.
+        #
+        # Re-invoke THIS resolved script (bash, not the Rust wrapper): the lane
+        # edit is the shell's job, and this skips a second audit bracket. The
+        # resolved path assumes nothing about the install layout. ROWT_NO_SYSPROXY
+        # keeps the child's hotspot fold from poking the system proxy — the swap,
+        # then the user's `restart`, is what applies it, exactly as --replace does.
+        local self; self="$(cd -P "$(dirname "$_src")" && pwd)/$(basename "$_src")"
+        # Stage UNDER $CFG so each final swap is a same-filesystem rename (atomic);
+        # a bare `mktemp -d` honors TMPDIR and could land on another volume.
+        local work xdg stage inx
+        work="$(mktemp -d "$CFG/.merge.XXXXXX")" || die "cannot create a staging dir under $CFG"
+        xdg="$work/x"; stage="$xdg/rowt"; inx="$work/in"
+        mkdir -p "$stage" "$inx"
+        tar xzf "$in" -C "$inx" || { rm -rf "$work"; die "extract failed"; }
+        local lf; for lf in "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" "$HOTSPOT_DOMAINS"; do
+          [ -f "$lf" ] && cp "$lf" "$stage/$(basename "$lf")"
+        done
+        # Fold each lane in. A child that FAILS aborts the whole merge with its own
+        # message; nothing is swapped, so the live config is untouched. (Without
+        # this check a failed child would silently swap in the unchanged copy and
+        # still report success — and under `set -e` exit mid-merge with the error
+        # captured but never shown.)
+        local report="" pair lane name out rc
+        for pair in escape:escape-domains.txt corp:corp-domains.txt block:block-domains.txt hotspot:hotspot-domains.txt; do
+          lane="${pair%%:*}"; name="${pair##*:}"
+          [ -f "$inx/$name" ] || continue
+          rc=0
+          out="$(XDG_CONFIG_HOME="$xdg" ROWT_NO_SYSPROXY=1 bash "$self" "$lane" import "$inx/$name" --no-reload 2>&1)" || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            rm -rf "$work"
+            die "merge failed folding the $lane lane — nothing changed:
+$out"
+          fi
+          report="$report$out
+"
+        done
+        # Show what folded in — the per-lane tallies (`escape += N new, …`), the
+        # staging path stripped — so a merge is legible, not a bare one-liner.
+        printf '%s' "$report" | grep -E '\+=' | sed -E 's/ \(from .*\)$//' || true
+        # A full bundle carries a server pool; merge deliberately leaves it. Say so
+        # rather than silently dropping it, so a "why didn't my servers come over"
+        # has an answer in the output.
+        if [ -f "$inx/servers.json" ] || [ -f "$inx/manual.json" ] || [ -f "$inx/import-review.json" ] \
+           || [ -f "$inx/subs.txt" ] || [ -f "$inx/outbound.json" ]; then
+          echo "note: the bundle also carries a server pool — NOT merged (use --replace to take the whole bundle, or 'server import' to fold servers in)."
+        fi
+        # A conflict is an entry the bundle puts in a lane where you already have
+        # it in a DIFFERENT one; folding it in moves it. Report ALL of them at the
+        # end, then apply-or-abort the merge as a whole.
+        local conflicts; conflicts="$(printf '%s' "$report" | grep 'moved out of' || true)"
+        if [ -n "$conflicts" ]; then
+          echo "merge conflicts — these entries are in a different lane here; the bundle would move them:"
+          printf '%s\n' "$conflicts"
+          if [ "$yes" != 1 ]; then
+            printf 'apply the merge? [y/N] '
+            local ans=""; read -r ans 2>/dev/null </dev/tty || ans=""
+            case "$ans" in y|Y|yes|YES) ;; *) echo "aborted."; rm -rf "$work"; return 1 ;; esac
+          fi
+        fi
+        for name in escape-domains.txt corp-domains.txt block-domains.txt hotspot-domains.txt; do
+          [ -f "$stage/$name" ] && mv "$stage/$name" "$CFG/$name"
+        done
+        rm -rf "$work"
+      fi
       for f in "$SERVERS" "$MANUAL" "$SR_REVIEW" "$SUBS_FILE"; do [ -f "$f" ] && chmod 600 "$f" 2>/dev/null || true; done
-      echo "imported into $CFG."
-      if cmd_render >/dev/null 2>&1; then echo "  ✓ regenerated host.json"
+      echo "imported$([ "$replace" = 1 ] && echo '' || echo ' (lanes merged)') into $CFG."
+      # Subshell: on a fresh box render `die`s (no servers/engine yet) — and a
+      # die is an exit, which `if cmd_render` could not catch, so it used to kill
+      # the command right here and swallow the guidance below. Containing it lets
+      # the "fine on a fresh box" branch actually run.
+      if ( cmd_render ) >/dev/null 2>&1; then echo "  ✓ regenerated host.json"
       else echo "  (couldn't render yet — that's fine on a fresh box: '$PROG fetch' installs sing-box)"; fi
       echo "next: '$PROG up'  (fresh machine) — or '$PROG restart' if rowt is already running."
       ;;
-    *) die "usage: $PROG config [ list | export [file] | import <file> [-y] ]" ;;
+    *) die "usage: $PROG config [ list | export [file] [--no-servers] | import <file> [-y] [--replace] ]" ;;
   esac
 }
 

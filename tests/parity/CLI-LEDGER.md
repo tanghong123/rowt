@@ -69,7 +69,11 @@ Partial arms — native for some sub-commands, legacy for the rest.
             "server" => matches!(sub, "" | "list" | "dump" | "add" | "rm" | "remove" | "clear" | "import"),
             "sub" => matches!(sub, "" | "list" | "dump" | "add" | "rm" | "remove" | "update" | "clear" | "import"),
             "use" | "ping" | "run" | "skill" | "report" | "uninstall" | "fetch" | "probe" | "vm" | "watch" | "onboard" => true,
-            "config" => matches!(sub, "" | "list" | "export" | "import"),
+            // `import` is NOT native: it delegates to the shell (lane editing —
+            // hotspot — is the shell's job), and it must delegate HERE, before the
+            // audit BEGIN, or the shell would open a SECOND BEGIN/END pair. `list`
+            // and `export` stay native.
+            "config" => matches!(sub, "" | "list" | "export"),
             "metrics" => true,
             "router" => matches!(sub, "" | "up" | "down" | "restart" | "status" | "log"),
             // A name none of the above claims is one of two things, and they want
