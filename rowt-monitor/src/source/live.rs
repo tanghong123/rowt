@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::source::parse::BlockBuckets;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -109,6 +110,27 @@ pub struct LiveSource {
     // Control layer: outcomes of `rowt` commands run off the UI thread, drained
     // by the app each tick into a footer toast (CONTROLS.md §4, §9.2).
     ctl_out: Arc<Mutex<Vec<crate::source::CtlOutcome>>>,
+    // Controls that may restart the router (`use`, the batched reload) still
+    // running — see `restart_in_flight`.
+    restarts: Arc<AtomicUsize>,
+}
+
+/// One count in `LiveSource::restarts`, held by the command's thread for as long
+/// as the command runs. The count drops however that ends — the thread returns,
+/// panics, or never starts (a failed spawn drops the closure, and this with it).
+struct InFlight(Arc<AtomicUsize>);
+
+impl InFlight {
+    fn new(count: &Arc<AtomicUsize>) -> Self {
+        count.fetch_add(1, Ordering::SeqCst);
+        InFlight(Arc::clone(count))
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl LiveSource {
@@ -154,6 +176,7 @@ impl LiveSource {
             sysproxy: Arc::new(Mutex::new(read_system_proxy(proxy_port).to_string())),
             sysproxy_started: false,
             ctl_out: Arc::new(Mutex::new(Vec::new())),
+            restarts: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -171,12 +194,15 @@ impl LiveSource {
 
     /// Run a `rowt` command off the UI thread and queue its outcome for the
     /// footer toast. Uses `$ROWT_BIN` (exported by `rowt monitor`) so the control
-    /// drives the exact CLI + config the monitor was launched from.
-    fn spawn_rowt(&self, args: Vec<String>, ok: String) {
+    /// drives the exact CLI + config the monitor was launched from. `restarts`:
+    /// the command may restart the router, so it counts as in flight until it exits.
+    fn spawn_rowt(&self, args: Vec<String>, ok: String, restarts: bool) {
         let out = Arc::clone(&self.ctl_out);
+        let in_flight = restarts.then(|| InFlight::new(&self.restarts));
         std::thread::Builder::new()
             .name("rowt-monitor-ctl".into())
             .spawn(move || {
+                let _in_flight = in_flight;
                 let bin = std::env::var("ROWT_BIN").unwrap_or_else(|_| "rowt".to_string());
                 let outcome = match std::process::Command::new(&bin).args(&args).output() {
                     Ok(o) if o.status.success() => crate::source::CtlOutcome::Ok(ok),
@@ -307,7 +333,9 @@ impl LiveSource {
         let escape = escape_tags_of(&host);
         let info = HostInfo {
             config_ok: host.is_object(),
-            members: escape.iter().filter(|t| *t != "escape").cloned().collect(),
+            // The server pool only — `escape` keeps the selector and `auto` for
+            // lane classification (see `is_pool_member`).
+            members: escape.iter().filter(|t| is_pool_member(t)).cloned().collect(),
             escape,
             iface: host_bind_iface(&host),
         };
@@ -480,12 +508,12 @@ impl LiveSource {
     /// A server is *up* if its most recent delay test succeeded, *down* if it
     /// failed, and simply not-yet-counted while its first probe is pending (so
     /// we never mislabel unprobed servers as down — the original bug).
-    fn servers(&self, state: &HashMap<String, String>, router_up: bool) -> Health {
+    fn servers(&self, state: &HashMap<String, String>, router_up: bool, auto_now: Option<String>) -> Health {
         let selected = state.get("selected").cloned().unwrap_or_default();
         let total = self.escape_members.len() as u32;
         if !router_up {
             // Can't probe through a down router; report the pool size only.
-            return Health { total, up: 0, down: 0, active: selected, chips: Vec::new(), active_ms: None, active_ok: None };
+            return Health { total, up: 0, down: 0, active: selected, auto_now: None, chips: Vec::new(), active_ms: None, active_ok: None };
         }
         let map = self.delays.lock().ok();
         // Results stay valid across a full probe interval (plus margin); only
@@ -501,45 +529,67 @@ impl LiveSource {
                 None // stale -> treat as pending, not down
             }
         };
-        let mut up = 0u32;
-        let mut down = 0u32;
-        let mut chips = Vec::new();
-        let mut active_ms = None;
-        for tag in &self.escape_members {
-            match fresh(tag) {
-                Some(Some(ms)) => {
-                    up += 1;
-                    let active = *tag == selected;
-                    if active {
-                        active_ms = Some(ms);
-                    }
-                    // All up servers appear in the strip; the active one is marked.
-                    chips.push(Server { name: tag.clone(), ms, active });
-                }
-                Some(None) => down += 1,
-                None => {} // pending first probe — neither up nor down yet
-            }
-        }
-        // Active first, then the rest by latency.
-        chips.sort_by_key(|c| (!c.active, c.ms));
-
-        // Active status. In auto mode there's no pinned server: it's healthy if
-        // ANY server is reachable, ERROR if all probed ones failed. In manual
-        // mode it's the selected server's own probe result. `None` = not yet
-        // probed (don't alarm at startup).
-        let probed = |up: u32, down: u32| if up > 0 { Some(true) } else if down > 0 { Some(false) } else { None };
-        let (active_ms, active_ok) = if selected == "auto" {
-            (chips.iter().map(|c| c.ms).min(), probed(up, down))
-        } else {
-            let ok = match fresh(&selected) {
-                Some(Some(_)) => Some(true),
-                Some(None) => Some(false),
-                None => None,
-            };
-            (active_ms, ok)
-        };
-        Health { total, up, down, active: selected, chips, active_ms, active_ok }
+        health_view(&self.escape_members, selected, auto_now, fresh)
     }
+
+    /// urltest's live pick: `GET /proxies/auto` → `now`, kept only when it names
+    /// a pool member (the group's `now` can briefly be empty right after a start).
+    fn auto_pick(&self) -> Option<String> {
+        let v = self.clash_get(&format!("/proxies/{AUTO_GROUP}"))?;
+        let now = v.get("now")?.as_str()?;
+        self.escape_members.iter().any(|m| m == now).then(|| now.to_string())
+    }
+}
+
+/// Derive the strip and the active server's health from the pool and each
+/// member's probe verdict — `fresh(tag)`: `Some(Some(ms))` up, `Some(None)`
+/// down, `None` pending (or stale). Pure, so the rules are testable.
+///
+/// The *active* server is the one carrying escape traffic: the pinned tag in
+/// manual mode, urltest's live pick (`auto_now`) in auto mode. It is marked in
+/// the strip — which pins it at the left — and its own probe drives the header's
+/// latency and the LIVE/ERROR dot. Auto with no resolved pick falls back to the
+/// pool: the fastest up server stands in for the latency (it is what urltest
+/// converges on), and the pool is healthy if any member is up.
+fn health_view(members: &[String], selected: String, auto_now: Option<String>, fresh: impl Fn(&str) -> Option<Option<u32>>) -> Health {
+    let auto = selected == AUTO_GROUP;
+    let in_use: Option<String> = if auto { auto_now.clone() } else { Some(selected.clone()) };
+    let mut up = 0u32;
+    let mut down = 0u32;
+    let mut chips = Vec::new();
+    for tag in members {
+        match fresh(tag) {
+            Some(Some(ms)) => {
+                up += 1;
+                // All up servers appear in the strip; the active one is marked.
+                chips.push(Server { name: tag.clone(), ms: Some(ms), active: in_use.as_deref() == Some(tag.as_str()) });
+            }
+            Some(None) => down += 1,
+            None => {} // pending first probe — neither up nor down yet
+        }
+    }
+    // Auto's pick holds the left of the strip even without a probe reading for
+    // it — right after `use auto` restarts the router, or when the prober and
+    // urltest disagree. An empty slot under "auto on" would read as broken; the
+    // latency shows `—` until a probe lands.
+    if let (true, Some(pick)) = (auto, auto_now.as_deref()) {
+        if !chips.iter().any(|c| c.name == pick) {
+            chips.push(Server { name: pick.to_string(), ms: None, active: true });
+        }
+    }
+    // Active first, then the rest by latency (a missing reading last).
+    chips.sort_by_key(|c| (!c.active, c.ms.is_none(), c.ms));
+
+    let probed = |up: u32, down: u32| if up > 0 { Some(true) } else if down > 0 { Some(false) } else { None };
+    let (active_ms, active_ok) = match in_use.as_deref() {
+        Some(tag) => match fresh(tag) {
+            Some(Some(ms)) => (Some(ms), Some(true)),
+            Some(None) => (None, Some(false)),
+            None => (None, None), // not yet probed — don't alarm
+        },
+        None => (chips.iter().filter_map(|c| c.ms).min(), probed(up, down)),
+    };
+    Health { total: members.len() as u32, up, down, active: selected, auto_now, chips, active_ms, active_ok }
 }
 
 /// Cached, parse-once view of the fields we need from host.json.
@@ -557,6 +607,7 @@ struct Health {
     up: u32,
     down: u32,
     active: String,
+    auto_now: Option<String>,
     chips: Vec<Server>,
     active_ms: Option<u32>,
     active_ok: Option<bool>,
@@ -590,7 +641,9 @@ impl Source for LiveSource {
     }
 
     fn use_server(&self, tag: &str) {
-        self.spawn_rowt(vec!["use".into(), tag.into()], format!("escape → {tag}"));
+        // In flight even pin → pin: that is a live clash switch, but `rowt use`
+        // falls back to a restart when the switch fails (e.g. mid-restart).
+        self.spawn_rowt(vec!["use".into(), tag.into()], format!("escape → {tag}"), true);
     }
 
     fn route_lane(&self, domain: &str, lane: Lane) {
@@ -598,6 +651,7 @@ impl Source for LiveSource {
         self.spawn_rowt(
             vec![verb.into(), "add".into(), domain.into(), "--no-reload".into()],
             format!("{domain} → {verb}"),
+            false,
         );
     }
 
@@ -605,6 +659,7 @@ impl Source for LiveSource {
         self.spawn_rowt(
             vec!["hotspot".into(), "add".into(), domain.into(), "--no-reload".into()],
             format!("{domain} → hotspot"),
+            false,
         );
     }
 
@@ -654,6 +709,7 @@ impl Source for LiveSource {
         self.spawn_rowt(
             vec!["proxy".into(), sub.into()],
             format!("system proxy {sub}"),
+            false,
         );
     }
 
@@ -663,9 +719,11 @@ impl Source for LiveSource {
         // `rowt reload`, which would also re-assert the system proxy and fight
         // the `o` toggle / captive-portal flow (CONTROLS.md §4.3 deviation).
         let out = Arc::clone(&self.ctl_out);
+        let in_flight = InFlight::new(&self.restarts);
         std::thread::Builder::new()
             .name("rowt-monitor-ctl".into())
             .spawn(move || {
+                let _in_flight = in_flight;
                 let bin = std::env::var("ROWT_BIN").unwrap_or_else(|_| "rowt".to_string());
                 let render = std::process::Command::new(&bin).arg("render").output();
                 let outcome = match render {
@@ -684,6 +742,10 @@ impl Source for LiveSource {
                 }
             })
             .ok();
+    }
+
+    fn restart_in_flight(&self) -> bool {
+        self.restarts.load(Ordering::SeqCst) > 0
     }
 
     fn drain_ctl(&self) -> Vec<crate::source::CtlOutcome> {
@@ -727,7 +789,14 @@ impl Source for LiveSource {
         }
 
         let (transient, persistent, blocked, errors) = self.errors(window, lane);
-        let mut h = self.servers(&state, router_up);
+        // In auto mode the server in use is urltest's call, not the state file's:
+        // one localhost read per tick, and only while auto is on.
+        let auto_now = if router_up && state.get("selected").map(String::as_str) == Some(AUTO_GROUP) {
+            self.auto_pick()
+        } else {
+            None
+        };
+        let mut h = self.servers(&state, router_up, auto_now);
 
         // Ground truth beats the synthetic probe. The health dot goes ERROR when
         // the active server's `generate_204` delay probe fails — but some servers
@@ -807,12 +876,19 @@ impl Source for LiveSource {
         let proxy = self.sysproxy.lock().map(|s| s.clone()).unwrap_or_else(|_| "off".to_string());
         let (watch, watch_age) = read_watch_status(&self.cfg);
         let monitor_stale = self.monitor_stale();
+        // The header names the server carrying traffic: auto's pick when it is
+        // known, else the selection itself (`auto` until the first read lands).
+        let server_name = match (h.active.as_str(), h.auto_now.as_deref()) {
+            ("", _) => "—".to_string(),
+            (AUTO_GROUP, Some(pick)) => pick.to_string(),
+            (sel, _) => sel.to_string(),
+        };
 
         Snapshot {
             identity: Identity {
                 mode,
                 uptime,
-                server_name: if h.active.is_empty() { "—".into() } else { h.active.clone() },
+                server_name,
                 server_ms: h.active_ms,
                 router,
                 router_cpu,
@@ -837,6 +913,7 @@ impl Source for LiveSource {
             servers_up: h.up,
             servers_down: h.down,
             active_server: h.active,
+            auto_now: h.auto_now,
             chips: h.chips,
         }
     }
@@ -874,6 +951,14 @@ fn url_encode(s: &str) -> String {
     out
 }
 
+/// Whether an `escape` tag is a server of the pool: not the selector itself, and
+/// not the urltest group auto mode lists as its first member — neither is a
+/// server, so neither is a chip or probed. (Both stay in the escape tag set:
+/// connection chains run through them, and lane classification needs them.)
+fn is_pool_member(tag: &str) -> bool {
+    tag != "escape" && tag != AUTO_GROUP
+}
+
 /// The `escape` selector's member tags (the server pool), plus the tag itself.
 fn escape_tags_of(host: &Value) -> HashSet<String> {
     let mut tags: HashSet<String> = HashSet::new();
@@ -897,7 +982,7 @@ fn read_escape_members(cfg: &std::path::Path) -> Vec<String> {
         return Vec::new();
     };
     let host: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-    escape_tags_of(&host).into_iter().filter(|t| t != "escape").collect()
+    escape_tags_of(&host).into_iter().filter(|t| is_pool_member(t)).collect()
 }
 
 fn read_clash_secret(cfg: &std::path::Path) -> Option<String> {
@@ -1355,5 +1440,90 @@ mod watch_cell_tests {
         // No heartbeat known (an older rowt never writes one) reads as on, not
         // stalled — or every machine would read stalled the day it upgrades.
         assert_eq!(watch_cell(true, true, None, 120), ("on", None));
+    }
+}
+
+#[cfg(test)]
+mod auto_selection_tests {
+    use super::*;
+
+    fn pool() -> Vec<String> {
+        ["JP-1", "SG-1", "US-1"].iter().map(|s| s.to_string()).collect()
+    }
+
+    /// `fresh` over a fixed table: `Some(ms)` up, `None` down; absent = pending.
+    fn verdicts(v: &[(&str, Option<u32>)]) -> impl Fn(&str) -> Option<Option<u32>> {
+        let m: HashMap<String, Option<u32>> = v.iter().map(|(t, ms)| (t.to_string(), *ms)).collect();
+        move |tag: &str| m.get(tag).copied()
+    }
+
+    #[test]
+    fn manual_mode_marks_the_pinned_server() {
+        let h = health_view(&pool(), "SG-1".into(), None, verdicts(&[("JP-1", Some(40)), ("SG-1", Some(80)), ("US-1", None)]));
+        let chips: Vec<_> = h.chips.iter().map(|c| (c.name.as_str(), c.active)).collect();
+        assert_eq!(chips, vec![("SG-1", true), ("JP-1", false)], "pinned first, down servers are not chips");
+        assert_eq!((h.active_ms, h.active_ok), (Some(80), Some(true)));
+        assert_eq!((h.total, h.up, h.down), (3, 2, 1));
+    }
+
+    #[test]
+    fn auto_mode_follows_urltests_pick_not_the_fastest() {
+        // JP-1 is faster, but urltest is carrying traffic on SG-1: follow urltest.
+        let h = health_view(&pool(), AUTO_GROUP.into(), Some("SG-1".into()), verdicts(&[("JP-1", Some(40)), ("SG-1", Some(80))]));
+        assert_eq!((h.chips[0].name.as_str(), h.chips[0].active), ("SG-1", true));
+        assert!(!h.chips[1].active);
+        assert_eq!((h.active_ms, h.active_ok), (Some(80), Some(true)));
+    }
+
+    #[test]
+    fn autos_pick_holds_the_strip_before_its_first_probe() {
+        let h = health_view(&pool(), AUTO_GROUP.into(), Some("US-1".into()), verdicts(&[("JP-1", Some(40))]));
+        assert_eq!((h.chips[0].name.as_str(), h.chips[0].ms, h.chips[0].active), ("US-1", None, true), "pinned, drawn with —");
+        assert_eq!((h.active_ms, h.active_ok), (None, None), "pending: no alarm");
+    }
+
+    #[test]
+    fn autos_pick_failing_its_probe_stays_pinned_and_flags_error() {
+        let h = health_view(&pool(), AUTO_GROUP.into(), Some("US-1".into()), verdicts(&[("JP-1", Some(40)), ("US-1", None)]));
+        assert_eq!((h.chips[0].name.as_str(), h.chips[0].ms, h.chips[0].active), ("US-1", None, true));
+        assert_eq!(h.active_ok, Some(false));
+    }
+
+    #[test]
+    fn unresolved_auto_falls_back_to_the_pool() {
+        let h = health_view(&pool(), AUTO_GROUP.into(), None, verdicts(&[("JP-1", Some(40)), ("SG-1", Some(80))]));
+        assert!(h.chips.iter().all(|c| !c.active), "no pick, nothing pinned");
+        assert_eq!((h.active_ms, h.active_ok), (Some(40), Some(true)), "fastest up stands in; healthy if any is up");
+    }
+
+    #[test]
+    fn in_flight_count_drops_however_the_command_thread_ends() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let g = InFlight::new(&count);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        drop(g);
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+        // A command thread that panics still releases its count on unwind — a
+        // leaked count would refuse every server change until a restart.
+        let g = InFlight::new(&count);
+        let t = std::thread::spawn(move || {
+            let _g = g;
+            panic!("command thread died");
+        });
+        assert!(t.join().is_err());
+        assert_eq!(count.load(Ordering::SeqCst), 0, "no permanent \"restart in progress\"");
+    }
+
+    #[test]
+    fn the_auto_group_is_not_a_pool_member_but_stays_an_escape_tag() {
+        let host: Value = serde_json::json!({"outbounds": [
+            {"type": "urltest", "tag": "auto", "outbounds": ["JP-1", "SG-1"]},
+            {"type": "selector", "tag": "escape", "outbounds": ["auto", "JP-1", "SG-1"]}
+        ]});
+        let tags = escape_tags_of(&host);
+        assert!(tags.contains(AUTO_GROUP) && tags.contains("escape"), "lane classification still sees both");
+        let mut members: Vec<String> = tags.into_iter().filter(|t| is_pool_member(t)).collect();
+        members.sort();
+        assert_eq!(members, vec!["JP-1", "SG-1"], "the pool — and its count — is servers only");
     }
 }

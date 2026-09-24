@@ -7,13 +7,16 @@ use std::collections::HashSet;
 
 use regex::RegexBuilder;
 
-use crate::model::{Conn, ConnRow, ConnView, ErrRow, Lane, MetricsBand, Snapshot, Window};
+use crate::model::{Conn, ConnRow, ConnView, ErrRow, Lane, MetricsBand, Snapshot, Window, AUTO_GROUP};
 use crate::source::History;
 use crate::source::Source;
 
 /// After the last committed lane edit, wait this long before issuing the single
 /// batched router reload (CONTROLS.md §4.3).
 pub const RELOAD_DEBOUNCE: Duration = Duration::from_secs(7);
+/// When a due batched reload finds a router restart already in flight, it
+/// re-checks this often instead of starting a second, overlapping restart.
+pub const RELOAD_RETRY: Duration = Duration::from_secs(1);
 /// An armed (not-yet-committed) lane edit auto-cancels after this long IDLE
 /// (§4.2) — measured from the last keypress, not from arming, so it never
 /// expires mid-edit while someone is typing. Cancelling is exactly what `Esc`
@@ -40,6 +43,10 @@ pub const DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(500);
 /// How long an optimistic proxy toggle is shown before deferring to the real
 /// polled state (long enough for `rowt proxy` + the ~2s state re-read to land).
 pub const PROXY_OPTIMISTIC_TTL: Duration = Duration::from_secs(6);
+/// How long an optimistic auto toggle is shown before deferring to the polled
+/// state. `rowt use` writes the selection *before* it restarts the router, so the
+/// next ~2s state re-read confirms it well inside this; a failed command reverts.
+pub const AUTO_OPTIMISTIC_TTL: Duration = Duration::from_secs(6);
 /// Clear a selection (which freezes the strip / holds a row) after this much
 /// input inactivity, so the view resumes live scrolling if the operator walks away.
 pub const SELECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -249,8 +256,9 @@ pub enum Action {
     ArmEdit(Edit), // a text key while armed — edit the entry in the confirm bar
     Confirm,      // Enter — commit the armed edit
     Escape,       // Esc — cancel arm / clear selection / clear lane filter (in that order)
-    UseServer,    // u — switch to the selected server (immediate)
+    UseServer,    // u — switch to the selected server (immediate); in auto mode, pins it
     ToggleProxy,  // o — toggle the macOS system proxy (immediate)
+    ToggleAuto,   // a — auto server selection on/off (global); off pins the server in use
     // Mouse:
     FocusConn,
     FocusErr,
@@ -320,6 +328,10 @@ pub struct App {
     // feels instant, then cleared once the real (polled) state confirms it — or a
     // timeout reverts the display if the underlying `rowt proxy` command failed.
     pub proxy_optimistic: Option<(String, Instant)>,
+    // The same for auto server selection (`a`, and `u` while auto is on). While
+    // it is pending, further auto changes are refused: each one restarts the
+    // router, and rowt does not serialize two concurrent restarts.
+    pub auto_optimistic: Option<(bool, Instant)>,
 
     pub help: bool,
     pub started: Instant, // wall-clock start, for time-based pulse + marquees
@@ -379,6 +391,7 @@ impl App {
             armed: None,
             pending_reload: None,
             proxy_optimistic: None,
+            auto_optimistic: None,
             help: false,
             started: Instant::now(),
             hover: None,
@@ -422,9 +435,16 @@ impl App {
         }
         if let Some(t) = self.pending_reload {
             if Instant::now() >= t {
-                self.pending_reload = None;
-                self.source.reload_router();
-                self.notify("reloading router…".to_string());
+                if self.source.restart_in_flight() {
+                    // An auto toggle or `u` is restarting the router right now;
+                    // overlapping restarts can take it down, so the batched
+                    // reload waits its turn (it renders the latest lanes anyway).
+                    self.pending_reload = Some(Instant::now() + RELOAD_RETRY);
+                } else {
+                    self.pending_reload = None;
+                    self.source.reload_router();
+                    self.notify("reloading router…".to_string());
+                }
             }
         }
         if let Some(a) = &self.armed {
@@ -437,6 +457,11 @@ impl App {
         if let Some((want, at)) = &self.proxy_optimistic {
             if self.snap.identity.proxy == *want || at.elapsed() >= PROXY_OPTIMISTIC_TTL {
                 self.proxy_optimistic = None;
+            }
+        }
+        if let Some((want, at)) = self.auto_optimistic {
+            if self.snap_auto() == want || at.elapsed() >= AUTO_OPTIMISTIC_TTL {
+                self.auto_optimistic = None;
             }
         }
         self.expire_idle_selection(Instant::now());
@@ -540,6 +565,7 @@ impl App {
             Escape => self.handle_escape(),
             UseServer => self.use_selected_server(),
             ToggleProxy => self.toggle_proxy(),
+            ToggleAuto => self.toggle_auto(),
             Up => self.move_sel(-1),
             Down => self.move_sel(1),
             FocusLeft => {
@@ -969,13 +995,73 @@ impl App {
         if self.focus != Focus::Health {
             return;
         }
-        if let Some(s) = self.strip_sel.and_then(|i| self.snap.chips.get(i)) {
-            if s.active {
-                self.notify(format!("{} is already active", s.name));
-            } else {
-                self.source.use_server(&s.name);
-                self.notify(format!("switching → {}", s.name));
+        let Some(s) = self.strip_sel.and_then(|i| self.snap.chips.get(i)).cloned() else {
+            return;
+        };
+        // In auto mode the active chip is urltest's pick, not a choice: `u` on it —
+        // or on any chip — pins that server, which is the other way auto turns
+        // off. Only a server you pinned yourself is "already active".
+        let auto = self.auto_display();
+        if !auto && s.active {
+            self.notify(format!("{} is already active", s.name));
+            return;
+        }
+        if self.restart_busy() {
+            return;
+        }
+        self.source.use_server(&s.name);
+        if auto {
+            self.auto_optimistic = Some((false, Instant::now()));
+            self.notify(format!("auto off · {} pinned", s.name));
+        } else {
+            self.notify(format!("switching → {}", s.name));
+        }
+    }
+
+    /// Whether a router change is still underway — an auto toggle not yet
+    /// confirmed by the poll, or any restarting control still running — and if
+    /// so, say so. Server changes wait for it: rowt does not serialize restarts,
+    /// and overlapping ones can take the router down (`Source::restart_in_flight`).
+    fn restart_busy(&mut self) -> bool {
+        let busy = self.auto_optimistic.is_some() || self.source.restart_in_flight();
+        if busy {
+            self.notify("router restart in progress…".to_string());
+        }
+        busy
+    }
+
+    /// Auto server selection as polled: the state names the urltest group.
+    fn snap_auto(&self) -> bool {
+        self.snap.active_server == AUTO_GROUP
+    }
+
+    /// Auto server selection to display: the optimistic target while a toggle
+    /// lands, otherwise the polled state.
+    pub fn auto_display(&self) -> bool {
+        self.auto_optimistic.map_or_else(|| self.snap_auto(), |(on, _)| on)
+    }
+
+    /// `a` — global. On: `rowt use auto`. Off: pin the server auto is using right
+    /// now (urltest's live pick), so traffic stays where it is. With no resolved
+    /// pick there is nothing to pin, and a guess could move traffic to a server
+    /// auto never chose — so it says so instead.
+    fn toggle_auto(&mut self) {
+        if self.restart_busy() {
+            return;
+        }
+        if self.auto_display() {
+            match self.snap.auto_now.clone() {
+                Some(pick) => {
+                    self.source.use_server(&pick);
+                    self.auto_optimistic = Some((false, Instant::now()));
+                    self.notify(format!("auto off · {pick} pinned"));
+                }
+                None => self.notify("⚠ auto's current server isn't known yet — pick one with u".to_string()),
             }
+        } else {
+            self.source.use_server(AUTO_GROUP);
+            self.auto_optimistic = Some((true, Instant::now()));
+            self.notify("auto on · fastest live server".to_string());
         }
     }
 

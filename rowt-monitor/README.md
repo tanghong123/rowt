@@ -33,7 +33,21 @@ domain · `p` pause · `?` help · `q` quit. (`v`/`s`/`f`/`/`/`w` are all global
 re-press or `↵` to commit; batched into one reload ~7s later) · `t` put it on
 the **hotspot** lane — macOS's proxy *bypass* list, so a venue's captive-portal
 page loads with the proxy on (`t` is the one letter of "hotspot" not already
-bound) · `u` use the selected server · `o` toggle the system proxy.
+bound) · `u` use the selected server · `a` auto server selection on/off · `o`
+toggle the system proxy.
+
+**Auto server selection** (`a`, from any pane; or click `auto` above the strip)
+switches the escape server group between a pinned server and rowt's urltest
+`auto`, which rides the fastest live server and re-probes the pool every
+`ROWT_AUTO_INTERVAL` (default 20m). While it is on, the server auto is actually
+using holds the strip's left edge (with `—` for latency until its first probe)
+and the rest scroll past it. Turning it off pins *that* server, so traffic stays
+where it is — and with no resolved pick yet it refuses rather than guess.
+Selecting a server with `u` also turns auto off: in auto mode `u` pins any chip,
+auto's own pick included. Each change restarts the router, and rowt does not
+serialize restarts — two overlapping ones can kill each other's routers — so
+while one is still running (a server change, or the batched lane reload) further
+server changes are refused with a toast and a due lane reload waits its turn.
 
 A hotspot edit is not a routing edit: nothing in that lane is rendered, and the
 CLI refreshes the bypass list on the spot instead of bouncing the router. The
@@ -116,7 +130,7 @@ cancel is exactly what `Esc` does, and just as silent.
 
 **Mouse:** wheel scrolls (and focuses) the list under the pointer; click a row /
 lane / window-tab to activate, a server chip to select it in place, or `sys proxy`
-to toggle it (hover-highlights).
+/ `auto` to toggle it (hover-highlights).
 
 ## Layout
 
@@ -133,9 +147,11 @@ to toggle it (hover-highlights).
   presenting a days-old binary as current.
 - **`live connections`** and **`errors & blocked`** panes — side by side,
   split by a center rule (tab labels shorten on narrow terminals).
-- Full-width **`server health`** strip, merged onto the closing `┴` rule. When the
-  pool overflows the row it marquees, with the active `▶` server pinned at the left
-  edge (` │ ` seam) so it never scrolls out of view.
+- Full-width **`server health`** strip, merged onto the closing `┴` rule. The row
+  above it leads with the **`auto` on/off toggle**, then the pool counts. When the
+  pool overflows the row it marquees, with the active `▶` server — the pinned one,
+  or in auto mode the one urltest is using — held at the left edge (` │ ` seam) so
+  it never scrolls out of view.
 
 ## Data sources
 

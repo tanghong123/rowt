@@ -46,7 +46,9 @@ pub trait Source {
     // its outcome via `drain_ctl`. Lane edits pass `--no-reload`; the reload is
     // batched by the UI and fired via `reload_router` on the debounce timer.
 
-    /// Switch the active outbound server (`rowt use <tag>` — live, no reload).
+    /// Select the escape server: `rowt use <tag>`, or `rowt use auto` for urltest
+    /// selection. Pin → pin is a live clash switch; entering or leaving auto
+    /// restarts the router (rowt renders the urltest group in or out).
     fn use_server(&self, _tag: &str) {}
     /// Route a domain into a lane (`rowt <lane> add <domain> --no-reload`).
     fn route_lane(&self, _domain: &str, _lane: Lane) {}
@@ -62,6 +64,14 @@ pub trait Source {
     fn set_proxy(&self, _on: bool) {}
     /// Issue the single batched router reload after lane edits settle.
     fn reload_router(&self) {}
+    /// A control that may restart the router (`use`, the batched reload) is still
+    /// running. rowt does not serialize restarts: two overlapping ones kill each
+    /// other's routers (`_router_stop` pkills every sing-box on the config), and
+    /// a failed one ends in the no-limbo guard turning the system proxy off with
+    /// intent off — so the UI starts no restart while one is in flight.
+    fn restart_in_flight(&self) -> bool {
+        false
+    }
     /// Drain any completed control-command outcomes (for the footer toast).
     fn drain_ctl(&self) -> Vec<CtlOutcome> {
         Vec::new()

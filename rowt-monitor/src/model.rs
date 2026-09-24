@@ -304,11 +304,18 @@ pub struct AllAgg {
     pub conns: u32,
 }
 
+/// The urltest group rowt renders for auto server selection (`bin/rowt`:
+/// `{type:"urltest", tag:"auto"}`), which is also the `rowt use auto` keyword.
+/// It is an outbound, not a server: never a chip, never probed.
+pub const AUTO_GROUP: &str = "auto";
+
 #[derive(Clone, Debug)]
 pub struct Server {
     pub name: String,
-    pub ms: u32,
-    pub active: bool, // the currently-selected server (marked in the strip)
+    /// Latest probe RTT. `None` only for auto's live pick before the prober
+    /// has a reading for it (drawn as `—`); every other chip is a probed-up one.
+    pub ms: Option<u32>,
+    pub active: bool, // the server carrying escape traffic — the pin, or auto's pick
 }
 
 /// Session facts for the identity band.
@@ -361,8 +368,13 @@ pub struct Snapshot {
     pub servers_total: u32,
     pub servers_up: u32,
     pub servers_down: u32,
+    /// The state's selection, verbatim: a server tag, or `AUTO_GROUP` in auto mode.
     pub active_server: String,
-    pub chips: Vec<Server>, // idle-but-up pool, sorted by latency
+    /// In auto mode, urltest's live pick (`GET /proxies/auto` → `now`) when it
+    /// names a pool member; `None` otherwise — including auto before the first
+    /// read lands. Turning auto off pins exactly this, so it is never guessed.
+    pub auto_now: Option<String>,
+    pub chips: Vec<Server>, // up pool, active first, then by latency
 }
 
 #[cfg(test)]

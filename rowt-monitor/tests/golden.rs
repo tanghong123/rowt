@@ -9,6 +9,9 @@ use rowt_monitor::model::Lane;
 use rowt_monitor::source::FixtureSource;
 use rowt_monitor::{render_text, theme, ui};
 
+mod common;
+use common::{Mode, Recording};
+
 const G96: &str = include_str!("../../ux-design/rowt_monitor/renders/rowt-monitor-96x30.txt");
 const G150: &str = include_str!("../../ux-design/rowt_monitor/renders/rowt-monitor-150x38.txt");
 const G212: &str = include_str!("../../ux-design/rowt_monitor/renders/rowt-monitor-212x52.txt");
@@ -679,4 +682,96 @@ fn watch_cell_states_and_stale_monitor_notice() {
     assert_eq!(buf.cell((col, 0)).unwrap().fg, theme::up());
     // …and the frame's own corner survives underneath it.
     assert_eq!(buf.cell((95, 0)).unwrap().symbol(), "╮");
+}
+
+// ---- auto server selection: the toggle row above the strip ----
+// The stats + chips rows are masked out of the frozen-capture diff above; these
+// are the dedicated assertions for what now lives there.
+
+/// Draw one interactive (non-present) frame; return the buffer, the hit map, and
+/// the row carrying the auto toggle + pool stats (the strip is the row below).
+fn stats_frame(app: &App, w: u16, h: u16) -> (ratatui::buffer::Buffer, ui::Hit, u16) {
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    let mut hit = ui::Hit::default();
+    term.draw(|f| {
+        let a = f.area();
+        hit = ui::draw(f.buffer_mut(), a, app, false);
+    })
+    .unwrap();
+    let buf = term.backend().buffer().clone();
+    let y = (0..h).find(|&y| row_text(&buf, w, y).contains("servers ·")).expect("stats row");
+    (buf, hit, y)
+}
+
+fn cells(buf: &ratatui::buffer::Buffer, w: u16, y: u16, from: usize, to: usize) -> String {
+    row_text(buf, w, y).chars().skip(from).take(to - from).collect()
+}
+
+#[test]
+fn auto_toggle_leads_the_row_above_the_strip() {
+    let app = App::new(Box::new(FixtureSource::still())); // a pinned server: auto off
+    let (buf, hit, y) = stats_frame(&app, 96, 41);
+    assert_eq!(cells(&buf, 96, y, 2, 10), "auto off", "the toggle leads the row");
+    let stats = "10 servers · 9 up · 1 down";
+    assert_eq!(cells(&buf, 96, y, 13, 13 + stats.chars().count()), stats, "stats at a fixed column after it");
+    assert_eq!(hit.auto, ratatui::layout::Rect::new(2, y, 8, 1), "all of `auto off` is the click target");
+    // A label is a label; `off` is dim — not the orange of a stopped sidecar,
+    // because a pinned server is the normal mode, not a warning.
+    let fg = |x: u16| buf.cell((x, y)).unwrap().fg;
+    assert_eq!(fg(2), theme::dimmer());
+    assert_eq!(fg(7), theme::dim());
+    // Directly below it, the pinned server still holds the strip's left edge.
+    assert_eq!(cells(&buf, 96, y + 1, 2, 19), "▶ JP-Tokyo  42 ms");
+}
+
+#[test]
+fn in_auto_mode_the_toggle_reads_on_and_urltests_pick_holds_the_left() {
+    let app = App::new(Box::new(Recording::new(Mode::Auto(Some("KR-Seoul")))));
+    let (buf, hit, y) = stats_frame(&app, 96, 41);
+    assert_eq!(cells(&buf, 96, y, 2, 9), "auto on");
+    assert_eq!(buf.cell((7, y)).unwrap().fg, theme::direct(), "`on` is green, like every enabled toggle");
+    assert_eq!(hit.auto, ratatui::layout::Rect::new(2, y, 7, 1));
+    assert_eq!(cells(&buf, 96, y + 1, 2, 19), "▶ KR-Seoul  72 ms", "the server auto is using is pinned; the rest scroll");
+    assert!(row_text(&buf, 96, 2).contains("KR-Seoul"), "and the header names it, not `auto`");
+}
+
+#[test]
+fn autos_pick_without_a_reading_holds_the_left_with_a_dash() {
+    // Right after `use auto` restarts the router the prober has no reading for
+    // urltest's pick yet — the slot under "auto on" must not be empty.
+    let app = App::new(Box::new(Recording::new(Mode::Auto(Some("ZZ-New")))));
+    let (buf, _, y) = stats_frame(&app, 96, 41);
+    assert_eq!(cells(&buf, 96, y + 1, 2, 12), "▶ ZZ-New —");
+    assert_eq!(buf.cell((11, y + 1)).unwrap().fg, theme::dim(), "no reading → a dim dash, not a latency color");
+}
+
+#[test]
+fn footer_lists_a_and_offers_u_pin_in_auto_mode() {
+    let mut app = App::new(Box::new(Recording::new(Mode::Auto(Some("JP-Tokyo")))));
+    app.focus = Focus::Health;
+    app.strip_sel = Some(0); // auto's own pick
+    let mut term = Terminal::new(TestBackend::new(150, 30)).unwrap();
+    term.draw(|f| {
+        let a = f.area();
+        ui::draw_footer(f.buffer_mut(), a, &app);
+    })
+    .unwrap();
+    let foot = row_text(term.backend().buffer(), 150, 29);
+    assert!(foot.contains("o proxy · a auto ·"), "the global group lists the key: {foot:?}");
+    assert!(foot.contains("u pin JP-Tokyo"), "`u` on auto's pick pins it: {foot:?}");
+}
+
+#[test]
+fn help_lists_the_auto_key() {
+    let mut app = App::new(Box::new(FixtureSource::still()));
+    app.help = true;
+    let mut term = Terminal::new(TestBackend::new(150, 40)).unwrap();
+    term.draw(|f| {
+        let a = f.area();
+        ui::draw(f.buffer_mut(), a, &app, false);
+    })
+    .unwrap();
+    let buf = term.backend().buffer();
+    let text: Vec<String> = (0..40).map(|y| row_text(buf, 150, y)).collect();
+    assert!(text.iter().any(|l| l.contains("a          auto server selection on/off")), "help overlay lists `a`");
 }

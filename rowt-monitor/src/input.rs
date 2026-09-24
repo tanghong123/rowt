@@ -93,6 +93,8 @@ pub fn key(k: KeyEvent, app: &App) -> Option<Action> {
         KeyCode::Char('T') => Action::RouteHotspotSuffix,
         KeyCode::Char('u') => Action::UseServer,
         KeyCode::Char('o') => Action::ToggleProxy,
+        // `a` for auto — global like `o`, not gated on the health pane's focus.
+        KeyCode::Char('a') => Action::ToggleAuto,
         KeyCode::Enter => Action::Confirm,
         KeyCode::Esc => Action::Escape,
         _ => return None,
@@ -150,9 +152,12 @@ pub fn mouse(m: MouseEvent, hit: &Hit) -> Option<Action> {
             }
         }
         MouseEventKind::Down(MouseButton::Left) => {
-            // "sys proxy on/off" toggles when clicked.
+            // "sys proxy on/off" and "auto on/off" toggle when clicked.
             if in_rect(hit.sysproxy, col, row) {
                 return Some(Action::ToggleProxy);
+            }
+            if in_rect(hit.auto, col, row) {
+                return Some(Action::ToggleAuto);
             }
             for (r, win) in &hit.windows {
                 if in_rect(*r, col, row) {

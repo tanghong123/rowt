@@ -3,8 +3,11 @@
 //! 10 connections (6 escape / 1 corp / 3 direct), 10 error rows, window = 10m.
 
 use rowt_monitor::app::{Action, App, Focus, Target};
-use rowt_monitor::model::{ConnView, Lane, MetricsBand, Window};
+use rowt_monitor::model::{ConnView, Lane, MetricsBand, Window, AUTO_GROUP};
 use rowt_monitor::source::FixtureSource;
+
+mod common;
+use common::{Mode, Recording};
 
 fn app() -> App {
     // No real clipboard side effects during tests.
@@ -865,4 +868,180 @@ fn an_over_broad_entry_is_refused() {
     a.update(Action::Confirm);
     assert_eq!(applied(&a), "bbc.co.uk → escape");
     assert!(a.pending_reload.is_some());
+}
+
+// ---- auto server selection (`a`, and `u` while auto is on) ----
+
+type Shared<T> = std::sync::Arc<std::sync::Mutex<T>>;
+
+/// An app over the recording source, plus its mode handle and call log.
+fn auto_app(mode: Mode) -> (App, Shared<Mode>, Shared<Vec<String>>) {
+    std::env::set_var("ROWT_MONITOR_NO_CLIPBOARD", "1");
+    let src = Recording::new(mode);
+    let (m, c) = (src.mode.clone(), src.calls.clone());
+    let mut a = App::new(Box::new(src));
+    a.conn_h = 6;
+    a.err_h = 6;
+    a.side_by_side = true;
+    (a, m, c)
+}
+
+fn calls(c: &Shared<Vec<String>>) -> Vec<String> {
+    c.lock().unwrap().clone()
+}
+
+#[test]
+fn a_turns_auto_on_from_any_pane() {
+    for focus in [Focus::Conn, Focus::Err, Focus::Health] {
+        let (mut a, _, c) = auto_app(Mode::Manual);
+        a.focus = focus;
+        assert!(!a.auto_display());
+        a.update(Action::ToggleAuto);
+        assert_eq!(calls(&c), vec![AUTO_GROUP], "rowt use auto, from {focus:?}");
+        assert!(a.auto_display(), "shown on at once (optimistic), from {focus:?}");
+    }
+}
+
+#[test]
+fn turning_auto_off_pins_the_server_it_is_using() {
+    // urltest is on KR-Seoul, not the fixture's old pin: off pins KR-Seoul, so
+    // traffic stays exactly where it is.
+    let (mut a, _, c) = auto_app(Mode::Auto(Some("KR-Seoul")));
+    assert!(a.auto_display());
+    a.update(Action::ToggleAuto);
+    assert_eq!(calls(&c), vec!["KR-Seoul"]);
+    assert!(!a.auto_display());
+}
+
+#[test]
+fn turning_auto_off_with_no_resolved_pick_does_not_guess() {
+    let (mut a, _, c) = auto_app(Mode::Auto(None));
+    a.update(Action::ToggleAuto);
+    assert!(calls(&c).is_empty(), "nothing known to pin, so nothing is pinned");
+    assert!(a.auto_display(), "auto stays on");
+    assert!(a.toast.as_ref().is_some_and(|(m, _)| m.starts_with('⚠')), "and it says why");
+}
+
+#[test]
+fn a_second_auto_change_waits_for_the_first_to_land() {
+    // Every auto change restarts the router, and rowt does not serialize two.
+    let (mut a, mode, c) = auto_app(Mode::Manual);
+    a.update(Action::ToggleAuto);
+    a.update(Action::ToggleAuto);
+    assert_eq!(calls(&c), vec![AUTO_GROUP], "the second press launched nothing");
+    // rowt writes the selection before it restarts, so the next poll confirms…
+    *mode.lock().unwrap() = Mode::Auto(Some("JP-Tokyo"));
+    a.tick();
+    a.on_frame();
+    assert!(a.auto_optimistic.is_none(), "confirmed by the poll");
+    assert!(a.auto_display());
+    // …and the next change goes through.
+    a.update(Action::ToggleAuto);
+    assert_eq!(calls(&c), vec![AUTO_GROUP, "JP-Tokyo"]);
+}
+
+#[test]
+fn u_pins_autos_own_pick_and_turns_auto_off() {
+    let (mut a, _, c) = auto_app(Mode::Auto(Some("JP-Tokyo")));
+    a.focus = Focus::Health;
+    a.strip_sel = Some(0); // the active chip: auto's pick
+    assert!(a.snap.chips[0].active);
+    a.update(Action::UseServer);
+    assert_eq!(calls(&c), vec!["JP-Tokyo"], "pinned — not 'already active'");
+    assert!(!a.auto_display());
+}
+
+#[test]
+fn u_on_another_chip_in_auto_mode_pins_that_one() {
+    let (mut a, _, c) = auto_app(Mode::Auto(Some("JP-Tokyo")));
+    a.focus = Focus::Health;
+    a.strip_sel = Some(1);
+    let other = a.snap.chips[1].name.clone();
+    a.update(Action::UseServer);
+    assert_eq!(calls(&c), vec![other]);
+    assert!(!a.auto_display());
+}
+
+#[test]
+fn u_on_the_pinned_server_is_still_a_no_op_in_manual_mode() {
+    let (mut a, _, c) = auto_app(Mode::Manual);
+    a.focus = Focus::Health;
+    a.strip_sel = Some(0); // JP-Tokyo, pinned by hand
+    a.update(Action::UseServer);
+    assert!(calls(&c).is_empty());
+    assert!(a.toast.as_ref().is_some_and(|(m, _)| m.contains("already active")));
+}
+
+#[test]
+fn a_is_the_auto_key_but_the_editors_type_it() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use rowt_monitor::app::Edit;
+    use rowt_monitor::input;
+    let key = |a: &App| input::key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE), a);
+    let mut a = app();
+    assert_eq!(key(&a), Some(Action::ToggleAuto));
+    a.update(Action::SearchOpen);
+    assert_eq!(key(&a), Some(Action::SearchInput('a')), "the search editor owns printable keys");
+    let mut a = app();
+    a.update(Action::Down); // lock a row, then arm an edit on it
+    a.update(Action::Route(Lane::Escape));
+    assert!(a.armed.is_some());
+    assert_eq!(key(&a), Some(Action::ArmEdit(Edit::Insert('a'))), "so does the armed confirm bar");
+}
+
+#[test]
+fn clicking_the_auto_toggle_toggles_it() {
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::layout::Rect;
+    use rowt_monitor::input;
+    use rowt_monitor::ui::Hit;
+    let hit = Hit { auto: Rect::new(2, 38, 8, 1), ..Default::default() };
+    let click = |col, row| MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: col, row, modifiers: KeyModifiers::NONE };
+    assert_eq!(input::mouse(click(5, 38), &hit), Some(Action::ToggleAuto));
+    assert_eq!(input::mouse(click(12, 38), &hit), None, "beside it is not it");
+}
+
+/// An app over the recording source, with its "restart in flight" flag.
+fn busy_app(mode: Mode) -> (App, Shared<bool>, Shared<Vec<String>>) {
+    std::env::set_var("ROWT_MONITOR_NO_CLIPBOARD", "1");
+    let src = Recording::new(mode);
+    let (b, c) = (src.busy.clone(), src.calls.clone());
+    let mut a = App::new(Box::new(src));
+    a.conn_h = 6;
+    a.err_h = 6;
+    a.side_by_side = true;
+    (a, b, c)
+}
+
+#[test]
+fn server_changes_wait_while_a_restart_is_in_flight() {
+    // e.g. the batched lane reload — or the previous toggle — is still
+    // restarting the router: overlapping restarts can take it down.
+    let (mut a, busy, c) = busy_app(Mode::Manual);
+    *busy.lock().unwrap() = true;
+    a.update(Action::ToggleAuto);
+    a.focus = Focus::Health;
+    a.strip_sel = Some(1); // not the pinned server
+    a.update(Action::UseServer);
+    assert!(calls(&c).is_empty(), "neither `a` nor `u` starts a second restart");
+    assert!(a.toast.as_ref().is_some_and(|(m, _)| m.contains("restart in progress")));
+    assert!(!a.auto_display(), "and nothing is shown as changed");
+    *busy.lock().unwrap() = false;
+    a.update(Action::UseServer);
+    assert_eq!(calls(&c).len(), 1, "once it has exited, the change goes through");
+}
+
+#[test]
+fn a_due_lane_reload_waits_for_an_in_flight_restart() {
+    use std::time::Instant;
+    let (mut a, busy, c) = busy_app(Mode::Manual);
+    *busy.lock().unwrap() = true;
+    a.pending_reload = Some(Instant::now()); // due now
+    a.on_frame();
+    assert!(calls(&c).is_empty(), "no overlapping restart");
+    assert!(a.pending_reload.is_some(), "re-armed, not dropped — the edits still land");
+    *busy.lock().unwrap() = false;
+    a.pending_reload = Some(Instant::now());
+    a.on_frame();
+    assert_eq!(calls(&c), vec!["reload"]);
 }

@@ -61,6 +61,13 @@ weight, and a cell belongs to exactly one tier:
 One exception: the **active server's name** is `escape` purple, because it marks
 *which* server, not how it's doing. Its latency carries the health.
 
+The **`auto` toggle** that leads the row above the server strip follows the same
+tiers, with one deliberate difference: `auto` is a label (`dimmer`) and `on` is
+`direct` like every enabled toggle, but `off` is `dim` — not the `up` orange that
+`collector` and `watch` use for off. Those being off is a degraded state; a
+pinned server is the normal mode, and a standing orange would teach the eye to
+ignore orange.
+
 Two consequences worth stating, because both diverge from the frozen capture:
 
 - **The status label takes its dot's color in every state, healthy included.** The

@@ -144,15 +144,15 @@ impl Source for FixtureSource {
         // The active server appears in the strip too, marked; the rest are the
         // idle-up pool. (total 10 = 9 up incl. active + 1 down.)
         let chips = vec![
-            Server { name: "JP-Tokyo".into(), ms: 42, active: true },
-            Server { name: "JP-Osaka".into(), ms: 175, active: false },
-            Server { name: "KR-Seoul".into(), ms: 72, active: false },
-            Server { name: "DE-Frankfurt".into(), ms: 195, active: false },
-            Server { name: "HK-1".into(), ms: 82, active: false },
-            Server { name: "SG-1".into(), ms: 81, active: false },
-            Server { name: "TW-Taipei".into(), ms: 110, active: false },
-            Server { name: "US-LA".into(), ms: 151, active: false },
-            Server { name: "NL-Ams".into(), ms: 68, active: false },
+            Server { name: "JP-Tokyo".into(), ms: Some(42), active: true },
+            Server { name: "JP-Osaka".into(), ms: Some(175), active: false },
+            Server { name: "KR-Seoul".into(), ms: Some(72), active: false },
+            Server { name: "DE-Frankfurt".into(), ms: Some(195), active: false },
+            Server { name: "HK-1".into(), ms: Some(82), active: false },
+            Server { name: "SG-1".into(), ms: Some(81), active: false },
+            Server { name: "TW-Taipei".into(), ms: Some(110), active: false },
+            Server { name: "US-LA".into(), ms: Some(151), active: false },
+            Server { name: "NL-Ams".into(), ms: Some(68), active: false },
         ];
 
         Snapshot {
@@ -184,6 +184,7 @@ impl Source for FixtureSource {
             servers_up: 9,
             servers_down: 1,
             active_server: "JP-Tokyo".into(),
+            auto_now: None,
             chips,
         }
     }

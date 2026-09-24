@@ -28,6 +28,7 @@ pub struct Hit {
     pub strip_pin: Option<usize>,         // chip held fixed at the strip's left edge (the active one), if any
     pub chips: Vec<(Rect, usize)>,        // server chips as drawn this frame (click to select)
     pub sysproxy: Rect,                   // the "sys proxy on/off" cell region (click to toggle)
+    pub auto: Rect,                       // the "auto on/off" cell region above the strip (click to toggle)
 }
 
 // NOTE: the bottom row is shifted one space left of the design capture so its
@@ -782,10 +783,31 @@ fn draw_health(
     let x0 = xl + 1;
     let w = (xr - 1) - x0 + 1;
     let s = &app.snap;
+    // Auto toggle, leading the row directly above the strip — over the pinned
+    // chip it decides. Clickable and hover-lit like `sys proxy`; `a` works from
+    // anywhere. `on` is green like every enabled toggle here, but `off` is `dim`,
+    // not the orange collector/watch use for off: those being off is degraded,
+    // whereas a pinned server is the normal mode, not a warning.
+    let auto_on = app.auto_display();
+    let val = if auto_on { "on" } else { "off" };
+    let auto_rect = Rect::new(x0 + 1, stats_y, dw("auto ") + dw(val), 1);
+    hit.auto = auto_rect;
+    let hovered = !present && app.hover.is_some_and(|(cx, cy)| rect_has(auto_rect, cx, cy));
+    let base = if auto_on { theme::direct() } else { theme::dim() };
+    let (label_st, val_st) = if hovered {
+        let u = |c: Color| Style::default().fg(theme::emphasize(c, 0.25)).add_modifier(Modifier::UNDERLINED);
+        (u(theme::dimmer()), u(base))
+    } else {
+        (theme::fg(theme::dimmer()), theme::fg(base))
+    };
+    put(buf, x0 + 1, stats_y, "auto", label_st);
+    put(buf, x0 + 1 + dw("auto "), stats_y, val, val_st);
     // Stats: the active server is named in the header identity band and marked
-    // in the strip below, so it is not repeated here.
+    // in the strip below, so it is not repeated here. At a fixed column (the
+    // wider `auto off` + the strip's 3-cell gap) so it holds still as the toggle
+    // flips.
     let stats = format!("{} servers · {} up · {} down", s.servers_total, s.servers_up, s.servers_down);
-    put(buf, x0 + 1, stats_y, &stats, theme::fg(theme::dim()));
+    put(buf, x0 + 1 + dw("auto off") + 3, stats_y, &stats, theme::fg(theme::dim()));
 
     // chips row — or a "probing…" hint while the first round is still running
     // (router up, pool known, but nothing has come back yet), so an empty strip
@@ -817,7 +839,12 @@ fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: boo
         .map(|(i, c)| {
             let picked = sel == Some(i);
             let bg = |st: Style| if picked { st.bg(theme::selection_bg()) } else { st };
-            let lat = bg(theme::fg(theme::latency_color(c.ms)));
+            // No reading yet — auto's pick before its first probe — reads `—`,
+            // the same as the header's latency without one.
+            let (ms, lat) = match c.ms {
+                Some(v) => (format!("{:>3} ms", v), bg(theme::fg(theme::latency_color(v)))),
+                None => ("—".to_string(), bg(theme::fg(theme::dim()))),
+            };
             let name_st = if picked {
                 bg(theme::bold(theme::armed()))
             } else if c.active {
@@ -825,7 +852,6 @@ fn draw_chips(buf: &mut Buffer, x0: u16, y: u16, w: u16, app: &App, present: boo
             } else {
                 bright
             };
-            let ms = format!("{:>3} ms", c.ms);
             if c.active {
                 vec![("▶ ".to_string(), bg(escape)), (c.name.clone(), name_st), (" ".to_string(), bg(bright)), (ms, lat)]
             } else {
@@ -1050,6 +1076,8 @@ fn draw_help(buf: &mut Buffer, area: Rect) {
         "             after ½s the entry turns editable:",
         "             type · ^w drop leading label · ↵ apply",
         "  u          use the selected server",
+        "  a          auto server selection on/off",
+        "             (off pins the server in use)",
         "  o          toggle the system proxy on/off",
         "  r          re-probe servers now",
         "  p          pause sampling   · esc  cancel",
@@ -1176,9 +1204,9 @@ pub fn draw_footer(buf: &mut Buffer, area: Rect, app: &App) {
 
     // Normal: global group, then a contextual group when something is live.
     let global = if app.paused {
-        " ↑↓←→ navigate · v flip · s span · f lane · / search · w window · o proxy · p resume · ? help · q quit "
+        " ↑↓←→ navigate · v flip · s span · f lane · / search · w window · o proxy · a auto · p resume · ? help · q quit "
     } else {
-        " ↑↓←→ navigate · v flip · s span · f lane · / search · w window · o proxy · p pause · ? help · q quit "
+        " ↑↓←→ navigate · v flip · s span · f lane · / search · w window · o proxy · a auto · p pause · ? help · q quit "
     };
     let shown = truncate(global, area.width);
     put(buf, left, y, &shown, dimmer);
@@ -1192,6 +1220,9 @@ pub fn draw_footer(buf: &mut Buffer, area: Rect, app: &App) {
         Focus::Err if app.err_active() => Some("e·c·b·d route (⇧ = suffix) · y copy ".to_string()),
         Focus::Health => match app.strip_sel.and_then(|i| app.snap.chips.get(i)) {
             None => Some("←→ select server ".to_string()),
+            // In auto mode `u` pins any chip — auto's own pick included — and
+            // that turns auto off.
+            Some(s) if app.auto_display() => Some(format!("u pin {} ", s.name)),
             Some(s) if !s.active => Some(format!("u use {} ", s.name)),
             Some(_) => Some("active server ".to_string()),
         },
