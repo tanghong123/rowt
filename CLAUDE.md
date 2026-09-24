@@ -39,6 +39,10 @@ skill** in `skills/rowt/`. Don't duplicate that here.
 - **Docs:** `README.md`, `DESIGN.md`, `PORTING.md`, `FUTURE.md`,
   `rowt-monitor/{README,DESIGN,METRICS,COLORS}.md`. Keep them current with
   behavior you change.
+- **`research/`** — surveys that answer a question before any code exists, e.g.
+  `ios-port.md` (can rowt's lanes run on an iPhone). Each is dated and cites
+  its platform sources. Treat it as a snapshot: re-verify the claims before
+  building on one.
 - **`.githooks/pre-commit`** — the auto version-bump, **and** a refusal when a
   commit leaves `tests/parity/{LEDGER,CLI-LEDGER}.md` stale. Enable in a fresh
   clone: `git config core.hooksPath .githooks`.

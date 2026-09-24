@@ -389,7 +389,10 @@ blind implementation worse than none:
    evidence, and it is one edit for whoever has a target to point it at.
 3. Tun mode in `rowt-core::render` per §4.1.2 — `route_exclude_address` fed by
    `corp_sync`, `strict_route: false`, and the no-fighting rule (journal and
-   fail open rather than re-assert a shadowed rule).
+   fail open rather than re-assert a shadowed rule). An iPhone port needs the
+   same render target, plus FakeIP for escape, an auto-detected interface and
+   a pluggable corp transport ([research/ios-port.md](research/ios-port.md)
+   §4, row 2). Design it once for both.
 4. systemd units (§4.1.4: a long-running service with an internal tick, not a
    timer firing oneshots) and `CAP_NET_ADMIN` via `AmbientCapabilities`.
 5. CI matrix — core tests on both, platform tests feature-gated — and the Linux
