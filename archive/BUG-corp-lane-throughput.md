@@ -127,7 +127,7 @@ The corp URL is anonymously readable, so no credentials are needed to reproduce.
 
 ## Relevance to FUTURE.md
 
-[FUTURE.md](FUTURE.md) sketches an agent that senses the environment — *"is corp VPN up,
+[FUTURE.md](../FUTURE.md) sketches an agent that senses the environment — *"is corp VPN up,
 what network am I on, is `bind_interface` filtered, is escape reachable"* — and sets the
 routing posture automatically. This bug is a concrete data point for that design, and it
 suggests the sensing set is missing a dimension:

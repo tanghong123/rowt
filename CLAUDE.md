@@ -22,7 +22,7 @@ skill** in `skills/rowt/`. Don't duplicate that here.
 - **`rowt-monitor/`** — a *separate* workspace (own `Cargo.lock`, own goldens),
   two bins: the ratatui TUI (`rowt-monitor`) and the metrics `collector`
   sidecar. Absolute-cell rendering matched **byte-for-byte** against golden
-  captures in `ux-design/rowt_monitor/`.
+  captures in `rowt-monitor/renders/`.
 - **`config/`** — Python helpers, stdlib-first: `vless-parse.py`,
   `sr-import.py`, `foreign-import.py`, `geosite-lookup.py`, plus lane-template
   `*.txt`. Most are being replaced by `rowt-rs` helpers; `bin/rowt` prefers the
@@ -43,6 +43,10 @@ skill** in `skills/rowt/`. Don't duplicate that here.
   `ios-port.md` (can rowt's lanes run on an iPhone). Each is dated and cites
   its platform sources. Treat it as a snapshot: re-verify the claims before
   building on one.
+- **`archive/`** — material the repo has outgrown, kept for history and not
+  maintained: the original monitor UX handoff (`ux-design/`) and resolved
+  investigations such as `BUG-corp-lane-throughput.md`. No code or test reads
+  from it, so don't cite it as current.
 - **`.githooks/pre-commit`** — the auto version-bump, **and** a refusal when a
   commit leaves `tests/parity/{LEDGER,CLI-LEDGER}.md` stale. Enable in a fresh
   clone: `git config core.hooksPath .githooks`.

@@ -1,5 +1,13 @@
 # Handoff: rowt monitor — TUI monitoring interface
 
+> **Archived 2026-09-24.** This is the monitor's original design handoff,
+> kept for history. The monitor has moved past it: see
+> [`rowt-monitor/DESIGN.md`](../../../rowt-monitor/DESIGN.md) §10 for the
+> deliberate deviations. The `renders/` it describes now live in
+> [`rowt-monitor/renders/`](../../../rowt-monitor/renders/). The `.txt`
+> captures there are still these frozen frames, and the `.ansi` ones are
+> regenerated from the real UI.
+
 ## Overview
 `rowt monitor` is a **terminal UI (TUI)** for observing a running `rowt` proxy: live
 connections and their throughput, a rolling-window view of connection errors and

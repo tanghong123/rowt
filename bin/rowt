@@ -58,7 +58,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.5.9"
+ROWT_VERSION="3.5.10"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -2286,7 +2286,7 @@ EOF
 #
 # `speed` exists for the second column, and leaving the reader to divide two
 # numbers is exactly how the last report blamed rowt for a corp tunnel's own
-# 1294-byte mtu (BUG-corp-lane-throughput.md). So say it, in both directions —
+# 1294-byte mtu (archive/BUG-corp-lane-throughput.md). So say it, in both directions —
 # "not rowt" is the answer a slow lane usually needs, and it is the sentence
 # that investigation was missing.
 #

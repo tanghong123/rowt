@@ -480,8 +480,8 @@ as the only VPN, "direct" just meant "off my tunnel". escape splits that
   per row. The second fetch is the whole point: it is the one measurement that
   separates "rowt's relay is slow" from "this path is slow", and its absence is
   how a corp tunnel's own 1294-byte mtu was reported as a rowt bug
-  (BUG-corp-lane-throughput.md — the same object was no faster with rowt out of
-  the picture entirely).
+  (archive/BUG-corp-lane-throughput.md — the same object was no faster with
+  rowt out of the picture entirely).
 
   **The threshold is a ratio, and there is deliberately no absolute floor.**
   Below half the bypassed rate is called out as rowt's own bottleneck. The 2x

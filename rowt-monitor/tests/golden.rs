@@ -12,9 +12,9 @@ use rowt_monitor::{render_text, theme, ui};
 mod common;
 use common::{Mode, Recording};
 
-const G96: &str = include_str!("../../ux-design/rowt_monitor/renders/rowt-monitor-96x30.txt");
-const G150: &str = include_str!("../../ux-design/rowt_monitor/renders/rowt-monitor-150x38.txt");
-const G212: &str = include_str!("../../ux-design/rowt_monitor/renders/rowt-monitor-212x52.txt");
+const G96: &str = include_str!("../renders/rowt-monitor-96x30.txt");
+const G150: &str = include_str!("../renders/rowt-monitor-150x38.txt");
+const G212: &str = include_str!("../renders/rowt-monitor-212x52.txt");
 
 /// Blank the regions of the frame that intentionally diverge from the frozen
 /// design capture, so the byte-exact diff still verifies everything else

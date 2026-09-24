@@ -167,12 +167,17 @@ Everything is derived on a 2-second tick from: the clash API
   pipeline (clash API, incremental log tailing, block-lane bucketing, the
   server-health prober), rendering, interactions, resource characteristics, and
   the testing strategy.
-- **[`../ux-design/rowt_monitor/`](../ux-design/rowt_monitor/)** — the
-  authoritative UX spec + byte-exact ground-truth renders + HTML prototype.
+- **[`renders/`](renders/)** — the reference frames: `.txt` captures frozen
+  from the original design, and `.ansi` renders of the current UI, regenerated
+  when the layout changes (DESIGN.md §4.2).
+- **[`../archive/ux-design/rowt_monitor/`](../archive/ux-design/rowt_monitor/)**
+  — the original UX handoff (spec + HTML prototype), archived. The monitor has
+  moved past it; DESIGN.md §10 lists the deliberate deviations.
 
-The layout, colors, and 130-column reflow reproduce those captures byte-for-byte
-in width. `tests/golden.rs` renders each geometry via ratatui's `TestBackend` and
-diffs against them; `--render WxH` is the same path exposed on the CLI.
+The layout and 130-column reflow reproduce the `.txt` captures byte-for-byte in
+width. `tests/golden.rs` renders each geometry via ratatui's `TestBackend` and
+diffs against them, masking the deliberate deviations; `--render WxH` is the
+same path exposed on the CLI.
 
 ## Themes
 

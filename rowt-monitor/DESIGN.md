@@ -7,10 +7,11 @@ routing, system-proxy toggle) layered on top. The `htop`/`btop` companion to the
 `rowt` CLI.
 
 This document is the full design reference — the product/UX design **and** the
-engineering internals. The frozen, pixel-exact UX handoff (spec + ground-truth
-renders + HTML prototype) lives separately in
-[`../ux-design/rowt_monitor/`](../ux-design/rowt_monitor/); this doc summarizes
-it and then goes under the hood.
+engineering internals. The original UX handoff (spec + HTML prototype) is
+archived in
+[`../archive/ux-design/rowt_monitor/`](../archive/ux-design/rowt_monitor/). The
+monitor has moved past it (§10), so this doc, [COLORS.md](COLORS.md) and the
+renders in [`renders/`](renders/) are the reference now.
 
 ---
 
@@ -39,13 +40,15 @@ it and then goes under the hood.
 
 ## 2. Product / UX design
 
-The authoritative UX spec — layout & reflow, the two panes, the server-health
-strip, the design tokens (the full color/glyph palette), the data-provenance
-table, and the interaction contract — plus the byte-exact ground-truth renders
-and the interactive HTML prototype, all live in
-**[`../ux-design/rowt_monitor/`](../ux-design/rowt_monitor/)**. That is the
-source of truth for *what it looks like and how it behaves*; this document does
-not restate it.
+The original UX spec — layout & reflow, the two panes, the server-health strip,
+the design tokens, the data-provenance table, and the interaction contract —
+and its interactive HTML prototype are archived in
+**[`../archive/ux-design/rowt_monitor/`](../archive/ux-design/rowt_monitor/)**.
+It was the source of truth for the first build. The monitor has since moved
+past it: §10 lists the deliberate deviations, and later controls such as the
+auto toggle postdate it. What the monitor looks like now is pinned by the
+renders in [`renders/`](renders/) (§4.2) and the palette in
+[COLORS.md](COLORS.md).
 
 For orientation, the frame is: a single **outer frame** (the only rounded
 corners) enclosing an **identity band** (logo + session facts + status dot) on
@@ -228,7 +231,7 @@ identical to a dark one.
 
 `tests/golden.rs` renders the still fixture at each geometry via
 `ratatui::backend::TestBackend`, extracts the plain-text grid, and asserts it
-equals the captures in `ux-design/rowt_monitor/renders/*.txt` — byte-for-byte in
+equals the captures in `renders/*.txt` — byte-for-byte in
 width. A `mask()` blanks the few regions that intentionally diverge from the
 frozen capture (see §10) so the rest stays exact. A separate `colors_spot_check`
 asserts key cells carry the expected fg/bold. `--render WxH` on the CLI is the
@@ -561,7 +564,7 @@ pool.
 
 ## 10. Intentional deviations from the frozen capture
 
-The `ux-design/rowt_monitor/renders/` captures are a snapshot; a few things were
+The `renders/*.txt` captures are a frozen snapshot of the handoff; a few things were
 deliberately changed after review (each masked in the golden test and covered by
 a dedicated assertion):
 
