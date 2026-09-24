@@ -17,7 +17,7 @@ stores output under ~/.config/rowt/.
 from __future__ import annotations
 
 import argparse
-import base64
+import binascii
 import json
 import os
 import re
@@ -83,6 +83,45 @@ _UUID = re.compile(
 def _first(qs: dict[str, list[str]], key: str, default: str = "") -> str:
     vals = qs.get(key)
     return unquote(vals[0]) if vals else default
+
+
+_B64_ALPHABET = frozenset(
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+)
+
+
+def _b64decode(s: str) -> bytes:
+    """`base64.b64decode(s)` under one rule on every Python: a complete pad
+    sequence ENDS the data.
+
+    That is CPython <= 3.12's forgiving decoder. 3.13 changed it to read on past
+    padding (RFC 4648 §3.3 allows either), so a body with anything after its
+    `==` decoded one way under Apple's python3 and another under brew's, and the
+    parity gates run whichever python3 is first on PATH. Cutting the input at
+    that pad gives every version the old answer, which is also rowt-rs's
+    (`sharelink::b64decode`), and it is the forgiving one: junk after a
+    subscription's padding is ignored instead of failing the whole body with
+    "Incorrect padding". Up to the cut the two rules agree byte for byte,
+    errors included.
+    """
+    try:
+        data = s.encode("ascii")  # what b64decode's own str check does first
+    except UnicodeEncodeError:
+        raise ValueError(
+            "string argument should contain only ASCII characters"
+        ) from None
+    quad = pads = 0
+    for i, c in enumerate(data):
+        if c == 0x3D:  # "=" — counted only once a quad can take padding
+            if quad >= 2:
+                pads += 1
+                if quad + pads >= 4:
+                    return binascii.a2b_base64(data[: i + 1])
+            continue
+        if c in _B64_ALPHABET:
+            pads = 0
+            quad = (quad + 1) % 4
+    return binascii.a2b_base64(data)
 
 
 def parse_vless(link: str, tag: str = "escape") -> dict:
@@ -339,7 +378,7 @@ def _ss_b64(s: str) -> str:
     """vmess's forgiving base64 — either alphabet, padding optional."""
     pad = "=" * (-len(s) % 4)
     try:
-        raw = base64.b64decode(s.replace("-", "+").replace("_", "/") + pad)
+        raw = _b64decode(s.replace("-", "+").replace("_", "/") + pad)
     except Exception as e:  # noqa: BLE001
         raise ValueError("ss link is not valid base64") from e
     return raw.decode("utf-8", "replace")
@@ -480,7 +519,7 @@ def parse_vmess(link: str, tag: str = "escape") -> dict:
     body = link[len("vmess://") :].strip()
     pad = "=" * (-len(body) % 4)
     try:
-        raw = base64.b64decode(body.replace("-", "+").replace("_", "/") + pad)
+        raw = _b64decode(body.replace("-", "+").replace("_", "/") + pad)
         cfg = json.loads(raw.decode("utf-8", "replace"))
     except Exception as e:  # noqa: BLE001
         raise ValueError(f"vmess link is not base64-JSON ({e})") from e
@@ -566,7 +605,7 @@ def _link_name(link: str) -> str:
         pad = "=" * (-len(body) % 4)
         try:
             cfg = json.loads(
-                base64.b64decode(body.replace("-", "+").replace("_", "/") + pad).decode(
+                _b64decode(body.replace("-", "+").replace("_", "/") + pad).decode(
                     "utf-8", "replace"
                 )
             )
@@ -676,9 +715,9 @@ def fetch_subscription(url: str) -> list[str]:
         # assume base64 (may be url-safe, may lack padding)
         pad = "=" * (-len(body) % 4)
         try:
-            body = base64.b64decode(
-                body.replace("-", "+").replace("_", "/") + pad
-            ).decode("utf-8", "replace")
+            body = _b64decode(body.replace("-", "+").replace("_", "/") + pad).decode(
+                "utf-8", "replace"
+            )
         except Exception as e:  # noqa: BLE001
             raise ValueError(f"could not decode subscription body: {e}") from e
     if "://" not in body:

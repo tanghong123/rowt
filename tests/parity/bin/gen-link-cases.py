@@ -166,6 +166,11 @@ def vmess_link(r: random.Random) -> str:
         enc = enc[: max(1, len(enc) - r.randint(1, 3))]
     elif roll < 0.18:                   # not base64-JSON at all
         enc = r.choice(["!!!!", "bm90IGpzb24=", "WzEsIDIsIDNd", "IjQ0MyI=", ""])
+    elif roll < 0.26:
+        # Data after the padding. CPython 3.13+ reads on past a pad and <= 3.12
+        # stops; both sides pin the stop (`_b64decode`, `sharelink::b64decode`),
+        # and these are the cases that hold them to it.
+        enc += r.choice(["Zm9v", "YWJj==", "eyJ2IjoiMiJ9", "==Zm9v", "\t=="])
     return "vmess://" + enc
 
 
@@ -186,6 +191,8 @@ def ss_link(r: random.Random) -> str:
             enc = enc.replace("+", "-").replace("/", "_").rstrip("=")
         if r.random() < 0.1:
             enc = enc.replace("=", "%3D")
+        if r.random() < 0.1:
+            enc += r.choice(["Zm9v", "YWJj", "=="])   # data after the pad
         s = f"ss://{enc}@{hostport}"
     elif shape < 0.75:                             # SIP022
         cred = f"{quote(method, safe='')}:{quote(pw, safe='')}"
@@ -194,6 +201,8 @@ def ss_link(r: random.Random) -> str:
         s = f"ss://{cred}@{hostport}"
     elif shape < 0.9:                              # legacy
         s = "ss://" + b64(f"{method}:{pw}@{hostport}")
+        if r.random() < 0.15:
+            s += r.choice(["Zm9v", "YWJj==", "=="])  # data after the pad
     else:                                          # broken
         s = "ss://" + r.choice(["!!!!", "", "@", f"{b64(method)}@{hostport}",
                                 "Zm9v", "bm8tYXQtc2lnbg==", f"{b64('m:p')}@",
@@ -273,6 +282,13 @@ def sub_body(r: random.Random) -> str:
         enc = base64.b64encode(text.encode("utf-8")).decode()
         if r.random() < 0.3:                       # url-safe, unpadded
             enc = enc.replace("+", "-").replace("/", "_").rstrip("=")
+        elif r.random() < 0.25:
+            # After the padding: a provider's trailing junk, or a second body
+            # encoded on its own. A pad sequence ends the data on both sides,
+            # so the rest is dropped rather than read on into (see _b64decode).
+            more = [link(r) for _ in range(r.randint(1, 2))]
+            enc += r.choice(["\nend of feed", "\n<!-- 42 -->", "\n" + base64.b64encode(
+                "\n".join(more).encode("utf-8")).decode()])
         return r.choice(["", "  ", "\n"]) + enc    # leading space must be stripped
     # Bodies that yield no links at all: base64 of prose, and not-base64.
     return r.choice(["bm90aGluZyBoZXJl", "!!!!", "clash: yaml: here", "", "%%%"])

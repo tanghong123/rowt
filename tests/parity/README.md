@@ -255,6 +255,15 @@ that the SAME inputs crash with the same kind of error and the same inputs
 succeed byte for byte. Matching frame lines would pin the interpreter, not the
 behaviour. Everything printed before the traceback still compares exactly.
 
+One interpreter difference is pinned rather than normalized, because it changes
+WHAT decodes, not how an error is worded. CPython 3.13 made `base64.b64decode`
+read on past a complete pad sequence, where 3.12 and earlier stop: `YQ==Yg==`
+is `a` on one and `a\x06 ` on the other. `vless-parse.py`'s `_b64decode`
+applies the old rule on every Python, which is also rowt-rs's (see
+`rowt-core::sharelink`). `gen-link-cases` puts data after a pad into vmess
+payloads, ss userinfo and subscription bodies so the gate holds the rule, and
+`selftest` step 34 drops the pin to prove the gate would notice.
+
 ### The CLI gate, and why it reads the disk
 
 `cli-diff` compares five things, and the biggest of them is not a stream: after

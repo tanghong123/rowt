@@ -21,6 +21,12 @@
 //!     URL-safe alphabet decodes anyway — and the script's own `pad` is computed
 //!     from the length *before* that discarding. A non-ASCII character is the
 //!     exception: that one is refused rather than dropped.
+//!   * A complete pad sequence ENDS the data: `YQ==Yg==` is `a`, and anything
+//!     after the padding is ignored. That is CPython <= 3.12's decoder. 3.13
+//!     reads on past padding instead (`a\x06 `, or "Incorrect padding" for junk
+//!     after a subscription's `==`), so the Python pins the old rule itself
+//!     (`_b64decode` in vless-parse.py) and every python3 gives this answer. It
+//!     is also the forgiving one for a body with junk after its padding.
 //!   * `str.strip()` counts `\x1c`–`\x1f` as whitespace and `str::trim()` does
 //!     not, so `strip()` below exists and every `.trim()` here would be a bug.
 //!
@@ -796,8 +802,10 @@ fn line_col(text: &str, idx: usize) -> (usize, usize) {
     (line, col)
 }
 
-/// `binascii.a2b_base64(s, strict_mode=False)` — non-alphabet characters are
-/// discarded rather than rejected, and a pad sequence ends the data.
+/// `binascii.a2b_base64(s, strict_mode=False)` as CPython <= 3.12 decodes —
+/// non-alphabet characters are discarded rather than rejected, and a complete
+/// pad sequence ends the data. vless-parse.py's `_b64decode` pins the same rule
+/// on 3.13+, which would read on past the pad (see the module doc).
 fn b64decode(s: &str) -> Result<Vec<u8>, String> {
     const PAD: u8 = b'=';
     // `_bytes_from_decode_data` encodes a str as ASCII first, so a single
@@ -1383,6 +1391,38 @@ mod tests {
     fn a_reserved_name_gets_its_index_appended() {
         let b = parse_many(&["hysteria2://pw@h.example:443#escape".into()]).unwrap();
         assert_eq!(b.outbounds[0]["tag"], "escape-1");
+    }
+
+    #[test]
+    fn a_complete_pad_sequence_ends_the_data() {
+        // The table vless-parse.py's `_b64decode` gives on Python 3.9, 3.13 and
+        // 3.14 alike — CPython <= 3.12's rule, which 3.13's own decoder
+        // abandoned. Errors are the text the callers interpolate.
+        let ascii = "string argument should contain only ASCII characters";
+        let one_more = "Invalid base64-encoded string: number of data characters (1) cannot be 1 more than a multiple of 4";
+        let cases: [(&str, Result<&[u8], &str>); 14] = [
+            ("YQ==YQ==", Ok(b"a")),
+            ("YQ==\nYg==", Ok(b"a")),
+            ("YQ=YQ==", Ok(b"a\x06\x10")), // "YQ=" is not complete: it reads on
+            ("YWI=Yw==", Ok(b"ab")),
+            ("cGxhaW46YSBiQDE5Mi4wLjIuMTo0NDM=/===", Ok(b"plain:a b@192.0.2.1:443")),
+            ("YQ==Y", Ok(b"a")),
+            ("Zm9vYg==YmFy", Ok(b"foob")),
+            ("YQ!==", Ok(b"a")),
+            ("=YQ==", Ok(b"a")),
+            ("Y===", Err(one_more)),
+            ("YQ=", Err("Incorrect padding")),
+            ("Y=Q=", Err("Incorrect padding")),
+            ("YQ==中", Err(ascii)),
+            ("Zm9v\nYmFy", Ok(b"foobar")),
+        ];
+        for (input, want) in cases {
+            let got = b64decode(input);
+            match want {
+                Ok(bytes) => assert_eq!(got.as_deref(), Ok(bytes), "{input:?}"),
+                Err(msg) => assert_eq!(got, Err(msg.to_string()), "{input:?}"),
+            }
+        }
     }
 
     #[test]

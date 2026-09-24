@@ -35,6 +35,7 @@
 #   31.  stop re-probing after a network change -> watch-shadow must fire (probes=3)
 #   32.  drop the discovery journal's state key   -> the watch tick cases must fire
 #   33.  make the DNS-free fallback give up        -> watch-shadow must fire
+#   34.  read past a base64 pad in the Python      -> vless-diff must fire
 #
 # Everything happens in a throwaway copy of the repo; the real tree is never
 # touched. Run it after changing the harness itself.
@@ -976,6 +977,33 @@ else
     fi
   fi
   cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+fi
+
+echo "34. the base64 pad rule must not follow the interpreter"
+if [ ! -x "$ROOT/target/release/rowt-vless" ]; then
+  echo "  skip — no release build"
+elif ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 13))'; then
+  echo "  skip — python3 is older than 3.13 and stops at a pad by itself: nothing to catch"
+else
+  # vless-parse.py's `_b64decode` cuts its input at the first complete pad
+  # sequence, because 3.13's own decoder reads on past one and rowt-rs stops
+  # (sharelink.rs's module doc). The regression it guards against is a single
+  # line: hand binascii the whole input, i.e. "just call b64decode". Only a
+  # corpus with data after a pad can see that, and gen-link-cases puts some in
+  # vmess payloads, ss userinfo and subscription bodies.
+  cp "$ROOT/config/vless-parse.py" "$tmp/config/vless-parse.py"
+  _pre="$(cksum < "$tmp/config/vless-parse.py")"
+  perl -0pi -e 's/return binascii\.a2b_base64\(data\[: i \+ 1\]\)/return binascii.a2b_base64(data)/' \
+    "$tmp/config/vless-parse.py"
+  if [ "$_pre" = "$(cksum < "$tmp/config/vless-parse.py")" ]; then
+    bad "could not drop the pad cut (_b64decode moved?)"
+  elif PARITY_RUST_VLESS="$ROOT/target/release/rowt-vless" \
+       "$tmp/tests/parity/bin/parity" vless-diff 400 >/dev/null 2>&1; then
+    bad "vless-diff passed with the Python reading on past a pad"
+  else
+    ok "vless-diff caught a Python that reads on past a base64 pad"
+  fi
+  cp "$ROOT/config/vless-parse.py" "$tmp/config/vless-parse.py"
 fi
 
 echo
