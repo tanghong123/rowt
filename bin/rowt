@@ -58,7 +58,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.5.8"
+ROWT_VERSION="3.5.9"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -2507,11 +2507,24 @@ PY
 _start_host_router() {
   mkdir -p "$LOGDIR"; rotate_log "$HOST_LOG"
   local _l; for _l in $LANE_NAMES; do rotate_log "$(lane_log "$_l")"; done
+  # Both daemons run with SIGHUP ignored, like the collector: a background job
+  # of a non-interactive shell stays in the CALLER's process group, and being
+  # reparented to launchd changes nothing about that. So when the caller is a
+  # long-running foreground process — rowt-monitor, whose lane reloads and auto
+  # toggles restart the router — closing its terminal hung up sing-box and the
+  # splitter with it. The subshell scopes the ignore to them (rowt keeps its own
+  # handling), and `exec` makes it sing-box, so $! is still sing-box's pid.
   if [ "${1:-1}" = 1 ] && _py_ok; then
-    # process substitution keeps $! = sing-box; append (>>) inside the splitter
-    "$SB" run -c "$HOST_CFG" > >(exec "${PY_SPLITTER[@]}" "$HOST_LOG" "$LOGDIR") 2>&1 &
+    # Append (>>) happens inside the splitter. The splitter's OWN stdout/stderr
+    # go to /dev/null: a process substitution inherits this shell's fds, so
+    # without it the splitter held whatever rowt's stdout/stderr were — the pipe
+    # of `rowt reload | tail`, or rowt-monitor's Command::output() — and that
+    # caller waited for an EOF that only arrived at the next router restart. It
+    # writes only to its log files; rowt-rs's start_router gives it
+    # Stdio::null() the same way.
+    ( trap '' HUP; exec "$SB" run -c "$HOST_CFG" > >(exec "${PY_SPLITTER[@]}" "$HOST_LOG" "$LOGDIR" >/dev/null 2>&1) 2>&1 ) &
   else
-    "$SB" run -c "$HOST_CFG" >>"$HOST_LOG" 2>&1 &
+    ( trap '' HUP; exec "$SB" run -c "$HOST_CFG" >>"$HOST_LOG" 2>&1 ) &
   fi
   echo $! > "$(host_pidfile)"
 }

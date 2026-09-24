@@ -449,6 +449,23 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// `nohup` for the daemons (sing-box, the splitter, the collector): each outlives
+/// the process that started it, so a hangup on that process's terminal must not
+/// reach it. A spawned child stays in its parent's process group — reparenting
+/// to launchd changes nothing about that — so a long-running foreground caller
+/// (rowt-monitor, whose lane reloads and auto toggles restart the router) would
+/// hand a closed terminal's SIGHUP straight to the router. An ignored signal
+/// stays ignored across `exec`.
+fn ignore_hangup(cmd: &mut Command) {
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            libc::signal(libc::SIGHUP, libc::SIG_IGN);
+            Ok(())
+        });
+    }
+}
+
 /// Returns the live `Child`, not just its pid, and the caller must keep it.
 ///
 /// A spawned process this process never reaps becomes a ZOMBIE when it exits —
@@ -468,7 +485,10 @@ pub fn start_router(ctx: &Ctx, split: bool) -> Result<std::process::Child, Strin
                          shell_quote(&ctx.sb().to_string_lossy()),
                          shell_quote(&ctx.host_cfg().to_string_lossy()));
     let mut cmd = Command::new("sh");
-    cmd.arg("-c").arg(&merged);
+    // stdin is /dev/null, as the shell's `&` job gets in a non-interactive
+    // script: a daemon that inherited the caller's stdin would hold that pipe.
+    cmd.arg("-c").arg(&merged).stdin(Stdio::null());
+    ignore_hangup(&mut cmd);
     let child = if split {
         // The splitter is its own process, so both outlive this CLI — the shell
         // gets the same shape from process substitution.
@@ -476,11 +496,12 @@ pub fn start_router(ctx: &Ctx, split: bool) -> Result<std::process::Child, Strin
         let mut child = cmd.spawn().map_err(|e| format!("spawn sing-box: {e}"))?;
         let out = child.stdout.take().ok_or("no stdout")?;
         let me = std::env::current_exe().map_err(|e| e.to_string())?;
-        Command::new(me)
-            .arg("_splitter").arg(ctx.host_log()).arg(ctx.logdir())
+        let mut splitter = Command::new(me);
+        splitter.arg("_splitter").arg(ctx.host_log()).arg(ctx.logdir())
             .stdin(Stdio::from(out))
-            .stdout(Stdio::null()).stderr(Stdio::null())
-            .spawn().map_err(|e| format!("spawn splitter: {e}"))?;
+            .stdout(Stdio::null()).stderr(Stdio::null());
+        ignore_hangup(&mut splitter);
+        splitter.spawn().map_err(|e| format!("spawn splitter: {e}"))?;
         child
     } else {
         let log = fs::OpenOptions::new().create(true).append(true).open(ctx.host_log())
@@ -582,13 +603,7 @@ pub fn start_collector(ctx: &Ctx) {
         .stdin(Stdio::null()).stdout(Stdio::from(log)).stderr(Stdio::from(log2));
     // `nohup` — the collector outlives the shell that started it, so a hangup
     // on the terminal `rowt up` was typed into must not reach it.
-    unsafe {
-        use std::os::unix::process::CommandExt;
-        cmd.pre_exec(|| {
-            libc::signal(libc::SIGHUP, libc::SIG_IGN);
-            Ok(())
-        });
-    }
+    ignore_hangup(&mut cmd);
     if let Ok(c) = cmd.spawn() {
         let _ = fs::write(ctx.cfg.join("collector.pid"), format!("{}\n", c.id()));
     }

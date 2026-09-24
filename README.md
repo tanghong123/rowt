@@ -791,7 +791,13 @@ place), or `sys proxy` to toggle it (hover-highlights).
   Note printable keys go to the field once editable, so `q` types rather than
   quits — `Esc` first. An over-broad entry (`com`, `co.uk`) shows red and is
   refused; the CLI's `--force` has no equivalent here, deliberately.
-- `u` — switch the active outbound server to the selected chip (live, immediate).
+- `u` — switch the active outbound server to the selected chip (immediate; a live
+  switch between pinned servers — from auto mode it pins the chip, which turns
+  auto off).
+- `a` — auto server selection on/off, from any pane (or click `auto` above the
+  strip). On rides the fastest live server (`rowt use auto`: urltest, re-probed
+  every 20m) and pins the server it is using at the strip's left edge; off pins
+  that server, so traffic stays put. Each change restarts the router.
 - `o` — toggle the macOS system proxy on/off (immediate).
 
 **Sources:** the clash API (`127.0.0.1:9090`), `host.json`, `state`/`servers.json`,
