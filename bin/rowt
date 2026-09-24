@@ -27,7 +27,8 @@
 # ROWT_AUTO_INTERVAL (default 20m). The selector lives wherever the tunnel runs
 # (host in mode host, the VM in mode vm).
 #
-# Servers are VLESS / VMess / AnyTLS / hysteria2, from manual links and/or subscriptions. Commands
+# Servers are VLESS / VMess / AnyTLS / hysteria2 / Shadowsocks / Trojan / TUIC, from manual links
+# and/or subscriptions. Commands
 # are grouped by noun (run 'rowt help' for the full list):
 #
 #   lifecycle : up [host|vm|local] · down · restart · reload · status · route <dest> · report
@@ -58,7 +59,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.5.10"
+ROWT_VERSION="3.5.11"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -1806,7 +1807,7 @@ after_import() {
 }
 
 cmd_import() {
-  [ "$#" -ge 1 ] || die "usage: $PROG server add '<vless://|vmess://|anytls://|hysteria2://...>' [more...]"
+  [ "$#" -ge 1 ] || die "usage: $PROG server add '<vless://|vmess://|anytls://|hysteria2://|ss://|trojan://|tuic://...>' [more...]"
   _py_ok || die "python3 not found"
   local new; new="$(printf '%s\n' "$@" | "${PY_VLESS[@]}" --multi)" || exit 1
   # append to the manual set and dedupe it in place (so re-importing the same
@@ -2006,7 +2007,7 @@ cmd_server() {
   local action="${1:-list}"; [ "$#" -gt 0 ] && shift || true
   case "$action" in
     list)      servers_list ;;
-    add)       cmd_import "$@" ;;               # parse vless:// / vmess:// / anytls:// / hysteria2:// link(s)
+    add)       cmd_import "$@" ;;               # parse vless:// … ss:// / trojan:// / tuic:// link(s)
     rm|remove) servers_remove "$@" ;;
     clear)     echo '[]' > "$MANUAL"; chmod 600 "$MANUAL"; info "manual servers cleared"; rebuild_servers; after_import ;;
     import)    # a JSON file (not --apply/--from) restores a `server dump`; else
@@ -3797,7 +3798,7 @@ $PROG server import --apply --input $IMPORT_REVIEW"
     else
       cmds="$PROG server import --output <file> --from <shadowrocket|clash-verge|v2box|flclash>   (accumulate; repeat per client)
 edit <file>, then:  $PROG server import --apply --input <file>
-or add directly:  $PROG server add '<vless://|vmess://|anytls://|hysteria2://…>'  /  $PROG sub add '<url>'"
+or add directly:  $PROG server add '<vless://|vmess://|anytls://|hysteria2://|ss://|trojan://|tuic://…>'  /  $PROG sub add '<url>'"
     fi
     _ob 1 "add servers" "$cmds"; pending=$((pending+1))
   fi
@@ -5788,7 +5789,8 @@ EOF
 $PROG server <subcommand> — manage the server pool.
 
   list                 list servers; * marks the live one            [default]
-  add '<link>' [more]  add manual server(s) from vless:// / vmess:// / anytls:// / hysteria2:// links
+  add '<link>' [more]  add manual server(s) from vless:// vmess:// anytls:// hysteria2://
+                       ss:// trojan:// tuic:// links
   rm <tag> [more]      remove a manual server (for a subscription node, remove the sub)
   clear                remove all manual servers
   import --detect      list the VPN clients on this Mac + the exact commands

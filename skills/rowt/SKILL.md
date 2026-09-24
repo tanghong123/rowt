@@ -1,6 +1,6 @@
 ---
 name: rowt
-description: Help a user set up and run rowt — a macOS command-line split-router (installed via `brew install tanghong123/tap/rowt`) that sends chosen sites through a personal VLESS/VMess/AnyTLS/hysteria2 tunnel (escape), corporate-intranet traffic into a corporate VPN (corp), and everything else straight out the physical NIC (direct), all from one local proxy on 127.0.0.1:7890. Use for FIRST-TIME SETUP (especially importing servers from an existing VPN client — Shadowrocket / Clash Verge / V2Box / FlClash — or adding vless:// links / subscriptions, then choosing which domains tunnel and running `rowt up`), for everyday operation (up/down/reload/restart/status/use/ping/monitor/metrics, editing escape|corp|block|hotspot lanes and `geosite:` categories, proxy on/off, moving the setup to another machine with `config export/import`, resetting/removing with `uninstall [--purge]`), and for debugging a downed router or wrong routing. Encodes the critical operational rules (e.g. never run reload/up/restart as a killable background task). Everything lives in `~/.config/rowt/`; run `rowt help`, `rowt <cmd> --help`, and `rowt onboard` for the live, version-current reference. (For working on rowt's own code / releases, see CLAUDE.md in the rowt repo.)
+description: Help a user set up and run rowt — a macOS command-line split-router (installed via `brew install tanghong123/tap/rowt`) that sends chosen sites through a personal VLESS/VMess/AnyTLS/hysteria2/Shadowsocks/Trojan/TUIC tunnel (escape), corporate-intranet traffic into a corporate VPN (corp), and everything else straight out the physical NIC (direct), all from one local proxy on 127.0.0.1:7890. Use for FIRST-TIME SETUP (especially importing servers from an existing VPN client — Shadowrocket / Clash Verge / V2Box / FlClash — or adding vless:// links / subscriptions, then choosing which domains tunnel and running `rowt up`), for everyday operation (up/down/reload/restart/status/use/ping/monitor/metrics, editing escape|corp|block|hotspot lanes and `geosite:` categories, proxy on/off, moving the setup to another machine with `config export/import`, resetting/removing with `uninstall [--purge]`), and for debugging a downed router or wrong routing. Encodes the critical operational rules (e.g. never run reload/up/restart as a killable background task). Everything lives in `~/.config/rowt/`; run `rowt help`, `rowt <cmd> --help`, and `rowt onboard` for the live, version-current reference. (For working on rowt's own code / releases, see CLAUDE.md in the rowt repo.)
 ---
 
 # rowt (user guide)
@@ -9,7 +9,7 @@ description: Help a user set up and run rowt — a macOS command-line split-rout
 
 | lane | you list | goes | for |
 |---|---|---|---|
-| **escape** | `escape-domains.txt` | a personal **VLESS/VMess/AnyTLS/hysteria2 tunnel** (bound to the physical NIC → your VPS) | blocked/foreign sites (google, github, youtube…) |
+| **escape** | `escape-domains.txt` | a personal **VLESS/VMess/AnyTLS/hysteria2/Shadowsocks/Trojan/TUIC tunnel** (bound to the physical NIC → your VPS) | blocked/foreign sites (google, github, youtube…) |
 | **corp** | `corp-domains.txt` (domains **and** CIDRs) | **into the corporate VPN** via the OS routing table | company intranet |
 | **direct** | everything unlisted | straight out the **physical NIC**, bypassing corp+escape | the local internet (e.g. China sites) |
 | **block** | `block-domains.txt` (+ a built-in ad/tracker set) | sinkholed — no DNS, no dial | ads/telemetry |
@@ -29,7 +29,7 @@ Engine: a bundled `sing-box` at `~/.config/rowt/bin/sing-box` (auto-fetched on f
    2. **Help the user curate `<file>`** — open it and keep the servers/subscriptions they want (each entry shows its `"_source"`; a good default is to keep their own nodes under `servers` and drop ones that come from a subscription, since subs are fetched fresh). Present the accumulated list grouped by `_source` so they can choose.
    3. `rowt server import --apply --input <file>` — merges the curated file into the pool (`_source` is stripped automatically) and fetches the subscriptions.
 
-   Clash sources need `brew install yq`. To add extras directly: `rowt server add '<vless://|vmess://|anytls://|hysteria2://…>'` / `rowt sub add '<url>'`. Finish with `rowt server list`, then `rowt use <tag>|auto` and `rowt ping`.
+   Clash sources need `brew install yq`. To add extras directly: `rowt server add '<vless://|vmess://|anytls://|hysteria2://|ss://|trojan://|tuic://…>'` / `rowt sub add '<url>'`. Finish with `rowt server list`, then `rowt use <tag>|auto` and `rowt ping`.
 3. **Start it:** `rowt up` (**foreground only** — see the rules below; auto-detects host/vm, `rowt probe` if unsure). Have the user switch to the corp VPN (turn the other app off).
 4. **Round out the setup — `onboard`'s "Recommended" section lists these state-aware, so run `onboard` again to see what's still `[ ]`:**
    - **Pick a working server:** `rowt ping` (ranks by latency) → `rowt use <tag>` (or `rowt use auto`), then confirm with `rowt status` (or a quick `rowt run curl -sI https://www.google.com`). Don't over-trust a red ERROR — verify with a real fetch.

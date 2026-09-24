@@ -11,8 +11,9 @@ Emits the same review JSON as `sr-import.py` on stdout:
      "skipped": {"<protocol>": <count>}}
 
 Share links are turned into outbounds by the sibling `vless-parse.py`, so only
-the protocols rowt speaks — VLESS / VMess / AnyTLS / hysteria2 — are kept; other
-protocols (trojan, ss, tuic, wireguard, …) are counted under "skipped".
+the protocols rowt speaks — VLESS / VMess / AnyTLS / hysteria2 / Shadowsocks /
+Trojan / TUIC — are kept; other protocols (ssr, wireguard, snell, …) are counted
+under "skipped".
 
 Sources:
   clash-verge  Clash Verge Rev profiles dir (Clash YAML; needs `yq`). Remote
@@ -157,7 +158,69 @@ def clash_proxy_to_link(p: dict) -> str | None:
             q["insecure"] = "1"
         return f"anytls://{quote(str(pw))}@{server}:{port}?{q_str(q)}{frag}"
 
-    return None  # trojan / ss / ssr / tuic / wireguard / … — rowt can't use these
+    if t == "ss":
+        # Clash names the two plugins sing-box builds in `obfs` and
+        # `v2ray-plugin`. Any other one travels under its own name, for the
+        # parser to refuse with that name in the warning.
+        plugin = str(p.get("plugin") or "")
+        opts = p.get("plugin-opts")
+        spec = plugin
+        if plugin == "obfs":
+            spec = f"obfs-local;obfs={(opts or {}).get('mode', 'http')}"
+            host = (opts or {}).get("host")
+            if host:
+                spec += f";obfs-host={host}"
+        elif plugin == "v2ray-plugin":
+            spec = f"v2ray-plugin;mode={(opts or {}).get('mode', 'websocket')}"
+            if (opts or {}).get("tls"):
+                spec += ";tls"
+            for k in ("host", "path"):
+                v = (opts or {}).get(k)
+                if v:
+                    spec += f";{k}={v}"
+        # SIP022's plaintext userinfo: the first ":" is the separator, so a
+        # password may carry more of them.
+        cred = quote(f"{p.get('cipher', '')}:{p.get('password', '')}", safe=":")
+        return f"ss://{cred}@{server}:{port}?{q_str({'plugin': spec})}{frag}"
+
+    if t == "trojan":
+        net = str(p.get("network", "tcp")).lower()
+        ro = p.get("reality-opts") or {}
+        q = {
+            "security": "reality" if ro else "tls",
+            "sni": p.get("sni") or p.get("servername"),
+            "fp": p.get("client-fingerprint"),
+            "pbk": ro.get("public-key"),
+            "sid": ro.get("short-id"),
+            "type": net,
+        }
+        if p.get("skip-cert-verify"):
+            q["insecure"] = "1"
+        if net in ("ws", "websocket"):
+            ws = p.get("ws-opts") or {}
+            q["path"] = ws.get("path", "/")
+            hdr = ws.get("headers") or {}
+            q["host"] = hdr.get("Host") or hdr.get("host")
+        elif net == "grpc":
+            q["serviceName"] = (p.get("grpc-opts") or {}).get("grpc-service-name")
+        pw = quote(str(p.get("password", "")), safe="")
+        return f"trojan://{pw}@{server}:{port}?{q_str(q)}{frag}"
+
+    if t == "tuic":
+        q = {
+            "sni": p.get("sni") or p.get("servername"),
+            "congestion_control": p.get("congestion-controller"),
+            "udp_relay_mode": p.get("udp-relay-mode"),
+        }
+        if p.get("skip-cert-verify"):
+            q["insecure"] = "1"
+        # A v4 proxy has a `token` and neither of these; its link is refused by
+        # the parser as missing them.
+        uuid = quote(str(p.get("uuid", "")), safe="")
+        pw = quote(str(p.get("password", "")), safe="")
+        return f"tuic://{uuid}:{pw}@{server}:{port}?{q_str(q)}{frag}"
+
+    return None  # ssr / wireguard / snell / hysteria (v1) / … — rowt can't use these
 
 
 def _links_from_clash_proxies(proxies: list, skipped: Counter) -> list[str]:
@@ -223,21 +286,8 @@ def import_v2box(db_path: Path, skipped: Counter) -> tuple[list[str], list[dict]
         con.close()
     for ztype, zurl, zsub in rows:
         url = (zurl or "").strip()
-        if url.startswith(
-            (
-                "vless://",
-                "vmess://",
-                "anytls://",
-                "hysteria2://",
-                "hy2://",
-                "trojan://",
-                "ss://",
-            )
-        ):
-            if url.startswith(("trojan://", "ss://")):
-                skipped[url.split("://", 1)[0]] += 1
-            else:
-                links.append(url)
+        if url.startswith(vp.SCHEMES):
+            links.append(url)
         else:
             skipped[str(ztype or "unknown").lower()] += 1
         sub = (zsub or "").strip()

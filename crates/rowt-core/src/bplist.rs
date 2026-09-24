@@ -306,12 +306,16 @@ impl P<'_> {
                 utf16be(&d).map(PlVal::Str)
             }
             0x80 => {
+                // Up to 16 bytes, so u128 holds any of them — and `plistlib.UID`
+                // raises ValueError for one of 2**64 or more, which the parse
+                // turns into InvalidFileException. Shifting into a u64 instead
+                // silently kept the low 8 bytes of a damaged 11-byte UID.
                 let d = self.read_upto(1 + l as usize).to_vec();
-                let mut v: u64 = 0;
+                let mut v: u128 = 0;
                 for &b in &d {
-                    v = (v << 8) | b as u64;
+                    v = (v << 8) | b as u128;
                 }
-                Some(PlVal::Uid(v))
+                Some(PlVal::Uid(u64::try_from(v).ok()?))
             }
             0xA0 => {
                 let s = self.get_size(l)?;
@@ -497,6 +501,17 @@ mod tests {
     #[test]
     fn a_uid_is_its_own_type_not_an_integer() {
         assert_eq!(load(&bp(vec![vec![0x80, 7]], 0)).unwrap(), PlVal::Uid(7));
+    }
+
+    #[test]
+    fn a_uid_of_two_to_the_64_or_more_makes_the_file_invalid() {
+        // `plistlib.UID` refuses one; the parse turns the ValueError into
+        // InvalidFileException. Width alone is not the test — leading zero
+        // bytes still fit.
+        let wide = [vec![0x8a, 0x01], vec![0; 10]].concat();
+        assert!(load(&bp(vec![wide], 0)).is_err());
+        let padded = [vec![0x8a], vec![0; 10], vec![7]].concat();
+        assert_eq!(load(&bp(vec![padded], 0)).unwrap(), PlVal::Uid(7));
     }
 
     #[test]

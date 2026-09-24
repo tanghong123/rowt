@@ -77,8 +77,8 @@ TITLES = [
     "dup",
     "dup",
 ]
-# Weighted toward the three the importer actually converts, so the Reality,
-# flow and transport branches are reached often rather than eventually.
+# Weighted toward the four the importer actually converts, so the Reality,
+# flow, transport and obfs branches are reached often rather than eventually.
 TYPES = [
     "VLESS",
     "VLESS",
@@ -89,13 +89,20 @@ TYPES = [
     "Subscribe",
     "Subscribe",
     "Shadowsocks",
+    "Shadowsocks",
+    "Shadowsocks",
     "Trojan",
     "",
     None,
     "vless",
 ]
-PORTS = [443, 8443, 0, "8443", " 8443 ", "abc", 1.5, True, None, -1, 65536]
-OBFS = ["none", "ws", "WebSocket", "grpc", "", None, "tls"]
+PORTS = [443, 8443, 0, "8443", " 8443 ", "abc", 1.5, True, None, -1, 65536, "8388", [1]]
+OBFS = ["none", "ws", "WebSocket", "grpc", "", None, "tls", "http", "HTTP"]
+# Shadowsocks's own fields, in the shapes a real store holds them (method and
+# obfs as strings, `plugin`/`proto` "none", a `chain` as another entry's id) —
+# plus the ones sing-box or rowt must refuse.
+SS_METHODS = ["aes-256-gcm", "aes-256-gcm", "chacha20-ietf-poly1305", "AES-128-GCM",
+              "rc4", "", None, 7, "2022-blake3-aes-128-gcm"]
 
 
 def w(path: str, data: bytes | str) -> None:
@@ -148,7 +155,20 @@ def server_entry(rng: random.Random, objs: list) -> dict:
     if rng.random() < 0.8:
         e["port"] = ref(rng.choice(PORTS))
     if rng.random() < 0.8:
-        e["password"] = ref(rng.choice(["pw-real", "pw-real", "pw-real", "", None, 42, b"pw"]))
+        e["password"] = ref(
+            rng.choice(
+                ["pw-real", "pw-real", "pw-real", "", None, 42, b"pw", "AAAAAAAAAAAAAAAAAAAAAA=="]
+            )
+        )
+    ss = typ == "Shadowsocks"
+    if rng.random() < (0.9 if ss else 0.1):
+        e["method"] = ref(rng.choice(SS_METHODS))
+    if rng.random() < (0.5 if ss else 0.1):
+        e["plugin"] = ref(rng.choice(["none", "none", "", None, "v2ray-plugin", "NONE", 5]))
+    if rng.random() < (0.5 if ss else 0.1):
+        e["proto"] = ref(rng.choice(["none", "none", "origin", "", None, "auth_aes128_md5"]))
+    if rng.random() < (0.15 if ss else 0.05):
+        e["chain"] = ref(rng.choice(["9F88A164-B8EC-4DA3-830E-7F36A790BDA2", "", None]))
     if rng.random() < 0.6:
         e["uuid"] = ref(rng.choice(["shadowrockets-own-id", "", None]))
     if rng.random() < 0.7:
@@ -166,7 +186,7 @@ def server_entry(rng: random.Random, objs: list) -> dict:
     if rng.random() < 0.5:
         e["obfs"] = ref(rng.choice(OBFS))
     if rng.random() < 0.4:
-        e["obfsParam"] = ref(rng.choice(["/ws", "", None, "svc"]))
+        e["obfsParam"] = ref(rng.choice(["/ws", "", None, "svc", "cdn.example.com"]))
     if rng.random() < 0.25:
         e["pluginParam"] = ref(rng.choice(["/plugin", "", None]))
     if rng.random() < 0.3:
@@ -214,6 +234,9 @@ def store_bytes(rng: random.Random) -> bytes:
     return plistlib.dumps(root, fmt=plistlib.FMT_BINARY)
 
 
+DAMAGE_BYTES = [x for x in range(256) if not 0x15 <= x <= 0x1F]
+
+
 def damaged(rng: random.Random, data: bytes) -> bytes:
     """A plist that has been through something. Both implementations must agree
     on which of these are still readable."""
@@ -224,7 +247,11 @@ def damaged(rng: random.Random, data: bytes) -> bytes:
     if kind < 0.7 and len(b) > 12:
         for _ in range(rng.randint(1, 3)):
             i = rng.randrange(8, len(b))
-            b[i] = rng.randrange(256)
+            # Never 0x15-0x1f: as a marker that is an integer wider than 16
+            # bytes, which bplist.rs refuses by design (its module doc: Apple's
+            # writer never emits one, and plistlib would hand back a bignum).
+            # A flip that lands there tests that documented choice, not parity.
+            b[i] = rng.choice(DAMAGE_BYTES)
         return bytes(b)
     if kind < 0.85:
         return b"not a plist at all\n" + bytes(b[:20])

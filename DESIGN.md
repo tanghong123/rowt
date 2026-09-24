@@ -366,7 +366,7 @@ writing the same source-independent review file, then `--apply`. The mapping:
 
 | Shadowrocket | rowt |
 |--------------|------------|
-| `[Proxy]` entries / subscription URLs | servers — `rowt server add` / `subscribe` / `import` (VLESS / VMess / AnyTLS / hysteria2; SS/trojan etc. skipped) |
+| `[Proxy]` entries / subscription URLs | servers — `rowt server add` / `subscribe` / `import` (VLESS / VMess / AnyTLS / hysteria2 / Shadowsocks / Trojan / TUIC; others skipped) |
 | `[Rule] …,PROXY` | `escape-domains.txt` (→ escape) |
 | `[Rule] …,DIRECT` for **intranet** domains | `corp-domains.txt` (→ corp) |
 | `[Rule] …,DIRECT` for **everything else** | nothing to do — escape's `final` is already `direct` |

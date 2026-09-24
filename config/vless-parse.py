@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Parse VLESS / AnyTLS share links (or a subscription) into sing-box outbounds.
+"""Parse share links (or a subscription) into sing-box outbounds.
 
-    vless-parse.py '<vless://|anytls://...>' [--tag TAG]   # one link -> one object
-    vless-parse.py --multi < links.txt                     # many links -> array
-    vless-parse.py --sub '<subscription-url>'              # fetch+decode -> array
-    vless-parse.py --combine < array.json                  # dedupe + uniquify tags
+    vless-parse.py '<vless://|ss://|trojan://...>' [--tag TAG]  # one link -> one object
+    vless-parse.py --multi < links.txt                          # many links -> array
+    vless-parse.py --sub '<subscription-url>'                   # fetch+decode -> array
+    vless-parse.py --combine < array.json                       # dedupe + uniquify tags
 
 Emits sing-box outbound(s) on stdout. Supported protocols: VLESS (incl. Reality),
-VMess, AnyTLS, and hysteria2 (incl. Salamander obfs). In --multi/--sub each outbound
-gets a unique tag from the link's #name (sanitized), falling back to "server-N".
+VMess, AnyTLS, hysteria2 (incl. Salamander obfs), Shadowsocks (incl. 2022 and the
+obfs/v2ray plugins), Trojan, and TUIC v5. In --multi/--sub each outbound gets a
+unique tag from the link's #name (sanitized), falling back to "server-N".
 Stdlib only — no dependencies. Credentials never touch the repo; the caller
 stores output under ~/.config/rowt/.
 """
@@ -25,6 +26,58 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from urllib.request import Request, urlopen
 
 RESERVED = {"escape", "auto", "direct", "corp", "block", "in", "local", "dns-out"}
+
+SCHEMES = (
+    "vless://",
+    "vmess://",
+    "anytls://",
+    "hysteria2://",
+    "hy2://",
+    "ss://",
+    "trojan://",
+    "tuic://",
+)
+
+# The Shadowsocks methods the pinned sing-box (1.13.14) accepts, probed with
+# `sing-box check`, which matches them case-sensitively; and the names other
+# clients give three of them. A method sing-box refuses fails `sing-box check`
+# for the WHOLE config, and with it every render, so it is refused here instead.
+SS_METHODS = (
+    "none",
+    "aes-128-gcm",
+    "aes-192-gcm",
+    "aes-256-gcm",
+    "chacha20-ietf-poly1305",
+    "xchacha20-ietf-poly1305",
+    "2022-blake3-aes-128-gcm",
+    "2022-blake3-aes-256-gcm",
+    "2022-blake3-chacha20-poly1305",
+    "aes-128-ctr",
+    "aes-192-ctr",
+    "aes-256-ctr",
+    "aes-128-cfb",
+    "aes-192-cfb",
+    "aes-256-cfb",
+    "rc4-md5",
+    "chacha20-ietf",
+    "xchacha20",
+)
+SS_ALIASES = {
+    "plain": "none",
+    "chacha20-poly1305": "chacha20-ietf-poly1305",
+    "xchacha20-poly1305": "xchacha20-ietf-poly1305",
+}
+# A Shadowsocks 2022 password is a base64 key of exactly this many bytes, or
+# several joined by ":" (identity keys, which only the AES methods take).
+SS_2022_KEY_BYTES = {
+    "2022-blake3-aes-128-gcm": 16,
+    "2022-blake3-aes-256-gcm": 32,
+    "2022-blake3-chacha20-poly1305": 32,
+}
+
+_UUID = re.compile(
+    r"[0-9a-fA-F]{8}(-?)[0-9a-fA-F]{4}\1[0-9a-fA-F]{4}\1[0-9a-fA-F]{4}\1[0-9a-fA-F]{12}"
+)
 
 
 def _first(qs: dict[str, list[str]], key: str, default: str = "") -> str:
@@ -43,7 +96,6 @@ def parse_vless(link: str, tag: str = "escape") -> dict:
 
     qs = parse_qs(u.query)
     security = _first(qs, "security", "none").lower()
-    net = _first(qs, "type", "tcp").lower()
     flow = _first(qs, "flow")
     sni = _first(qs, "sni") or _first(qs, "peer") or server
     fp = _first(qs, "fp", "chrome")
@@ -75,22 +127,270 @@ def parse_vless(link: str, tag: str = "escape") -> dict:
             }
         out["tls"] = tls
 
+    transport = _transport(qs)
+    if transport:
+        out["transport"] = transport
+    return out
+
+
+def _transport(qs: dict[str, list[str]]) -> dict | None:
+    """The `type=` transport that VLESS and Trojan links share; tcp is none."""
+    net = _first(qs, "type", "tcp").lower()
     if net in ("ws", "websocket"):
         transport: dict = {"type": "ws", "path": _first(qs, "path", "/")}
         host = _first(qs, "host")
         if host:
             transport["headers"] = {"Host": host}
-        out["transport"] = transport
-    elif net == "grpc":
-        out["transport"] = {"type": "grpc", "service_name": _first(qs, "serviceName")}
-    elif net in ("http", "h2"):
+        return transport
+    if net == "grpc":
+        return {"type": "grpc", "service_name": _first(qs, "serviceName")}
+    if net in ("http", "h2"):
         transport = {"type": "http", "path": _first(qs, "path", "/")}
         host = _first(qs, "host")
         if host:
             transport["host"] = [h for h in host.split(",") if h]
-        out["transport"] = transport
+        return transport
+    return None
 
+
+def parse_trojan(link: str, tag: str = "escape") -> dict:
+    """Turn a trojan:// URI into a sing-box Trojan outbound.
+
+    The whole userinfo is the password: a `:` in it is not a separator, as it
+    is for the uuid-shaped schemes. TLS is on unless the link says
+    `security=none`, and the transports are VLESS's.
+    """
+    u = urlsplit(link)
+    password = unquote(u.netloc.rpartition("@")[0])
+    server = u.hostname or ""
+    port = u.port or 443
+    if not password or not server:
+        raise ValueError("trojan link missing password or host")
+
+    qs = parse_qs(u.query)
+    security = _first(qs, "security", "tls").lower()
+    out: dict = {
+        "type": "trojan",
+        "tag": tag,
+        "server": server,
+        "server_port": int(port),
+        "password": password,
+    }
+    if security != "none":
+        insecure = _first(qs, "allowInsecure") or _first(qs, "insecure", "0")
+        tls: dict = {
+            "enabled": True,
+            "server_name": _first(qs, "sni") or _first(qs, "peer") or server,
+            "insecure": insecure in ("1", "true", "True"),
+        }
+        alpn = _first(qs, "alpn")
+        if alpn:
+            tls["alpn"] = [a for a in alpn.split(",") if a]
+        tls["utls"] = {"enabled": True, "fingerprint": _first(qs, "fp", "chrome")}
+        if security == "reality":
+            pbk = _first(qs, "pbk")
+            if not pbk:
+                raise ValueError("reality link missing pbk (public key)")
+            tls["reality"] = {
+                "enabled": True,
+                "public_key": pbk,
+                "short_id": _first(qs, "sid"),
+            }
+        out["tls"] = tls
+
+    transport = _transport(qs)
+    if transport:
+        out["transport"] = transport
     return out
+
+
+def parse_tuic(link: str, tag: str = "escape") -> dict:
+    """Turn a tuic:// (v5, `uuid:password@host`) URI into a sing-box TUIC outbound.
+
+    QUIC, so TLS is always on. With no `alpn` it offers h3, as Clash.Meta does:
+    TUIC servers are commonly set to require it. The uuid is checked because
+    sing-box refuses a malformed one for the whole config; tuning values it
+    does not know are dropped instead, leaving its defaults.
+    """
+    u = urlsplit(link)
+    uuid = unquote(u.username or "")
+    password = unquote(u.password or "")
+    server = u.hostname or ""
+    port = u.port or 443
+    if not uuid or not password or not server:
+        raise ValueError("tuic link missing uuid, password or host")
+    if not _UUID.fullmatch(uuid):
+        raise ValueError("tuic link has a malformed uuid")
+
+    qs = parse_qs(u.query)
+    insecure = (
+        _first(qs, "allow_insecure")
+        or _first(qs, "allowInsecure")
+        or _first(qs, "insecure", "0")
+    )
+    tls: dict = {
+        "enabled": True,
+        "server_name": _first(qs, "sni") or _first(qs, "peer") or server,
+        "insecure": insecure in ("1", "true", "True"),
+    }
+    alpn = _first(qs, "alpn", "h3")
+    if alpn:
+        tls["alpn"] = [a for a in alpn.split(",") if a]
+
+    out: dict = {
+        "type": "tuic",
+        "tag": tag,
+        "server": server,
+        "server_port": int(port),
+        "uuid": uuid,
+        "password": password,
+    }
+    cc = _first(qs, "congestion_control") or _first(qs, "congestion_controller")
+    cc = cc.lower().replace("-", "_")
+    if cc in ("cubic", "new_reno", "bbr"):
+        out["congestion_control"] = cc
+    relay = _first(qs, "udp_relay_mode").lower()
+    if relay in ("native", "quic"):
+        out["udp_relay_mode"] = relay
+    out["tls"] = tls
+    return out
+
+
+def _b64_key_bytes(s: str) -> int:
+    """How many bytes `s` holds as padded standard base64, the only form
+    sing-box reads a Shadowsocks 2022 key in, or -1 if it is not that."""
+    if len(s) % 4 or not re.fullmatch(r"[A-Za-z0-9+/]*={0,2}", s):
+        return -1
+    return len(s) // 4 * 3 - s.count("=")
+
+
+def _ss_plugin(spec: str) -> tuple[str, str]:
+    """A SIP003 `plugin` value (`name;opt=v;flag`) as sing-box's plugin and
+    plugin_opts.
+
+    sing-box builds in obfs-local (simple-obfs) and v2ray-plugin and no others,
+    and reads their mode case-sensitively, so the mode is lowercased and then
+    checked against what it accepts.
+    """
+    name, _, rest = spec.partition(";")
+    name = name.strip().lower()
+    if name == "simple-obfs":
+        name = "obfs-local"
+    if name not in ("obfs-local", "v2ray-plugin"):
+        raise ValueError(
+            f"shadowsocks plugin {name or '(empty)'} is not supported by sing-box"
+        )
+    key = "obfs" if name == "obfs-local" else "mode"
+    opts = rest.split(";") if rest else []
+    mode = None
+    for i, opt in enumerate(opts):
+        k, eq, v = opt.partition("=")
+        if eq and k == key:
+            mode = v.lower()
+            opts[i] = f"{key}={mode}"
+    allowed = ("http", "tls") if name == "obfs-local" else ("websocket", "quic")
+    if mode is not None and mode not in allowed:
+        raise ValueError(
+            f"{name} mode {mode or '(empty)'} is not supported by sing-box"
+        )
+    if mode == "quic" and "tls" not in opts:
+        raise ValueError("v2ray-plugin mode quic needs tls")
+    return name, ";".join(opts)
+
+
+def shadowsocks_outbound(
+    tag: str, server: str, port: int, method: str, password: str, plugin: str = ""
+) -> dict:
+    """A sing-box Shadowsocks outbound, for the ss:// parser and the Shadowrocket
+    importer alike, refusing what the pinned sing-box would refuse. Let through,
+    one bad method or key fails `sing-box check` for the whole config, and with
+    it every render until the server is removed by hand."""
+    m = method.strip().lower()
+    m = SS_ALIASES.get(m, m)
+    if m not in SS_METHODS:
+        raise ValueError(
+            f"shadowsocks method {method.strip() or '(empty)'} is not supported by sing-box"
+        )
+    if not password and m != "none":
+        raise ValueError("shadowsocks server missing password")
+    if not 0 < port < 65536:
+        raise ValueError(f"shadowsocks port {port} is out of range")
+    size = SS_2022_KEY_BYTES.get(m)
+    if size:
+        keys = password.split(":")
+        if len(keys) > 1 and m == "2022-blake3-chacha20-poly1305":
+            raise ValueError(f"shadowsocks {m} takes a single key")
+        if any(_b64_key_bytes(k) != size for k in keys):
+            raise ValueError(f"shadowsocks {m} needs base64 keys of {size} bytes")
+    out: dict = {
+        "type": "shadowsocks",
+        "tag": tag,
+        "server": server,
+        "server_port": port,
+        "method": m,
+        "password": password,
+    }
+    if plugin:
+        out["plugin"], out["plugin_opts"] = _ss_plugin(plugin)
+    return out
+
+
+def _ss_b64(s: str) -> str:
+    """vmess's forgiving base64 — either alphabet, padding optional."""
+    pad = "=" * (-len(s) % 4)
+    try:
+        raw = base64.b64decode(s.replace("-", "+").replace("_", "/") + pad)
+    except Exception as e:  # noqa: BLE001
+        raise ValueError("ss link is not valid base64") from e
+    return raw.decode("utf-8", "replace")
+
+
+def parse_ss(link: str, tag: str = "escape") -> dict:
+    """Turn an ss:// link into a sing-box Shadowsocks outbound.
+
+    Three shapes: SIP002's `ss://base64(method:password)@host:port`, SIP022's
+    `ss://method:password@host:port` with each half percent-encoded (how the
+    2022 keys travel), and the legacy all-base64
+    `ss://base64(method:password@host:port)`. Split by hand, not by urlsplit:
+    standard base64 carries `/`, which would end the netloc early. A `plugin=`
+    query is SIP003's `name;opt=v`.
+    """
+    body, _, query = link[len("ss://") :].partition("#")[0].partition("?")
+    if "@" in body:
+        userinfo, _, hostport = body.rpartition("@")
+        cred = unquote(userinfo)
+        if ":" not in cred:
+            cred = _ss_b64(cred)
+    else:
+        # A trailing "/" is the path separator of `…/?plugin=`, not base64: a
+        # well-formed legacy body ends in the encoding of a port digit, never "/".
+        cred, at, hostport = _ss_b64(body.rstrip("/")).rpartition("@")
+        if not at:
+            raise ValueError("ss link is not method:password@host:port")
+    method, colon, password = cred.partition(":")
+    if not colon:
+        raise ValueError("ss link missing method:password")
+
+    hostport = hostport.rstrip("/")
+    if hostport.startswith("["):
+        host, _, rest = hostport[1:].partition("]")
+        port = rest[1:] if rest.startswith(":") else ""
+    else:
+        host, sep, port = hostport.rpartition(":")
+        if not sep:
+            host, port = hostport, ""
+    if not host:
+        raise ValueError("ss link missing host")
+    if not (port.isascii() and port.isdigit() and 0 < int(port) < 65536):
+        raise ValueError("ss link missing a valid port")
+    return shadowsocks_outbound(
+        tag,
+        host.lower(),
+        int(port),
+        method,
+        password,
+        _first(parse_qs(query), "plugin"),
+    )
 
 
 def parse_anytls(link: str, tag: str = "escape") -> dict:
@@ -249,6 +549,12 @@ def parse_link(link: str, tag: str = "escape") -> dict:
         return parse_anytls(link, tag)
     if link.startswith(("hysteria2://", "hy2://")):
         return parse_hysteria2(link, tag)
+    if link.startswith("ss://"):
+        return parse_ss(link, tag)
+    if link.startswith("trojan://"):
+        return parse_trojan(link, tag)
+    if link.startswith("tuic://"):
+        return parse_tuic(link, tag)
     raise ValueError("unsupported protocol")
 
 
@@ -294,9 +600,7 @@ def parse_many(links: list[str]) -> list[dict]:
             continue
         if "://" not in link:
             continue  # subscription header lines (e.g. "REMARKS=...") — skip quietly
-        if not link.startswith(
-            ("vless://", "vmess://", "anytls://", "hysteria2://", "hy2://")
-        ):
+        if not link.startswith(SCHEMES):
             proto = link.split("://", 1)[0]
             print(f"warning: skipping unsupported link ({proto}://)", file=sys.stderr)
             continue
@@ -306,7 +610,8 @@ def parse_many(links: list[str]) -> list[dict]:
             print(f"warning: skipping a link ({e})", file=sys.stderr)
     if not out:
         raise ValueError(
-            "no usable vless:// / vmess:// / anytls:// / hysteria2:// links found"
+            "no usable vless:// / vmess:// / anytls:// / hysteria2:// / ss:// /"
+            " trojan:// / tuic:// links found"
         )
     return out
 
@@ -385,7 +690,11 @@ def fetch_subscription(url: str) -> list[str]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="share link(s) -> sing-box outbound JSON")
-    ap.add_argument("link", nargs="?", help="a vless:// / anytls:// share link")
+    ap.add_argument(
+        "link",
+        nargs="?",
+        help="a share link: vless, vmess, anytls, hysteria2, ss, trojan or tuic",
+    )
     ap.add_argument("--tag", default="escape", help="outbound tag in single mode")
     ap.add_argument(
         "--multi", action="store_true", help="read links from stdin -> array"

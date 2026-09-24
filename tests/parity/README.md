@@ -229,12 +229,14 @@ directory.
 `sr-diff` is the one that reads a binary format. Its corpus writes real
 NSKeyedArchiver plists with `plistlib`, then truncates and byte-flips a fifth
 of them — so the gate is as much about agreeing on which damaged stores are
-still READABLE as about what a readable one yields. It also carries the one
-place the Rust is deliberately narrower than the Python, named in
+still READABLE as about what a readable one yields. It also carries the two
+places the Rust is deliberately narrower than the Python, both named in
 `rowt-core::bplist`: XML plists are not read, only `bplist00`, which is what
-Shadowrocket writes and all `bin/rowt` can produce. The corpus contains no XML
-plist, because a corpus that avoids a gap is not evidence the gap is closed —
-the module doc is.
+Shadowrocket writes and all `bin/rowt` can produce; and an integer wider than
+16 bytes, which Apple's writer never emits, is refused where `plistlib` hands
+back a bignum. The corpus contains no XML plist, and its byte flips never write
+the `0x15`–`0x1f` markers, because a corpus that avoids a gap is not evidence
+the gap is closed — the module doc is.
 
 `vless-diff`, `merge-diff`, `foreign-diff` and `sr-diff` are the gates that
 compare stderr, because it is where stderr is a result: `server add` and the

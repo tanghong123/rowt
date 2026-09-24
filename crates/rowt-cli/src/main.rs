@@ -1661,7 +1661,7 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                 }
                 "add" => {
                     if rest.len() < 2 {
-                        die(&cfg, &format!("usage: {PROG} server add '<vless://|vmess://|anytls://|hysteria2://...>' [more...]"));
+                        die(&cfg, &format!("usage: {PROG} server add '<vless://|vmess://|anytls://|hysteria2://|ss://|trojan://|tuic://...>' [more...]"));
                     }
                     pool::add(&ctx, &rest[1..])
                 }

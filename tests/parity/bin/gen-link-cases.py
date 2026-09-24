@@ -41,16 +41,48 @@ VMESS_NETS = ["tcp", "ws", "grpc", "http", "h2", "kcp", "quic", "", "WS"]
 VMESS_TLS = ["", "tls", "1", "true", "reality", "none", "TLS"]
 VMESS_PORTS = [443, "443", "8443", 0, "abc", "", 443.0]
 
+# Shadowsocks. The methods mix what sing-box takes, the aliases other clients
+# write, case, and what it refuses; the 2022 keys are fixed byte patterns whose
+# standard base64 carries '+' and '/', so the url-safe and percent-encoded
+# spellings of them differ from the raw one.
+K16 = "+/v7" * 5 + "+w=="                 # base64 of 16 x 0xfb... bytes
+K32 = "+/v7" * 10 + "+/s="                # 32 bytes
+SS_METHODS = ["aes-256-gcm", "AES-128-GCM", "chacha20-ietf-poly1305",
+              "chacha20-poly1305", "xchacha20-poly1305", "plain", "none", "rc4",
+              "table", "", "rc4-md5", "2022-blake3-aes-128-gcm",
+              "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305"]
+SS_PASSWORDS = ["pw-1", "p:w", "p@ss", "p/w", "", "a b", "中文", "p%41w", K16, K32,
+                f"{K16}:{K16}", f"{K32}:{K32}", K32.replace("+", "-"), "notbase64!",
+                K32.rstrip("=")]
+SS_HOSTS = ["h1.example", "HOST.Example", "192.0.2.1", "[2001:db8::1]",
+            "[2001:DB8::1", "2001:db8::1", "", "中文.example", "h1.example/"]
+SS_PORTS = ["8388", "443", "0", "65535", "65536", "", "abc", "08388",
+            "99999999999999999999", "٣٣"]
+SS_PLUGINS = ["obfs-local;obfs=http;obfs-host=cdn.example", "simple-obfs;obfs=TLS",
+              "obfs-local", "obfs-local;obfs=bogus", "obfs-local;obfs=",
+              "v2ray-plugin", "v2ray-plugin;mode=websocket;tls;host=cdn.example;path=/ws",
+              "v2ray-plugin;mode=WebSocket", "v2ray-plugin;mode=quic",
+              "v2ray-plugin;mode=quic;tls", "v2ray-plugin;mode=grpc",
+              "shadow-tls;host=x", ";", "OBFS-LOCAL;obfs=http", "kcptun"]
+
+TUIC_USERS = [f"{u}:pw-1" for u in UUIDS[:3]] + [
+    UUIDS[0].upper() + ":p%3Aw", UUIDS[1].replace("-", "") + ":pw-2", UUIDS[2],
+    "not-a-uuid:pw-1", ":pw-1", "", UUIDS[3][:35] + "g:pw-1",
+    UUIDS[4].replace("-", "", 1) + ":pw-1", f"{UUIDS[5]}:", f"{UUIDS[0]}:a:b"]
+CCS = ["", "bbr", "BBR", "cubic", "new_reno", "New-Reno", "vegas"]
+RELAYS = ["", "native", "quic", "QUIC", "bogus"]
+
 
 def q(r: random.Random, proto: str) -> str:
     """A query string with the parameters that protocol actually reads, plus
     some it does not (which must be ignored identically)."""
     parts = []
     add = lambda k, v: parts.append(f"{k}={v}")
-    if proto == "vless":
-        add("security", r.choice(SECURITY))
+    if proto in ("vless", "trojan"):
+        if proto == "vless" or r.random() < 0.7:
+            add("security", r.choice(SECURITY))
         add("type", r.choice(NETS))
-        if r.random() < 0.4:
+        if proto == "vless" and r.random() < 0.4:
             add("flow", r.choice(["", "xtls-rprx-vision"]))
         if r.random() < 0.5:
             add("pbk", r.choice(["", "PUBKEY-0001"]))
@@ -58,6 +90,19 @@ def q(r: random.Random, proto: str) -> str:
             add("sid", r.choice(["", "ab", "00"]))
         if r.random() < 0.6:
             add("serviceName", r.choice(["", "grpc-svc", "a%2Fb"]))
+        if proto == "trojan":
+            if r.random() < 0.5:
+                add("allowInsecure", r.choice(INSECURE))
+            if r.random() < 0.3:
+                add("insecure", r.choice(INSECURE))
+    elif proto == "tuic":
+        for k in ("allow_insecure", "allowInsecure", "insecure"):
+            if r.random() < 0.3:
+                add(k, r.choice(INSECURE))
+        if r.random() < 0.6:
+            add(r.choice(["congestion_control", "congestion_controller"]), r.choice(CCS))
+        if r.random() < 0.5:
+            add("udp_relay_mode", r.choice(RELAYS))
     else:
         add("insecure", r.choice(INSECURE))
         if proto in ("hysteria2", "hy2"):
@@ -124,14 +169,59 @@ def vmess_link(r: random.Random) -> str:
     return "vmess://" + enc
 
 
+def ss_link(r: random.Random) -> str:
+    """An ss:// link in one of its three shapes — SIP002 (base64 userinfo,
+    either alphabet), SIP022 (percent-encoded plaintext), legacy (all base64) —
+    or broken in one of the ways a mangled subscription breaks them."""
+    import base64
+    from urllib.parse import quote
+    method, pw = r.choice(SS_METHODS), r.choice(SS_PASSWORDS)
+    host, port = r.choice(SS_HOSTS), r.choice(SS_PORTS)
+    hostport = f"{host}:{port}" if r.random() < 0.9 else host
+    b64 = lambda s: base64.b64encode(s.encode("utf-8")).decode()
+    shape = r.random()
+    if shape < 0.45:                               # SIP002
+        enc = b64(f"{method}:{pw}")
+        if r.random() < 0.3:
+            enc = enc.replace("+", "-").replace("/", "_").rstrip("=")
+        if r.random() < 0.1:
+            enc = enc.replace("=", "%3D")
+        s = f"ss://{enc}@{hostport}"
+    elif shape < 0.75:                             # SIP022
+        cred = f"{quote(method, safe='')}:{quote(pw, safe='')}"
+        if r.random() < 0.3:
+            cred = f"{method}:{pw}"                # raw — a '/' or '@' left in
+        s = f"ss://{cred}@{hostport}"
+    elif shape < 0.9:                              # legacy
+        s = "ss://" + b64(f"{method}:{pw}@{hostport}")
+    else:                                          # broken
+        s = "ss://" + r.choice(["!!!!", "", "@", f"{b64(method)}@{hostport}",
+                                "Zm9v", "bm8tYXQtc2lnbg==", f"{b64('m:p')}@",
+                                "%E4%B8%AD@h1.example:8388"])
+    if r.random() < 0.15:
+        s += "/"
+    if r.random() < 0.55:
+        plugin = r.choice(SS_PLUGINS)
+        s += "?plugin=" + (quote(plugin, safe="") if r.random() < 0.7 else plugin)
+        if r.random() < 0.2:
+            s += "&group=ignored"
+    if r.random() < 0.8:
+        s += "#" + r.choice(NAMES)
+    return s
+
+
 def link(r: random.Random) -> str:
     proto = r.choice(["vless", "vless", "vmess", "anytls", "hysteria2", "hy2",
-                      "ss", "trojan"])
+                      "ss", "ss", "ss", "trojan", "trojan", "tuic", "tuic",
+                      "wireguard"])
     if proto == "vmess":
         return vmess_link(r)
-    if proto in ("ss", "trojan"):
-        return f"{proto}://{r.choice(UUIDS)}@h1.example:443#unsupported"
-    user, host, port = r.choice(USERS), r.choice(HOSTS), r.choice(PORTS)
+    if proto == "ss":
+        return ss_link(r)
+    if proto == "wireguard":
+        return f"wireguard://{r.choice(UUIDS)}@h1.example:51820#unsupported"
+    user = r.choice(TUIC_USERS if proto == "tuic" else USERS)
+    host, port = r.choice(HOSTS), r.choice(PORTS)
     s = f"{proto}://{user}@{host}{port}"
     if r.random() < 0.85:
         s += "?" + q(r, proto)
@@ -149,7 +239,8 @@ def junk(r: random.Random) -> str:
 def outbound(r: random.Random) -> dict:
     o: dict = {}
     if r.random() < 0.95:
-        o["type"] = r.choice(["vless", "vmess", "anytls", "hysteria2"])
+        o["type"] = r.choice(["vless", "vmess", "anytls", "hysteria2",
+                              "shadowsocks", "trojan", "tuic"])
     if r.random() < 0.85:
         o["tag"] = r.choice(NAMES + ["escape", "auto", ""])
     o["server"] = r.choice(["h1.example", "h2.example", "192.0.2.1"])

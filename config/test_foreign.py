@@ -77,8 +77,87 @@ def test_vmess_ws_roundtrips():
     eq(o["tls"]["server_name"], "h.example", "sni")
 
 
+def test_ss_obfs_roundtrips():
+    proxy = {
+        "name": "S",
+        "type": "ss",
+        "server": "h.example",
+        "port": 8388,
+        "cipher": "aes-256-gcm",
+        "password": "p@ss:w/rd",
+        "plugin": "obfs",
+        "plugin-opts": {"mode": "tls", "host": "cdn.example"},
+    }
+    o = vp.parse_link(fi.clash_proxy_to_link(proxy), "S")
+    eq(o["type"], "shadowsocks", "type")
+    eq((o["server"], o["server_port"]), ("h.example", 8388), "endpoint")
+    eq((o["method"], o["password"]), ("aes-256-gcm", "p@ss:w/rd"), "credentials")
+    eq(o["plugin"], "obfs-local", "plugin")
+    eq(o["plugin_opts"], "obfs=tls;obfs-host=cdn.example", "plugin_opts")
+
+
+def test_ss_v2ray_plugin_roundtrips_and_shadow_tls_is_refused_by_name():
+    proxy = {
+        "name": "V",
+        "type": "ss",
+        "server": "h.example",
+        "port": 443,
+        "cipher": "chacha20-ietf-poly1305",
+        "password": "pw",
+        "plugin": "v2ray-plugin",
+        "plugin-opts": {"mode": "websocket", "tls": True, "path": "/ws"},
+    }
+    o = vp.parse_link(fi.clash_proxy_to_link(proxy), "V")
+    eq(o["plugin_opts"], "mode=websocket;tls;path=/ws", "v2ray opts")
+    proxy["plugin"] = "shadow-tls"
+    try:
+        vp.parse_link(fi.clash_proxy_to_link(proxy), "V")
+    except ValueError as e:
+        assert "shadow-tls" in str(e), e
+    else:
+        raise AssertionError("shadow-tls should be refused")
+
+
+def test_trojan_ws_roundtrips():
+    proxy = {
+        "name": "T",
+        "type": "trojan",
+        "server": "t.example",
+        "port": 443,
+        "password": "p/w",
+        "sni": "s.example",
+        "skip-cert-verify": True,
+        "network": "ws",
+        "ws-opts": {"path": "/tr", "headers": {"Host": "cdn.example"}},
+    }
+    o = vp.parse_link(fi.clash_proxy_to_link(proxy), "T")
+    eq(o["type"], "trojan", "type")
+    eq(o["password"], "p/w", "password")
+    eq(o["tls"]["server_name"], "s.example", "sni")
+    eq(o["tls"]["insecure"], True, "skip-cert-verify")
+    eq(o["transport"]["path"], "/tr", "ws path")
+
+
+def test_tuic_roundtrips():
+    proxy = {
+        "name": "U",
+        "type": "tuic",
+        "server": "u.example",
+        "port": 443,
+        "uuid": "2DD61D93-75D8-4DA4-AC0E-6AECE7EAC365",
+        "password": "pw",
+        "congestion-controller": "bbr",
+        "udp-relay-mode": "native",
+    }
+    o = vp.parse_link(fi.clash_proxy_to_link(proxy), "U")
+    eq(o["type"], "tuic", "type")
+    eq(o["congestion_control"], "bbr", "cc")
+    eq(o["udp_relay_mode"], "native", "relay")
+    eq(o["tls"]["alpn"], ["h3"], "alpn")
+
+
 def test_unsupported_type_is_none():
-    for t in ("trojan", "ss", "tuic", "wireguard"):
+    for t in ("ssr", "wireguard", "snell", "hysteria"):
         eq(
             fi.clash_proxy_to_link({"type": t, "name": "x", "server": "h", "port": 1}),
             None,
@@ -93,11 +172,12 @@ def test_skipped_counts_unsupported():
     proxies = [
         {"type": "vless", "name": "a", "server": "h", "port": 1, "uuid": "u"},
         {"type": "trojan", "name": "b", "server": "h", "port": 2, "password": "p"},
-        {"type": "ss", "name": "c", "server": "h", "port": 3},
+        {"type": "wireguard", "name": "c", "server": "h", "port": 3},
+        {"type": "ssr", "name": "d", "server": "h", "port": 4},
     ]
     links = fi._links_from_clash_proxies(proxies, skipped)
-    eq(len(links), 1, "one supported link")
-    eq(dict(skipped), {"trojan": 1, "ss": 1}, "skipped counts")
+    eq(len(links), 2, "vless and trojan become links")
+    eq(dict(skipped), {"wireguard": 1, "ssr": 1}, "skipped counts")
 
 
 def test_build_review_skips_existing_pool():

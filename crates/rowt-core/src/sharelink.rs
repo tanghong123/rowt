@@ -1,5 +1,6 @@
-//! Share links (`vless://`, `vmess://`, `anytls://`, `hysteria2://`) into
-//! sing-box outbounds — a port of `config/vless-parse.py`.
+//! Share links (`vless://`, `vmess://`, `anytls://`, `hysteria2://`, `ss://`,
+//! `trojan://`, `tuic://`) into sing-box outbounds — a port of
+//! `config/vless-parse.py`.
 //!
 //! This is the one module in rowt-core that handles credentials: the userinfo of
 //! a share link is a UUID or a password. A mis-parse here does not fail loudly,
@@ -35,7 +36,49 @@ use std::collections::HashSet;
 pub const RESERVED: [&str; 8] =
     ["escape", "auto", "direct", "corp", "block", "in", "local", "dns-out"];
 
-const SUPPORTED: [&str; 5] = ["vless://", "vmess://", "anytls://", "hysteria2://", "hy2://"];
+/// The schemes `parse_link` speaks. The importers read it too, to decide which
+/// V2Box rows are links.
+pub const SCHEMES: [&str; 8] =
+    ["vless://", "vmess://", "anytls://", "hysteria2://", "hy2://", "ss://", "trojan://", "tuic://"];
+
+/// The Shadowsocks methods the pinned sing-box (1.13.14) accepts, probed with
+/// `sing-box check`, which matches them case-sensitively. One it refuses fails
+/// the check for the WHOLE config, and with it every render.
+const SS_METHODS: [&str; 18] = [
+    "none",
+    "aes-128-gcm",
+    "aes-192-gcm",
+    "aes-256-gcm",
+    "chacha20-ietf-poly1305",
+    "xchacha20-ietf-poly1305",
+    "2022-blake3-aes-128-gcm",
+    "2022-blake3-aes-256-gcm",
+    "2022-blake3-chacha20-poly1305",
+    "aes-128-ctr",
+    "aes-192-ctr",
+    "aes-256-ctr",
+    "aes-128-cfb",
+    "aes-192-cfb",
+    "aes-256-cfb",
+    "rc4-md5",
+    "chacha20-ietf",
+    "xchacha20",
+];
+
+/// The names other clients give three of them.
+const SS_ALIASES: [(&str, &str); 3] = [
+    ("plain", "none"),
+    ("chacha20-poly1305", "chacha20-ietf-poly1305"),
+    ("xchacha20-poly1305", "xchacha20-ietf-poly1305"),
+];
+
+/// A Shadowsocks 2022 password is a base64 key of exactly this many bytes, or
+/// several joined by `:` (identity keys, which only the AES methods take).
+const SS_2022_KEY_BYTES: [(&str, i64); 3] = [
+    ("2022-blake3-aes-128-gcm", 16),
+    ("2022-blake3-aes-256-gcm", 32),
+    ("2022-blake3-chacha20-poly1305", 32),
+];
 
 fn obj() -> Map<String, Value> {
     Map::new()
@@ -88,7 +131,6 @@ pub fn parse_vless(link: &str, tag: &str) -> Result<Value, String> {
     }
     let qs = parse_qs(&u.query);
     let security = first(&qs, "security", "none").to_lowercase();
-    let net = first(&qs, "type", "tcp").to_lowercase();
     let flow = first(&qs, "flow", "");
     let sni = sni_of(&qs, &server);
     let fp = first(&qs, "fp", "chrome");
@@ -129,29 +171,39 @@ pub fn parse_vless(link: &str, tag: &str) -> Result<Value, String> {
         out.insert("tls".into(), tls.into());
     }
 
-    let host = first(&qs, "host", "");
+    if let Some(t) = transport(&qs) {
+        out.insert("transport".into(), t);
+    }
+    Ok(out.into())
+}
+
+/// `_transport` — the `type=` transport VLESS and Trojan links share; tcp (and
+/// anything unknown) is none.
+fn transport(qs: &[(String, Vec<String>)]) -> Option<Value> {
+    let net = first(qs, "type", "tcp").to_lowercase();
+    let host = first(qs, "host", "");
     match net.as_str() {
         "ws" | "websocket" => {
             let mut t = obj();
             t.insert("type".into(), "ws".into());
-            t.insert("path".into(), first(&qs, "path", "/").into());
+            t.insert("path".into(), first(qs, "path", "/").into());
             if !host.is_empty() {
                 let mut h = obj();
                 h.insert("Host".into(), host.into());
                 t.insert("headers".into(), h.into());
             }
-            out.insert("transport".into(), t.into());
+            Some(t.into())
         }
         "grpc" => {
             let mut t = obj();
             t.insert("type".into(), "grpc".into());
-            t.insert("service_name".into(), first(&qs, "serviceName", "").into());
-            out.insert("transport".into(), t.into());
+            t.insert("service_name".into(), first(qs, "serviceName", "").into());
+            Some(t.into())
         }
         "http" | "h2" => {
             let mut t = obj();
             t.insert("type".into(), "http".into());
-            t.insert("path".into(), first(&qs, "path", "/").into());
+            t.insert("path".into(), first(qs, "path", "/").into());
             if !host.is_empty() {
                 t.insert(
                     "host".into(),
@@ -160,11 +212,310 @@ pub fn parse_vless(link: &str, tag: &str) -> Result<Value, String> {
                     ),
                 );
             }
-            out.insert("transport".into(), t.into());
+            Some(t.into())
         }
-        _ => {}
+        _ => None,
+    }
+}
+
+/// `x or y` over two query values — the first non-empty one.
+fn either(a: String, b: impl FnOnce() -> String) -> String {
+    if a.is_empty() {
+        b()
+    } else {
+        a
+    }
+}
+
+/// `parse_trojan`. The WHOLE userinfo is the password, so a `:` in it is not a
+/// separator as it is for the uuid-shaped schemes; TLS is on unless the link
+/// says `security=none`; the transports are VLESS's.
+pub fn parse_trojan(link: &str, tag: &str) -> Result<Value, String> {
+    let u = urlsplit(link)?;
+    let password = unquote(u.userinfo());
+    let server = u.hostname().unwrap_or_default();
+    let port = u.port()?.filter(|p| *p != 0).unwrap_or(443);
+    if password.is_empty() || server.is_empty() {
+        return Err("trojan link missing password or host".into());
+    }
+    let qs = parse_qs(&u.query);
+    let security = first(&qs, "security", "tls").to_lowercase();
+
+    let mut out = obj();
+    out.insert("type".into(), "trojan".into());
+    out.insert("tag".into(), tag.into());
+    out.insert("server".into(), server.clone().into());
+    out.insert("server_port".into(), port.into());
+    out.insert("password".into(), password.into());
+    if security != "none" {
+        let insecure = either(first(&qs, "allowInsecure", ""), || first(&qs, "insecure", "0"));
+        let mut tls = obj();
+        tls.insert("enabled".into(), true.into());
+        tls.insert("server_name".into(), sni_of(&qs, &server).into());
+        tls.insert("insecure".into(), matches!(insecure.as_str(), "1" | "true" | "True").into());
+        let alpn = first(&qs, "alpn", "");
+        if !alpn.is_empty() {
+            tls.insert("alpn".into(), alpn_list(&alpn));
+        }
+        let mut utls = obj();
+        utls.insert("enabled".into(), true.into());
+        utls.insert("fingerprint".into(), first(&qs, "fp", "chrome").into());
+        tls.insert("utls".into(), utls.into());
+        if security == "reality" {
+            let pbk = first(&qs, "pbk", "");
+            if pbk.is_empty() {
+                return Err("reality link missing pbk (public key)".into());
+            }
+            let mut r = obj();
+            r.insert("enabled".into(), true.into());
+            r.insert("public_key".into(), pbk.into());
+            r.insert("short_id".into(), first(&qs, "sid", "").into());
+            tls.insert("reality".into(), r.into());
+        }
+        out.insert("tls".into(), tls.into());
+    }
+    if let Some(t) = transport(&qs) {
+        out.insert("transport".into(), t);
     }
     Ok(out.into())
+}
+
+/// `_UUID.fullmatch` — 8-4-4-4-12 hex, with every hyphen or none of them.
+fn is_uuid(s: &str) -> bool {
+    let b = s.as_bytes();
+    let hex = |r: &[u8]| r.iter().all(|c| c.is_ascii_hexdigit());
+    match b.len() {
+        32 => hex(b),
+        36 => {
+            [8, 13, 18, 23].iter().all(|&i| b[i] == b'-')
+                && hex(&b[..8])
+                && hex(&b[9..13])
+                && hex(&b[14..18])
+                && hex(&b[19..23])
+                && hex(&b[24..])
+        }
+        _ => false,
+    }
+}
+
+/// `parse_tuic` — v5, `uuid:password@host`. QUIC, so TLS is always on, and h3
+/// is offered when the link names no ALPN. The uuid is checked because
+/// sing-box refuses a malformed one for the whole config; tuning values it does
+/// not know are dropped, leaving its defaults.
+pub fn parse_tuic(link: &str, tag: &str) -> Result<Value, String> {
+    let u = urlsplit(link)?;
+    let uuid = unquote(u.username().unwrap_or(""));
+    let password = unquote(u.password().unwrap_or(""));
+    let server = u.hostname().unwrap_or_default();
+    let port = u.port()?.filter(|p| *p != 0).unwrap_or(443);
+    if uuid.is_empty() || password.is_empty() || server.is_empty() {
+        return Err("tuic link missing uuid, password or host".into());
+    }
+    if !is_uuid(&uuid) {
+        return Err("tuic link has a malformed uuid".into());
+    }
+    let qs = parse_qs(&u.query);
+    let insecure = either(first(&qs, "allow_insecure", ""), || {
+        either(first(&qs, "allowInsecure", ""), || first(&qs, "insecure", "0"))
+    });
+    let mut tls = obj();
+    tls.insert("enabled".into(), true.into());
+    tls.insert("server_name".into(), sni_of(&qs, &server).into());
+    tls.insert("insecure".into(), matches!(insecure.as_str(), "1" | "true" | "True").into());
+    let alpn = first(&qs, "alpn", "h3");
+    if !alpn.is_empty() {
+        tls.insert("alpn".into(), alpn_list(&alpn));
+    }
+
+    let mut out = obj();
+    out.insert("type".into(), "tuic".into());
+    out.insert("tag".into(), tag.into());
+    out.insert("server".into(), server.into());
+    out.insert("server_port".into(), port.into());
+    out.insert("uuid".into(), uuid.into());
+    out.insert("password".into(), password.into());
+    let cc = either(first(&qs, "congestion_control", ""), || first(&qs, "congestion_controller", ""))
+        .to_lowercase()
+        .replace('-', "_");
+    if matches!(cc.as_str(), "cubic" | "new_reno" | "bbr") {
+        out.insert("congestion_control".into(), cc.into());
+    }
+    let relay = first(&qs, "udp_relay_mode", "").to_lowercase();
+    if matches!(relay.as_str(), "native" | "quic") {
+        out.insert("udp_relay_mode".into(), relay.into());
+    }
+    out.insert("tls".into(), tls.into());
+    Ok(out.into())
+}
+
+/// `_b64_key_bytes` — the bytes `s` holds as padded standard base64, the only
+/// form sing-box reads a Shadowsocks 2022 key in, or -1 if it is not that.
+fn b64_key_bytes(s: &str) -> i64 {
+    let pads = s.len() - s.trim_end_matches('=').len();
+    let body = &s[..s.len() - pads];
+    let ok = s.chars().count() % 4 == 0
+        && pads <= 2
+        && body.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'+' || c == b'/');
+    if !ok {
+        return -1;
+    }
+    (s.len() / 4 * 3) as i64 - pads as i64
+}
+
+/// `_ss_plugin` — a SIP003 `name;opt=v;flag` as sing-box's `plugin` and
+/// `plugin_opts`. sing-box builds in obfs-local (simple-obfs) and v2ray-plugin
+/// only, and reads their mode case-sensitively, so the mode is lowercased and
+/// checked here.
+fn ss_plugin(spec: &str) -> Result<(String, String), String> {
+    let (name, rest) = spec.split_once(';').unwrap_or((spec, ""));
+    let mut name = strip(name).to_lowercase();
+    if name == "simple-obfs" {
+        name = "obfs-local".into();
+    }
+    if name != "obfs-local" && name != "v2ray-plugin" {
+        let shown = if name.is_empty() { "(empty)" } else { &name };
+        return Err(format!("shadowsocks plugin {shown} is not supported by sing-box"));
+    }
+    let key = if name == "obfs-local" { "obfs" } else { "mode" };
+    let mut opts: Vec<String> =
+        if rest.is_empty() { Vec::new() } else { rest.split(';').map(String::from).collect() };
+    let mut mode: Option<String> = None;
+    for opt in opts.iter_mut() {
+        if let Some((k, v)) = opt.split_once('=') {
+            if k == key {
+                let m = v.to_lowercase();
+                *opt = format!("{key}={m}");
+                mode = Some(m);
+            }
+        }
+    }
+    let allowed: [&str; 2] = if name == "obfs-local" { ["http", "tls"] } else { ["websocket", "quic"] };
+    if let Some(m) = &mode {
+        if !allowed.contains(&m.as_str()) {
+            let shown = if m.is_empty() { "(empty)" } else { m };
+            return Err(format!("{name} mode {shown} is not supported by sing-box"));
+        }
+    }
+    if mode.as_deref() == Some("quic") && !opts.iter().any(|o| o == "tls") {
+        return Err("v2ray-plugin mode quic needs tls".into());
+    }
+    Ok((name, opts.join(";")))
+}
+
+/// `shadowsocks_outbound` — for the ss:// parser and the Shadowrocket importer
+/// alike, refusing what the pinned sing-box would refuse. Let through, one bad
+/// method or key fails `sing-box check` for the whole config, and with it every
+/// render until the server is removed by hand.
+pub fn shadowsocks_outbound(
+    tag: &str,
+    server: &str,
+    port: i64,
+    method: &str,
+    password: &str,
+    plugin: &str,
+) -> Result<Value, String> {
+    let lowered = strip(method).to_lowercase();
+    let m = SS_ALIASES.iter().find(|(a, _)| *a == lowered).map_or(lowered.clone(), |(_, t)| t.to_string());
+    if !SS_METHODS.contains(&m.as_str()) {
+        let shown = if strip(method).is_empty() { "(empty)" } else { strip(method) };
+        return Err(format!("shadowsocks method {shown} is not supported by sing-box"));
+    }
+    if password.is_empty() && m != "none" {
+        return Err("shadowsocks server missing password".into());
+    }
+    if !(0 < port && port < 65536) {
+        return Err(format!("shadowsocks port {port} is out of range"));
+    }
+    if let Some((_, size)) = SS_2022_KEY_BYTES.iter().find(|(n, _)| *n == m) {
+        let keys: Vec<&str> = password.split(':').collect();
+        if keys.len() > 1 && m == "2022-blake3-chacha20-poly1305" {
+            return Err(format!("shadowsocks {m} takes a single key"));
+        }
+        if keys.iter().any(|k| b64_key_bytes(k) != *size) {
+            return Err(format!("shadowsocks {m} needs base64 keys of {size} bytes"));
+        }
+    }
+    let mut out = obj();
+    out.insert("type".into(), "shadowsocks".into());
+    out.insert("tag".into(), tag.into());
+    out.insert("server".into(), server.into());
+    out.insert("server_port".into(), port.into());
+    out.insert("method".into(), m.into());
+    out.insert("password".into(), password.into());
+    if !plugin.is_empty() {
+        let (name, opts) = ss_plugin(plugin)?;
+        out.insert("plugin".into(), name.into());
+        out.insert("plugin_opts".into(), opts.into());
+    }
+    Ok(out.into())
+}
+
+/// `_ss_b64` — vmess's forgiving base64 (either alphabet, padding optional),
+/// with the failure reduced to one fixed message.
+fn ss_b64(s: &str) -> Result<String, String> {
+    let pad = "=".repeat((4 - s.chars().count() % 4) % 4);
+    let swapped: String = s
+        .chars()
+        .map(|c| match c {
+            '-' => '+',
+            '_' => '/',
+            c => c,
+        })
+        .collect();
+    let raw = b64decode(&format!("{swapped}{pad}")).map_err(|_| "ss link is not valid base64".to_string())?;
+    Ok(String::from_utf8_lossy(&raw).into_owned())
+}
+
+/// `parse_ss` — SIP002 `ss://base64(method:password)@host:port`, SIP022's
+/// percent-encoded `ss://method:password@host:port`, and the legacy all-base64
+/// `ss://base64(method:password@host:port)`. Split by hand, NOT by `urlsplit`:
+/// standard base64 carries `/`, which would end the netloc early — and the
+/// Python splits by hand too, so the two agree on the same wrong answer only if
+/// neither uses it.
+pub fn parse_ss(link: &str, tag: &str) -> Result<Value, String> {
+    let rest = &link["ss://".len()..];
+    let rest = rest.split_once('#').map_or(rest, |(b, _)| b);
+    let (body, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let (cred, hostport) = match body.rsplit_once('@') {
+        Some((userinfo, hostport)) => {
+            let cred = unquote(userinfo);
+            let cred = if cred.contains(':') { cred } else { ss_b64(&cred)? };
+            (cred, hostport.to_string())
+        }
+        // A trailing `/` is the path separator of `…/?plugin=`, not base64: a
+        // well-formed legacy body ends in the encoding of a port digit, never
+        // `/`. Stripping it also keeps the decode away from data after a pad,
+        // where CPython 3.13+'s decoder (it reads on) and this one (it stops)
+        // part ways.
+        None => match ss_b64(body.trim_end_matches('/'))?.rsplit_once('@') {
+            Some((c, h)) => (c.to_string(), h.to_string()),
+            None => return Err("ss link is not method:password@host:port".into()),
+        },
+    };
+    let Some((method, password)) = cred.split_once(':') else {
+        return Err("ss link missing method:password".into());
+    };
+    let hostport = hostport.trim_end_matches('/');
+    let (host, port) = match hostport.strip_prefix('[') {
+        Some(inner) => {
+            let (h, after) = inner.split_once(']').unwrap_or((inner, ""));
+            (h, after.strip_prefix(':').unwrap_or(""))
+        }
+        None => hostport.rsplit_once(':').unwrap_or((hostport, "")),
+    };
+    if host.is_empty() {
+        return Err("ss link missing host".into());
+    }
+    // `port.isdigit() and 0 < int(port) < 65536` — Python's int is unbounded,
+    // so a run of digits too long for u128 is simply out of range.
+    let valid = !port.is_empty()
+        && port.bytes().all(|c| c.is_ascii_digit())
+        && port.parse::<u128>().is_ok_and(|n| n > 0 && n < 65536);
+    if !valid {
+        return Err("ss link missing a valid port".into());
+    }
+    let plugin = first(&parse_qs(query), "plugin", "");
+    shadowsocks_outbound(tag, &host.to_lowercase(), port.parse::<i64>().unwrap_or(0), method, password, &plugin)
 }
 
 pub fn parse_anytls(link: &str, tag: &str) -> Result<Value, String> {
@@ -604,6 +955,12 @@ pub fn parse_link(link: &str, tag: &str) -> Result<Value, String> {
         parse_anytls(link, tag)
     } else if link.starts_with("hysteria2://") || link.starts_with("hy2://") {
         parse_hysteria2(link, tag)
+    } else if link.starts_with("ss://") {
+        parse_ss(link, tag)
+    } else if link.starts_with("trojan://") {
+        parse_trojan(link, tag)
+    } else if link.starts_with("tuic://") {
+        parse_tuic(link, tag)
     } else {
         Err("unsupported protocol".into())
     }
@@ -684,7 +1041,7 @@ pub fn parse_many(links: &[String]) -> Result<Batch, (Batch, String)> {
         if !link.contains("://") {
             continue; // subscription header lines (e.g. "REMARKS=…")
         }
-        if !SUPPORTED.iter().any(|p| link.starts_with(p)) {
+        if !SCHEMES.iter().any(|p| link.starts_with(p)) {
             let proto = link.split_once("://").map(|(p, _)| p).unwrap_or("");
             b.warnings.push(format!("warning: skipping unsupported link ({proto}://)"));
             continue;
@@ -699,7 +1056,8 @@ pub fn parse_many(links: &[String]) -> Result<Batch, (Batch, String)> {
         }
     }
     if b.outbounds.is_empty() {
-        let msg = "no usable vless:// / vmess:// / anytls:// / hysteria2:// links found".to_string();
+        let msg = "no usable vless:// / vmess:// / anytls:// / hysteria2:// / ss:// / trojan:// / tuic:// links found"
+            .to_string();
         return Err((b, msg));
     }
     Ok(b)
@@ -891,11 +1249,14 @@ mod tests {
     }
 
     fn vmess(cfg: Value) -> String {
-        // base64 without a dependency: the tests only need the standard alphabet.
+        format!("vmess://{}", b64(&serde_json::to_string(&cfg).unwrap()))
+    }
+
+    /// base64 without a dependency: the tests only need the standard alphabet.
+    fn b64(s: &str) -> String {
         const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let src = serde_json::to_string(&cfg).unwrap();
-        let b = src.as_bytes();
-        let mut out = String::from("vmess://");
+        let b = s.as_bytes();
+        let mut out = String::new();
         for c in b.chunks(3) {
             let n = ((c[0] as u32) << 16)
                 | ((*c.get(1).unwrap_or(&0) as u32) << 8)
@@ -1026,9 +1387,133 @@ mod tests {
 
     #[test]
     fn an_unsupported_scheme_is_named_in_the_warning() {
-        let e = parse_many(&["ss://whatever@h.example:443".into()]).unwrap_err();
-        assert_eq!(e.0.warnings, ["warning: skipping unsupported link (ss://)"]);
-        assert_eq!(e.1, "no usable vless:// / vmess:// / anytls:// / hysteria2:// links found");
+        let e = parse_many(&["wireguard://whatever@h.example:443".into()]).unwrap_err();
+        assert_eq!(e.0.warnings, ["warning: skipping unsupported link (wireguard://)"]);
+        assert_eq!(
+            e.1,
+            "no usable vless:// / vmess:// / anytls:// / hysteria2:// / ss:// / trojan:// / tuic:// links found"
+        );
+    }
+
+    fn refused(link: &str, why: &str) {
+        match parse_link(link, "t") {
+            Ok(o) => panic!("{link}: parsed as {o}, should be refused ({why})"),
+            Err(e) => assert!(e.contains(why), "{link}: refused with {e:?}, not {why:?}"),
+        }
+    }
+
+    #[test]
+    fn ss_sip002_base64_userinfo_may_carry_a_slash() {
+        let cred = b64("aes-256-gcm:pa/ss?w");
+        assert!(cred.contains('/'), "the case needs a '/' in the base64");
+        let o = parse_link(&format!("ss://{cred}@H.Example:8388#N"), "N").unwrap();
+        assert_eq!(o["type"], "shadowsocks");
+        assert_eq!(o["server"], "h.example");
+        assert_eq!(o["server_port"], 8388);
+        assert_eq!(o["method"], "aes-256-gcm");
+        assert_eq!(o["password"], "pa/ss?w");
+        assert!(o.get("plugin").is_none());
+    }
+
+    #[test]
+    fn ss_urlsafe_unpadded_with_an_obfs_plugin() {
+        let cred: String = b64("chacha20-ietf-poly1305:p@ss")
+            .replace('+', "-")
+            .replace('/', "_")
+            .trim_end_matches('=')
+            .to_string();
+        let o = parse_link(
+            &format!("ss://{cred}@h.example:443/?plugin=simple-obfs%3Bobfs%3DHTTP%3Bobfs-host%3Dcdn.example#N"),
+            "N",
+        )
+        .unwrap();
+        assert_eq!(o["password"], "p@ss");
+        assert_eq!(o["plugin"], "obfs-local");
+        assert_eq!(o["plugin_opts"], "obfs=http;obfs-host=cdn.example");
+    }
+
+    #[test]
+    fn ss_sip022_plaintext_ipv6_and_the_legacy_form() {
+        let key = b64(&"k".repeat(32));
+        let o = parse_link(
+            &format!("ss://2022-blake3-aes-256-gcm:{}@[2001:DB8::1]:8388", key.replace('=', "%3D")),
+            "t",
+        )
+        .unwrap();
+        assert_eq!(o["password"], key.as_str());
+        assert_eq!(o["server"], "2001:db8::1");
+        let o = parse_link(&format!("ss://{}", b64("aes-128-gcm:p:w@legacy.example:8389")), "t").unwrap();
+        assert_eq!((o["server"].as_str(), o["server_port"].as_i64()), (Some("legacy.example"), Some(8389)));
+        assert_eq!(o["password"], "p:w", "the first ':' is the separator");
+    }
+
+    #[test]
+    fn ss_refuses_what_sing_box_would() {
+        let k16 = b64(&"k".repeat(16));
+        let k32 = b64(&"k".repeat(32));
+        let pw = b64("aes-256-gcm:pw");
+        refused(&format!("ss://{}@h.example:1", b64("rc4:pw")), "method rc4 is not supported");
+        refused(&format!("ss://2022-blake3-aes-128-gcm:{k32}@h.example:1"), "keys of 16 bytes");
+        refused("ss://2022-blake3-aes-256-gcm:notbase64!@h.example:1", "keys of 32");
+        refused(&format!("ss://2022-blake3-chacha20-poly1305:{k32}:{k32}@h.example:1"), "single key");
+        refused(&format!("ss://{}@h.example:1", b64("aes-256-gcm:")), "missing password");
+        refused(&format!("ss://{pw}@h.example"), "missing a valid port");
+        refused(&format!("ss://{pw}@h.example:65536"), "missing a valid port");
+        refused(&format!("ss://{pw}@h.example:{}", "9".repeat(60)), "missing a valid port");
+        refused(&format!("ss://{}@h.example:1", b64("aes-256-gcm")), "missing method:password");
+        refused("ss://!!!!", "not method:password@host:port");
+        let base = format!("ss://{pw}@h.example:1?plugin=");
+        refused(&format!("{base}shadow-tls%3Bhost%3Dx"), "plugin shadow-tls is not supported");
+        refused(&format!("{base}obfs-local%3Bobfs%3Dbogus"), "obfs-local mode bogus");
+        refused(&format!("{base}v2ray-plugin%3Bmode%3Dquic"), "mode quic needs tls");
+        // And what it does take, so the refusals above do not refuse everything.
+        parse_link(&format!("ss://2022-blake3-aes-128-gcm:{k16}:{k16}@h.example:1"), "t").unwrap();
+        parse_link(&format!("{base}v2ray-plugin%3Bmode%3Dquic%3Btls"), "t").unwrap();
+        let o = parse_link(&format!("ss://{}@h.example:1", b64("CHACHA20-POLY1305:pw")), "t").unwrap();
+        assert_eq!(o["method"], "chacha20-ietf-poly1305", "alias, case-folded");
+    }
+
+    #[test]
+    fn trojan_is_tls_by_default_and_the_userinfo_is_the_password() {
+        let o = parse_link("trojan://p%40ss:w@T.example:443?allowInsecure=1#N", "N").unwrap();
+        assert_eq!(o["password"], "p@ss:w");
+        assert_eq!(o["tls"]["server_name"], "t.example");
+        assert_eq!(o["tls"]["insecure"], true);
+        assert_eq!(o["tls"]["utls"], json!({"enabled": true, "fingerprint": "chrome"}));
+        assert!(o.get("transport").is_none());
+        let o = parse_link("trojan://pw@t.example:80?security=none", "t").unwrap();
+        assert!(o.get("tls").is_none());
+        let o = parse_link(
+            "trojan://pw@t.example?security=reality&pbk=K&sid=ab&type=ws&path=%2Fws&host=cdn.example",
+            "t",
+        )
+        .unwrap();
+        assert_eq!(o["tls"]["reality"], json!({"enabled": true, "public_key": "K", "short_id": "ab"}));
+        assert_eq!(o["transport"], json!({"type": "ws", "path": "/ws", "headers": {"Host": "cdn.example"}}));
+        refused("trojan://pw@t.example?security=reality", "missing pbk");
+        refused("trojan://t.example:443", "missing password or host");
+    }
+
+    #[test]
+    fn tuic_defaults_and_tuning() {
+        let u = "2DD61D93-75D8-4DA4-AC0E-6AECE7EAC365";
+        let o = parse_link(&format!("tuic://{u}:p%3Aw@u.example:8443#N"), "N").unwrap();
+        assert_eq!((o["uuid"].as_str(), o["password"].as_str()), (Some(u), Some("p:w")));
+        assert_eq!(o["tls"]["alpn"], json!(["h3"]));
+        assert!(o.get("congestion_control").is_none());
+        let o = parse_link(
+            &format!("tuic://{u}:pw@u.example?congestion_control=New-Reno&udp_relay_mode=QUIC&allow_insecure=1"),
+            "t",
+        )
+        .unwrap();
+        assert_eq!(o["congestion_control"], "new_reno");
+        assert_eq!(o["udp_relay_mode"], "quic");
+        assert_eq!(o["tls"]["insecure"], true);
+        let o = parse_link(&format!("tuic://{u}:pw@u.example?congestion_control=vegas"), "t").unwrap();
+        assert!(o.get("congestion_control").is_none(), "unknown is dropped, not fatal");
+        parse_link(&format!("tuic://{}:pw@u.example", u.replace('-', "")), "t").unwrap();
+        refused("tuic://not-a-uuid:pw@u.example", "malformed uuid");
+        refused(&format!("tuic://{u}@u.example"), "missing uuid, password or host");
     }
 
     #[test]

@@ -25,7 +25,7 @@
 use crate::bplist::PlVal;
 use crate::foreign::{Counter, Exc, R};
 use crate::pyurl;
-use crate::sharelink::{strip, RESERVED};
+use crate::sharelink::{self, strip, RESERVED};
 use serde_json::{Map, Value};
 
 /// Python's type name, for an exception message.
@@ -408,6 +408,53 @@ pub fn to_anytls(s: &Entry, tag: &str) -> R<Option<Value>> {
     Ok(Some(Value::Object(out)))
 }
 
+/// `_to_shadowsocks`. Shadowrocket keeps simple-obfs in `obfs` (http/tls) and
+/// its host in `obfsParam`. In the store this was written against, `plugin`
+/// was "none" or absent and `pluginParam` empty on every entry, so anything
+/// else there is skipped rather than guessed at. So are a server `chain`ed
+/// through another, an SSR `proto`, and a `tls` flag. The outbound itself comes
+/// from the share-link parser's builder, which refuses what sing-box would.
+pub fn to_shadowsocks(s: &Entry, tag: &str) -> R<Option<Value>> {
+    let host = get(s, "host");
+    if !truthy(host) || truthy(get(s, "chain")) || truthy(get(s, "tls")) {
+        return Ok(None);
+    }
+    if !matches!(str_or(get(s, "proto"), "none").to_lowercase().as_str(), "none" | "origin") {
+        return Ok(None);
+    }
+    if str_or(get(s, "plugin"), "none").to_lowercase() != "none" {
+        return Ok(None);
+    }
+    let obfs = str_or(get(s, "obfs"), "none").to_lowercase();
+    let mut plugin = String::new();
+    if obfs == "http" || obfs == "tls" {
+        plugin = format!("obfs-local;obfs={obfs}");
+        let param = get(s, "obfsParam");
+        if truthy(param) {
+            plugin.push_str(&format!(";obfs-host={}", py_str_top(param.unwrap())));
+        }
+    } else if obfs != "none" {
+        return Ok(None);
+    }
+    // The Python evaluates every argument inside its `try`, so a port `int()`
+    // refuses with a ValueError skips the server too. A TypeError (a port that
+    // is a list, say) is not caught there, and ends the run as it does for VLESS.
+    let port = match port_of(s) {
+        Ok(p) => p,
+        Err(e) if e.name == "ValueError" => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    Ok(sharelink::shadowsocks_outbound(
+        tag,
+        &py_str_top(host.unwrap()),
+        port,
+        &str_or(get(s, "method"), ""),
+        &str_or(get(s, "password"), ""),
+        &plugin,
+    )
+    .ok())
+}
+
 /// The shared `tls` object, in the key order each caller writes it.
 fn tls_block(sni: &str, reality: Option<Map<String, Value>>, insecure: Option<bool>) -> Value {
     let mut tls = Map::new();
@@ -520,13 +567,17 @@ pub fn scan_store(root: &PlVal) -> R<Scan> {
                 e.insert("title".into(), Value::String(str_or(get(s, "title"), "")));
                 out.subscriptions.push(Value::Object(e));
             }
-        } else if typ == "VLESS" || typ == "AnyTLS" {
+        } else if typ == "VLESS" || typ == "AnyTLS" || typ == "Shadowsocks" {
             // The tag is taken BEFORE the conversion, so a server that cannot
             // be converted still burns its name — the same coupling
             // `sharelink::parse_many` has.
             let name = str_of(or2(get(s, "title"), get(s, "host")));
             let tag = sanitize(&name, index, &mut used);
-            let v = if typ == "VLESS" { to_vless(s, &tag)? } else { to_anytls(s, &tag)? };
+            let v = match typ.as_str() {
+                "VLESS" => to_vless(s, &tag)?,
+                "AnyTLS" => to_anytls(s, &tag)?,
+                _ => to_shadowsocks(s, &tag)?,
+            };
             match v {
                 Some(v) => out.servers.push(v),
                 None => out.skipped.incr(&typ),
@@ -571,6 +622,65 @@ mod tests {
     }
     fn s(x: &str) -> PlVal {
         PlVal::Str(x.into())
+    }
+
+    /// The field layout harvested from a real store: 44 Shadowsocks entries,
+    /// simple-obfs in `obfs`/`obfsParam`, the port a string.
+    fn ss_entry(extra: &[(&str, PlVal)]) -> Entry {
+        let mut e = entry(&[
+            ("type", s("Shadowsocks")),
+            ("host", s("h.example")),
+            ("port", s("8388")),
+            ("method", s("aes-256-gcm")),
+            ("password", s("pw")),
+            ("obfs", s("http")),
+            ("obfsParam", s("cdn.example")),
+            ("plugin", s("none")),
+            ("proto", s("none")),
+            ("tls", PlVal::Bool(false)),
+        ]);
+        for (k, v) in extra {
+            match e.iter_mut().find(|(ek, _)| matches!(ek, PlVal::Str(n) if n == k)) {
+                Some(slot) => slot.1 = v.clone(),
+                None => e.push((s(k), v.clone())),
+            }
+        }
+        e
+    }
+
+    #[test]
+    fn shadowsocks_takes_simple_obfs_from_obfs_and_obfs_param() {
+        let o = to_shadowsocks(&ss_entry(&[]), "t").unwrap().unwrap();
+        assert_eq!(o["type"], "shadowsocks");
+        assert_eq!(o["server_port"], 8388);
+        assert_eq!(o["plugin"], "obfs-local");
+        assert_eq!(o["plugin_opts"], "obfs=http;obfs-host=cdn.example");
+        let o = to_shadowsocks(&ss_entry(&[("obfs", s("none"))]), "t").unwrap().unwrap();
+        assert!(o.get("plugin").is_none());
+    }
+
+    #[test]
+    fn shadowsocks_skips_what_it_cannot_express_or_sing_box_would_refuse() {
+        for (k, v) in [
+            ("chain", s("9F88A164-B8EC-4DA3-830E-7F36A790BDA2")),
+            ("proto", s("auth_aes128_md5")),
+            ("plugin", s("v2ray-plugin")),
+            ("obfs", s("websocket")),
+            ("tls", PlVal::Bool(true)),
+            ("method", s("rc4")),
+            ("password", s("")),
+            ("port", s("99999")),
+            ("port", s("not a port")),
+        ] {
+            assert_eq!(to_shadowsocks(&ss_entry(&[(k, v.clone())]), "t").unwrap(), None, "{k}={v:?}");
+        }
+        // A port that is a (non-empty, so truthy) list is a TypeError, which the
+        // Python's `except ValueError` does not catch. An EMPTY one is falsy, and
+        // `port or 443` takes the default.
+        let e = to_shadowsocks(&ss_entry(&[("port", PlVal::Array(vec![s("1")]))]), "t");
+        assert!(e.is_err_and(|e| e.name == "TypeError"));
+        let o = to_shadowsocks(&ss_entry(&[("port", PlVal::Array(vec![]))]), "t").unwrap().unwrap();
+        assert_eq!(o["server_port"], 443);
     }
 
     #[test]

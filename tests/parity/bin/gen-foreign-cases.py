@@ -96,7 +96,8 @@ def yamlish(obj) -> str:
 
 def proxy(rng: random.Random) -> dict:
     t = rng.choice(
-        ["vless", "vless", "vmess", "vmess", "anytls", "hysteria2", "trojan", "ss", "tuic", "", None]
+        ["vless", "vless", "vmess", "vmess", "anytls", "hysteria2", "trojan", "ss", "ss",
+         "tuic", "wireguard", "ssr", "", None]
     )
     p: dict = {"name": rng.choice(NAMES), "server": rng.choice(HOSTS)}
     if t is not None or rng.random() < 0.5:
@@ -108,8 +109,10 @@ def proxy(rng: random.Random) -> dict:
         p["uuid"] = rng.choice(
             ["01779e49-274c-4237-a4a6-f16f91b7850e", "u-1", 7, "", None, "a/b c"]
         )
-    if rng.random() < 0.4:
-        p["password"] = rng.choice(["pw", "p+w/x", "", None, 42])
+    if rng.random() < 0.4 or t in ("ss", "trojan", "tuic"):
+        p["password"] = rng.choice(
+            ["pw", "p+w/x", "", None, 42, "p:w@x", "AAAAAAAAAAAAAAAAAAAAAA=="]
+        )
     if rng.random() < 0.2:
         p["auth"] = rng.choice(["auth1", ""])
     net = rng.choice(["tcp", "ws", "websocket", "grpc", "h2", "TCP", None])
@@ -155,11 +158,37 @@ def proxy(rng: random.Random) -> dict:
         p["grpc-opts"] = rng.choice([{"grpc-service-name": "svc"}, {}, "oops", None])
     if rng.random() < 0.3:
         p[rng.choice(["alterId", "alter-id"])] = rng.choice([0, 1, "2", None, ""])
-    if rng.random() < 0.25:
-        p["cipher"] = rng.choice(["auto", "aes-128-gcm", "", None])
+    if rng.random() < 0.25 or t == "ss":
+        p["cipher"] = rng.choice(
+            ["auto", "aes-128-gcm", "", None, "aes-256-gcm", "chacha20-ietf-poly1305",
+             "rc4", "2022-blake3-aes-128-gcm", 7]
+        )
     if rng.random() < 0.2:
         p["obfs"] = rng.choice(["salamander", "", None])
         p["obfs-password"] = rng.choice(["op", "", None])
+    if rng.random() < 0.3 or t == "ss":
+        p["plugin"] = rng.choice(["obfs", "v2ray-plugin", "shadow-tls", "", None, 7, "OBFS"])
+    if rng.random() < 0.3 or p.get("plugin"):
+        # Like reality-opts: a non-mapping is an AttributeError on the first .get.
+        p["plugin-opts"] = rng.choice(
+            [
+                {"mode": "http", "host": "cdn.example.com"},
+                {"mode": "tls"},
+                {"mode": None},
+                {"mode": "websocket", "tls": True, "host": "h.example.com", "path": "/ws"},
+                {"tls": "yes", "path": ""},
+                {"mode": "quic"},
+                {},
+                "oops",
+                7,
+                [],
+                None,
+            ]
+        )
+    if rng.random() < 0.3 or t == "tuic":
+        p["congestion-controller"] = rng.choice(["bbr", "cubic", "New_Reno", "", None, 7])
+    if rng.random() < 0.2 or t == "tuic":
+        p["udp-relay-mode"] = rng.choice(["native", "quic", "", None, "bogus"])
     return p
 
 
@@ -281,6 +310,9 @@ SQL_VALUES = [
     "hy2://pw@203.0.113.44:443",
     "trojan://pw@192.0.2.10:443",
     "ss://YWVzOnB3@192.0.2.10:8388",
+    "ss://YWVzLTI1Ni1nY206cHc=@192.0.2.10:8388#S",
+    "tuic://01779e49-274c-4237-a4a6-f16f91b7850e:pw@192.0.2.10:443#T",
+    "wireguard://k@192.0.2.10:51820",
     "  vless://u@192.0.2.10:443#padded  ",
     "not a link",
     "",

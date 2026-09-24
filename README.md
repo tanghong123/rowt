@@ -1,6 +1,6 @@
 # rowt — personal VLESS/AnyTLS VPN alongside a corporate VPN
 
-Run a personal **VLESS / VMess / AnyTLS / hysteria2** VPN for selected sites **while the corporate
+Run a personal **VLESS / VMess / AnyTLS / hysteria2 / Shadowsocks / Trojan / TUIC** VPN for selected sites **while the corporate
 VPN keeps the default route**, without the two clients fighting over the tunnel.
 
 📖 **[Product introduction](https://tanghong123.github.io/rowt/)** ·
@@ -378,10 +378,12 @@ just run it in place from the repo as `./bin/rowt` without installing.
 ## Quick start
 
 ```sh
-# one or more servers (vless:// , anytls:// , or hysteria2:// / hy2://)…
+# one or more servers (vless://, vmess://, anytls://, hysteria2:// / hy2://,
+# ss://, trojan://, tuic://)…
 ./bin/rowt server add 'vless://<uuid>@host:port?security=reality&sni=...&pbk=...&sid=...#JP' \
                        'anytls://<pass>@host2:port?sni=...#US' \
-                       'hysteria2://<pass>@host3:443?sni=...&insecure=0#SG'
+                       'hysteria2://<pass>@host3:443?sni=...&insecure=0#SG' \
+                       'ss://<base64 of method:password>@host4:8388#HK'
 # …a subscription link (add several with --add)…
 ./bin/rowt sub add 'https://example.com/sub/xxxxx'
 # …or migrate straight from Shadowrocket (see below):
@@ -390,6 +392,22 @@ just run it in place from the repo as `./bin/rowt` without installing.
 # with the CORP VPN connected:
 ./bin/rowt up
 ```
+
+**Shadowsocks, Trojan and TUIC.** An `ss://` link can be any of the three
+shapes in circulation: SIP002 (`base64(method:password)@host:port`), SIP022's
+plaintext form that carries 2022-blake3 keys, or the legacy all-base64 one. A
+`plugin=` of `obfs-local` / `simple-obfs` or `v2ray-plugin` is kept; those are
+the two plugins sing-box builds in. `trojan://` takes VLESS's `security`/`type`
+parameters (TLS unless `security=none`), and `tuic://` is v5
+(`uuid:password@host`), offering h3 when the link names no ALPN.
+
+A server the pinned sing-box would refuse is **skipped with a warning when it
+is added**, not saved: an unknown cipher, a 2022 key of the wrong length, another
+plugin (`shadow-tls`, `kcptun`, …), or a malformed TUIC uuid. Saved, it would
+fail `sing-box check` for the whole config, and every render with it, until
+removed by hand. WireGuard and ShadowTLS servers are not supported yet: sing-box
+runs them as an endpoint and as a pair of chained outbounds, which the config
+rowt renders does not express.
 
 ### Import from another client (Shadowrocket / Clash Verge / V2Box / FlClash)
 
@@ -408,8 +426,8 @@ $EDITOR ~/.config/rowt/import-review.json
 ```
 
 Each source contributes its **servers** (only the protocols rowt speaks — VLESS /
-VMess / AnyTLS / hysteria2; others are counted as skipped) and, where it has them,
-its **subscription URLs** (added to `subs.txt` so they stay auto-updating — e.g. a
+VMess / AnyTLS / hysteria2 / Shadowsocks / Trojan / TUIC; others are counted as
+skipped) and, where it has them, its **subscription URLs** (added to `subs.txt` so they stay auto-updating — e.g. a
 Clash Verge *remote* profile). Clash sources need [`yq`](https://github.com/mikefarah/yq)
 (`brew install yq`); V2Box is read from its local database. The apps don't need to be
 running — rowt reads their on-disk config.
@@ -421,8 +439,9 @@ duplicate; and a **subscription URL already in `subs.txt`** is skipped too (matc
 ignoring a display-only `name=` param). `import --apply` is source-independent: it
 applies whatever's in the review file, regardless of which client it came from.
 
-VLESS and AnyTLS servers import; Shadowsocks/other protocols are reported as
-skipped. `PROXY`-rule domains are merged into your escape list.
+VLESS, AnyTLS and Shadowsocks servers import (Shadowsocks with its simple-obfs
+setting). Other protocols, and a Shadowsocks server chained through another,
+are reported as skipped. `PROXY`-rule domains are merged into your escape list.
 
 ### Removing servers / subscriptions
 
@@ -446,7 +465,7 @@ $EDITOR config/escape-domains.txt
 
 ## Multiple servers & switching
 
-Every configured server (VLESS, AnyTLS, or hysteria2, from manual imports and/or
+Every configured server (whatever its protocol, from manual imports and/or
 subscriptions) is a member of a sing-box **selector** group named `escape`.
 
 ```sh
@@ -605,7 +624,7 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 | command | what it does |
 | --- | --- |
 | `server list` | list servers (`*` = active). |
-| `server add '<vless://\|vmess://\|anytls://\|hysteria2://…>' [more…]` | add manual server(s) from link(s), deduped. |
+| `server add '<vless://\|vmess://\|anytls://\|hysteria2://\|ss://\|trojan://\|tuic://…>' [more…]` | add manual server(s) from link(s), deduped. |
 | `server rm <tag>` / `server clear` | remove a manual server / clear all manual. |
 | `server import [--from shadowrocket\|clash-verge\|v2box\|flclash] [--apply]` | import servers **and** subs from another client via an editable, source-independent review file. |
 | `server import <file.json>` | restore manual servers from a `server dump` (round-trips). |
@@ -888,7 +907,7 @@ enforcing at the packet-filter layer, so → **vm** mode.
 
 ```
 bin/rowt              main tool (subcommands above)
-config/vless-parse.py      vless:// / anytls:// link → sing-box outbound (stdlib)
+config/vless-parse.py      share link (vless/vmess/anytls/hysteria2/ss/trojan/tuic) → sing-box outbound (stdlib)
 config/sr-import.py        Shadowrocket store + rules → servers/subs/domains
 config/escape-domains.txt  template for bucket 1 (escape) — seeded into ~/.config
 config/corp-domains.txt    template for bucket 2 (corp), domains + CIDRs

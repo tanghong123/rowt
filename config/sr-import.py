@@ -6,9 +6,9 @@ Surge-style rule config, and emits a JSON summary on stdout:
 
     {
       "subscriptions": [{"url": "...", "info": "...", "title": "..."}],
-      "servers":       [ <sing-box VLESS outbound>, ... ],   # VLESS only
-      "proxy_domains": ["google.com", ...],                   # [Rule] ...,PROXY
-      "skipped":       {"AnyTLS": 19, "Shadowsocks": 44}      # not importable
+      "servers":       [ <sing-box outbound>, ... ],   # VLESS / AnyTLS / Shadowsocks
+      "proxy_domains": ["google.com", ...],            # [Rule] ...,PROXY
+      "skipped":       {"Trojan": 3, "Shadowsocks": 1} # not importable
     }
 
 Nothing is written and no credentials are printed to stderr. Stdlib only.
@@ -18,13 +18,24 @@ from __future__ import annotations
 
 import argparse
 import glob
+import importlib.util
 import json
 import os
 import plistlib
 import re
 import sys
 from collections import Counter
+from pathlib import Path
 from plistlib import UID
+
+# The share-link parser's Shadowsocks builder, so a method or key sing-box would
+# refuse is refused the same way here (hyphenated filename → importlib).
+_spec = importlib.util.spec_from_file_location(
+    "vless_parse", Path(__file__).resolve().parent / "vless-parse.py"
+)
+assert _spec and _spec.loader
+vp = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(vp)
 
 HOME = os.path.expanduser("~")
 GC = f"{HOME}/Library/Group Containers/group.com.liguangming.Shadowrocket"
@@ -158,6 +169,40 @@ def _to_anytls(s: dict, tag: str) -> dict | None:
     }
 
 
+def _to_shadowsocks(s: dict, tag: str) -> dict | None:
+    """Shadowrocket keeps simple-obfs in `obfs` (http/tls), its host in
+    `obfsParam`. In the store this was written against, `plugin` was "none" or
+    absent and `pluginParam` empty on every entry, so anything else there is
+    skipped rather than guessed at. So are a server `chain`ed through another,
+    since rowt cannot express the hop, an SSR `proto`, and a `tls` flag."""
+    host, port = s.get("host"), s.get("port")
+    if not host or s.get("chain") or s.get("tls"):
+        return None
+    if str(s.get("proto") or "none").lower() not in ("none", "origin"):
+        return None
+    if str(s.get("plugin") or "none").lower() != "none":
+        return None
+    obfs = str(s.get("obfs") or "none").lower()
+    plugin = ""
+    if obfs in ("http", "tls"):
+        plugin = f"obfs-local;obfs={obfs}"
+        if s.get("obfsParam"):
+            plugin += f";obfs-host={s.get('obfsParam')}"
+    elif obfs != "none":
+        return None
+    try:
+        return vp.shadowsocks_outbound(
+            tag,
+            str(host),
+            int(port or 443),
+            str(s.get("method") or ""),
+            str(s.get("password") or ""),
+            plugin,
+        )
+    except ValueError:
+        return None
+
+
 def _parse_rules(conf: str) -> list[str]:
     doms: list[str] = []
     in_rules = False
@@ -226,9 +271,14 @@ def main() -> int:
                             "title": str(s.get("title") or ""),
                         }
                     )
-            elif typ in ("VLESS", "AnyTLS"):
+            elif typ in ("VLESS", "AnyTLS", "Shadowsocks"):
                 tag = _sanitize(str(s.get("title") or s.get("host")), i, used)
-                v = _to_vless(s, tag) if typ == "VLESS" else _to_anytls(s, tag)
+                convert = {
+                    "VLESS": _to_vless,
+                    "AnyTLS": _to_anytls,
+                    "Shadowsocks": _to_shadowsocks,
+                }[typ]
+                v = convert(s, tag)
                 if v:
                     result["servers"].append(v)
                 else:

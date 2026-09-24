@@ -348,7 +348,95 @@ pub fn clash_proxy_to_link(p: &Map<String, Value>) -> R<Option<String>> {
         )));
     }
 
-    Ok(None) // trojan / ss / ssr / tuic / wireguard / … — rowt cannot use these
+    if t == "ss" {
+        // Clash's names for the two plugins sing-box builds in. Any other one
+        // travels under its own name, for the parser to refuse by name.
+        let plugin = p.get("plugin");
+        let plugin = if truthy(plugin) { py_str(plugin.unwrap()) } else { String::new() };
+        let opts = p.get("plugin-opts");
+        let mut spec = plugin.clone();
+        if plugin == "obfs" {
+            let mode = dget_or(opts, "mode", Value::String("http".into()))?;
+            spec = format!("obfs-local;obfs={}", py_str(&mode));
+            let host = dget(opts, "host")?;
+            if truthy(host.as_ref()) {
+                spec.push_str(&format!(";obfs-host={}", py_str(host.as_ref().unwrap())));
+            }
+        } else if plugin == "v2ray-plugin" {
+            let mode = dget_or(opts, "mode", Value::String("websocket".into()))?;
+            spec = format!("v2ray-plugin;mode={}", py_str(&mode));
+            if truthy(dget(opts, "tls")?.as_ref()) {
+                spec.push_str(";tls");
+            }
+            for k in ["host", "path"] {
+                let v = dget(opts, k)?;
+                if truthy(v.as_ref()) {
+                    spec.push_str(&format!(";{k}={}", py_str(v.as_ref().unwrap())));
+                }
+            }
+        }
+        // SIP022's plaintext userinfo: the first `:` is the separator, so the
+        // password may carry more of them.
+        let cred = format!("{}:{}", str_or(p, "cipher", ""), str_or(p, "password", ""));
+        return Ok(Some(format!(
+            "ss://{}@{server}:{port}?{}{frag}",
+            pyurl::quote(&cred, ":"),
+            q_str(&[("plugin", Some(Value::String(spec)))])
+        )));
+    }
+
+    if t == "trojan" {
+        let net = str_or(p, "network", "tcp").to_lowercase();
+        let ro = p.get("reality-opts");
+        let security = if truthy(ro) { "reality" } else { "tls" };
+        let mut q: Vec<(&str, Option<Value>)> = vec![
+            ("security", Some(Value::String(security.into()))),
+            ("sni", qv(or2(p.get("sni"), p.get("servername")))),
+            ("fp", qv(p.get("client-fingerprint"))),
+            ("pbk", qvo(dget(ro, "public-key")?)),
+            ("sid", qvo(dget(ro, "short-id")?)),
+            ("type", Some(Value::String(net.clone()))),
+        ];
+        if truthy(p.get("skip-cert-verify")) {
+            q.push(("insecure", Some(Value::String("1".into()))));
+        }
+        if net == "ws" || net == "websocket" {
+            let ws = p.get("ws-opts");
+            q.push(("path", qvo(Some(dget_or(ws, "path", Value::String("/".into()))?))));
+            let hdr = dget(ws, "headers")?;
+            let host = {
+                let a = dget(hdr.as_ref(), "Host")?;
+                if truthy(a.as_ref()) {
+                    a
+                } else {
+                    dget(hdr.as_ref(), "host")?
+                }
+            };
+            q.push(("host", qvo(host)));
+        } else if net == "grpc" {
+            q.push(("serviceName", qvo(dget(p.get("grpc-opts"), "grpc-service-name")?)));
+        }
+        let pw = pyurl::quote(&str_or(p, "password", ""), "");
+        return Ok(Some(format!("trojan://{pw}@{server}:{port}?{}{frag}", q_str(&q))));
+    }
+
+    if t == "tuic" {
+        let mut q: Vec<(&str, Option<Value>)> = vec![
+            ("sni", qv(or2(p.get("sni"), p.get("servername")))),
+            ("congestion_control", qv(p.get("congestion-controller"))),
+            ("udp_relay_mode", qv(p.get("udp-relay-mode"))),
+        ];
+        if truthy(p.get("skip-cert-verify")) {
+            q.push(("insecure", Some(Value::String("1".into()))));
+        }
+        // A v4 proxy has a `token` and neither of these; the parser refuses
+        // its link as missing them.
+        let uuid = pyurl::quote(&str_or(p, "uuid", ""), "");
+        let pw = pyurl::quote(&str_or(p, "password", ""), "");
+        return Ok(Some(format!("tuic://{uuid}:{pw}@{server}:{port}?{}{frag}", q_str(&q))));
+    }
+
+    Ok(None) // ssr / wireguard / snell / hysteria (v1) / … — rowt cannot use these
 }
 
 /// `base64.b64encode` — standard alphabet, padded.
@@ -632,10 +720,9 @@ fn startswith_str(s: &Stripped, prefixes: &[&str]) -> R<bool> {
     }
 }
 
-const V2BOX_LINKS: [&str; 7] =
-    ["vless://", "vmess://", "anytls://", "hysteria2://", "hy2://", "trojan://", "ss://"];
-
-/// `import_v2box`, given the rows the caller read out of `ZCDV2RAYITEM`.
+/// `import_v2box`, given the rows the caller read out of `ZCDV2RAYITEM`. A row
+/// whose URL has a scheme `vless-parse` speaks is a link; any other row is
+/// counted under its `ZTYPE`.
 pub fn v2box_rows(
     rows: &[(PyVal, PyVal, PyVal)],
     skipped: &mut Counter,
@@ -644,13 +731,9 @@ pub fn v2box_rows(
     let mut subs: Vec<Value> = Vec::new();
     for (ztype, zurl, zsub) in rows {
         let url = or_empty_strip(zurl)?;
-        if startswith_str(&url, &V2BOX_LINKS)? {
+        if startswith_str(&url, &sharelink::SCHEMES)? {
             let Stripped::Str(u) = &url else { unreachable!() };
-            if startswith_str(&url, &["trojan://", "ss://"])? {
-                skipped.incr(u.split_once("://").map(|(p, _)| p).unwrap_or(u));
-            } else {
-                links.push(u.clone());
-            }
+            links.push(u.clone());
         } else {
             let t = if ztype.truthy() { ztype.to_py_str() } else { "unknown".into() };
             skipped.incr(&t.to_lowercase());
@@ -878,7 +961,7 @@ mod tests {
 
     #[test]
     fn unsupported_types_are_none() {
-        for t in ["trojan", "ss", "tuic", "wireguard"] {
+        for t in ["ssr", "wireguard", "snell", "hysteria"] {
             let p = obj(json!({"type": t, "name": "x", "server": "h", "port": 1}));
             assert_eq!(clash_proxy_to_link(&p).unwrap(), None, "{t}");
         }
@@ -890,11 +973,52 @@ mod tests {
         let proxies = json!([
             {"type": "vless", "name": "a", "server": "h", "port": 1, "uuid": "u"},
             {"type": "trojan", "name": "b", "server": "h", "port": 2, "password": "p"},
-            {"type": "ss", "name": "c", "server": "h", "port": 3}
+            {"type": "wireguard", "name": "c", "server": "h", "port": 3},
+            {"type": "ssr", "name": "d", "server": "h", "port": 4}
         ]);
         let links = links_from_clash_proxies(Some(&proxies), &mut c).unwrap();
-        assert_eq!(links.len(), 1);
-        assert_eq!(c.to_value(), json!({"trojan": 1, "ss": 1}));
+        assert_eq!(links.len(), 2);
+        assert_eq!(c.to_value(), json!({"wireguard": 1, "ssr": 1}));
+    }
+
+    #[test]
+    fn ss_with_obfs_roundtrips_and_shadow_tls_is_refused_by_name() {
+        let mut proxy = json!({"name": "S", "type": "ss", "server": "h.example", "port": 8388,
+                               "cipher": "aes-256-gcm", "password": "p@ss:w/rd", "plugin": "obfs",
+                               "plugin-opts": {"mode": "tls", "host": "cdn.example"}});
+        let o = sharelink::parse_link(&link(proxy.clone()), "S").unwrap();
+        assert_eq!(o["type"], "shadowsocks");
+        assert_eq!(o["password"], "p@ss:w/rd");
+        assert_eq!(o["plugin"], "obfs-local");
+        assert_eq!(o["plugin_opts"], "obfs=tls;obfs-host=cdn.example");
+        proxy["plugin"] = json!("shadow-tls");
+        let e = sharelink::parse_link(&link(proxy), "S").unwrap_err();
+        assert!(e.contains("shadow-tls"), "{e}");
+    }
+
+    #[test]
+    fn trojan_ws_and_tuic_roundtrip() {
+        let o = sharelink::parse_link(
+            &link(json!({"name": "T", "type": "trojan", "server": "t.example", "port": 443,
+                         "password": "p/w", "sni": "s.example", "skip-cert-verify": true,
+                         "network": "ws", "ws-opts": {"path": "/tr", "headers": {"Host": "cdn.example"}}})),
+            "T",
+        )
+        .unwrap();
+        assert_eq!(o["password"], "p/w");
+        assert_eq!(o["tls"]["server_name"], "s.example");
+        assert_eq!(o["tls"]["insecure"], true);
+        assert_eq!(o["transport"]["path"], "/tr");
+        let o = sharelink::parse_link(
+            &link(json!({"name": "U", "type": "tuic", "server": "u.example", "port": 443,
+                         "uuid": "2DD61D93-75D8-4DA4-AC0E-6AECE7EAC365", "password": "pw",
+                         "congestion-controller": "bbr", "udp-relay-mode": "native"})),
+            "U",
+        )
+        .unwrap();
+        assert_eq!(o["congestion_control"], "bbr");
+        assert_eq!(o["udp_relay_mode"], "native");
+        assert_eq!(o["tls"]["alpn"], json!(["h3"]));
     }
 
     #[test]
@@ -1063,17 +1187,19 @@ mod tests {
     }
 
     #[test]
-    fn v2box_counts_trojan_and_ss_by_scheme_and_others_by_ztype() {
+    fn v2box_takes_every_scheme_rowt_speaks_and_counts_the_rest_by_ztype() {
         let rows = vec![
             (PyVal::Str("a".into()), PyVal::Str("trojan://x".into()), PyVal::None),
-            (PyVal::Str("a".into()), PyVal::Str("ss://x".into()), PyVal::None),
+            (PyVal::Str("a".into()), PyVal::Str(" ss://x ".into()), PyVal::None),
+            (PyVal::Str("a".into()), PyVal::Str("tuic://x".into()), PyVal::None),
+            (PyVal::Str("WireGuard".into()), PyVal::Str("wireguard://x".into()), PyVal::None),
             (PyVal::Int(7), PyVal::Str("nonsense".into()), PyVal::None),
             (PyVal::Bytes(b"B".to_vec()), PyVal::Str("nope".into()), PyVal::None),
         ];
         let mut c = Counter::new();
         let (links, _) = v2box_rows(&rows, &mut c).unwrap();
-        assert!(links.is_empty());
-        assert_eq!(c.to_value(), json!({"trojan": 1, "ss": 1, "7": 1, "b'b'": 1}));
+        assert_eq!(links, ["trojan://x", "ss://x", "tuic://x"]);
+        assert_eq!(c.to_value(), json!({"wireguard": 1, "7": 1, "b'b'": 1}));
     }
 
     #[test]

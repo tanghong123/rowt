@@ -289,6 +289,12 @@ server add vless://00000000-0000-4000-8000-000000000009@203.0.113.20:443?securit
 server add
 server add notalink
 server add vless://00000000-0000-4000-8000-000000000009@203.0.113.20:443#d1 vless://00000000-0000-4000-8000-000000000009@203.0.113.20:443#d2
+# Shadowsocks (SIP002 base64 of `aes-256-gcm:pw-1`, with an obfs plugin), Trojan
+# and TUIC — each through `server add` to the pool, plus one Shadowsocks link the
+# pinned sing-box would refuse (rc4, base64 `rc4:pw`), which must be skipped
+# with its reason rather than saved.
+server add ss://YWVzLTI1Ni1nY206cHctMQ==@203.0.113.21:8388/?plugin=obfs-local%3Bobfs%3Dhttp%3Bobfs-host%3Dcdn.example#ss1 trojan://pw-2@203.0.113.22:443?sni=trojan.example&type=ws&path=%2Fws#tr1 tuic://00000000-0000-4000-8000-000000000010:pw-3@203.0.113.23:443?congestion_control=bbr#tu1
+server add ss://cmM0OnB3@203.0.113.24:8388#ss-rc4
 # Re-importing something the manual set already has must be idempotent on disk,
 # not merely deduped again in servers.json on the next rebuild.
 PARITY_SCENARIO=pool-seeded server add vless://00000000-0000-4000-8000-000000000001@203.0.113.10:443#alpha-again

@@ -257,6 +257,19 @@ impl Split {
         Some(userinfo.split_once(':').map_or(userinfo, |(u, _)| u))
     }
 
+    /// `SplitResult.password` — everything after the FIRST `:` of the
+    /// userinfo, so a `:` inside the password survives; `None` without a `:`.
+    pub fn password(&self) -> Option<&str> {
+        let (userinfo, _) = self.netloc.rsplit_once('@')?;
+        userinfo.split_once(':').map(|(_, p)| p)
+    }
+
+    /// The whole userinfo, `''` when there is no `@` —
+    /// `netloc.rpartition("@")[0]`.
+    pub fn userinfo(&self) -> &str {
+        self.netloc.rsplit_once('@').map_or("", |(u, _)| u)
+    }
+
     /// `(hostname, port)` before either is interpreted — `_hostinfo`.
     fn hostinfo(&self) -> (&str, Option<&str>) {
         let hostinfo = self.netloc.rsplit_once('@').map_or(&self.netloc[..], |(_, h)| h);

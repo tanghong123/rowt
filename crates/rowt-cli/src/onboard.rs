@@ -153,7 +153,7 @@ pub fn run(ctx: &Ctx, here: &Path) -> String {
                                 review.display(), review.display()));
             c
         } else {
-            format!("{PROG} server import --output <file> --from <shadowrocket|clash-verge|v2box|flclash>   (accumulate; repeat per client)\nedit <file>, then:  {PROG} server import --apply --input <file>\nor add directly:  {PROG} server add '<vless://|vmess://|anytls://|hysteria2://…>'  /  {PROG} sub add <url>")
+            format!("{PROG} server import --output <file> --from <shadowrocket|clash-verge|v2box|flclash>   (accumulate; repeat per client)\nedit <file>, then:  {PROG} server import --apply --input <file>\nor add directly:  {PROG} server add '<vless://|vmess://|anytls://|hysteria2://|ss://|trojan://|tuic://…>'  /  {PROG} sub add <url>")
         };
         ob(&mut o, false, "add servers", &cmds);
         pending += 1;

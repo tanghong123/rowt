@@ -13,7 +13,7 @@ use std::process::{Command, ExitCode, Stdio};
 
 const USAGE: &str = "usage: vless-parse.py [-h] [--tag TAG] [--multi] [--sub URL] [--combine]\n                      [link]";
 
-const HELP: &str = "\nshare link(s) -> sing-box outbound JSON\n\npositional arguments:\n  link        a vless:// / anytls:// share link\n\noptions:\n  -h, --help  show this help message and exit\n  --tag TAG   outbound tag in single mode\n  --multi     read links from stdin -> array\n  --sub URL   fetch a subscription URL -> array\n  --combine   dedupe an array read from stdin";
+const HELP: &str = "\nshare link(s) -> sing-box outbound JSON\n\npositional arguments:\n  link        a share link: vless, vmess, anytls, hysteria2, ss, trojan or\n              tuic\n\noptions:\n  -h, --help  show this help message and exit\n  --tag TAG   outbound tag in single mode\n  --multi     read links from stdin -> array\n  --sub URL   fetch a subscription URL -> array\n  --combine   dedupe an array read from stdin";
 
 /// `ap.error(msg)` — usage on stderr, then the complaint, then exit 2.
 fn ap_error(msg: &str) -> ! {
@@ -177,8 +177,15 @@ pub fn main(argv: &[String]) -> ExitCode {
         // a corrupt pool accepted rather than rejected. `pool.rs::combine` had
         // the type check all along and explained why; this is that check, on
         // the path that grew a caller.
-        if let Some(bad) = arr.iter().find(|e| !e.is_object()) {
-            attribute_error(bad);
+        //
+        // The Python prints each duplicate's note as it meets it, so the notes
+        // for the elements BEFORE the bad one are already on stderr when the
+        // traceback lands.
+        if let Some(i) = arr.iter().position(|e| !e.is_object()) {
+            for w in sharelink::combine(&arr[..i]).warnings {
+                eprintln!("{w}");
+            }
+            attribute_error(&arr[i]);
         }
         let b = sharelink::combine(arr);
         let out = Value::Array(b.outbounds.clone());
