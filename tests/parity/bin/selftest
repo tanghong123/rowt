@@ -1006,6 +1006,30 @@ else
   cp "$ROOT/config/vless-parse.py" "$tmp/config/vless-parse.py"
 fi
 
+echo "35. an agent's watch install must stop before it writes anything"
+cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+if [ ! -x "$ROOT/target/release/rowt-rs" ]; then
+  echo "  skip — no release build"
+else
+  # With no terminal, sudo cannot ask for the password, so the sudoers rule
+  # cannot go in — and `watch install` must stop BEFORE it writes the agent, or
+  # it leaves a watcher that looks installed and fails every proxy repair it
+  # attempts. ROWT_PARITY_SUDO=no-tty is the only way the sandbox reaches that
+  # branch; turning the stop into a warning must show up as a different exit
+  # status, config tree and trace.
+  perl -0pi -e 's/die ("\x27\$PROG watch install\x27 needs an admin password)/err $1/' "$tmp/bin/rowt"
+  if grep -qF "die \"'\$PROG watch install' needs an admin password" "$tmp/bin/rowt"; then
+    bad "could not turn the stop into a warning (cmd_watch moved?)"
+  elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" \
+       PARITY_CASES="$(only 'ROWT_PARITY_SUDO=no-tty watch install')" \
+       "$P" cli-diff >/dev/null 2>&1; then
+    bad "cli-diff passed with an agent's watch install carrying on without its sudoers rule"
+  else
+    ok "cli-diff caught a watch install that carries on without a password"
+  fi
+  cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+fi
+
 echo
 echo "selftest: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -23,6 +23,7 @@ is not 'does it work' but 'whose code ran, and what proves it'.
 | `conns` | **native** | cli-diff |
 | `corp` | **native** | cli-diff |
 | `direct` | **native** | cli-diff |
+| `doctor` | legacy | — |
 | `down` | **native** | cli-diff + boot-test |
 | `escape` | **native** | cli-diff |
 | `explain` | **native** | cli-diff |
@@ -54,7 +55,7 @@ is not 'does it work' but 'whose code ran, and what proves it'.
 | `vm` | **native** | cli-diff |
 | `watch` | **native** | cli-diff |
 
-**37 of 39 command arms answered natively**; the other 2 run in the shell.
+**37 of 40 command arms answered natively**; the other 3 run in the shell.
 
 Partial arms — native for some sub-commands, legacy for the rest.
 `native()` in crates/rowt-cli/src/main.rs is the authority:

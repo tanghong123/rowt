@@ -235,18 +235,11 @@ fn accumulate(ctx: &Ctx, source: &str, path: Option<&str>, file: &Path) -> Resul
     let cfg = &ctx.cfg;
     let (label, add) = match source {
         "shadowrocket" | "sr" => {
-            // QUIRK: the shell appends `--path <p>` to whichever dumper it
-            // picked, and `sr-import.py` has no such option — it takes
-            // `--store` and `--conf`. So `--from shadowrocket --path X` is
-            // always an argparse error and always ends here. Reproduced rather
-            // than quietly made to work, because making it work would change
-            // which file gets read.
-            if path.is_some() {
-                eprintln!("usage: sr-import.py [-h] [--store STORE] [--conf CONF] [--detect]");
-                eprintln!("sr-import.py: error: unrecognized arguments: --path");
-                crate::die(cfg, "could not read Shadowrocket data");
-            }
-            let store = srio::resolve_store(None);
+            // `--path` is the importer's `--store` here (`args.store or
+            // _find(...)`). It used to be forwarded to sr-import.py as
+            // `--path`, an argparse error every time; retired in both
+            // implementations at once (PORTING.md §6.7.2).
+            let store = srio::resolve_store(path);
             match srio::extract(store.as_deref(), None) {
                 Ok(v) => ("Shadowrocket", v),
                 Err(srio::SrErr::Exc(e)) => {

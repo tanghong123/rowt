@@ -98,6 +98,15 @@ running router alone. `sudo` is recorded and then delegates to the shim for the
 command it wraps, so an unshimmed effectful command fails loudly instead of
 running for real.
 
+A case token `ROWT_PARITY_SUDO=no-tty` makes that `sudo` refuse instead, in
+sudo's own words — "a terminal is required to read the password", or "a
+password is required" under `-n` — which is what a shell with no terminal and no
+cached credential gets (an agent's). Both implementations key an explanation on
+those words (`watch install` stops before writing anything, `proxy on` says to run
+it in a terminal), so without the token the sandbox could only ever reach a
+missing shim. It found a real divergence the day it was added: `rowt-rs` ignored
+a failed proxy write and carried on, where the shell dies.
+
 Four artifacts come out of each run: `stdout`, `stderr`, `rc`, `trace` (every
 shimmed call with its argv) and `fsstate` (the config tree afterwards,
 checksummed over *normalized* content).

@@ -25,7 +25,7 @@ the macOS system proxy), and sing-box decides, per connection, which of three
                       ┌────────────────────────── sing-box (127.0.0.1:7890) ──────────────────────────┐
    app ──HTTP/SOCKS──▶│  match the destination against rules, pick ONE outbound:                      │
                       │                                                                                │
-                      │   escape ──▶ VLESS tunnel      (socket BOUND to en0 → home router → VPS)       │
+                      │   escape ──▶ your tunnel       (socket BOUND to en0 → home router → VPS)       │
                       │   corp   ──▶ direct, NO bind   (OS routing table → corp utun → intranet)       │
                       │   direct ──▶ direct, bind en0  (socket BOUND to en0 → home router → internet)  │
                       └────────────────────────────────────────────────────────────────────────────────┘
@@ -251,7 +251,7 @@ detects this by testing a VPS both via the default route and via `en0`:
 - **mode `host`** — `bind_interface` works. The VLESS outbound runs on the host,
   bound to `en0`. Compact, nothing else needed, works while travelling.
 - **mode `vm`** — `bind_interface` is filtered. A **bridged Lima VM** (its own
-  LAN IP, its own network stack) runs the VLESS tunnel; the host's `escape`
+  LAN IP, its own network stack) runs the tunnel; the host's `escape`
   outbound becomes a SOCKS hop to that VM. The VM's packets are physically
   independent of the host, so no corp filter can catch them. The host→VM hop
   rides the home LAN, which corp excludes.

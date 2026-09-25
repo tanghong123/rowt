@@ -73,6 +73,29 @@ fn run(cmd: &str, args: &[&str]) -> Result<(), String> {
     }
 }
 
+/// `run`, keeping the command's complaint as the error, so a caller can tell
+/// sudo's "a terminal is required to read the password" (an agent's shell, which
+/// has no terminal) from every other failure. Nothing is printed here: the
+/// shell shows sudo's words on some calls and discards them on others
+/// (`-setproxybypassdomains … >/dev/null 2>&1`), so the caller decides.
+fn run_keep_err(cmd: &str, args: &[&str]) -> Result<(), String> {
+    let out = Command::new(cmd)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("{cmd}: {e}"))?;
+    let err = String::from_utf8_lossy(&out.stderr);
+    let err = err.trim_end_matches('\n');
+    if out.status.success() {
+        Ok(())
+    } else if err.is_empty() {
+        Err(format!("{cmd} {}: exit {:?}", args.join(" "), out.status.code()))
+    } else {
+        Err(err.to_string())
+    }
+}
+
 pub struct Mac;
 
 /// The three protocols, in the order the shell touches them. Order is part of
@@ -104,7 +127,7 @@ impl Mac {
             a.push("networksetup");
         }
         a.extend_from_slice(args);
-        run("sudo", &a)
+        if passwordless { run("sudo", &a) } else { run_keep_err("sudo", &a) }
     }
 
     /// `_iface_up`: an address AND a gateway.

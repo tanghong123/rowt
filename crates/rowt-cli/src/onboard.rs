@@ -164,8 +164,11 @@ pub fn run(ctx: &Ctx, here: &Path) -> String {
         ob(&mut o, true, &format!("router running (mode {mode})"),
            &format!("{PROG} status   ·   {PROG} down to stop"));
     } else {
-        ob(&mut o, false, "start the router (connect the CORP VPN first, other VPN app OFF)",
-           &format!("{PROG} up"));
+        // Keep the current VPN on until rowt works: behind a firewall it is what
+        // reaches GitHub and the subscriptions. Only a client LISTENING on
+        // rowt's port must go first; escape and direct bind to the physical NIC.
+        ob(&mut o, false, "start the router (keep your current VPN on; quit first only a client that holds rowt's port, e.g. Clash)",
+           &format!("{PROG} up host\nthen quit the old VPN app and connect the corp VPN ('{PROG} reload' if no watcher)"));
         pending += 1;
     }
 

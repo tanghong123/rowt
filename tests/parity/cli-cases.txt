@@ -182,6 +182,11 @@ help
 help nosuchcommand
 escape --help
 watch --help
+# `run` passes its arguments to the program it wraps, so a --help anywhere after
+# the program name is the program's. A FIRST argument of --help/-h names no
+# program, and used to reach bash's exec, which choked on it.
+run --help
+run -h
 
 # Every page in the registry, one case each. Not thoroughness for its own sake:
 # the pages share one renderer, and it processes the heredoc escapes the shell
@@ -195,6 +200,7 @@ help config
 help connections
 help corp
 help direct
+help doctor
 help down
 help escape
 help explain
@@ -357,8 +363,9 @@ server import --from shadowrocket
 server import --from clash-verge
 server import --from v2box
 server import --from flclash
-# `--path` is appended to whichever dumper was picked, and sr-import.py has no
-# such option — so this combination always fails. Bug-for-bug (PORTING.md §6.7).
+# `--path` names where to read the client from. It reached sr-import.py as
+# `--path` — an argparse error every time — until it was retired in both
+# implementations (PORTING.md §6.7.2); Shadowrocket's importer calls it --store.
 server import --from shadowrocket --path /nonexistent
 server import --from v2box --path /nonexistent
 # The OTHER meaning of the same arm, and nothing above reaches it: a positional
@@ -610,3 +617,17 @@ proxy off
 proxy on
 PARITY_SCENARIO=proxy-on proxy off
 PARITY_SCENARIO=router-up proxy on
+# …and the one scenario where `proxy on` really WRITES: its proxy points
+# elsewhere, so the six networksetup calls run. Then the same with sudo refusing
+# the way it does in a shell with no terminal (an agent's): ROWT_PARITY_SUDO=no-tty
+# makes the shim answer in sudo's words, which both sides key the explanation on.
+# Rust used to ignore a failed write here and carry on to the bypass list; no
+# case could see it while the shim always agreed.
+PARITY_SCENARIO=watch-proxy-repoint proxy on
+PARITY_SCENARIO=watch-proxy-repoint ROWT_PARITY_SUDO=no-tty proxy on
+
+# `watch install`'s one admin step. In the plain sandbox sudo reaches a shim that
+# does not exist (no visudo), so the rule reads as invalid and the agent is still
+# installed. Under no-tty, install stops BEFORE writing anything and says why.
+watch install
+ROWT_PARITY_SUDO=no-tty watch install

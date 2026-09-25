@@ -723,7 +723,22 @@ pub fn proxy_on(ctx: &Ctx, force: bool) -> String {
         } else {
             eprintln!("==> pointing '{svc}' system proxy at 127.0.0.1:{} (SOCKS + HTTP; needs admin)", ctx.port);
         }
-        let _ = p.proxy_set(&svc, ctx.port);
+        // `|| _proxy_admin_die`. This used to drop the error on the floor and
+        // carry on to the bypass list, where the shell dies — invisible to the
+        // gate until a scenario could make sudo refuse (ROWT_PARITY_SUDO).
+        if let Err(e) = p.proxy_set(&svc, ctx.port) {
+            // `_ns_write` shows sudo's own words before the chain gives up.
+            if !e.is_empty() && !e.starts_with("sudo networksetup") {
+                eprintln!("{e}");
+            }
+            // One cause has a different answer: a shell with no terminal can
+            // never be asked for the password, so "sudo -v" is no advice there.
+            if e.contains("terminal is required") || e.contains("password is required") {
+                crate::die(&ctx.cfg, &format!("setting the system proxy needs an admin password, and this shell has no terminal to ask for one — run '{p}' in your own terminal, or install the passwordless rule once, also there: '{w}'",
+                    p = format!("{} proxy on", crate::PROG), w = format!("{} watch install", crate::PROG)));
+            }
+            crate::die(&ctx.cfg, &format!("could not set system proxy (admin required). Run: sudo -v, then '{} proxy on'", crate::PROG));
+        }
     } else {
         out.push_str(&format!("  proxy already pointing at 127.0.0.1:{} — left as is\n", ctx.port));
     }

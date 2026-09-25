@@ -73,9 +73,41 @@ fn attribute_error(v: &Value) -> ! {
     )
 }
 
+/// The HTTP status behind a failed `curl -f`, when there was one: "The
+/// requested URL returned error: 404" on stderr. The exit code is no guide —
+/// 22 on a direct request, but curl 8.x reports the same 404 through a proxy's
+/// CONNECT tunnel as 56. `None` for a failure that never got a response
+/// (refused, unresolvable, timed out).
+pub fn http_status(stderr: &str) -> Option<u16> {
+    let (_, tail) = stderr.split_once("returned error: ")?;
+    tail.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
+}
+
+/// http.client's reason phrase for the statuses a subscription host sends.
+fn reason_phrase(status: u16) -> &'static str {
+    match status {
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        408 => "Request Timeout",
+        410 => "Gone",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        _ => "Error",
+    }
+}
+
 /// The IO half of `fetch_subscription`. urlopen's failures are not ValueErrors,
-/// so the Python dies with a traceback and exit 1; curl failing gives the same
-/// status, which is all the shell caller reads (`2>/dev/null`, status-checked).
+/// so the Python dies with a traceback and exit 1, and so does this — with the
+/// same exception TYPE: `HTTPError` when the server answered with a status,
+/// `URLError` when nothing answered. This used to exit 1 silently, which lost
+/// the one fact that explains a dead subscription (a 404). The shell reads the
+/// `HTTPError` line to put the status on its "subscription fetch failed" line.
 fn fetch(url: &str) -> Result<String, ()> {
     let ua = std::env::var("ROWT_SUB_UA")
         .ok()
@@ -83,11 +115,20 @@ fn fetch(url: &str) -> Result<String, ()> {
         .unwrap_or_else(|| "Shadowrocket/2.2.28 (iPhone; iOS 17.5.1; Scale/3.00)".into());
     let out = Command::new("curl")
         .args(["-fsSL", "--max-time", "20", "-A", &ua, "--", url])
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .output()
         .map_err(|_| ())?;
     if !out.status.success() {
-        return Err(());
+        let err = String::from_utf8_lossy(&out.stderr);
+        match http_status(&err) {
+            Some(s) => py_traceback("urllib.error.HTTPError", &format!("HTTP Error {s}: {}", reason_phrase(s))),
+            None => {
+                // "curl: (7) Failed to connect to …" → the part after the code.
+                let why = err.lines().last().unwrap_or("").trim();
+                let why = why.split_once(") ").map(|(_, w)| w).unwrap_or(why);
+                py_traceback("urllib.error.URLError", &format!("<urlopen error {why}>"))
+            }
+        }
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -238,5 +279,23 @@ pub fn main(argv: &[String]) -> ExitCode {
             emit(b, out);
         }
         Err((b, e)) => fail(&b, &e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::http_status;
+
+    #[test]
+    fn an_http_status_is_read_off_curls_message_whatever_the_exit_code() {
+        // curl ≥ 7.76 prints the bare code; older ones add the reason phrase.
+        assert_eq!(http_status("curl: (22) The requested URL returned error: 404\n"), Some(404));
+        assert_eq!(http_status("curl: (22) The requested URL returned error: 403 Forbidden\n"), Some(403));
+        // curl 8.7 through a proxy's CONNECT tunnel: the same 404, exit 56.
+        assert_eq!(http_status("curl: (56) The requested URL returned error: 404\n"), Some(404));
+        // No response at all: refused, unresolvable, timed out.
+        assert_eq!(http_status("curl: (7) Failed to connect to 127.0.0.1 port 9: Connection refused\n"), None);
+        assert_eq!(http_status("curl: (28) Operation timed out after 20001 milliseconds\n"), None);
+        assert_eq!(http_status("unexpected\n"), None);
     }
 }

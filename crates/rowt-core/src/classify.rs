@@ -32,7 +32,7 @@ impl Lane {
     /// The parenthetical on `explain`'s first line.
     pub fn description(self) -> &'static str {
         match self {
-            Lane::Escape => "personal VLESS tunnel — through the proxy",
+            Lane::Escape => "personal tunnel — through the proxy",
             Lane::Corp => "into the corp VPN via the OS route",
             Lane::Direct => "straight out the physical NIC — pass-through",
             Lane::Block => "refused — ad/telemetry sinkhole (no DNS, no dial)",

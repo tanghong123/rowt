@@ -83,6 +83,7 @@ down              mut    down
 lane_log          skip   escape log        # tail -f — never terminates
 monitor           skip   monitor           # execs the TUI
 mon_alias         skip   mon               # same, via the alias
+doctor            skip   doctor            # reads the live machine (ports, processes) and dials the network: nothing stable to mask
 uninstall         skip   uninstall         # mutates the machine, so not a mask case; cli-diff compares it
 run_wrapper       skip   run               # exec wrapper, needs a wrapped command
 ping              skip   ping              # dials real servers; belongs to a network-marked suite (cli-diff compares it, shimmed)

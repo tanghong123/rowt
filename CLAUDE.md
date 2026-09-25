@@ -32,7 +32,11 @@ skill** in `skills/rowt/`. Don't duplicate that here.
   to the **brew-installed** copy (`/opt/homebrew/opt/rowt/libexec/skills/rowt`),
   *not* to this tree — so editing it here changes nothing live until the next
   release + `brew upgrade`. Keep it in sync with `rowt help` / `rowt onboard`
-  when commands change.
+  when commands change. `SKILL.md` is the agent's onboarding playbook (knack's
+  budget is 24 KB — bulk goes in `references/`). The diagnosis it runs first is
+  `rowt doctor` (`cmd_doctor`, a legacy arm rowt-rs hands to the shell), whose
+  FLAG names SKILL.md's table maps to actions — rename one and change the table
+  in the same pass.
 - **`share/knack/rowt.toml`** — the knack foreign-owner recipe, printed by
   `rowt skill recipe`. The formula installs `share/` into `libexec`, so adding a
   file here that the CLI reads means changing `Formula/rowt.rb` in the same pass.

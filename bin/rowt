@@ -5,7 +5,7 @@
 #
 # It runs sing-box on the host as a rule-router (mixed proxy on 127.0.0.1:PORT,
 # so the macOS system-proxy target never changes) with three destinations:
-#   escape  — escape-domains.txt -> personal VLESS tunnel   (e.g. google)
+#   escape  — escape-domains.txt -> your personal tunnel    (e.g. google)
 #   corp    — corp-domains.txt   -> into the corp VPN       (e.g. intranet)
 #   direct  — everything else    -> straight out the physical NIC, bypassing
 #             both corp and escape                          (e.g. baidu / China)
@@ -59,7 +59,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.5.12"
+ROWT_VERSION="3.5.13"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -1330,7 +1330,7 @@ cmd_run() {
   local envpx="${https_proxy:-${HTTPS_PROXY:-${all_proxy:-${ALL_PROXY:-${http_proxy:-${HTTP_PROXY:-}}}}}}"
   if [ -n "$envpx" ] && _run_reach "$envpx"; then
     info "run: reaching $target via the current shell proxy env ($envpx)"
-    exec "$@"
+    exec -- "$@"
   fi
 
   # 2. macOS system proxy
@@ -1342,7 +1342,7 @@ cmd_run() {
       local sysurl="http://$host:$port"
       if _run_reach "$sysurl"; then
         info "run: reaching $target via the system proxy ($sysurl)"
-        _run_export "$sysurl"; exec "$@"
+        _run_export "$sysurl"; exec -- "$@"
       fi
     fi
   fi
@@ -1352,7 +1352,7 @@ cmd_run() {
     local rurl="http://127.0.0.1:$PORT"
     if _run_reach "$rurl"; then
       info "run: reaching $target via rowt (127.0.0.1:$PORT)"
-      _run_export "$rurl" "socks5h://127.0.0.1:$PORT"; exec "$@"
+      _run_export "$rurl" "socks5h://127.0.0.1:$PORT"; exec -- "$@"
     fi
   fi
 
@@ -1360,7 +1360,7 @@ cmd_run() {
   unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY
   if _run_reach ""; then
     info "run: $target is reachable directly — running with no proxy"
-    exec "$@"
+    exec -- "$@"
   fi
 
   die "run: could not reach $target via shell env, system proxy, rowt, or direct — not running '$1'"
@@ -1777,15 +1777,25 @@ rebuild_servers() {
   local acc; acc="$(mktemp)"; echo '[]' > "$acc"
   [ -s "$MANUAL" ] && jq -s 'add' "$acc" "$MANUAL" > "$acc.n" && mv "$acc.n" "$acc"
   if [ -f "$SUBS_FILE" ]; then
-    local url out
+    local url out why shown sub_err; sub_err="$(mktemp)"
     while IFS= read -r url; do
       case "$url" in ''|\#*) continue ;; esac
-      if out="$("${PY_VLESS[@]}" --sub "$url" 2>/dev/null)"; then
+      if out="$("${PY_VLESS[@]}" --sub "$url" 2>"$sub_err")"; then
         jq -s 'add' "$acc" <(printf '%s' "$out") > "$acc.n" && mv "$acc.n" "$acc"
       else
-        err "subscription fetch failed: ${url%%\?*}…"
+        # Both fetchers end a failure with urllib's exception line. Only an HTTP
+        # status is worth surfacing: a 404 is a subscription the provider has
+        # dropped, which "fetch failed" alone never said.
+        why="$(sed -n 's/^urllib\.error\.HTTPError: HTTP Error \([0-9][0-9]*\).*/ (HTTP \1)/p' "$sub_err" | tail -1)"
+        # Scheme and host only: providers put the token in the PATH as often as
+        # in the query, so '${url%%\?*}' printed it. A line that is no URL at all
+        # keeps the old cut.
+        shown="$(printf '%s' "$url" | sed -nE 's#^([A-Za-z][A-Za-z0-9+.-]*://[^/?#]*).*#\1/…#p')"
+        [ -n "$shown" ] || shown="${url%%\?*}…"
+        err "subscription fetch failed: $shown$why"
       fi
     done < "$SUBS_FILE"
+    rm -f "$sub_err"
   fi
   "${PY_VLESS[@]}" --combine < "$acc" > "$SERVERS.tmp" || { rm -f "$SERVERS.tmp" "$acc"; die "combine failed"; }
   mv "$SERVERS.tmp" "$SERVERS"; chmod 600 "$SERVERS"; rm -f "$acc"
@@ -1956,7 +1966,12 @@ cmd_from_shadowrocket() {
     flclash) dumper=("${PY_FOREIGN[@]}" --from flclash); label="FlClash" ;;
     *) die "unknown source: $source  (want: shadowrocket | clash-verge | v2box | flclash)" ;;
   esac
-  [ -n "$path" ] && dumper+=(--path "$path")
+  # sr-import.py names its override --store; the other importers call it --path.
+  # Appending --path to both made '--from shadowrocket --path X' an argparse
+  # error every time (retired in PORTING.md §6.7.2).
+  if [ -n "$path" ]; then
+    case "$source" in shadowrocket|sr) dumper+=(--store "$path") ;; *) dumper+=(--path "$path") ;; esac
+  fi
 
   # Dump the client's raw extract, then MERGE it into $file — deduping against the
   # existing pool AND what's already accumulated, tagging each kept entry with its
@@ -2948,8 +2963,26 @@ _ns_write() { # $1 = 1 for the passwordless watchdog form, 0 for interactive
     _NS_SKIPPED=1
     return 0
   fi
-  if [ "$pw" = 1 ]; then sudo -n /usr/sbin/networksetup "$@"
-  else                   sudo networksetup "$@"; fi
+  if [ "$pw" = 1 ]; then sudo -n /usr/sbin/networksetup "$@"; return; fi
+  # sudo's own complaint is kept (and still shown): "a terminal is required" is
+  # how a shell with no terminal — an agent's — fails, and `proxy on` words that
+  # case differently. stdout passes through untouched; networksetup reports its
+  # own errors there.
+  local _e _rc
+  { _e="$(sudo networksetup "$@" 2>&1 1>&3)"; _rc=$?; } 3>&1
+  _NS_ERR="$_e"; [ -z "$_e" ] || printf '%s\n' "$_e" >&2
+  return "$_rc"
+}
+
+# `proxy on` could not write the proxy. One cause has a different answer: a
+# shell with no terminal can never be asked for the password, so "sudo -v" is no
+# advice there — the user runs it, or installs the passwordless rule once.
+_proxy_admin_die() {
+  case "${_NS_ERR:-}" in
+    *"terminal is required"*|*"password is required"*)
+      die "setting the system proxy needs an admin password, and this shell has no terminal to ask for one — run '$PROG proxy on' in your own terminal, or install the passwordless rule once, also there: '$PROG watch install'" ;;
+  esac
+  die "could not set system proxy (admin required). Run: sudo -v, then '$PROG proxy on'"
 }
 
 # The resolver the physical NIC's DHCP server advertised — the hotspot's own
@@ -3250,7 +3283,7 @@ cmd_proxy() {
             && _ns_write 0 -setwebproxystate "$svc" on \
             && _ns_write 0 -setsecurewebproxy "$svc" 127.0.0.1 "$PORT" \
             && _ns_write 0 -setsecurewebproxystate "$svc" on \
-            || die "could not set system proxy (admin required). Run: sudo -v, then '$PROG proxy on'"
+            || _proxy_admin_die
         else
           echo "  proxy already pointing at 127.0.0.1:$PORT — left as is"
         fi
@@ -3805,7 +3838,12 @@ or add directly:  $PROG server add '<vless://|vmess://|anytls://|hysteria2://|ss
 
   # 4. router up
   if host_running; then _ob 0 "router running (mode $mode)" "$PROG status   ·   $PROG down to stop"
-  else _ob 1 "start the router (connect the CORP VPN first, other VPN app OFF)" "$PROG up"; pending=$((pending+1)); fi
+  # Keep the current VPN on until rowt works: behind a firewall it is what reaches
+  # GitHub and the subscriptions (and whatever agent is driving the setup). Only a
+  # client LISTENING on rowt's port must go first; a TUN-only client can stay,
+  # because escape and direct bind to the physical NIC.
+  else _ob 1 "start the router (keep your current VPN on; quit first only a client that holds rowt's port, e.g. Clash)" "$PROG up host
+then quit the old VPN app and connect the corp VPN ('$PROG reload' if no watcher)"; pending=$((pending+1)); fi
 
   # 5. an escape server selected
   local sel; sel="$(sget selected)"
@@ -3876,6 +3914,7 @@ Choose what goes where (edit anytime; lane 'add' auto-renders + restarts):
     unlisted traffic → direct (physical NIC); private/overlay IPs → OS routing (unbound).  '$PROG explain <domain|ip>' shows a destination's lane.
 
 Everyday:
+    $PROG doctor            is anything AROUND rowt in the way? (other VPN apps, port $PORT, a PAC, reachability)
     $PROG status            is it working (state + reachability)?
     $PROG speed <url>       is a lane FAST enough to use? (reachability can't see a stalled lane)
     $PROG reload            re-apply after switching Wi-Fi / wired / corp VPN on-off
@@ -3892,6 +3931,202 @@ EOF
   [ -f "$readme" ] && echo "      $readme   (full user guide)"
   [ -f "$design" ] && echo "      $design   (how the routing works)"
   echo "Config lives in: $CFG"
+}
+
+# ---------- doctor ----------------------------------------------------------
+# rowt doctor [api-host] — diagnose the Mac AROUND rowt. `onboard` answers how far
+# rowt's own setup is; this answers what decides whether that setup goes smoothly:
+# who holds rowt's ports, what other proxy/VPN software runs and who carries the
+# default route, a PAC that would bypass rowt, what answers over the physical NIC
+# versus through rowt, whether the proxy can be written without a password, and
+# what can be imported. Facts first, then FLAGS — stable UPPER_SNAKE ids that the
+# agent skill (skills/rowt/SKILL.md) maps to an action and to who takes it; rename
+# one and that table changes in the same pass.
+#
+# Read-only: no sudo beyond `sudo -n -l` (a listing), no brew update, every network
+# wait bounded by curl -m or nc -G. api-host is the API of the agent driving the
+# setup — the one connection that has to survive the switch from the old VPN.
+cmd_doctor() {
+  case "${1:-}" in -*) die "usage: $PROG doctor [api-host]" ;; esac
+  local api="${1:-${ROWT_DOCTOR_API:-api.anthropic.com}}"
+  api="${api#*://}"; api="${api%%/*}"
+  # This script runs under `set -euo pipefail`; every probe of the machine below
+  # is allowed to fail (no default route offline, a free port, no VPN services),
+  # so each one ends in `|| true` rather than taking doctor down with it.
+  local t; t="$(mktemp -d "${TMPDIR:-/tmp}/rowt-doctor.XXXXXX")" || die "mktemp failed"
+  local flags=""
+  _dr_flag() { flags="$flags$(printf '  %-22s %s' "$1" "$2")
+"; }
+  _dr_row() { printf '%-8s %s\n' "$1" "$2"; }
+  # An HTTP status that proves the host itself answered. 403 is how an API
+  # refuses a region, which is exactly what is being looked for.
+  _dr_served() { case "$1" in [23][0-9][0-9]) return 0 ;; 403) return 1 ;; 4[0-9][0-9]) return 0 ;; esac; return 1; }
+  echo "$PROG doctor (read-only) — $(date '+%Y-%m-%d %H:%M')"
+
+  # system
+  local arch brew_bin stable=""
+  arch="$(uname -m)"
+  [ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" = 1 ] && arch="$arch (Rosetta; the Mac is arm64)"
+  brew_bin="$(command -v brew 2>/dev/null || true)"
+  local sh="${SHELL:-?}"
+  _dr_row system "macOS $(sw_vers -productVersion 2>/dev/null) $arch · brew ${brew_bin:-absent} · shell ${sh##*/}"
+  [ -n "$brew_bin" ] || _dr_flag NO_BREW "Homebrew is not installed"
+  [ "$arch" = x86_64 ] && _dr_flag INTEL_MAC "brew builds rowt from source (needs Rust; several minutes)"
+
+  # rowt. Only a tap that is already tapped is asked about: an untapped one makes
+  # `brew info` clone it from GitHub, which can hang on this very network.
+  if [ -n "$brew_bin" ] && [ -d "$(brew --repository 2>/dev/null)/Library/Taps/tanghong123/homebrew-tap" ]; then
+    stable="$(HOMEBREW_NO_AUTO_UPDATE=1 brew info tanghong123/tap/rowt 2>/dev/null | sed -n '1s/.*stable \([0-9][0-9.]*\).*/\1/p' || true)"
+  fi
+  _dr_row rowt "$ROWT_VERSION at $(_watch_self)${stable:+ · tap has $stable}"
+  if [ -n "$stable" ] && [ "$ROWT_VERSION" != "$stable" ] \
+     && [ "$(printf '%s\n%s\n' "$ROWT_VERSION" "$stable" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)" = "$stable" ]; then
+    _dr_flag ROWT_OUTDATED "$ROWT_VERSION installed, $stable available"
+  fi
+
+  # ports. lsof sees only this user's processes; a root service (a client's
+  # "service mode" core) holds a port invisibly, so no answer falls back to
+  # simply connecting.
+  _dr_port_owner() {
+    local pid cmd name
+    pid="$(lsof -nP -iTCP:"$1" -sTCP:LISTEN -t 2>/dev/null | head -1 || true)"
+    if [ -n "$pid" ]; then
+      cmd="$(ps -o command= -p "$pid" 2>/dev/null || true)"
+      case "$cmd" in */rowt/*) echo "rowt ($pid)"; return ;; esac
+      name="$(ps -o comm= -p "$pid" 2>/dev/null || true)"; name="${name##*/}"
+      echo "${name:-?} (pid $pid)"; return
+    fi
+    if nc -z -G 1 127.0.0.1 "$1" >/dev/null 2>&1; then echo "an unseen owner (a root service?)"; else echo free; fi
+  }
+  local o1 o2
+  o1="$(_dr_port_owner "$PORT")"; o2="$(_dr_port_owner "$CLASH_PORT")"
+  _dr_row ports "$PORT: $o1 · $CLASH_PORT: $o2"
+  case "$o1" in free|"rowt ("*) ;; *) _dr_flag PORT_BUSY "$PORT (the proxy port) is held by $o1" ;; esac
+  case "$o2" in free|"rowt ("*) ;; *) _dr_flag PORT_BUSY "$CLASH_PORT (the controller port) is held by $o2" ;; esac
+
+  # other proxy / VPN software — one label per product (a client runs several
+  # processes); rowt's own sing-box lives under …/rowt/bin and is skipped.
+  ps -axo comm= 2>/dev/null | awk '
+    /\/rowt\/bin\/sing-box$/ { next }
+    { n = $0; sub(/.*\//, "", n); n = tolower(n) }
+    n ~ /^shadowrocket/                 { p["Shadowrocket"] = 1 }
+    n ~ /^(clash|mihomo|verge)/         { p["Clash"] = 1 }
+    n ~ /^flclash/                      { p["FlClash"] = 1 }
+    n ~ /^v2box/                        { p["V2Box"] = 1 }
+    n ~ /^(v2ray|xray)/                 { p["V2Ray/Xray"] = 1 }
+    n ~ /^(surge|stash|quantumult)/     { p["Surge/Stash/Quantumult"] = 1 }
+    n ~ /^(hiddify|nekoray|nekobox)/    { p["Hiddify/NekoRay"] = 1 }
+    n ~ /^sing-box$/                    { p["another sing-box"] = 1 }
+    n ~ /^(vpnagentd|acvpn|cisco)/      { c["Cisco Secure Client"] = 1 }
+    n ~ /^(globalprotect|pangp)/        { c["GlobalProtect"] = 1 }
+    n ~ /^zscaler/                      { c["Zscaler"] = 1 }
+    n ~ /^forti/                        { c["FortiClient"] = 1 }
+    n ~ /^(pulse|ivanti|dsaccess)/      { c["Ivanti/Pulse"] = 1 }
+    n ~ /^(openvpn|tunnelblick)/        { c["OpenVPN"] = 1 }
+    n ~ /^wireguard/                    { c["WireGuard"] = 1 }
+    n ~ /^(tailscale|ipnextension)/     { o["Tailscale"] = 1 }
+    n ~ /^zerotier/                     { o["ZeroTier"] = 1 }
+    function list(a,   k, s) { s = ""; for (k in a) s = s (s == "" ? "" : ", ") k; return s == "" ? "none" : s }
+    END { print list(p); print list(c); print list(o) }' > "$t/apps" || true
+  local vpn_up
+  vpn_up="$(scutil --nc list 2>/dev/null | awk -F'"' '/\(Connected\)/ { s = s (s == "" ? "" : ", ") $2 } END { print s }' || true)"
+  _dr_row apps "proxy clients: $(sed -n 1p "$t/apps") · corp VPN: $(sed -n 2p "$t/apps") · overlay: $(sed -n 3p "$t/apps")${vpn_up:+ · connected VPN services: $vpn_up}"
+
+  # network
+  local dflt phys hwport overlay_if
+  dflt="$(route -n get default 2>/dev/null | awk '/interface:/ { print $2 }' || true)"
+  phys="$(detect_iface 2>/dev/null || true)"
+  hwport="$(networksetup -listallhardwareports 2>/dev/null | awk -v d="$phys" '/^Hardware Port:/ { p = substr($0, 16) } $0 == "Device: " d { print p; exit }' || true)"
+  overlay_if="$(ifconfig 2>/dev/null | awk '/^[a-z]/ { i = $1; sub(/:$/, "", i) } /inet 100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./ { print i; exit }' || true)"
+  # Tunnels that are up, overlays aside — vendor-neutral, so a VPN that runs a raw
+  # utun (and shows neither as a VPN service nor as a known client) still shows.
+  local tun_ifs
+  tun_ifs="$(ifconfig 2>/dev/null | awk '/^[a-z]/ { i = $1; sub(/:$/, "", i) }
+    $1 == "inet" && i ~ /^(utun|ipsec|ppp)/ && $2 !~ /^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./ { print i }' \
+    | sort -u | paste -sd, - | sed 's/,/, /g' || true)"
+  _dr_row network "physical ${phys:-none}${hwport:+ ($hwport)} · default route via ${dflt:-none}${tun_ifs:+ · tunnels up: $tun_ifs}${overlay_if:+ · 100.64/10 overlay on $overlay_if}"
+  [ -n "$phys" ] || _dr_flag NO_PHYSICAL_NETWORK "no Wi-Fi or Ethernet interface is up"
+  case "$dflt" in utun*|ipsec*|ppp*) _dr_flag VPN_HOLDS_DEFAULT "$dflt carries the default route" ;; esac
+
+  # proxy settings, and this shell's own proxy env (user:pass@ masked)
+  local px sys pac wpad apx
+  px="$(scutil --proxy 2>/dev/null || true)"
+  _dr_pv() { printf '%s\n' "$px" | awk -v k="$1" '$1 == k { print $3; exit }'; }
+  sys=off; [ "$(_dr_pv HTTPEnable)" = 1 ] && sys="$(_dr_pv HTTPProxy):$(_dr_pv HTTPPort)"
+  pac=""; [ "$(_dr_pv ProxyAutoConfigEnable)" = 1 ] && pac="$(_dr_pv ProxyAutoConfigURLString)"
+  wpad="$(_dr_pv ProxyAutoDiscoveryEnable)"
+  apx="${https_proxy:-${HTTPS_PROXY:-${all_proxy:-${ALL_PROXY:-${http_proxy:-${HTTP_PROXY:-}}}}}}"
+  apx="$(printf '%s' "$apx" | sed -E 's#//[^@/]*@#//***@#')"
+  _dr_row proxy "system $sys · PAC ${pac:-off}$([ "$wpad" = 1 ] && printf ' · WPAD on') · this shell's proxy env: ${apx:-none}"
+  case "$sys" in off|"127.0.0.1:$PORT") ;; *) _dr_flag SYSTEM_PROXY_OTHER "the system proxy points at $sys" ;; esac
+  [ -n "$pac" ] && _dr_flag PAC_ON "$pac"
+  [ "$wpad" = 1 ] && _dr_flag PAC_ON "proxy auto-discovery (WPAD) is on"
+
+  # reachability — in parallel, each bounded by curl -m
+  _dr_probe() { # $1 = result name, rest = curl args
+    # `|| rc=$?`, not `; rc=$?`: under the script's `set -e` a failed curl
+    # (every timeout) ended this background subshell before it wrote anything.
+    local n="$1" code rc=0; shift
+    code="$(curl -sS -o /dev/null -m 5 -w '%{http_code}' "$@" 2>/dev/null)" || rc=$?
+    if [ "$rc" = 0 ] && [ -n "$code" ] && [ "$code" != 000 ]; then echo "$code"
+    else case "$rc" in 6) echo dns-fail ;; 7) echo refused ;; 28) echo timeout ;; 35) echo tls-fail ;; 52) echo empty ;; 56) echo reset ;; *) echo "fail($rc)" ;; esac
+    fi > "$t/$n"
+  }
+  if [ -n "$phys" ]; then
+    _dr_probe nic_g   --noproxy '*' --interface "$phys" https://www.google.com/generate_204 &
+    _dr_probe nic_gh  --noproxy '*' --interface "$phys" https://github.com/ &
+    _dr_probe nic_bd  --noproxy '*' --interface "$phys" https://www.baidu.com/ &
+    _dr_probe nic_api --noproxy '*' --interface "$phys" "https://$api/" &
+  fi
+  _dr_probe def_api --noproxy '*' "https://$api/" &
+  if [ "$o1" != free ]; then
+    _dr_probe px_g   -x "http://127.0.0.1:$PORT" https://www.google.com/generate_204 &
+    _dr_probe px_api -x "http://127.0.0.1:$PORT" "https://$api/" &
+  fi
+  wait
+  _dr_r() { cat "$t/$1" 2>/dev/null || echo "-"; }
+  _dr_row reach "over ${phys:-the NIC} (rowt's direct lane): google $(_dr_r nic_g) · github $(_dr_r nic_gh) · baidu $(_dr_r nic_bd) · $api $(_dr_r nic_api)"
+  _dr_row "" "default route, no proxy: $api $(_dr_r def_api)$([ "$o1" != free ] && printf ' · through 127.0.0.1:%s: google %s · %s %s' "$PORT" "$(_dr_r px_g)" "$api" "$(_dr_r px_api)")"
+  if [ -n "$phys" ] && ! _dr_served "$(_dr_r nic_bd)" && ! _dr_served "$(_dr_r nic_g)"; then
+    _dr_flag NET_DOWN "nothing answers over $phys (offline, a captive portal, or a shell without network)"
+  elif [ -n "$phys" ]; then
+    _dr_served "$(_dr_r nic_g)" && _dr_flag OPEN_INTERNET "Google answers over $phys: no firewall to escape here"
+    _dr_served "$(_dr_r nic_gh)" || _dr_flag GITHUB_BLOCKED "github.com over $phys: $(_dr_r nic_gh)"
+    if ! _dr_served "$(_dr_r nic_api)"; then
+      _dr_flag AGENT_API_NEEDS_TUNNEL "$api over $phys: $(_dr_r nic_api)"
+      if [ -n "$apx" ]; then
+        case "$apx" in
+          *://127.0.0.1:"$PORT"|*://127.0.0.1:"$PORT"/|*://localhost:"$PORT"|*://localhost:"$PORT"/)
+            _dr_flag AGENT_VIA_PROXY_ENV "this shell's API calls go to $apx — rowt's port, so they follow rowt" ;;
+          *) _dr_flag AGENT_VIA_PROXY_ENV "this shell's API calls go to $apx — NOT rowt's port: they stop when that proxy does" ;;
+        esac
+      elif _dr_served "$(_dr_r def_api)"; then
+        _dr_flag AGENT_VIA_VPN "this shell reaches $api only through ${dflt:-the current VPN}"
+      fi
+    fi
+  fi
+
+  # admin rights. `sudo -n -l` lists without a password once ANY NOPASSWD rule
+  # exists; `sudo -n -l <cmd>` would not do — it also succeeds for commands that
+  # are merely allowed WITH a password.
+  if [ -e "$WATCH_SUDOERS" ] && sudo -n -l 2>/dev/null | grep -q 'NOPASSWD.*networksetup -setwebproxy '; then
+    _dr_row sudo "passwordless proxy writes: yes ($WATCH_SUDOERS)"
+  else
+    _dr_row sudo "passwordless proxy writes: no"
+    _dr_flag NO_SUDO_RULE "setting the system proxy will ask for an admin password"
+  fi
+
+  # import sources
+  local src yq_s=absent
+  have yq && yq_s=present
+  src="$(detect_import_sources | paste -sd, - | sed 's/,/, /g')"
+  _dr_row import "clients with servers to import: ${src:-none} · yq $yq_s"
+  [ -n "$src" ] || _dr_flag NO_IMPORT_SOURCE "no Shadowrocket / Clash Verge / V2Box / FlClash config found"
+  case "$src" in *clash-verge*|*flclash*) [ "$yq_s" = absent ] && _dr_flag YQ_MISSING "Clash-family imports need yq" ;; esac
+
+  echo
+  if [ -n "$flags" ]; then echo "FLAGS"; printf '%s' "$flags"; else echo "FLAGS: none"; fi
+  rm -rf "$t"
 }
 
 # ---------- route explainer ------------------------------------------------
@@ -4015,7 +4250,7 @@ cmd_explain() {
   fi
   local desc
   case "$lane" in
-    escape) desc="personal VLESS tunnel — through the proxy" ;;
+    escape) desc="personal tunnel — through the proxy" ;;
     corp)   desc="into the corp VPN via the OS route" ;;
     direct) desc="straight out the physical NIC — pass-through" ;;
     block)  desc="refused — ad/telemetry sinkhole (no DNS, no dial)" ;;
@@ -4051,7 +4286,8 @@ cmd_explain() {
   fi
 }
 
-# At-a-glance state + config validity (this absorbs the old 'doctor').
+# At-a-glance state + config validity. (It absorbed an old 'doctor'; today's
+# 'doctor' looks at the machine AROUND rowt instead — see cmd_doctor.)
 cmd_status() {
   local mode; mode="$(sget mode)"; mode="${mode:-?}"
   if [ "$mode" = "local" ]; then
@@ -4813,21 +5049,31 @@ cmd_watch() {
       if [ "$refresh" = 1 ] && [ ! -f "$WATCH_PLIST" ]; then info "watch not installed — nothing to refresh"; return 0; fi
       local self; self="$(_watch_self)"
       [ -x "$self" ] || die "cannot resolve the rowt binary path ($self)"
-      mkdir -p "$(dirname "$WATCH_PLIST")"
-      _watch_plist_body > "$WATCH_PLIST"
       # scoped passwordless sudo for the proxy toggles (validated before install);
       # skipped on 'refresh' so a post-upgrade reload never needs a password.
+      # It comes FIRST, before anything is written: a shell that cannot be asked
+      # for a password (an agent's has no terminal) stops here and says why.
+      # It used to write the agent, fail the validation for want of a password,
+      # report the rule as invalid, and install a watcher with no rule — one that
+      # looks installed and then fails every proxy repair it attempts.
       if [ "$refresh" = 0 ]; then
-        local tmp; tmp="$(mktemp)"; _watch_sudoers_body > "$tmp"
-        if sudo visudo -cf "$tmp" >/dev/null 2>&1; then
+        local tmp verr; tmp="$(mktemp)"; _watch_sudoers_body > "$tmp"
+        if verr="$(sudo visudo -cf "$tmp" 2>&1 >/dev/null)"; then
           info "installing scoped passwordless-sudo rule ($WATCH_SUDOERS; needs admin once)"
           sudo install -m 440 -o root -g wheel "$tmp" "$WATCH_SUDOERS" \
             || err "could not install $WATCH_SUDOERS — a Wi-Fi<->Ethernet switch may prompt for a password"
         else
+          case "$verr" in
+            *"terminal is required"*|*"password is required"*)
+              rm -f "$tmp"
+              die "'$PROG watch install' needs an admin password once (for $WATCH_SUDOERS), and this shell has no terminal to ask for one — run it in your own terminal" ;;
+          esac
           err "generated sudoers failed validation — skipping it (service-change reloads may prompt)"
         fi
         rm -f "$tmp"
       fi
+      mkdir -p "$(dirname "$WATCH_PLIST")"
+      _watch_plist_body > "$WATCH_PLIST"
       launchctl bootout "gui/$(id -u)/$WATCH_LABEL" 2>/dev/null || true
       launchctl bootstrap "gui/$(id -u)" "$WATCH_PLIST" 2>/dev/null \
         || launchctl load -w "$WATCH_PLIST" 2>/dev/null \
@@ -5459,6 +5705,7 @@ cmd_diag() {
 _reg() {
 cat <<'REG'
 c@lifecycle@onboard@guided getting-started checklist (what to run next)
+o@lifecycle@doctor [api-host]@what's AROUND rowt: port owners, other VPN apps, a PAC, reachability, the admin rule (read-only)
 c@lifecycle@up [host|vm|local] [--force]@set up & start (no arg = auto-detect the mode)
 c@lifecycle@down@tear down: proxy off + stop sing-box + vm down
 o@lifecycle@uninstall [--purge]@reverse setup for a clean re-onboard (--purge wipes config)
@@ -5468,6 +5715,7 @@ c@lifecycle@reload@re-apply after a network switch (re-render + restart + proxy)
 o@lifecycle@watch <install|uninstall|status|refresh>@auto-reload on net change; captive-portal handling; clears a stale proxy at login
 c@lifecycle@status@state + config validity + reachability
 o@lifecycle@explain <domain|ip>@explain a destination's lane (escape / corp / direct)
+o@lifecycle@speed [url …]@sustained throughput per lane, proxied vs bypassed (catches a lane that is reachable but too slow to use)
 o@lifecycle@connections [lane|-w]@live view: active connections + which lane each is on
 o@lifecycle@monitor [--theme dark|light|auto]@read-only TUI: live connections, errors/blocked, server health
 o@lifecycle@run <command> [args...]@auto-pick a proxy env that reaches the net, then run the command
@@ -5480,9 +5728,8 @@ o@servers & selection@sub <list|add|rm|update|clear|import|dump>@manage subscrip
 c@servers & selection@use <tag>|auto@pin a server (manual) or auto-pick fastest live
 c@servers & selection@ping [tag]@parallel latency test through the tunnel (fastest first)
 a@servers & selection@probe@detect which mode works (host vs vm) with corp VPN up
-o@lifecycle@speed [url …]@sustained throughput per lane, proxied vs bypassed (catches a lane that is reachable but too slow to use)
 c@routing lanes@escape <list|add|rm|import|clear|dump|errors>@edit the escape lane (VPN tunnel)
-o@routing lanes@corp <list|add|rm|import|clear|dump|errors|sync>@edit the corp lane; 'sync' mirrors an overlay VPN's routes (corp/Tailscale) into it
+o@routing lanes@corp <list|add|rm|import|clear|dump|errors|sync|suggest>@edit the corp lane; 'sync' mirrors an overlay VPN's routes (corp/Tailscale) into it
 o@routing lanes@block <list|add|rm|import|clear|dump|errors>@block lane (ad/telemetry sinkhole); 'errors' = what got blocked
 o@routing lanes@hotspot <list|add|rm|import|clear|dump>@captive-portal hosts the OS reaches WITHOUT the proxy, so a venue's login page loads while rowt is up
 o@routing lanes@direct <errors|log>@diagnose the pass-through lane; 'errors' = what failed direct (escape candidates)
@@ -5501,7 +5748,7 @@ usage() {
   cat <<EOF
 $PROG — split traffic three ways from one local proxy (127.0.0.1:$PORT) while a
 corporate VPN keeps the default route:
-  escape  domains in escape-domains.txt  -> personal VLESS tunnel (e.g. google)
+  escape  domains in escape-domains.txt  -> your personal tunnel (e.g. google)
   corp    domains/CIDRs in corp-domains.txt -> into the corp VPN (e.g. intranet)
   direct  everything else                -> straight out the physical NIC, bypassing
                                             corp AND escape (e.g. baidu / China)
@@ -5520,7 +5767,7 @@ Notes:
   • 'server import' and 'sub import' both import from Shadowrocket (servers + subs).
   • Unlisted traffic goes to '$FINAL_ROUTE' (override with ROWT_FINAL=corp|direct).
   • 'use <tag>' (manual) never probes servers, so flaky/dead ones can't spin the CPU.
-  • Modes: host = VLESS bound to the physical NIC; vm = a bridged Lima VM runs the tunnel.
+  • Modes: host = the tunnel bound to the physical NIC; vm = a bridged Lima VM runs it.
   • Shell helpers (from shell-init): rowt-proxy-on / rowt-proxy-off point this
     shell's CLI proxy env at local rowt; rowt-remote-on <remote-host> / -off point
     it at a reachable tailnet-shared rowt (short names expand through Tailscale);
@@ -5690,7 +5937,8 @@ $PROG status — at-a-glance state and health.
 
 Shows mode, server count + selected/active server, the host-router pid/port, the
 system-proxy state, the routing buckets, sing-box config validity, and a live
-'via proxy' reachability check. (Absorbs the old 'doctor'.)
+'via proxy' reachability check. For what's AROUND rowt — other VPN apps, who holds
+its ports, a PAC, what answers where — see '$PROG doctor'.
 EOF
 ;;
     explain|route) cat <<EOF
@@ -5794,13 +6042,15 @@ $PROG server <subcommand> — manage the server pool.
   rm <tag> [more]      remove a manual server (for a subscription node, remove the sub)
   clear                remove all manual servers
   import --detect      list the VPN clients on this Mac + the exact commands
-  import --from SRC [--output FILE]
+  import --from SRC [--output FILE] [--path P]
                        extract servers + subs from a client and ACCUMULATE them
                        into a review FILE (default import-review.json), skipping
                        any already in your pool or already in FILE. Each kept
                        entry is tagged with a "_source". SRC = shadowrocket |
-                       clash-verge | v2box | flclash. Run once per client (same
-                       FILE) to gather several, then edit FILE and apply:
+                       clash-verge | v2box | flclash. --path reads the client's
+                       store, directory or DB from P instead of where the app
+                       keeps it. Run once per client (same FILE) to gather
+                       several, then edit FILE and apply:
   import --apply [--input FILE]
                        apply the (edited) review FILE into the pool
   import <file.json>   restore manual servers from a 'server dump' (round-trip)
@@ -5937,7 +6187,11 @@ $PROG $1 <subcommand> — edit the $1 lane$([ "$1" = escape ] && echo " (domains
                        Each label gets its own auto-managed block; a tunnel that's
                        DOWN keeps its last-learned CIDRs (needed in-office too). The
                        watchdog re-syncs automatically on connect. Hand-added corp
-                       entries above the managed blocks are never touched.")
+                       entries above the managed blocks are never touched.
+  suggest              list the internal DNS domains THIS network advertises
+                       (DHCP search domains, which are corp-routed automatically,
+                       and scoped resolvers' domains, which are only candidates for
+                       'corp add'). It sees them only on the corp LAN or VPN.")
 A domain lives in AT MOST one lane: 'add'/'import' here pulls the exact entry out
 of the other lanes (block/corp/escape), since the router matches block→corp→escape
 first-match-wins and a domain in two lists would be silently shadowed. The two rule
@@ -6138,6 +6392,31 @@ Completion defers to a hidden '$PROG _complete' at tab-time, so it never drifts
 from the actual command set.
 EOF
 ;;
+    doctor) cat <<EOF
+$PROG doctor [api-host] — diagnose the Mac around rowt (read-only).
+
+'$PROG onboard' says how far rowt's own setup is. This says what decides whether
+that setup goes smoothly, then ends with FLAGS that you, or an agent driving the
+setup, can act on:
+  ports     who holds $PORT (the proxy) and $CLASH_PORT (the controller) — a Clash
+            client usually does, and rowt cannot start until it lets go
+  apps      other proxy clients, corp VPN clients, overlays, connected VPN services
+  network   the physical interface, the tunnels that are up, and who carries
+            the default route
+  proxy     the system proxy, a PAC or WPAD (either one bypasses rowt), and this
+            shell's own proxy variables
+  reach     Google, GitHub, Baidu and api-host over the physical NIC (rowt's
+            direct lane), with no proxy, and through 127.0.0.1:$PORT
+  sudo      whether the system proxy can be written without a password — the
+            rule '$PROG watch install' adds to $WATCH_SUDOERS
+  import    which clients have servers to import, and whether yq is there
+
+api-host is the API the agent driving the setup talks to (default
+api.anthropic.com, or ROWT_DOCTOR_API): the one connection that has to survive
+the switch from the old VPN to rowt. Changes nothing: no sudo beyond a listing,
+no writes, every network wait bounded.
+EOF
+;;
     version) cat <<EOF
 $PROG version — print the version ($ROWT_VERSION).
 EOF
@@ -6183,7 +6462,7 @@ rotate_log() { # $1=logfile
 _is_readonly() { # $1=cmd  $2=first arg
   case "$1" in
     status|report|explain|route|connections|conns|monitor|mon|ping|probe|version|\
-    run|onboard|shell-init|completion|_complete|help|audit|metrics|-h|--help|--version|-V) return 0 ;;
+    run|onboard|doctor|shell-init|completion|_complete|help|audit|metrics|-h|--help|--version|-V) return 0 ;;
     proxy)  case "${2:-status}" in on|off) return 1 ;; *) return 0 ;; esac ;;
     router) case "${2:-status}" in up|down|restart) return 1 ;; *) return 0 ;; esac ;;
     vm)     case "${2:-status}" in up|down|restart|delete) return 1 ;; *) return 0 ;; esac ;;
@@ -6434,6 +6713,7 @@ run_command() {
   case "$cmd" in
     # lifecycle
     onboard)    cmd_onboard "$@" ;;
+    doctor)     cmd_doctor "$@" ;;
     up)         cmd_setup "$@" ;;          # up [host|vm]
     down)       cmd_revert "$@" ;;
     uninstall)  cmd_uninstall "$@" ;;
@@ -6582,8 +6862,12 @@ main() {
   esac
   # exec-wrappers pass all args through to the wrapped program, so don't let a
   # '--help'/'-h' meant for it trigger rowt's own help. (Use 'rowt help <cmd>'.)
-  case "$cmd" in run|monitor|mon) ;; *)
-    case " $* " in *" --help "*|*" -h "*) show_help "$cmd"; return $? ;; esac ;;
+  # A FIRST argument of -h/--help is still rowt's own: no program is named that,
+  # and before this 'rowt run --help' handed it to exec, which choked on it.
+  case "$cmd" in
+    run) case "${1:-}" in -h|--help) show_help "$cmd"; return $? ;; esac ;;
+    monitor|mon) ;;
+    *) case " $* " in *" --help "*|*" -h "*) show_help "$cmd"; return $? ;; esac ;;
   esac
   # Read-only commands run untouched; mutating ones are bracketed in the audit
   # log (BEGIN before, END+rc after; a die() in between records an ABORT). The

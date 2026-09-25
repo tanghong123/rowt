@@ -195,10 +195,14 @@ where
         _ => {}
     }
     // exec-wrappers pass every argument to the wrapped program, so a `--help`
-    // meant for THAT must not trigger rowt's own help.
+    // meant for THAT must not trigger rowt's own help. A FIRST argument of
+    // `run` is the exception: no program is called `--help`.
     if !matches!(cmd, "run" | "monitor" | "mon")
         && rest.iter().any(|a| a == "--help" || a == "-h")
     {
+        return crate::help::show(cfg, cmd);
+    }
+    if cmd == "run" && matches!(rest.first().map(|a| a.as_str()), Some("--help" | "-h")) {
         return crate::help::show(cfg, cmd);
     }
 

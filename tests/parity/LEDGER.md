@@ -11,6 +11,7 @@ from the source and are not listed.
 | command | in matrix | covered by |
 |---|---|---|
 | `onboard` | yes | onboard |
+| `doctor` | yes | doctor |
 | `up` | yes | up up_local |
 | `down` | yes | down |
 | `uninstall` | yes | uninstall |

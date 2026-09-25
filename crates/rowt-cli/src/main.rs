@@ -2095,7 +2095,8 @@ fn main() -> ExitCode {
             // same page either way and this only saves a process.
             let wants_help = matches!(cmd.as_str(), "help" | "-h" | "--help")
                 || (!matches!(cmd.as_str(), "run" | "monitor" | "mon")
-                    && args[1..].iter().any(|a| a == "--help" || a == "-h"));
+                    && args[1..].iter().any(|a| a == "--help" || a == "-h"))
+                || (cmd == "run" && matches!(args.get(1).map(|a| a.as_str()), Some("--help" | "-h")));
             let sub = args.get(1).cloned().unwrap_or_default();
             if !wants_help && !native(cmd, &sub) {
                 delegate(&args);

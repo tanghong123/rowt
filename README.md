@@ -1,4 +1,4 @@
-# rowt — personal VLESS/AnyTLS VPN alongside a corporate VPN
+# rowt — a personal VPN for chosen sites, alongside a corporate VPN
 
 Run a personal **VLESS / VMess / AnyTLS / hysteria2 / Shadowsocks / Trojan / TUIC** VPN for selected sites **while the corporate
 VPN keeps the default route**, without the two clients fighting over the tunnel.
@@ -8,17 +8,53 @@ VPN keeps the default route**, without the two clients fighting over the tunnel.
 the problem, the architecture, onboarding, and a tour of the monitor. Start there
 if you'd rather see it than read it.
 
-## TL;DR — the common path
+## Fastest start: let your coding agent set it up
+
+rowt ships an agent skill, so a coding agent (Claude Code, Codex, or another one
+that reads skills) can do the setup with you. Keep your current VPN (Shadowrocket,
+Clash, …) **on** for now: it's what reaches GitHub and your subscriptions.
+
+```sh
+brew install tanghong123/tap/rowt
+rowt skill install        # hands the rowt skill to your coding agents
+```
+
+Then open a **new** agent session and ask it to *set up rowt*. The agent:
+
+1. **Looks before it touches anything.** It runs `rowt doctor` and `rowt onboard`
+   and tells you what it found: your other VPN apps, anything holding port 7890, a
+   corporate auto-proxy (PAC) that would bypass rowt, and what your network can
+   reach. Then it tells you its plan.
+2. **Brings your servers in** from Shadowrocket, Clash Verge, V2Box or FlClash, or
+   from share links or a subscription URL you give it. It shows you only names and
+   protocols, never credentials, and asks which to keep.
+3. **Starts rowt and verifies it** while your old VPN is still on. That includes
+   checking that the agent's own API answers through rowt, so the switch can't cut
+   the agent off mid-setup.
+
+Only two steps need your hands:
+
+- **One password.** When the agent asks, run `rowt watch install` in your own
+  terminal. It installs the watcher and a narrow passwordless rule for setting the
+  system proxy. The agent has no terminal to type a password into.
+- **The switch.** When the agent says so, quit the old VPN app and connect your
+  corporate VPN. It gives you the command to resume the session through rowt
+  before you do.
+
+Prefer to do it yourself? That's the next section.
+
+## TL;DR — doing it by hand
 
 Do the whole setup with **Shadowrocket (or any working VPN) ON** — `rowt up`
-downloads sing-box for you, so there's no separate fetch step. Only switch to
+installs the bundled, pinned sing-box for you, so there's no separate fetch step. Only switch to
 the corp VPN once it's up and working.
 
 ```sh
 # --- with Shadowrocket ON the whole time ---
 
-# 1. install
+# 1. install, then look at what's around rowt (other VPN apps, port 7890, a PAC)
 brew install tanghong123/tap/rowt          # or: ./install.sh
+rowt doctor
 
 # 2. bring your servers in — import from another client you already use:
 rowt server import                        # from Shadowrocket (default)
@@ -26,7 +62,7 @@ rowt server import                        # from Shadowrocket (default)
 $EDITOR ~/.config/rowt/import-review.json  # delete stale servers/subs
 rowt server import --apply    # (or: rowt server add '<vless://…>' / rowt sub add '<url>')
 
-# 3. set up & start (auto-fetches sing-box if missing, then renders/starts/proxies)
+# 3. set up & start (installs the bundled sing-box, then renders/starts/proxies)
 rowt up host                  # host mode (the common one); 'rowt up' auto-detects, 'up vm' forces vm, 'up local' runs with no tunnel
 
 # --- now switch networks ---
@@ -270,7 +306,7 @@ domain into the corp lane while it sits here. CLI tools ignore the macOS list;
 
 | bucket | list | where it goes | example |
 | --- | --- | --- | --- |
-| **escape** | `config/escape-domains.txt` | personal **VLESS tunnel** | google, youtube, github |
+| **escape** | `config/escape-domains.txt` | your personal **tunnel** (VLESS, VMess, AnyTLS, hysteria2, Shadowsocks, Trojan or TUIC) | google, youtube, github |
 | **corp** | `config/corp-domains.txt` (domains **and** CIDRs) | **into the corp VPN** (via the OS routing table, so the corp client's own routes carry it) | `*.corp.example.com`, `10.0.0.0/8` |
 | **direct** | everything else (the default) | **straight out the physical NIC**, bypassing *both* corp and escape | baidu, the China internet |
 
@@ -327,7 +363,7 @@ corp tunnel) is done two ways, picked automatically by `probe`:
 | mode | how the uplink escapes | when |
 | --- | --- | --- |
 | **host** | VLESS outbound with `bind_interface=<physical NIC>` — forced out the physical interface | corp enforces via **routes** (common). Compact, no VM, works while travelling. |
-| **vm** | a **bridged Lima VM** runs the VLESS tunnel; the host forwards escape traffic to it over SOCKS. The VM has its own network stack. | corp enforces via a **packet filter** and `bind_interface` can't bypass it. |
+| **vm** | a **bridged Lima VM** runs the tunnel; the host forwards escape traffic to it over SOCKS. The VM has its own network stack. | corp enforces via a **packet filter** and `bind_interface` can't bypass it. |
 
 In both modes the system-proxy target stays `127.0.0.1:7890`; only the `escape`
 outbound differs (direct VLESS vs. SOCKS→VM), so switching modes is transparent.
@@ -405,9 +441,11 @@ A server the pinned sing-box would refuse is **skipped with a warning when it
 is added**, not saved: an unknown cipher, a 2022 key of the wrong length, another
 plugin (`shadow-tls`, `kcptun`, …), or a malformed TUIC uuid. Saved, it would
 fail `sing-box check` for the whole config, and every render with it, until
-removed by hand. WireGuard and ShadowTLS servers are not supported yet: sing-box
-runs them as an endpoint and as a pair of chained outbounds, which the config
-rowt renders does not express.
+removed by hand. WireGuard and ShadowTLS servers are not supported: sing-box runs
+them as an endpoint and as a pair of chained outbounds, which the config rowt
+renders does not express, and neither serves what rowt is for (WireGuard is poor
+at crossing a firewall on its own; ShadowTLS only wraps a self-hosted
+Shadowsocks).
 
 ### Import from another client (Shadowrocket / Clash Verge / V2Box / FlClash)
 
@@ -605,12 +643,13 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 | command | what it does |
 | --- | --- |
 | `onboard` | guided getting-started checklist — shows how far you are and the exact next command. `rowt` with no args shows it too. |
+| `doctor [api-host]` | what's **around** rowt that decides whether setup goes smoothly: who holds ports 7890/9090 (a Clash client usually does), other proxy/VPN software and who owns the default route, a PAC or WPAD that would bypass rowt, what answers over the physical NIC vs through rowt (Google, GitHub, and the API host of the agent driving setup — default `api.anthropic.com`), whether the proxy can be written without a password, and which clients can be imported. Ends with FLAGS that the `rowt` agent skill acts on. Read-only. |
 | `up [host\|vm\|local] [--force]` | ensure sing-box → probe (if no mode) → render → start router → proxy on. `local` = no tunnel at all, for when you are already outside the censored network: the escape lane's rules retarget to `direct` (keeping their precedence over broader block entries), block/corp/direct are unchanged, and no server is needed. A bare `up` chooses it when the `ROWT_GFW_CANARIES` answer over the physical NIC. Idempotent (no-op if already up), except vm mode re-detects the VM's DHCP IP and re-wires if it moved; `--force` does a full rebuild. Switching to host mode powers the VM down. |
 | `down` | tear everything down: system proxy off, **kill sing-box** (incl. strays), VM down. |
 | `restart` | bounce the tunnel in place (host or vm, whichever is active) — no re-render, no proxy change. Use if sing-box is stuck/high-CPU. |
 | `reload` | re-detect the network interface, re-render, restart, re-apply the proxy — run after switching Wi-Fi ↔ wired ↔ hotspot. |
 | `watch <install\|uninstall\|status>` | install/remove a LaunchAgent that (a) runs `reload` on every network change (debounced; a no-op when neither the interface nor the active-service proxy moved) and (b) on a timer **probes the escape tunnel** and auto-recovers it — a *wedged* tunnel (router up, not carrying traffic; 3 failed probes) or a *crashed* one (router down while your intent is up, same boot), via `reload`, cooldown-gated and verified by a re-probe. It also runs once at **login**: if rowt isn't running but the system proxy is still set to `127.0.0.1:7890`, it clears it, so rowt's proxy effect never outlives a reboot. `install` also adds a scoped passwordless-sudo rule for the `networksetup` proxy toggles (so a Wi-Fi↔Ethernet switch doesn't prompt); `uninstall` removes both. Recoveries are recorded in `audit`. It further (c) restarts a router that is **up and answering but spinning** — high CPU with no traffic — which the liveness probe alone cannot see, and (d) **re-syncs its own agent plist** when that plist was written by an older rowt. `status` reports a stale agent instead of just `LOADED`. |
-| `status` | mode, servers, proxy state, reachability **and config validity** (absorbs the old `doctor`). |
+| `status` | mode, servers, proxy state, reachability **and config validity** — rowt itself. |
 | `explain <domain\|ip>` | explain which lane a destination takes — `escape` (proxy), `corp` (into the corp VPN), `block`, or `direct` (pass-through) — and which rule matched. Mirrors the real routing: a `--domain` (whole-host) entry wins outright, else hand-list domain suffixes win by **longest match** across all three lanes, then corp CIDR (on the resolved IP), then final; adds a live HTTP check if the router is running. (`route` still works as a hidden alias.) |
 | `report` | full offline diagnostic (deps, configs, per-server reachability, DNS, through-proxy tests, log + audit tail) → `~/.config/rowt/diag-*.txt`, **secrets masked**, for sharing. |
 | `audit [-n N\|all\|path\|clear]` | the **mutation trail** — one line per state-changing op, whether you ran it or the `watch` agent did, with `BEGIN`/`END`/`ABORT`, timing, and a `by=<parent>(<tty>)` field that says whether it was hands-on (`by=zsh`) or the watchdog (`by=launchd`). `BEGIN` is written before the work, so even a command that hangs leaves a trace. Read-only commands aren't recorded. → `~/.config/rowt/log/audit.log`. |

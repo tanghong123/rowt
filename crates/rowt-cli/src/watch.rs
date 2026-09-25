@@ -65,6 +65,13 @@ fn quiet(cmd: &str, args: &[&str]) -> bool {
         .status().map(|s| s.success()).unwrap_or(false)
 }
 
+/// `verr="$(cmd 2>&1 >/dev/null)"` — quiet, but the failure keeps its words.
+fn stderr_of(cmd: &str, args: &[&str]) -> Result<(), String> {
+    let out = Command::new(cmd).args(args).stdout(Stdio::null()).stderr(Stdio::piped())
+        .output().map_err(|e| e.to_string())?;
+    if out.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&out.stderr).into_owned()) }
+}
+
 fn cfg_of(ctx: &Ctx) -> Config {
     Config {
         port: ctx.port,
@@ -809,24 +816,35 @@ pub fn cmd(ctx: &Ctx, self_bin: &Path, action: &str) -> Result<String, String> {
                 eprintln!("==> watch not installed — nothing to refresh");
                 return Ok(String::new());
             }
+            // The admin step comes FIRST, before anything is written: a shell that
+            // cannot be asked for a password (an agent's has no terminal) stops
+            // here and says why, instead of installing a watcher with no sudoers
+            // rule — one that looks installed and fails every proxy repair.
+            if !refresh {
+                let tmp = std::env::temp_dir().join(format!("rowt-sudoers-{}", std::process::id()));
+                std::fs::write(&tmp, sudoers_body()).map_err(|e| e.to_string())?;
+                match stderr_of("sudo", &["visudo", "-cf", &tmp.to_string_lossy()]) {
+                    Ok(()) => {
+                        eprintln!("==> installing scoped passwordless-sudo rule ({SUDOERS}; needs admin once)");
+                        if !quiet("sudo", &["install", "-m", "440", "-o", "root", "-g", "wheel",
+                                            &tmp.to_string_lossy(), SUDOERS]) {
+                            eprintln!("error: could not install {SUDOERS} — a Wi-Fi<->Ethernet switch may prompt for a password");
+                        }
+                    }
+                    Err(verr) => {
+                        if verr.contains("terminal is required") || verr.contains("password is required") {
+                            let _ = std::fs::remove_file(&tmp);
+                            die(cfg, &format!("'{PROG} watch install' needs an admin password once (for {SUDOERS}), and this shell has no terminal to ask for one — run it in your own terminal"));
+                        }
+                        eprintln!("error: generated sudoers failed validation — skipping it (service-change reloads may prompt)");
+                    }
+                }
+                let _ = std::fs::remove_file(&tmp);
+            }
             if let Some(d) = plist.parent() {
                 let _ = std::fs::create_dir_all(d);
             }
             std::fs::write(&plist, plist_body(ctx, self_bin)).map_err(|e| e.to_string())?;
-            if !refresh {
-                let tmp = std::env::temp_dir().join(format!("rowt-sudoers-{}", std::process::id()));
-                std::fs::write(&tmp, sudoers_body()).map_err(|e| e.to_string())?;
-                if quiet("sudo", &["visudo", "-cf", &tmp.to_string_lossy()]) {
-                    eprintln!("==> installing scoped passwordless-sudo rule ({SUDOERS}; needs admin once)");
-                    if !quiet("sudo", &["install", "-m", "440", "-o", "root", "-g", "wheel",
-                                        &tmp.to_string_lossy(), SUDOERS]) {
-                        eprintln!("error: could not install {SUDOERS} — a Wi-Fi<->Ethernet switch may prompt for a password");
-                    }
-                } else {
-                    eprintln!("error: generated sudoers failed validation — skipping it (service-change reloads may prompt)");
-                }
-                let _ = std::fs::remove_file(&tmp);
-            }
             let u = uid();
             let _ = quiet("launchctl", &["bootout", &format!("gui/{u}/{LABEL}")]);
             if !quiet("launchctl", &["bootstrap", &format!("gui/{u}"), &plist.to_string_lossy()])

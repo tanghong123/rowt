@@ -36,6 +36,18 @@ printf '%s\n' "$_line" >> "$trace"
 # networksetup shim. If the wrapped command has no shim, exec fails loudly —
 # fail-closed is the point: an unshimmed effectful command must never run.
 if [ "$name" = sudo ]; then
+  # ROWT_PARITY_SUDO=no-tty answers the way sudo does in a shell with no
+  # controlling terminal and no cached credential — an agent's. It refuses in
+  # its own words, because those words are what rowt keys its explanation on
+  # (`watch install`, `proxy on`); `-n` asks for no prompt, and gets the other
+  # refusal. Without this the sandbox could only ever reach a missing shim.
+  if [ "${ROWT_PARITY_SUDO:-}" = no-tty ]; then
+    case " $* " in
+      *" -n "*) echo "sudo: a password is required" >&2 ;;
+      *)        echo "sudo: a terminal is required to read the password; either use the -S option to read from standard input or configure an askpass helper" >&2 ;;
+    esac
+    exit 1
+  fi
   while [ "$#" -gt 0 ]; do
     case "$1" in
       -v)                   exit 0 ;;

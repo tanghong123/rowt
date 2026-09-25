@@ -809,6 +809,20 @@ protects behavior something might *depend on*; nothing can depend on an entry
 that disappears, and the shell was not "right" in a way the port had to match —
 it was losing writes it had already acknowledged.
 
+#### 6.7.2 Retired: `server import --from shadowrocket --path` could never work
+
+`cmd_server_import` appended `--path <p>` to whichever dumper it picked, and
+`sr-import.py` has no `--path` — it calls the override `--store`. So the
+combination was an argparse error on every run, and `importer.rs` reproduced it
+bug-for-bug, printing the argparse usage itself (a cli-diff case pinned it).
+Both sides now pass the path as the Shadowrocket importer's `--store`
+(`srio::resolve_store(path)` in Rust), so it reads the file it was given.
+
+Retired on the same grounds as §6.7.1: nothing can depend on an option that
+always fails. It surfaced while exercising the import flow for the agent skill,
+through a user-level path (`--path` was undocumented until this change), not
+through the gate, which had pinned the failure as behavior.
+
 ### 6.8 Coverage ledger
 
 Every arm of `run_command`'s `case` plus every entry in `_is_readonly` becomes

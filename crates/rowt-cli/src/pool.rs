@@ -150,10 +150,12 @@ use rowt_core::pyurl::opens_a_request;
 /// `curl` a subscription and parse it — the IO half of `--sub`.
 ///
 /// Every failure the Python turns into a non-zero exit collapses to `Err`
-/// here, because a non-zero exit is all the shell reads: the fetch itself, an
-/// undecodable body, and a body that yielded no usable links are three
-/// different messages on a stderr the caller sends to /dev/null.
-fn fetch_sub(url: &str) -> Result<Vec<Value>, ()> {
+/// here: the fetch itself, an undecodable body, and a body that yielded no
+/// usable links. The one detail kept is the HTTP status of a fetch the server
+/// refused — the shell reads the same number off the helper's `HTTPError` line
+/// and both put it on the "subscription fetch failed" line, because a 404 is a
+/// subscription the provider has dropped and "fetch failed" alone never said so.
+fn fetch_sub(url: &str) -> Result<Vec<Value>, Option<u16>> {
     // urllib refuses a URL with no scheme outright — `ValueError: unknown url
     // type: 'example.com'` — WITHOUT opening a socket, and the shell reads that
     // non-zero exit as "subscription fetch failed". curl is the opposite: given
@@ -164,7 +166,7 @@ fn fetch_sub(url: &str) -> Result<Vec<Value>, ()> {
     // has to come BEFORE the process, since by the time curl runs the request
     // is already out.
     if !opens_a_request(url) {
-        return Err(());
+        return Err(None);
     }
     let ua = crate::env_or(
         "ROWT_SUB_UA",
@@ -172,16 +174,34 @@ fn fetch_sub(url: &str) -> Result<Vec<Value>, ()> {
     );
     let out = std::process::Command::new("curl")
         .args(["-fsSL", "--max-time", "20", "-A", &ua, "--", url])
-        .stderr(std::process::Stdio::null())
         .output()
-        .map_err(|_| ())?;
+        .map_err(|_| None)?;
     if !out.status.success() {
-        return Err(());
+        // The HTTP status is the one reason the summary line carries — the
+        // shell reads the same number off urllib's `HTTPError` line.
+        return Err(rowt_core::pycli::vless_parse::http_status(&String::from_utf8_lossy(&out.stderr)));
     }
     let body = String::from_utf8_lossy(&out.stdout).into_owned();
-    let links = sharelink::decode_subscription(&body).map_err(|_| ())?;
+    let links = sharelink::decode_subscription(&body).map_err(|_| None)?;
     // `2>/dev/null` on the shell's side: the per-link warnings are dropped.
-    sharelink::parse_many(&links).map(|b| b.outbounds).map_err(|_| ())
+    sharelink::parse_many(&links).map(|b| b.outbounds).map_err(|_| None)
+}
+
+/// How a failed subscription is named on the error line: scheme and host only.
+/// Providers put the token in the PATH as often as in the query, so the old
+/// cut at the first `?` printed it. A line that is no URL keeps that old cut.
+/// Mirrors the shell's `sed -E 's#^([A-Za-z][A-Za-z0-9+.-]*://[^/?#]*).*#\1/…#'`.
+fn shown_url(url: &str) -> String {
+    if let Some((scheme, rest)) = url.split_once("://") {
+        let mut c = scheme.chars();
+        let valid = c.next().is_some_and(|f| f.is_ascii_alphabetic())
+            && c.all(|x| x.is_ascii_alphanumeric() || matches!(x, '+' | '.' | '-'));
+        if valid {
+            let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+            return format!("{scheme}://{host}/…");
+        }
+    }
+    format!("{}…", url.split('?').next().unwrap_or(url))
 }
 
 /// `rebuild_servers` — servers.json from the manual set plus every subscription.
@@ -214,9 +234,10 @@ pub fn rebuild(ctx: &Ctx) -> Result<(), String> {
             Ok(v) => fetched.push(v),
             // `${url%%\?*}` — everything before the first `?`, so the query
             // string (which is where the token lives) stays out of the log.
-            Err(()) => err(&format!(
-                "subscription fetch failed: {}…",
-                url.split('?').next().unwrap_or(url)
+            Err(status) => err(&format!(
+                "subscription fetch failed: {}{}",
+                shown_url(url),
+                status.map(|s| format!(" (HTTP {s})")).unwrap_or_default()
             )),
         }
     }
@@ -571,6 +592,16 @@ pub fn clear_subs(ctx: &Ctx) -> Result<String, String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_failed_subscription_is_named_by_scheme_and_host_so_a_path_token_stays_out() {
+        assert_eq!(shown_url("https://sub.example/subscribe/12/SeCrEtToKeN"), "https://sub.example/…");
+        assert_eq!(shown_url("https://sub.example/feed?token=SeCrEt"), "https://sub.example/…");
+        assert_eq!(shown_url("http://127.0.0.1:9/feed"), "http://127.0.0.1:9/…");
+        // Not a URL: the old cut at the first `?`.
+        assert_eq!(shown_url("example.com/feed?x=1"), "example.com/feed…");
+        assert_eq!(shown_url("1http://example.com/x"), "1http://example.com/x…");
+    }
 
     #[test]
     fn a_final_line_without_a_newline_is_not_a_subscription() {

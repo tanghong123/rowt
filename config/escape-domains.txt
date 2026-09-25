@@ -1,5 +1,5 @@
 # Domains routed through the escape VPN (case 1). This is one of three buckets:
-#   escape-domains.txt  -> escape (this file: the VLESS tunnel, e.g. google)
+#   escape-domains.txt  -> escape (this file: your personal tunnel, e.g. google)
 #   corp-domains.txt    -> corp   (into the corporate VPN, e.g. intranet)
 #   (everything else)   -> direct (straight out the physical NIC, e.g. baidu)
 #
@@ -41,3 +41,13 @@ wikimedia.org
 x.com
 twitter.com
 twimg.com
+
+# AI assistants and coding agents. From mainland China their APIs are blocked,
+# or refuse the region, on the direct lane — and an agent driving rowt's setup
+# needs its own API to keep answering through the switch-over. (Gemini is
+# already covered by geosite:google.)
+anthropic.com
+claude.ai
+claude.com
+openai.com
+chatgpt.com
