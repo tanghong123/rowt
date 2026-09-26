@@ -15,6 +15,43 @@ The bracketed keys (`A1`, `F3`, `B5`, and so on) point into §7.
 
 ---
 
+## Decision, 2026-09-26: not building
+
+**The iOS port is cancelled** (repo tasks #29 and #30). The survey below is
+kept as the snapshot it was. Its findings still hold, but they no longer add
+up to a reason to build:
+
+- **rowt's advantage on the Mac does not carry over.** On macOS, rowt runs a
+  personal tunnel *next to* the corp VPN client (§1.1). On iOS only one VPN
+  app is up at a time (§1.2), so an iPhone rowt would take the same single
+  slot Shadowrocket takes, and the phone toggles between it and the corp
+  client either way.
+- **Its other advantage now reaches Shadowrocket without an app.** Beyond
+  coexistence, what rowt offered over Shadowrocket was a cleaner set of routes.
+  Since rowt 3.5.14, `rowt config export --to shadowrocket` writes rowt's lanes
+  as a Shadowrocket config: rowt's precedence order, `FINAL,DIRECT` for
+  everything unlisted, and the hand-added servers as share links. It was
+  loaded and checked on the author's iPhone.
+- **Everything else an iOS rowt would need, Shadowrocket already has:** the
+  protocols, subscriptions, a rule engine and a finished app, while iOS
+  handles captive portals itself.
+- **What would remain is carrying corp traffic inside rowt's own tunnel**
+  (§1.1 (ii), a relay through a machine with corp access). That is a policy
+  question rather than an engineering one. It does not justify the cost: a
+  Swift app, a packet-tunnel extension, a paid developer account and ongoing
+  upkeep.
+
+**What would reopen it:**
+- iOS letting a VPN app run beside an app-provided enterprise VPN;
+- corp policy allowing the corp VPN to ride inside rowt's tunnel (§1.1 (i) or
+  (ii));
+- a need on the phone that Shadowrocket cannot serve.
+
+PORTING.md's Phase 5 (the TUN render target) is unaffected. It was always a
+Linux item first.
+
+---
+
 ## 1. Verdict
 
 ### 1.1 The answer
@@ -672,6 +709,9 @@ The Status hero always shows *which* server is actually carrying traffic.
 ## 6. Risks and open questions
 
 ### 6.1 Decisions only you can make
+
+*Settled 2026-09-26: the port is not being built, so none of these is open.
+The reasons are in the decision at the top.*
 
 1. **Corp on iPhone:** off (toggle to the corp client), relay via the Mac
    (b2: policy), or an endpoint (b1: only if the corp VPN is

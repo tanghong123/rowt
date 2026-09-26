@@ -99,6 +99,7 @@ rowt escape add youtube.com   # send another site through the personal tunnel
 rowt corp add intranet.example.com 10.0.0.0/8   # send a domain (and its subdomains) or a CIDR into the corp VPN
 rowt block add ads.example.com   # sinkhole an ad/telemetry domain (no DNS, no dial)
 rowt hotspot add unitedwifi.com  # a venue's captive portal: reached WITHOUT the proxy, so its login page loads
+rowt config export --to shadowrocket  # the same routes (and servers) for Shadowrocket on your iPhone
 rowt use JP                   # pick a server (rowt ping shows the fastest)
 rowt status                   # is it working? (mode / server / proxy / reachability)
 rowt speed <url>              # is a lane FAST enough — and is rowt the cause? (it says which)
@@ -201,22 +202,34 @@ war with the corp client.
 
 ## Your rules on the iPhone (Shadowrocket)
 
-Shadowrocket on the iPhone can route the same way rowt does on the Mac:
+Shadowrocket on the iPhone can route the same way rowt does on the Mac. rowt
+writes your setup out for it:
 
 ```sh
-rowt config export --to shadowrocket          # rowt-shadowrocket.conf + rowt-shadowrocket-servers.txt
+rowt config export --to shadowrocket                 # rowt-shadowrocket.conf + rowt-shadowrocket-servers.txt
 rowt config export --to shadowrocket --routes-only   # the routing config alone
 ```
 
 **`rowt-shadowrocket.conf` is the routing**, as a Shadowrocket config:
-escape → `PROXY`, block → `REJECT`, corp and hotspot → `DIRECT`, and everything
-else `FINAL,DIRECT`. The rules come in rowt's own order (Shadowrocket also takes
-the first rule that matches), `geosite:` categories are written out in full
-(bar the few regex entries some carry: Shadowrocket has no rule for a domain
-regex, and the export counts what it leaves out), and `PROXY` means whichever
-server is selected in Shadowrocket. AirDrop it to the
-phone (or save it to iCloud Drive), open it with Shadowrocket, tap it under
-Config, and choose Use Config.
+escape → `PROXY`, block → `REJECT`, corp and hotspot → `DIRECT`. Anything
+unlisted goes **direct, bypassing the proxy**: a Shadowrocket config's default
+action is its `FINAL` rule, and the export ends the `[Rule]` section with
+`FINAL,DIRECT`. The rules come in rowt's own order (Shadowrocket also takes the
+first rule that matches), `geosite:` categories are written out in full (bar the
+few regex entries some carry: Shadowrocket has no rule for a domain regex, and
+the export counts what it leaves out), and `PROXY` means whichever server is
+selected in Shadowrocket.
+
+To use it:
+1. AirDrop the file to the phone, or save it to iCloud Drive.
+2. Open it with Shadowrocket, tap it under Config, and choose Use Config.
+3. Set **Global Routing** on Shadowrocket's home screen to **Config**. Config
+   follows the file's rules. **Proxy** sends everything through the server and
+   ignores the rules, `FINAL` included, and **Direct** proxies nothing.
+
+The export is a snapshot, so export again after changing lanes on the Mac. It
+also names your corp domains (as `DIRECT` rules), so keep it off public URLs,
+including a public remote-config link.
 
 **`rowt-shadowrocket-servers.txt` is your servers**: each hand-added server as a
 share link, followed by your subscription URLs, which Shadowrocket fetches

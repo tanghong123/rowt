@@ -139,8 +139,9 @@ foreground with output redirected to a file (see SKILL.md → Rules).
   hotspot → DIRECT, everything else DIRECT), plus `…-servers.txt`: the hand-added
   servers as share links, each checked by parsing it back, and the subscription
   URLs. That file holds credentials, so it's owner-only; `--routes-only` skips it.
-  The user opens the config with Shadowrocket (Use Config) and pastes the servers
-  file's text into it.
+  The user opens the config with Shadowrocket (Use Config), sets Global Routing to
+  Config (Proxy ignores the rules), and pastes the servers file's text into it.
+  It's a snapshot: export again after lane changes.
 - **Importing:** `config import` **merges** by default. It unions each lane list,
   reports an entry that lands in a different lane as a conflict, and leaves the
   recipient's servers alone. `--replace` overwrites instead.
