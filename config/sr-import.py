@@ -203,6 +203,15 @@ def _to_shadowsocks(s: dict, tag: str) -> dict | None:
         return None
 
 
+def _names_under(pattern: str) -> bool:
+    """A DOMAIN-WILDCARD pattern of the one shape a lane entry can hold: `*.x`,
+    with no other wildcard (`*`, `?`, or a `[...]` class) in `x`."""
+    rest = pattern[2:]
+    return (
+        pattern.startswith("*.") and bool(rest) and not any(c in rest for c in "*?[]")
+    )
+
+
 def _parse_rules(conf: str) -> list[str]:
     doms: list[str] = []
     in_rules = False
@@ -219,6 +228,11 @@ def _parse_rules(conf: str) -> list[str]:
         typ, value, action = parts[0].upper(), parts[1], parts[-1].upper()
         if action == "PROXY" and typ in ("DOMAIN-SUFFIX", "DOMAIN"):
             doms.append(value.lower())
+        elif action == "PROXY" and typ == "DOMAIN-WILDCARD" and _names_under(value):
+            # `*.x` (the names under x) is rowt's dot-led `.x`, which is how
+            # `rowt config export --to shadowrocket` writes one. Any other
+            # wildcard shape has no rowt rule, so it is left out.
+            doms.append(value[1:].lower())
     # dedupe, keep order
     seen: set[str] = set()
     return [x for x in doms if not (x in seen or seen.add(x))]

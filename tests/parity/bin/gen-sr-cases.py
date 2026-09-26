@@ -269,6 +269,13 @@ CONF_BODIES = [
     "[Rule]\nDOMAIN-SUFFIX , spaced.example , PROXY \nDOMAIN,dup.example,PROXY\n"
     "DOMAIN,DUP.example,PROXY\nDOMAIN,,PROXY\n,,\n",
     "[Rule]\nDOMAIN-SUFFIX,例え.example,PROXY\nDOMAIN-KEYWORD,kw,PROXY\n",
+    # DOMAIN-WILDCARD: only `*.x` becomes an entry (`.x`), as rowt's own
+    # Shadowrocket export writes one; every other shape is left out.
+    "[Rule]\nDOMAIN-WILDCARD,*.Wild.example,PROXY\nDOMAIN-WILDCARD,a*.bad.example,PROXY\n"
+    "DOMAIN-WILDCARD,*.,PROXY\nDOMAIN-WILDCARD,*.q?.example,PROXY\n"
+    "DOMAIN-WILDCARD,*.[ab].example,PROXY\nDOMAIN-WILDCARD,*.*.two.example,PROXY\n"
+    "DOMAIN-WILDCARD,*.direct.example,DIRECT\nDOMAIN-WILDCARD , *.spaced.example , PROXY\n"
+    "domain-wildcard,*.例え.example,proxy\nDOMAIN-WILDCARD,*.wild.example,PROXY\n",
     "no sections at all\nDOMAIN,orphan.example,PROXY\n",
     "[Rule]\n",
     "",

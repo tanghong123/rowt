@@ -1191,6 +1191,258 @@ pub fn render(v: &Value) -> String {
     format!("{}\n", pyjson::dumps(v))
 }
 
+// ---- the other way: an outbound as a share link ---------------------------
+//
+// `to_link` in vless-parse.py, byte for byte: `parity vless-diff` runs
+// `--links` through both. Every helper below is the Python one of the same
+// name. The Python's AttributeError/TypeError on a malformed outbound (a tls
+// that is a string, an alpn that is not a list) is `Err(())` here, and both
+// end in "no link".
+
+type Pairs = Vec<(String, String)>;
+
+/// `(d.get(k) or {})`: the sub-dict, None when the value is falsy, and the
+/// AttributeError the Python meets on a truthy value that is not a dict.
+fn or_dict<'a>(d: Option<&'a Map<String, Value>>, k: &str) -> Result<Option<&'a Map<String, Value>>, ()> {
+    match d.and_then(|m| m.get(k)) {
+        Some(v) if truthy(v) => v.as_object().map(Some).ok_or(()),
+        _ => Ok(None),
+    }
+}
+
+/// `str(d.get(k, default))`.
+fn gs(d: Option<&Map<String, Value>>, k: &str, default: &str) -> String {
+    d.and_then(|m| m.get(k)).map(py_str).unwrap_or_else(|| default.to_string())
+}
+
+/// `_listed`: an alpn list or a transport's hosts as a comma list; not a list
+/// is the TypeError.
+fn listed(d: Option<&Map<String, Value>>, k: &str) -> Result<String, ()> {
+    match d.and_then(|m| m.get(k)) {
+        None => Ok(String::new()),
+        Some(Value::Array(a)) => Ok(a.iter().map(py_str).collect::<Vec<_>>().join(",")),
+        Some(_) => Err(()),
+    }
+}
+
+fn pair(k: &str, v: String) -> (String, String) {
+    (k.to_string(), v)
+}
+
+/// `_query`: the pairs in order, empty values left out.
+fn query(pairs: Pairs) -> String {
+    let kept: Pairs = pairs.into_iter().filter(|(_, v)| !v.is_empty()).collect();
+    pyurl::urlencode(&kept)
+}
+
+/// `_hostport`: a bare IPv6 address bracketed, which urlsplit needs.
+fn hostport(o: &Map<String, Value>) -> String {
+    let mut host = gs(Some(o), "server", "");
+    if host.contains(':') {
+        host = format!("[{host}]");
+    }
+    format!("{host}:{}", gs(Some(o), "server_port", ""))
+}
+
+/// `_transport_pairs`.
+fn transport_pairs(tr: Option<&Map<String, Value>>) -> Result<Pairs, ()> {
+    let ty = gs(tr, "type", "");
+    Ok(match ty.as_str() {
+        "ws" => vec![
+            pair("type", "ws".into()),
+            pair("path", gs(tr, "path", "")),
+            pair("host", gs(or_dict(tr, "headers")?, "Host", "")),
+        ],
+        "grpc" => vec![pair("type", "grpc".into()), pair("serviceName", gs(tr, "service_name", ""))],
+        "http" => vec![pair("type", "http".into()), pair("path", gs(tr, "path", "")), pair("host", listed(tr, "host")?)],
+        "" => vec![pair("type", "tcp".into())],
+        _ => vec![pair("type", ty)],
+    })
+}
+
+/// `_tls_pairs`.
+fn tls_pairs(tls: Option<&Map<String, Value>>, insecure_key: &str) -> Result<Pairs, ()> {
+    let reality = or_dict(tls, "reality")?;
+    let insecure = tls.and_then(|m| m.get("insecure")).is_some_and(truthy) && !insecure_key.is_empty();
+    Ok(vec![
+        pair("security", if reality.is_some() { "reality" } else { "tls" }.into()),
+        pair("sni", gs(tls, "server_name", "")),
+        pair("alpn", listed(tls, "alpn")?),
+        pair("fp", gs(or_dict(tls, "utls")?, "fingerprint", "")),
+        pair(insecure_key, if insecure { "1".into() } else { String::new() }),
+        pair("pbk", gs(reality, "public_key", "")),
+        pair("sid", gs(reality, "short_id", "")),
+    ])
+}
+
+/// `_unchecked_link`.
+fn unchecked_link(o: &Map<String, Value>) -> Result<String, ()> {
+    let t = o.get("type").and_then(|v| v.as_str()).ok_or(())?;
+    let tag = gs(Some(o), "tag", "");
+    let frag = format!("#{}", pyurl::quote(&tag, ""));
+    let tls = or_dict(Some(o), "tls")?;
+    let tr = or_dict(Some(o), "transport")?;
+    let q_user = |k: &str| pyurl::quote(&gs(Some(o), k, ""), "");
+    match t {
+        "vless" => {
+            let mut q = vec![pair("encryption", "none".into()), pair("flow", gs(Some(o), "flow", ""))];
+            if tls.is_some() { q.extend(tls_pairs(tls, "")?) } else { q.push(pair("security", "none".into())) }
+            q.extend(transport_pairs(tr)?);
+            Ok(format!("vless://{}@{}?{}{frag}", q_user("uuid"), hostport(o), query(q)))
+        }
+        "trojan" => {
+            let mut q = if tls.is_some() { tls_pairs(tls, "allowInsecure")? } else { vec![pair("security", "none".into())] };
+            q.extend(transport_pairs(tr)?);
+            Ok(format!("trojan://{}@{}?{}{frag}", q_user("password"), hostport(o), query(q)))
+        }
+        "tuic" => {
+            let insecure = tls.and_then(|m| m.get("insecure")).is_some_and(truthy);
+            let q = vec![
+                pair("sni", gs(tls, "server_name", "")),
+                pair("alpn", listed(tls, "alpn")?),
+                pair("congestion_control", gs(Some(o), "congestion_control", "")),
+                pair("udp_relay_mode", gs(Some(o), "udp_relay_mode", "")),
+                pair("allow_insecure", if insecure { "1".into() } else { String::new() }),
+            ];
+            Ok(format!("tuic://{}:{}@{}?{}{frag}", q_user("uuid"), q_user("password"), hostport(o), query(q)))
+        }
+        "anytls" | "hysteria2" => {
+            let insecure = tls.and_then(|m| m.get("insecure")).is_some_and(truthy);
+            let mut q = vec![
+                pair("sni", gs(tls, "server_name", "")),
+                pair("alpn", listed(tls, "alpn")?),
+                pair("insecure", if insecure { "1".into() } else { String::new() }),
+            ];
+            if t == "anytls" {
+                q.push(pair("fp", gs(or_dict(tls, "utls")?, "fingerprint", "")));
+            } else {
+                let obfs = or_dict(Some(o), "obfs")?;
+                let mbps = |k: &str| o.get(k).map(py_str).unwrap_or_default();
+                q.extend([
+                    pair("upmbps", mbps("up_mbps")),
+                    pair("downmbps", mbps("down_mbps")),
+                    pair("obfs", if obfs.is_some() { "salamander".into() } else { String::new() }),
+                    pair("obfs-password", gs(obfs, "password", "")),
+                ]);
+            }
+            Ok(format!("{t}://{}@{}?{}{frag}", q_user("password"), hostport(o), query(q)))
+        }
+        "shadowsocks" => {
+            let (method, pw) = (gs(Some(o), "method", ""), gs(Some(o), "password", ""));
+            let cred = if method.starts_with("2022-") {
+                pyurl::quote(&format!("{method}:{pw}"), ":")
+            } else {
+                crate::foreign::b64encode(format!("{method}:{pw}").as_bytes())
+                    .replace('+', "-")
+                    .replace('/', "_")
+                    .trim_end_matches('=')
+                    .to_string()
+            };
+            let mut plugin = gs(Some(o), "plugin", "");
+            if !plugin.is_empty() && o.get("plugin_opts").is_some_and(truthy) {
+                plugin = format!("{plugin};{}", gs(Some(o), "plugin_opts", ""));
+            }
+            let tail = if plugin.is_empty() { String::new() } else { format!("/?{}", pyurl::urlencode(&[pair("plugin", plugin)])) };
+            Ok(format!("ss://{cred}@{}{tail}{frag}", hostport(o)))
+        }
+        "vmess" => {
+            let ty = gs(tr, "type", "");
+            let (mut net, mut host, mut path) = (if ty.is_empty() { "tcp".to_string() } else { ty.clone() }, String::new(), String::new());
+            match ty.as_str() {
+                "ws" => {
+                    host = gs(or_dict(tr, "headers")?, "Host", "");
+                    path = gs(tr, "path", "");
+                }
+                "grpc" => path = gs(tr, "service_name", ""),
+                "http" => {
+                    net = "h2".into();
+                    host = listed(tr, "host")?;
+                    path = gs(tr, "path", "");
+                }
+                _ => {}
+            }
+            let mut j = Map::new();
+            for (k, v) in [
+                ("v", "2".to_string()),
+                ("ps", tag.clone()),
+                ("add", gs(Some(o), "server", "")),
+                ("port", gs(Some(o), "server_port", "")),
+                ("id", gs(Some(o), "uuid", "")),
+                ("aid", gs(Some(o), "alter_id", "0")),
+                ("scy", gs(Some(o), "security", "auto")),
+                ("net", net),
+                ("type", "none".into()),
+                ("host", host),
+                ("path", path),
+                ("tls", if tls.is_some() { "tls".into() } else { String::new() }),
+                ("sni", gs(tls, "server_name", "")),
+                ("alpn", listed(tls, "alpn")?),
+                ("fp", gs(or_dict(tls, "utls")?, "fingerprint", "")),
+            ] {
+                j.insert(k.to_string(), Value::String(v));
+            }
+            Ok(format!("vmess://{}", crate::foreign::b64encode(pyjson::dumps_flat(&Value::Object(j)).as_bytes())))
+        }
+        _ => Err(()),
+    }
+}
+
+/// Python's `==` on what json.loads returns: numbers compare by value, a bool
+/// is the int 0 or 1 (`True == 1`), dicts ignore key order.
+fn py_eq(a: &Value, b: &Value) -> bool {
+    fn int(v: &Value) -> Option<i128> {
+        match v {
+            Value::Bool(b) => Some(*b as i128),
+            Value::Number(n) => n.as_i64().map(i128::from).or_else(|| n.as_u64().map(i128::from)),
+            _ => None,
+        }
+    }
+    fn num(v: &Value) -> Option<f64> {
+        match v {
+            Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
+            Value::Number(n) => n.as_f64(),
+            _ => None,
+        }
+    }
+    match (a, b) {
+        (Value::Null, Value::Null) => true,
+        (Value::String(x), Value::String(y)) => x == y,
+        (Value::Array(x), Value::Array(y)) => x.len() == y.len() && x.iter().zip(y).all(|(p, q)| py_eq(p, q)),
+        (Value::Object(x), Value::Object(y)) => {
+            x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| py_eq(v, w)))
+        }
+        _ => match (int(a), int(b)) {
+            (Some(p), Some(q)) => p == q,
+            _ => matches!((num(a), num(b)), (Some(p), Some(q)) if p == q),
+        },
+    }
+}
+
+/// `to_link`'s `norm`: the host lowercased, and an empty alpn list dropped
+/// (except for tuic, where no alpn reads back as h3).
+fn norm(d: &Map<String, Value>) -> Map<String, Value> {
+    let mut n = d.clone();
+    let server = gs(Some(d), "server", "").to_lowercase();
+    n.insert("server".into(), Value::String(server));
+    let not_tuic = n.get("type").map(py_str).as_deref() != Some("tuic");
+    if let Some(Value::Object(tls)) = n.get_mut("tls") {
+        if not_tuic && matches!(tls.get("alpn"), Some(Value::Array(a)) if a.is_empty()) {
+            tls.shift_remove("alpn");
+        }
+    }
+    n
+}
+
+/// `to_link`: the share link for an outbound, or None when no link carries it
+/// exactly — decided by parsing the link back, never assumed.
+pub fn to_link(o: &Value) -> Option<String> {
+    let m = o.as_object()?;
+    let link = unchecked_link(m).ok()?;
+    let back = parse_link(&link, &gs(Some(m), "tag", "")).ok()?;
+    let back = back.as_object()?;
+    py_eq(&Value::Object(norm(back)), &Value::Object(norm(m))).then_some(link)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1202,6 +1454,62 @@ mod tests {
 
     // The behaviours config/test_parse.py pins, kept here so the Python's own
     // checklist survives the port.
+
+    #[test]
+    fn to_link_round_trips_every_protocol() {
+        let b64 = |s: &str| crate::foreign::b64encode(s.as_bytes());
+        let key = format!("{}=", "A".repeat(43));
+        let vm = |j: Value| format!("vmess://{}", b64(&pyjson::dumps_flat(&j)));
+        let links = [
+            "vless://00000000-0000-4000-8000-000000000001@h.example:443?security=reality&sni=s.example&fp=chrome&pbk=PUBKEY&sid=ab12&flow=xtls-rprx-vision#R".to_string(),
+            "vless://00000000-0000-4000-8000-000000000001@h.example:8443?security=tls&sni=s.example&alpn=h2,http/1.1&type=ws&path=/ray?ed=2048&host=w.example#WS".into(),
+            "vless://00000000-0000-4000-8000-000000000001@[2001:db8::1]:443?security=none&type=grpc&serviceName=svc#v6".into(),
+            "trojan://p%40ss%2Fw@t.example:443?sni=s.example&allowInsecure=1&type=ws&path=/t#T".into(),
+            "trojan://pw@t.example:443?security=reality&sni=s.example&pbk=K&sid=01&fp=safari#TR".into(),
+            "tuic://00000000-0000-4000-8000-000000000002:pw@u.example:443?sni=s.example&alpn=h3,h2&congestion_control=bbr&udp_relay_mode=quic&allow_insecure=1#U".into(),
+            format!("ss://{}@s.example:8388#classic", b64("aes-256-gcm:p@ss/w+rd")),
+            format!("ss://2022-blake3-aes-256-gcm:{}@[2001:db8::2]:8388#v2022", key.replace('=', "%3D")),
+            format!("ss://{}@s.example:8388/?plugin=obfs-local%3Bobfs%3Dhttp%3Bobfs-host%3Dcdn.example#obfs", b64("chacha20-ietf-poly1305:pw")),
+            "anytls://pw@a.example:443?sni=s.example&fp=firefox&alpn=h2&insecure=1#A".into(),
+            "hysteria2://pw@y.example:443?sni=s.example&insecure=1&upmbps=20&downmbps=100&obfs=salamander&obfs-password=ob#Y".into(),
+            vm(json!({"v": "2", "ps": "香港 01", "add": "m.example", "port": "443", "id": "00000000-0000-4000-8000-000000000003",
+                      "aid": "0", "scy": "auto", "net": "ws", "host": "w.example", "path": "/v", "tls": "tls", "sni": "s.example", "fp": "chrome"})),
+            vm(json!({"add": "m.example", "port": 8443, "id": "00000000-0000-4000-8000-000000000003", "net": "h2", "host": "a.example,b.example", "path": "/h", "tls": ""})),
+        ];
+        for link in &links {
+            let o = one(link, "N");
+            let back = to_link(&o).unwrap_or_else(|| panic!("no link for {link}"));
+            assert_eq!(one(&back, "N"), o, "round trip of {link}");
+        }
+    }
+
+    #[test]
+    fn to_link_refuses_what_no_link_carries() {
+        let mut tuic = one("tuic://00000000-0000-4000-8000-000000000002:pw@u.example:443#t", "t");
+        tuic["tls"]["alpn"] = json!([]);
+        let base = one("vless://00000000-0000-4000-8000-000000000001@h.example:443?security=tls#v", "v");
+        let with = |k: &str, v: Value| {
+            let mut o = base.clone();
+            o[k] = v;
+            o
+        };
+        for o in [tuic, with("transport", json!({"type": "quic"})), with("tls", json!("yes")),
+                  with("packet_encoding", json!("xudp")), json!({"type": "wireguard"}), json!({}), json!("x")] {
+            assert_eq!(to_link(&o), None, "refused: {o}");
+        }
+        let mut empty_alpn = base.clone();
+        empty_alpn["tls"]["alpn"] = json!([]);
+        assert!(to_link(&empty_alpn).is_some(), "an empty alpn list is the same TLS as none");
+    }
+
+    #[test]
+    fn python_equality_is_what_the_round_trip_compares_with() {
+        assert!(py_eq(&json!(true), &json!(1)));
+        assert!(py_eq(&json!(443), &json!(443.0)));
+        assert!(py_eq(&json!({"a": 1, "b": [false]}), &json!({"b": [0], "a": 1.0})));
+        assert!(!py_eq(&json!("1"), &json!(1)));
+        assert!(!py_eq(&json!(null), &json!(false)));
+    }
 
     #[test]
     fn hysteria2_carries_tls_and_the_mbps_hints() {

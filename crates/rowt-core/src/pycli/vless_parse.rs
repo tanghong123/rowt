@@ -11,9 +11,9 @@ use serde_json::Value;
 use std::io::Read;
 use std::process::{Command, ExitCode, Stdio};
 
-const USAGE: &str = "usage: vless-parse.py [-h] [--tag TAG] [--multi] [--sub URL] [--combine]\n                      [link]";
+const USAGE: &str = "usage: vless-parse.py [-h] [--tag TAG] [--multi] [--sub URL] [--combine]\n                      [--links]\n                      [link]";
 
-const HELP: &str = "\nshare link(s) -> sing-box outbound JSON\n\npositional arguments:\n  link        a share link: vless, vmess, anytls, hysteria2, ss, trojan or\n              tuic\n\noptions:\n  -h, --help  show this help message and exit\n  --tag TAG   outbound tag in single mode\n  --multi     read links from stdin -> array\n  --sub URL   fetch a subscription URL -> array\n  --combine   dedupe an array read from stdin";
+const HELP: &str = "\nshare link(s) -> sing-box outbound JSON\n\npositional arguments:\n  link        a share link: vless, vmess, anytls, hysteria2, ss, trojan or\n              tuic\n\noptions:\n  -h, --help  show this help message and exit\n  --tag TAG   outbound tag in single mode\n  --multi     read links from stdin -> array\n  --sub URL   fetch a subscription URL -> array\n  --combine   dedupe an array read from stdin\n  --links     read an outbound array from stdin -> one share link per line";
 
 /// `ap.error(msg)` — usage on stderr, then the complaint, then exit 2.
 fn ap_error(msg: &str) -> ! {
@@ -144,6 +144,7 @@ fn emit(b: Batch, result: Value) -> ! {
 pub fn main(argv: &[String]) -> ExitCode {
     let (mut tag, mut multi, mut combine, mut sub, mut link) =
         ("escape".to_string(), false, false, None::<String>, None::<String>);
+    let mut links = false;
 
     let mut i = 0;
     while i < argv.len() {
@@ -155,6 +156,7 @@ pub fn main(argv: &[String]) -> ExitCode {
             }
             "--multi" => multi = true,
             "--combine" => combine = true,
+            "--links" => links = true,
             "--tag" => {
                 i += 1;
                 match argv.get(i) {
@@ -187,6 +189,27 @@ pub fn main(argv: &[String]) -> ExitCode {
     // link…" usage error rather than being attempted. Dropping the empties here
     // makes the rest of this function read the way the Python does.
     let sub = sub.filter(|s| !s.is_empty());
+    // `elif args.links:` — right after --combine, as main() orders them.
+    if links && !combine {
+        let text = stdin_string();
+        let v = match sharelink::py_json_loads(&text) {
+            Ok(v) => v,
+            Err(e) => fail(&Batch::default(), &e),
+        };
+        let Some(arr) = v.as_array() else {
+            fail(&Batch::default(), "--links wants a JSON array of outbounds");
+        };
+        for o in arr {
+            match sharelink::to_link(o) {
+                Some(l) => println!("{l}"),
+                None => {
+                    let name = o.as_object().and_then(|m| m.get("tag")).map(sharelink::py_str).unwrap_or_else(|| "?".into());
+                    eprintln!("warning: '{name}' has settings no share link carries exactly — not exported");
+                }
+            }
+        }
+        std::process::exit(0);
+    }
     let link = link.filter(|s| !s.is_empty());
 
     // The same precedence main() has: --combine, then --sub, then --multi, then

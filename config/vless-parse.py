@@ -5,13 +5,15 @@
     vless-parse.py --multi < links.txt                          # many links -> array
     vless-parse.py --sub '<subscription-url>'                   # fetch+decode -> array
     vless-parse.py --combine < array.json                       # dedupe + uniquify tags
+    vless-parse.py --links < array.json                         # outbounds -> share links
 
 Emits sing-box outbound(s) on stdout. Supported protocols: VLESS (incl. Reality),
 VMess, AnyTLS, hysteria2 (incl. Salamander obfs), Shadowsocks (incl. 2022 and the
 obfs/v2ray plugins), Trojan, and TUIC v5. In --multi/--sub each outbound gets a
 unique tag from the link's #name (sanitized), falling back to "server-N".
-Stdlib only — no dependencies. Credentials never touch the repo; the caller
-stores output under ~/.config/rowt/.
+--links goes the other way, one link per outbound, and only when the link
+parses back to the same outbound. Stdlib only — no dependencies. Credentials
+never touch the repo; the caller stores output under ~/.config/rowt/.
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ import json
 import os
 import re
 import sys
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 RESERVED = {"escape", "auto", "direct", "corp", "block", "in", "local", "dns-out"}
@@ -597,6 +599,185 @@ def parse_link(link: str, tag: str = "escape") -> dict:
     raise ValueError("unsupported protocol")
 
 
+def _hostport(o: dict) -> str:
+    """`host:port` for a link's netloc. A bare IPv6 address is bracketed, which
+    urlsplit needs to read the port back."""
+    host = str(o.get("server", ""))
+    if ":" in host:
+        host = f"[{host}]"
+    return f"{host}:{o.get('server_port', '')}"
+
+
+def _query(pairs: list[tuple[str, str]]) -> str:
+    """The query, in the order given, leaving out empty values: absent and empty
+    read back alike (parse_qs drops a blank value)."""
+    return urlencode([(k, v) for k, v in pairs if v])
+
+
+def _listed(v: object) -> str:
+    """An alpn list, or a transport's hosts, as the comma list a link carries."""
+    if not isinstance(v, list):
+        raise TypeError("expected a list")
+    return ",".join(str(x) for x in v)
+
+
+def _transport_pairs(tr: dict) -> list[tuple[str, str]]:
+    """The `type=` transport of a VLESS or Trojan link — _transport, reversed."""
+    ty = str(tr.get("type", ""))
+    if ty == "ws":
+        return [
+            ("type", "ws"),
+            ("path", str(tr.get("path", ""))),
+            ("host", str((tr.get("headers") or {}).get("Host", ""))),
+        ]
+    if ty == "grpc":
+        return [("type", "grpc"), ("serviceName", str(tr.get("service_name", "")))]
+    if ty == "http":
+        return [
+            ("type", "http"),
+            ("path", str(tr.get("path", ""))),
+            ("host", _listed(tr.get("host", []))),
+        ]
+    # An unknown type is written as it is: it cannot parse back to itself, so
+    # to_link refuses the outbound rather than dropping its transport.
+    return [("type", ty or "tcp")]
+
+
+def _tls_pairs(tls: dict, insecure_key: str) -> list[tuple[str, str]]:
+    """The TLS half of a VLESS or Trojan query: security, sni, alpn, fp, the
+    insecure flag under the scheme's own name, and REALITY's key and short id."""
+    reality = tls.get("reality") or {}
+    return [
+        ("security", "reality" if reality else "tls"),
+        ("sni", str(tls.get("server_name", ""))),
+        ("alpn", _listed(tls.get("alpn", []))),
+        ("fp", str((tls.get("utls") or {}).get("fingerprint", ""))),
+        (insecure_key, "1" if tls.get("insecure") and insecure_key else ""),
+        ("pbk", str(reality.get("public_key", ""))),
+        ("sid", str(reality.get("short_id", ""))),
+    ]
+
+
+def _unchecked_link(o: dict) -> str:
+    """A share link for outbound o in the form parse_link reads, not yet checked:
+    to_link parses it back. The name travels as the fragment, or as vmess's `ps`,
+    which is where _link_name looks for it."""
+    t = o.get("type")
+    tag = str(o.get("tag", ""))
+    frag = "#" + quote(tag, safe="")
+    tls = o.get("tls") or {}
+    tr = o.get("transport") or {}
+    if t == "vless":
+        q = [("encryption", "none"), ("flow", str(o.get("flow", "")))]
+        q += _tls_pairs(tls, "") if tls else [("security", "none")]
+        q += _transport_pairs(tr)
+        user = quote(str(o.get("uuid", "")), safe="")
+        return f"vless://{user}@{_hostport(o)}?{_query(q)}{frag}"
+    if t == "trojan":
+        q = _tls_pairs(tls, "allowInsecure") if tls else [("security", "none")]
+        q += _transport_pairs(tr)
+        user = quote(str(o.get("password", "")), safe="")
+        return f"trojan://{user}@{_hostport(o)}?{_query(q)}{frag}"
+    if t == "tuic":
+        q = [
+            ("sni", str(tls.get("server_name", ""))),
+            ("alpn", _listed(tls.get("alpn", []))),
+            ("congestion_control", str(o.get("congestion_control", ""))),
+            ("udp_relay_mode", str(o.get("udp_relay_mode", ""))),
+            ("allow_insecure", "1" if tls.get("insecure") else ""),
+        ]
+        user = quote(str(o.get("uuid", "")), safe="")
+        pw = quote(str(o.get("password", "")), safe="")
+        return f"tuic://{user}:{pw}@{_hostport(o)}?{_query(q)}{frag}"
+    if t == "anytls" or t == "hysteria2":
+        q = [
+            ("sni", str(tls.get("server_name", ""))),
+            ("alpn", _listed(tls.get("alpn", []))),
+            ("insecure", "1" if tls.get("insecure") else ""),
+        ]
+        if t == "anytls":
+            q.append(("fp", str((tls.get("utls") or {}).get("fingerprint", ""))))
+        else:
+            obfs = o.get("obfs") or {}
+            q += [
+                ("upmbps", str(o["up_mbps"]) if "up_mbps" in o else ""),
+                ("downmbps", str(o["down_mbps"]) if "down_mbps" in o else ""),
+                ("obfs", "salamander" if obfs else ""),
+                ("obfs-password", str(obfs.get("password", ""))),
+            ]
+        pw = quote(str(o.get("password", "")), safe="")
+        return f"{t}://{pw}@{_hostport(o)}?{_query(q)}{frag}"
+    if t == "shadowsocks":
+        method, pw = str(o.get("method", "")), str(o.get("password", ""))
+        if method.startswith("2022-"):
+            # SIP022: percent-encoded plaintext, the form 2022 keys travel in.
+            cred = quote(f"{method}:{pw}", safe=":")
+        else:
+            # SIP002: URL-safe base64 of method:password, unpadded.
+            raw = binascii.b2a_base64(f"{method}:{pw}".encode(), newline=False)
+            cred = raw.decode().replace("+", "-").replace("/", "_").rstrip("=")
+        plugin = str(o.get("plugin", ""))
+        if plugin and o.get("plugin_opts"):
+            plugin += ";" + str(o["plugin_opts"])
+        tail = "/?" + urlencode([("plugin", plugin)]) if plugin else ""
+        return f"ss://{cred}@{_hostport(o)}{tail}{frag}"
+    if t == "vmess":
+        ty = str(tr.get("type", ""))
+        net, host, path = ty or "tcp", "", ""
+        if ty == "ws":
+            host = str((tr.get("headers") or {}).get("Host", ""))
+            path = str(tr.get("path", ""))
+        elif ty == "grpc":
+            path = str(tr.get("service_name", ""))
+        elif ty == "http":
+            net, host, path = "h2", _listed(tr.get("host", [])), str(tr.get("path", ""))
+        j = {
+            "v": "2",
+            "ps": tag,
+            "add": str(o.get("server", "")),
+            "port": str(o.get("server_port", "")),
+            "id": str(o.get("uuid", "")),
+            "aid": str(o.get("alter_id", 0)),
+            "scy": str(o.get("security", "auto")),
+            "net": net,
+            "type": "none",
+            "host": host,
+            "path": path,
+            "tls": "tls" if tls else "",
+            "sni": str(tls.get("server_name", "")),
+            "alpn": _listed(tls.get("alpn", [])),
+            "fp": str((tls.get("utls") or {}).get("fingerprint", "")),
+        }
+        body = binascii.b2a_base64(json.dumps(j).encode(), newline=False).decode()
+        return "vmess://" + body
+    raise ValueError(f"no share link for type {t}")
+
+
+def to_link(o: dict) -> str | None:
+    """The share link for a sing-box outbound, or None when no link carries it
+    exactly. Checked, not assumed: the link is parsed back, and anything but the
+    same outbound (a host's case aside — names are case-insensitive, and every
+    parser but vmess's lowercases them) refuses it. So an outbound built by hand,
+    or by another importer, with a setting links cannot express is never
+    exported with that setting silently gone."""
+    try:
+        link = _unchecked_link(o)
+        back = parse_link(link, str(o.get("tag", "")))
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+    def norm(d: dict) -> dict:
+        n = {**d, "server": str(d.get("server", "")).lower()}
+        tls = n.get("tls")
+        # An empty alpn list and none are the same TLS to sing-box, and no link
+        # can write the empty one. Not for tuic: there no alpn reads back as h3.
+        if isinstance(tls, dict) and tls.get("alpn") == [] and n.get("type") != "tuic":
+            n["tls"] = {k: v for k, v in tls.items() if k != "alpn"}
+        return n
+
+    return link if norm(back) == norm(o) else None
+
+
 def _link_name(link: str) -> str:
     """The human name of a share link: the URI `#fragment` for vless/anytls/hy2,
     or the `ps` field for vmess:// (whose name lives inside the base64 JSON)."""
@@ -742,11 +923,31 @@ def main() -> int:
     ap.add_argument(
         "--combine", action="store_true", help="dedupe an array read from stdin"
     )
+    ap.add_argument(
+        "--links",
+        action="store_true",
+        help="read an outbound array from stdin -> one share link per line",
+    )
     args = ap.parse_args()
 
     try:
         if args.combine:
             result: object = combine(json.load(sys.stdin))
+        elif args.links:
+            data = json.load(sys.stdin)
+            if not isinstance(data, list):
+                raise ValueError("--links wants a JSON array of outbounds")
+            for o in data:
+                link = to_link(o) if isinstance(o, dict) else None
+                if link:
+                    print(link)
+                else:
+                    name = o.get("tag", "?") if isinstance(o, dict) else "?"
+                    print(
+                        f"warning: '{name}' has settings no share link carries exactly — not exported",
+                        file=sys.stderr,
+                    )
+            return 0
         elif args.sub:
             result = parse_many(fetch_subscription(args.sub))
         elif args.multi:

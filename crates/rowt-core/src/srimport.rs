@@ -475,6 +475,15 @@ fn tls_block(sni: &str, reality: Option<Map<String, Value>>, insecure: Option<bo
 
 /// `_parse_rules` — the `[Rule]` section's `…,PROXY` domain rules, deduped,
 /// order kept.
+/// `_names_under` — a DOMAIN-WILDCARD pattern of the one shape a lane entry can
+/// hold: `*.x`, with no other wildcard (`*`, `?`, or a `[...]` class) in `x`.
+fn names_under(pattern: &str) -> bool {
+    match pattern.strip_prefix("*.") {
+        Some(rest) => !rest.is_empty() && !rest.contains(['*', '?', '[', ']']),
+        None => false,
+    }
+}
+
 pub fn parse_rules(text: &str) -> Vec<String> {
     let mut doms: Vec<String> = Vec::new();
     let mut in_rules = false;
@@ -496,6 +505,11 @@ pub fn parse_rules(text: &str) -> Vec<String> {
         let action = parts[parts.len() - 1].to_uppercase();
         if action == "PROXY" && (typ == "DOMAIN-SUFFIX" || typ == "DOMAIN") {
             doms.push(value.to_lowercase());
+        } else if action == "PROXY" && typ == "DOMAIN-WILDCARD" && names_under(value) {
+            // `*.x` (the names under x) is rowt's dot-led `.x`, which is how
+            // `rowt config export --to shadowrocket` writes one. Any other
+            // wildcard shape has no rowt rule, so it is left out.
+            doms.push(value[1..].to_lowercase());
         }
     }
     let mut seen: Vec<String> = Vec::new();
@@ -857,6 +871,18 @@ mod tests {
                     IP-CIDR,192.0.2.0/24,PROXY\ndomain,b.example.org,proxy\n\
                     DOMAIN,example.com,PROXY\n[Host]\nDOMAIN,after.example,PROXY\n";
         assert_eq!(parse_rules(text), ["example.com", "b.example.org"]);
+    }
+
+    /// What `config export --to shadowrocket` writes for a dot-led entry comes
+    /// back as that entry; a wildcard no lane can hold does not come back.
+    #[test]
+    fn a_names_under_wildcard_is_the_dot_led_entry() {
+        let text = "[Rule]\nDOMAIN-WILDCARD,*.Wild.example,PROXY\nDOMAIN-WILDCARD,a*.bad.example,PROXY\n\
+                    DOMAIN-WILDCARD,*.,PROXY\nDOMAIN-WILDCARD,*.q?.example,PROXY\n\
+                    DOMAIN-WILDCARD,*.[ab].example,PROXY\nDOMAIN-WILDCARD,*.*.two.example,PROXY\n\
+                    DOMAIN-WILDCARD,*.direct.example,DIRECT\nDOMAIN-WILDCARD , *.spaced.example , PROXY\n\
+                    DOMAIN-SUFFIX,wild.example,PROXY\n";
+        assert_eq!(parse_rules(text), [".wild.example", ".spaced.example", "wild.example"]);
     }
 
     #[test]

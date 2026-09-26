@@ -246,7 +246,7 @@ replaced**, run `rowt fetch host` (with a working path to GitHub) or `rowt reloa
 | abroad, no firewall | `rowt up local` (back: `rowt up host`) |
 | CLI tools | `rowt run <cmd>` · `rowt proxy env` · `rowt-proxy-on` (from shell-init) |
 | watch it live | `rowt monitor` (user's terminal) · `rowt metrics top` |
-| move or share the setup | `rowt config export [--no-servers]` → `rowt config import <file>` (merges; `--replace` overwrites) |
+| move or share the setup | `rowt config export [--routes-only]` → `rowt config import <file>` (merges; `--replace` overwrites) · to an iPhone: `rowt config export --to shadowrocket` |
 | stop / remove | `rowt down` · `rowt uninstall [--purge]` then `brew uninstall rowt` |
 
 Everyday details, the monitor keys, tailnet sharing and geosite are in

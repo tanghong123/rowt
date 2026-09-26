@@ -59,7 +59,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.5.13"
+ROWT_VERSION="3.5.14"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -567,7 +567,8 @@ list_json() {
   # `exact` must drop them: the others select by "is / isn't a CIDR", a test a
   # `domain:` line passes, so without this it would render as a domain_suffix —
   # silently becoming the leaky suffix the flag exists to avoid.
-  grep -vE '^[[:space:]]*(#|$)' "$f" | sed 's/[[:space:]]//g' | grep -vE '^geosite:' \
+  # `*.z.com` is read as `.z.com` — see _lane_has.
+  grep -vE '^[[:space:]]*(#|$)' "$f" | sed -e 's/[[:space:]]//g' -e 's/^\*\.\(.\)/.\1/' | grep -vE '^geosite:' \
     | case "$filt" in
         exact)  { grep -E '^domain:' | sed 's/^domain://'; } || true ;;
         cidr)   { grep -vE '^domain:' | grep -E '/[0-9]+$'; } || true ;;
@@ -627,6 +628,27 @@ _lane_label() {
     *)                  echo "$1" ;;
   esac
 }
+# `*.z.com` is the wildcard spelling of `.z.com` (Shadowrocket's and Surge's,
+# and the one rowt's own docs used to show). sing-box's domain_suffix has no
+# wildcard, so a stored `*.z.com` was a literal `*` that no name contains: the
+# entry matched nothing, silently. Every reader of a lane list therefore takes
+# it as the dot-led entry (list_json, _longest_domain_hit, the hotspot bypass),
+# `add`/`import` store the dot, and these two treat a lane still holding the
+# old spelling as holding the entry. Mirrors rowt_core::render::unwildcard.
+#
+# Is entry $2 a line of lane file $1 — as written, or as its old wildcard?
+_lane_has() { # $1=file $2=entry
+  grep -qxF -e "$2" "$1" 2>/dev/null && return 0
+  case "$2" in .?*) grep -qxF -e "*$2" "$1" 2>/dev/null ;; *) return 1 ;; esac
+}
+# Lane file $1 without entry $2 (either spelling), to stdout.
+_lane_without() { # $1=file $2=entry
+  case "$2" in
+    .?*) grep -vxF -e "$2" -e "*$2" "$1" || true ;;
+    *)   grep -vxF -e "$2" "$1" || true ;;
+  esac
+}
+
 # Remove exact entry $2 from every lane file except the target $1, so the entry
 # ends up in a single lane. Echoes a note per lane it was pulled out of.
 _lane_dedupe() { # $1=keep-file $2=entry
@@ -634,8 +656,8 @@ _lane_dedupe() { # $1=keep-file $2=entry
   for f in "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" "$HOTSPOT_DOMAINS"; do
     [ "$f" = "$keep" ] && continue
     [ -f "$f" ] || continue
-    if grep -qxF "$e" "$f" 2>/dev/null; then
-      tmp="$(mktemp)"; grep -vxF "$e" "$f" > "$tmp"; mv "$tmp" "$f"
+    if _lane_has "$f" "$e"; then
+      tmp="$(mktemp)"; _lane_without "$f" "$e" > "$tmp"; mv "$tmp" "$f"
       echo "  moved out of $(_lane_label "$f") lane: $e"
     fi
   done
@@ -691,7 +713,8 @@ _list_add_file() { # $1=list-file $2=source-file $3=label
   while IFS= read -r line; do
     e="$(printf '%s' "$line" | tr -d '[:space:]')"
     case "$e" in ''|\#*) continue ;; esac
-    if grep -qxF "$e" "$1" 2>/dev/null; then already=$((already + 1))
+    case "$e" in '*.'?*) e="${e#\*}" ;; esac   # stored as .z.com (_lane_has)
+    if _lane_has "$1" "$e"; then already=$((already + 1))
     else printf '%s\n' "$e" >> "$1"; added=$((added + 1)); fi
     _lane_dedupe "$1" "$e"  # single-lane invariant: pull it from the other lanes
   done < "$2"
@@ -799,6 +822,9 @@ edit_list() {
         # single-lane invariant, the already-present test and every message all
         # operate on the line as it is actually stored.
         [ "$exact" -eq 1 ] && e="domain:$e"
+        # `*.z.com` is stored as `.z.com`, so the guard below sees `*.com` as
+        # `.com` (_lane_has). A stamped exact entry stays as typed.
+        case "$e" in '*.'?*) e="${e#\*}" ;; esac
         # An entry that is a whole namespace is declined unless --force.
         if [ "$force" -eq 0 ]; then
           local _why
@@ -807,12 +833,22 @@ edit_list() {
             continue
           fi
         fi
+        # sing-box has no wildcard, so a '*' still in the entry — anywhere but
+        # the leading '*.' just read as the dot, or under --domain — is a
+        # literal no name contains: the entry would match nothing, silently.
+        # Not --force-able, since nothing is gained. The routing lanes only:
+        # the hotspot lane goes to macOS, whose bypass list does read '*'.
+        # Mirrors rowt_core::lanes::wildcard_message.
+        case "$label:$e" in
+          hotspot:*) ;;
+          *'*'*) echo "  skipped $e — '*' matches nothing in a routing lane; for the names under z.com, add .z.com (or *.z.com) without --domain"; continue ;;
+        esac
         # geosite: is escape/block only (corp routes internal domains/CIDRs, and
         # the OS bypass list cannot hold a rule-set).
         case "$e" in
           geosite:*) case "$label" in corp|hotspot) echo "  skipped $e — geosite: is only for the escape and block lanes"; continue ;; esac ;;
         esac
-        if grep -qxF "$e" "$file" 2>/dev/null; then echo "  already present: $e"
+        if _lane_has "$file" "$e"; then echo "  already present: $e"
         else _lane_append "$file" "$e"; echo "  added: $e"; fi
         _lane_dedupe "$file" "$e"  # single-lane invariant: pull it from the other lanes
         case "$e" in
@@ -842,8 +878,9 @@ edit_list() {
       for e in "$@"; do
         e="$(printf '%s' "$e" | tr -d '[:space:]')"
         [ "$exact" -eq 1 ] && [ -n "$e" ] && e="domain:$e"
-        if grep -qxF "$e" "$file" 2>/dev/null; then
-          grep -vxF "$e" "$file" > "$tmp"; mv "$tmp" "$file"; echo "  removed: $e"
+        case "$e" in '*.'?*) e="${e#\*}" ;; esac   # either spelling goes (_lane_has)
+        if _lane_has "$file" "$e"; then
+          _lane_without "$file" "$e" > "$tmp"; mv "$tmp" "$file"; echo "  removed: $e"
         else echo "  not found: $e"; fi
       done
       rm -f "$tmp" 2>/dev/null || true ;;
@@ -2864,14 +2901,19 @@ _proxy_bypass_want() {
 }
 # The hotspot lane as bypass entries. macOS matches a bare name EXACTLY and
 # needs the `*.` form for its subdomains, so a plain entry becomes both; a
-# `domain:` (exact) entry is just the host, and an address or CIDR passes as
-# written. Lowercased and byte-sorted: the setter hands this list to
-# networksetup in order, and both implementations must hand over the same argv.
+# dot-led entry (`.x`, or its old wildcard spelling `*.x`) is the subdomains
+# alone, so it is the `*.` form alone — it used to go out as `.x` and `*..x`,
+# neither of which macOS matches against a real name; a `domain:` (exact) entry
+# is just the host, and an address or CIDR passes as written. Lowercased and
+# byte-sorted: the setter hands this list to networksetup in order, and both
+# implementations must hand over the same argv.
 _hotspot_bypass_entries() {
   [ -f "$HOTSPOT_DOMAINS" ] || return 0
   { grep -vE '^[[:space:]]*(#|$)' "$HOTSPOT_DOMAINS" 2>/dev/null | sed 's/[[:space:]]//g' \
       | grep -vE '^geosite:' | tr 'A-Z' 'a-z' \
       | awk '/^domain:/ { print substr($0, 8); next }
+             /^\*\../ { print; next }
+             /^\../ { print "*" $0; next }
              /\/[0-9]+$/ || /^[0-9.]+$/ { print; next }
              { print; print "*." $0 }' | LC_ALL=C sort -u; } || true
 }
@@ -3885,9 +3927,9 @@ then quit the old VPN app and connect the corp VPN ('$PROG reload' if no watcher
   if [ "${corp_n:-0}" -gt 0 ]; then
     _ob 0 "corp lane configured ($corp_n entries$corp_note)" "$PROG corp list   ·   $PROG corp suggest   (on corp LAN/VPN)"
   elif [ -n "$auto_dom" ]; then
-    _ob 0 "corp auto-setup active (this network advertises $auto_dom)" "$PROG corp suggest   ·   add extras: $PROG corp add '*.corp.example.com' 10.0.0.0/8"
+    _ob 0 "corp auto-setup active (this network advertises $auto_dom)" "$PROG corp suggest   ·   add extras: $PROG corp add corp.example.com 10.0.0.0/8"
   else
-    _ob 1 "corp lane — auto-fills when you connect your work network/VPN" "$PROG corp suggest   (on corp LAN/VPN)   ·   $PROG corp add '*.corp.example.com' 10.0.0.0/8"
+    _ob 1 "corp lane — auto-fills when you connect your work network/VPN" "$PROG corp suggest   (on corp LAN/VPN)   ·   $PROG corp add corp.example.com 10.0.0.0/8"
   fi
 
   echo
@@ -3906,7 +3948,7 @@ then quit the old VPN app and connect the corp VPN ('$PROG reload' if no watcher
 Choose what goes where (edit anytime; lane 'add' auto-renders + restarts):
     $PROG escape add google.com            tunnel a site
     $PROG escape add geosite:google        …or a whole maintained service (all Google domains, all ccTLDs)
-    $PROG corp   add '*.corp.example' 10.0.0.0/8   into the corp VPN (domains AND CIDRs)
+    $PROG corp   add corp.example 10.0.0.0/8   into the corp VPN (domains AND CIDRs)
     $PROG corp   suggest                   list this network's internal domains (on corp LAN / VPN up)
     $PROG corp   sync                      mirror the corp VPN's DHCP domains + routed CIDRs into the corp lane
     $PROG block  add ads.example           sinkhole (ad/telemetry); a big ad set is on by default
@@ -3921,6 +3963,7 @@ Everyday:
     $PROG monitor           live TUI (--theme dark|light|auto)   ·   $PROG proxy on | off    macOS system proxy
     $PROG metrics           per-domain traffic history; the collector runs with the router   ·   $PROG metrics top
     $PROG config export     move the setup to another Mac — 'config import' merges it in (holds secrets — encrypt)
+    $PROG config export --to shadowrocket   the same lanes (and servers) for Shadowrocket on an iPhone
     $PROG down              stop everything
 EOF
 
@@ -4191,6 +4234,7 @@ _longest_domain_hit() { # $1=domain
     [ -f "$f" ] || continue
     while IFS= read -r e; do
       e="$(printf '%s' "$e" | sed 's/[[:space:]]//g')"; case "$e" in ''|\#*) continue ;; esac
+      case "$e" in '*.'?*) e="${e#\*}" ;; esac   # `*.z.com` is `.z.com` (_lane_has)
       case "$e" in
         domain:*)
           ent="${e#domain:}"
@@ -5722,7 +5766,7 @@ o@lifecycle@run <command> [args...]@auto-pick a proxy env that reaches the net, 
 a@lifecycle@report@full diagnostic report to a file (masked; shareable)
 o@lifecycle@audit [-n N|all|path|clear]@who changed what, when (CLI + watchdog mutations)
 o@lifecycle@metrics [status|top|path|query]@per-domain traffic history (bytes in/out over time)
-o@lifecycle@config [list|export|import]@back up / move the whole setup to another machine
+o@lifecycle@config [list|export|import]@back up / move the whole setup to another machine; 'export --to shadowrocket' for an iPhone
 o@servers & selection@server <list|add|rm|clear|import|dump>@manage the server pool
 o@servers & selection@sub <list|add|rm|update|clear|import|dump>@manage subscriptions
 c@servers & selection@use <tag>|auto@pin a server (manual) or auto-pick fastest live
@@ -6012,10 +6056,20 @@ box's clash secret, mode, bound interface), and runtime bin/cache/log/metrics �
 those are regenerated on the target.
 
   $PROG config list              show which source files would be packed  [default]
-  $PROG config export [file] [--no-servers]  write a .tgz (default rowt-config-<date>.tgz)
-                                 --no-servers packs only the lane rules (escape/
-                                 corp/block/hotspot) — no server pool, no
-                                 credentials; safe to share or commit
+  $PROG config export [--to rowt|shadowrocket] [file] [--routes-only]
+                                 --to rowt (the default): write a .tgz (default
+                                 rowt-config-<date>.tgz). --routes-only (or
+                                 --no-servers) packs only the lane rules — no
+                                 server pool, no credentials; safe to share
+                                 --to shadowrocket: for Shadowrocket on the iPhone.
+                                 The config (default rowt-shadowrocket.conf):
+                                 escape -> PROXY, block -> REJECT, corp and
+                                 hotspot -> DIRECT, everything else DIRECT, in
+                                 rowt's order. Plus <file>-servers.txt (0600,
+                                 credentials): your servers as share links, each
+                                 checked by parsing it back, and your
+                                 subscription URLs. --routes-only skips it;
+                                 '-' prints the config (needs --routes-only)
   $PROG config import <file> [-y] [--replace]  MERGE a bundle's lane lists into
                                  yours (default), then re-render. Union, deduped,
                                  single-lane; conflicts (an entry that is in a
@@ -6199,8 +6253,10 @@ kinds are different entries, so 'z.com' and '--domain z.com' can sit in differen
 lanes; the exact rule is emitted first and therefore wins for that one host.
 
 Suffix is almost always what you want — 'z.com' already covers 'a.z.com' and, since
-sing-box matches on a label boundary, does NOT cover 'xz.com'. Reach for '--domain'
-when a single host must go somewhere its own subdomains should not.
+sing-box matches on a label boundary, does NOT cover 'xz.com'. '.z.com' covers only
+what is under it, not z.com itself; '*.z.com' (the Shadowrocket/Surge spelling) is
+stored as '.z.com'. Reach for '--domain' when a single host must go somewhere its
+own subdomains should not.
 
 Edits auto-reload the router if it is running. 'errors' reads the per-lane error
 log the router keeps (timestamp + domain + reason). NOTE: only failed/refused
@@ -6285,8 +6341,9 @@ The list is (re)applied whenever rowt owns the proxy: 'proxy on', 'up',
 'reload', and right after an edit here.
 
   (no verb)            list the lane                                 [default]
-  add <entry> [more]   add host(s); 'x.com' bypasses x.com AND *.x.com
-                       (--domain: that exact host only; an IP or CIDR as written)
+  add <entry> [more]   add host(s); 'x.com' bypasses x.com AND *.x.com, '.x.com'
+                       (or '*.x.com') only *.x.com (--domain: that exact host
+                       only; an IP or CIDR as written)
   rm <entry> [more]    remove entries
   import <file>        batch-add one entry per line from a file (# comments ok)
   clear                remove every entry (keeps the file's comment header)
@@ -6548,6 +6605,146 @@ EOF
   esac
 }
 
+# `config export --to shadowrocket [file|-] [--routes-only]` — rowt's setup for
+# Shadowrocket on an iPhone, as two files. The CONFIG (file, default
+# rowt-shadowrocket.conf) holds the routing: escape -> PROXY, block -> REJECT,
+# corp -> DIRECT, hotspot -> DIRECT (and skip-proxy), everything else ->
+# FINAL,DIRECT; PROXY is whichever server is selected in the app. The SERVERS
+# (<file>-servers.txt, 0600) are share links for the hand-added servers plus the
+# subscription URLs, one per line — what Shadowrocket imports servers from.
+# Links, not the config's [Proxy] lines: Shadowrocket documents those only in
+# outline (nothing for REALITY, flow or AnyTLS), while a share link is checked
+# here by parsing it back (`vless-parse --links`). --routes-only skips the file.
+#
+# Shadowrocket takes the first rule that matches, like sing-box, so the ORDER is
+# the render's (assemble_host): the hotspot lane first, since macOS bypasses those
+# hosts before rowt sees them; then exact hosts (escape, corp, block); then every
+# hand suffix, most specific first; then the geosite categories (escape, block);
+# then the corp and private ranges; then the ad set. Categories are expanded from
+# the cached .srs — Shadowrocket cannot read a sing-box rule-set — and their regex
+# entries, which have no Shadowrocket rule type, are counted rather than exported.
+_export_shadowrocket() { # $1 = output path, or - for stdout; $2 = 1 for rules only
+  local out="$1" routes_only="${2:-0}" t n regex=0
+  if [ "$out" = "-" ] && [ "$routes_only" = 0 ]; then
+    die "the servers go to a file of their own, so stdout carries the rules only — add --routes-only"
+  fi
+  t="$(mktemp -d "${TMPDIR:-/tmp}/rowt-sr.XXXXXX")" || die "mktemp failed"
+  # rowt's entry forms, spelled the Shadowrocket way (a stored `*.z.com` arrives
+  # as `.z.com`: list_json reads it so):
+  #   z.com   -> DOMAIN-SUFFIX (the name and everything under it)
+  #   .z.com  -> DOMAIN-WILDCARD,*.z.com (only what is under it)
+  local sr='def sr(p): ascii_downcase | if startswith(".") then "DOMAIN-WILDCARD,*\(.),\(p)"
+            else "DOMAIN-SUFFIX,\(.),\(p)" end;'
+  _sr_geo() { # $1 = category, $2 = policy — one category, expanded
+    local f="$CACHE/geosite-$1.srs" j="$t/geo-$1.json"
+    if [ ! -f "$f" ]; then echo "# geosite:$1 — not cached, so not exported (run '$PROG fetch host')"; return 0; fi
+    if ! "$SB" rule-set decompile "$f" -o "$j" >/dev/null 2>&1; then
+      echo "# geosite:$1 — could not be decompiled, so not exported"; return 0
+    fi
+    echo "# geosite:$1"
+    # A sing-box "listable" field is an array, or a bare string when it holds one.
+    jq -r --arg p "$2" "$sr"'def each: if type == "array" then .[] elif type == "string" then . else empty end;
+        .rules[] | ((.domain | each) | "DOMAIN,\(ascii_downcase),\($p)"),
+        ((.domain_suffix | each) | sr($p)), ((.domain_keyword | each) | "DOMAIN-KEYWORD,\(ascii_downcase),\($p)")' "$j"
+    n="$(jq '[.rules[] | .domain_regex | if type == "array" then length elif type == "string" then 1 else 0 end] | add // 0' "$j")"
+    regex=$((regex + n))
+  }
+  {
+    echo "# hotspot lane: reached without the proxy"
+    hotspot_domains_json | jq -r "$sr"'.[] | sr("DIRECT")'
+    echo "# exact hosts (--domain)"
+    escape_exact_json | jq -r '.[] | "DOMAIN,\(ascii_downcase),PROXY"'
+    corp_exact_json   | jq -r '.[] | "DOMAIN,\(ascii_downcase),DIRECT"'
+    block_exact_json  | jq -r '.[] | "DOMAIN,\(ascii_downcase),REJECT"'
+    echo "# hand-listed suffixes, most specific first"
+    jq -rn --argjson e "$(domains_json)" --argjson c "$(corp_domains_json)" --argjson b "$(block_domains_json)" "$sr"'
+      (($b | map({s: ., p: "REJECT"})) + ($c | map({s: ., p: "DIRECT"})) + ($e | map({s: ., p: "PROXY"})))
+      | sort_by([(.s | split(".") | length), (.s | length)]) | reverse | .[] | . as $r | $r.s | sr($r.p)'
+  } > "$t/rules"
+  # Called directly, not in a subshell: it adds to $regex.
+  local g
+  while IFS= read -r g; do [ -n "$g" ] && _sr_geo "$g" PROXY >> "$t/rules"; done < <(geosites_of "$DOMAINS")
+  while IFS= read -r g; do [ -n "$g" ] && _sr_geo "$g" REJECT >> "$t/rules"; done < <(geosites_of "$BLOCK_DOMAINS")
+  {
+    echo "# corp and private ranges"
+    corp_cidrs_json | jq -r '.[] | if test(":") then "IP-CIDR6,\(.),DIRECT,no-resolve" else "IP-CIDR,\(.),DIRECT,no-resolve" end'
+    if [ "$PRIVATE_DEFAULT" = corp ]; then printf '%s' "$PRIVATE_CIDRS" | jq -r '.[] | "IP-CIDR,\(.),DIRECT,no-resolve"'; fi
+  } >> "$t/rules"
+  if [ -f "$ADS_SRS" ]; then _sr_geo category-ads-all REJECT >> "$t/rules"; fi
+  echo "FINAL,DIRECT" >> "$t/rules"
+
+  # skip-proxy: Shadowrocket's own defaults, the captive-portal probes rowt also
+  # bypasses, and the hotspot lane (as x and *.x, as macOS needs them).
+  local skip
+  skip="$({ printf '%s\n' 192.168.0.0/16 10.0.0.0/8 172.16.0.0/12 localhost '*.local' captive.apple.com \
+             connectivitycheck.gstatic.com detectportal.firefox.com www.msftconnecttest.com
+           _hotspot_bypass_entries; } | awk '!seen[$0]++' | paste -sd, - | sed 's/,/, /g')"
+  {
+    echo "# Shadowrocket config written by rowt $ROWT_VERSION ('$PROG config export --to shadowrocket'), $(date '+%Y-%m-%d %H:%M:%S')."
+    echo "# Routing rules only: PROXY is whichever server is selected in Shadowrocket (no server is in this file)."
+    echo "#   escape -> PROXY   block -> REJECT   corp, hotspot -> DIRECT   everything else -> FINAL,DIRECT"
+    echo "# The order follows rowt's precedence (the first matching rule wins). Regenerate rather than edit."
+    if [ "$regex" -gt 0 ]; then echo "# $regex regex entries from the geosite categories are not included: Shadowrocket has no domain-regex rule."; fi
+    echo
+    echo "[General]"
+    echo "bypass-system = true"
+    echo "skip-proxy = $skip"
+    echo "tun-excluded-routes = 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.0.2.0/24, 192.88.99.0/24, 192.168.0.0/16, 198.51.100.0/24, 203.0.113.0/24, 224.0.0.0/4, 255.255.255.255/32"
+    echo "dns-server = system"
+    echo "ipv6 = true"
+    echo
+    echo "[Rule]"
+    cat "$t/rules"
+    echo
+    echo "[Host]"
+    echo "localhost = 127.0.0.1"
+  } > "$t/out.conf"
+
+  # Counted without the FINAL line, which the summary names on its own.
+  local total proxy reject direct
+  proxy="$(grep -c ',PROXY$' "$t/rules" || true)"
+  reject="$(grep -c ',REJECT$' "$t/rules" || true)"
+  direct="$(grep -v '^FINAL,' "$t/rules" | grep -cE ',DIRECT(,no-resolve)?$' || true)"
+  total=$((proxy + reject + direct))
+  if [ "$out" = "-" ]; then
+    cat "$t/out.conf"
+  else
+    cat "$t/out.conf" > "$out" || { rm -rf "$t"; die "could not write $out"; }
+    echo "wrote $out"
+  fi
+  # The servers: hand-added ones as share links (each one checked by parsing it
+  # back — one that no link carries exactly is named on stderr and left out),
+  # then the subscription URLs, which Shadowrocket fetches itself. No comment
+  # lines: the whole file is meant to be copied into Shadowrocket as it is.
+  local sfile="" nlinks=0 nsubs=0
+  if [ "$routes_only" = 0 ]; then
+    sfile="${out%.conf}-servers.txt"
+    if [ -s "$MANUAL" ]; then "${PY_VLESS[@]}" --links < "$MANUAL" > "$t/links" || { rm -rf "$t"; die "could not turn the servers into share links"; }; fi
+    [ -f "$t/links" ] || : > "$t/links"
+    { grep -vE '^[[:space:]]*(#|$)' "$SUBS_FILE" 2>/dev/null || true; } > "$t/subs"
+    nlinks="$(grep -c . "$t/links" || true)"; nsubs="$(grep -c . "$t/subs" || true)"
+    ( umask 077; cat "$t/links" "$t/subs" > "$sfile" ) || { rm -rf "$t"; die "could not write $sfile"; }
+    chmod 600 "$sfile" 2>/dev/null || true
+    echo "wrote $sfile"
+  fi
+  {
+    echo "  $total rules: $proxy PROXY (escape), $reject REJECT (block), $direct DIRECT (corp, hotspot, ranges) + FINAL,DIRECT"
+    if [ "$regex" -gt 0 ]; then echo "  $regex geosite regex entries left out (Shadowrocket has no domain-regex rule)"; fi
+    if [ -n "$sfile" ]; then
+      echo "  servers: $nlinks share link(s) + $nsubs subscription URL(s) in $sfile"
+      echo "  ⚠ that file holds credentials: move it by AirDrop (encrypted) and delete it after importing."
+    else
+      echo "  rules only (--routes-only): PROXY uses whichever server is selected in Shadowrocket"
+    fi
+    if [ "$out" != "-" ]; then
+      echo "  on the iPhone: AirDrop (or iCloud Drive) the config, open it with Shadowrocket (it"
+      echo "  lands in Config), tap it, Use Config. For the servers, copy the servers file's text"
+      echo "  and add it in Shadowrocket, which imports share links from the clipboard."
+    fi
+  } >&2
+  rm -rf "$t"
+}
+
 # Back up / move the whole setup between machines. Bundles only the
 # source-of-truth files (which `render` rebuilds from) — NOT the rendered
 # host.json/vm.json, the machine-specific `state`, or runtime bin/cache/log/metrics.
@@ -6568,15 +6765,27 @@ cmd_config() {
       # POOL (servers/manual/import-review/subs/outbound) so the bundle is only
       # the lane rules — no credentials, so it is safe to share or commit. The
       # pool files are exactly the ones the credentials warning is about.
-      local out="" no_servers=0
+      # --to picks the format: rowt (the default, this bundle) or shadowrocket
+      # (the lanes as a Shadowrocket config; `-` there means stdout).
+      # `-` (stdout) is the Shadowrocket target's alone; the bundle refuses it
+      # wherever it stands, which is only known once --to has been read.
+      local out="" no_servers=0 to=rowt dash=0
       while [ "$#" -gt 0 ]; do
         case "$1" in
-          --no-servers) no_servers=1 ;;
-          -*) die "unknown flag: $1  (usage: $PROG config export [file] [--no-servers])" ;;
+          --no-servers|--routes-only) no_servers=1 ;;
+          --to) [ "$#" -ge 2 ] || die "usage: $PROG config export [--to rowt|shadowrocket] [file] [--routes-only]"; to="$2"; shift ;;
+          --to=*) to="${1#--to=}" ;;
+          -)  dash=1; [ -z "$out" ] && out="-" ;;
+          -*) die "unknown flag: $1  (usage: $PROG config export [--to rowt|shadowrocket] [file] [--routes-only])" ;;
           *)  [ -z "$out" ] && out="$1" ;;
         esac
         shift
       done
+      case "$to" in
+        rowt) [ "$dash" = 0 ] || die "unknown flag: -  (usage: $PROG config export [--to rowt|shadowrocket] [file] [--routes-only])" ;;
+        shadowrocket) _export_shadowrocket "${out:-rowt-shadowrocket.conf}" "$no_servers"; return ;;
+        *) die "unknown export target: $to  (supported: rowt, shadowrocket)" ;;
+      esac
       out="${out:-rowt-config-$(date +%Y%m%d-%H%M%S).tgz}"
       local pool=" $SERVERS $MANUAL $SR_REVIEW $SUBS_FILE $OUTBOUND " names=() f
       for f in "${src[@]}"; do
@@ -6702,7 +6911,7 @@ $out"
       else echo "  (couldn't render yet — that's fine on a fresh box: '$PROG fetch' installs sing-box)"; fi
       echo "next: '$PROG up'  (fresh machine) — or '$PROG restart' if rowt is already running."
       ;;
-    *) die "usage: $PROG config [ list | export [file] [--no-servers] | import <file> [-y] [--replace] ]" ;;
+    *) die "usage: $PROG config [ list | export [--to rowt|shadowrocket] [file] [--routes-only] | import <file> [-y] [--replace] ]" ;;
   esac
 }
 

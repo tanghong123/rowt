@@ -44,6 +44,13 @@
 # today, and grow to the whole command surface as later phases port it.
 set -euo pipefail
 
+# Python ≥3.13 colours its tracebacks (and 3.14 its argparse help) whenever
+# FORCE_COLOR is set, whatever stdout is, and terminals and agent harnesses do
+# export it. The Python-vs-Rust gates compare exception names and help text byte
+# for byte, so a coloured Python reads as a difference on every such case — sr-diff
+# reported 83/300 on nothing else. PYTHON_COLORS outranks FORCE_COLOR and NO_COLOR.
+export PYTHON_COLORS=0
+
 SELF="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIR="$(cd -P "$SELF/.." && pwd)"                 # tests/parity
 ROOT="$(cd -P "$DIR/../.." && pwd)"              # repo root

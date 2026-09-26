@@ -153,6 +153,8 @@ fn entries(list: &str) -> impl Iterator<Item = String> + '_ {
     list.lines()
         .map(|l| l.chars().filter(|c| !c.is_whitespace()).collect::<String>())
         .filter(|e| !e.is_empty() && !e.starts_with('#'))
+        // `*.z.com` is `.z.com`, as the render reads it (render::unwildcard).
+        .map(|e| crate::render::unwildcard(&e))
 }
 
 /// sing-box's `domain_suffix`, as measured with `sing-box rule-set match` on
@@ -369,6 +371,22 @@ mod tests {
         let t = input("com\n", "", "", &p);
         assert_eq!(classify("xz.com", &t).lane, Lane::Escape);
         assert_ne!(classify("xcom", &t).lane, Lane::Escape);
+    }
+
+    /// `*.wild.example` is the dot-led entry spelled as a wildcard, and the
+    /// verdict names it the way the render reads it. It used to be a literal
+    /// `*` that matched nothing, so the docs' own example sent a corp host out
+    /// the physical NIC.
+    #[test]
+    fn a_wildcard_entry_is_its_dot_led_form() {
+        let p: Vec<String> = vec![];
+        let i = input("", "*.wild.example\n", "", &p);
+        let c = classify("host.wild.example", &i);
+        assert_eq!(c.lane, Lane::Corp);
+        assert!(c.why.contains("'.wild.example'"), "{}", c.why);
+        assert_eq!(classify("a.b.wild.example", &i).lane, Lane::Corp);
+        assert_eq!(classify("wild.example", &i).lane, Lane::Direct);
+        assert_eq!(classify("xwild.example", &i).lane, Lane::Direct);
     }
 
     #[test]

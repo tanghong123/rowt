@@ -245,6 +245,22 @@ def junk(r: random.Random) -> str:
                      "ss://x@h1.example:443", "\tvless://"])
 
 
+_VP = None
+
+
+def _vp():
+    """config/vless-parse.py, to turn generated links into outbounds for the
+    --links cases: the oracle makes the inputs, and both sides answer them."""
+    global _VP
+    if _VP is None:
+        import importlib.util
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "config", "vless-parse.py")
+        spec = importlib.util.spec_from_file_location("vless_parse", path)
+        _VP = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_VP)
+    return _VP
+
+
 def outbound(r: random.Random) -> dict:
     o: dict = {}
     if r.random() < 0.95:
@@ -343,7 +359,7 @@ def case(r: random.Random, d: str) -> None:
                 "1http://example.com",  # scheme must start with a letter
                 "",
             ])]
-    elif roll < 0.96:                             # --combine over an array
+    elif roll < 0.89:                             # --combine over an array
         argv = ["--combine"]
         outs = [outbound(r) for _ in range(r.randint(0, 6))]
         if outs and r.random() < 0.5:             # force a duplicate pair
@@ -368,6 +384,27 @@ def case(r: random.Random, d: str) -> None:
             outs_bad = list(outs)
             outs_bad.insert(r.randint(0, len(outs_bad)), bad_elem)
             stdin = json.dumps(outs_bad, ensure_ascii=False)
+    elif roll < 0.96:                             # --links: outbounds back to links
+        # Mostly outbounds the parser made, which must all round-trip; some
+        # hand-shaped ones, which mostly cannot and must be refused alike; and
+        # now and then no array at all.
+        argv = ["--links"]
+        outs = []
+        for _ in range(r.randint(0, 5)):
+            if r.random() < 0.8:
+                # Most generated links are deliberately broken; draw until one
+                # parses, so a case carries the outbounds it was meant to.
+                for _attempt in range(40):
+                    try:
+                        outs.append(_vp().parse_link(link(r).strip(), r.choice(NAMES) or "x"))
+                        break
+                    except Exception:  # noqa: BLE001 — a refused link is not an input here
+                        continue
+            else:
+                outs.append(outbound(r))
+        stdin = json.dumps(outs, ensure_ascii=False)
+        if r.random() < 0.08:
+            stdin = r.choice(["", "not json", "{}", '[1, "x", null]'])
     else:                                         # argument errors
         argv = r.choice([[], ["--tag"], ["--nope"], ["a.link", "b.link"]])
     with open(os.path.join(d, "argv"), "w", encoding="utf-8") as fh:

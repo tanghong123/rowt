@@ -241,10 +241,10 @@ pub fn run(ctx: &Ctx, here: &Path) -> String {
            &format!("{PROG} corp list   ·   {PROG} corp suggest   (on corp LAN/VPN)"));
     } else if !auto_dom.is_empty() {
         ob(&mut o, true, &format!("corp auto-setup active (this network advertises {auto_dom})"),
-           &format!("{PROG} corp suggest   ·   add extras: {PROG} corp add '*.corp.example.com' 10.0.0.0/8"));
+           &format!("{PROG} corp suggest   ·   add extras: {PROG} corp add corp.example.com 10.0.0.0/8"));
     } else {
         ob(&mut o, false, "corp lane — auto-fills when you connect your work network/VPN",
-           &format!("{PROG} corp suggest   (on corp LAN/VPN)   ·   {PROG} corp add '*.corp.example.com' 10.0.0.0/8"));
+           &format!("{PROG} corp suggest   (on corp LAN/VPN)   ·   {PROG} corp add corp.example.com 10.0.0.0/8"));
     }
 
     o.push(String::new());

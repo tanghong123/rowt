@@ -351,6 +351,134 @@ def test_parse_many_still_skips_what_rowt_does_not_speak():
     assert "skipping unsupported link (wireguard://)" in err.getvalue(), err.getvalue()
 
 
+def test_to_link_round_trips_every_protocol():
+    """to_link is parse_link reversed: each link below, parsed, written back as
+    a link and parsed again, is the same outbound — REALITY, transports, the
+    two Shadowsocks credential forms, plugins, IPv6 and the tuning keys."""
+    key = "A" * 43 + "="  # a 32-byte base64 key, the shape 2022 wants
+    links = [
+        "vless://00000000-0000-4000-8000-000000000001@h.example:443?security=reality&sni=s.example&fp=chrome&pbk=PUBKEY&sid=ab12&flow=xtls-rprx-vision#R",
+        "vless://00000000-0000-4000-8000-000000000001@h.example:8443?security=tls&sni=s.example&alpn=h2,http/1.1&type=ws&path=/ray?ed=2048&host=w.example#WS",
+        "vless://00000000-0000-4000-8000-000000000001@[2001:db8::1]:443?security=none&type=grpc&serviceName=svc#v6",
+        "vless://00000000-0000-4000-8000-000000000001@h.example:443?security=tls&type=http&path=/h2&host=a.example,b.example#H2",
+        "trojan://p%40ss%2Fw@t.example:443?sni=s.example&allowInsecure=1&type=ws&path=/t#T",
+        "trojan://pw@t.example:443?security=reality&sni=s.example&pbk=K&sid=01&fp=safari#TR",
+        "trojan://pw@t.example:443?security=none#plain",
+        "tuic://00000000-0000-4000-8000-000000000002:pw@u.example:443?sni=s.example&alpn=h3,h2&congestion_control=bbr&udp_relay_mode=quic&allow_insecure=1#U",
+        "ss://" + _b64("aes-256-gcm:p@ss/w+rd") + "@s.example:8388#classic",
+        "ss://2022-blake3-aes-256-gcm:"
+        + key.replace("=", "%3D")
+        + "@[2001:db8::2]:8388#v2022",
+        "ss://"
+        + _b64("chacha20-ietf-poly1305:pw")
+        + "@s.example:8388/?plugin=obfs-local%3Bobfs%3Dhttp%3Bobfs-host%3Dcdn.example#obfs",
+        "ss://" + _b64("none:") + "@s.example:8388#none",
+        "anytls://pw@a.example:443?sni=s.example&fp=firefox&alpn=h2&insecure=1#A",
+        "hysteria2://pw@y.example:443?sni=s.example&insecure=1&upmbps=20&downmbps=100&obfs=salamander&obfs-password=ob#Y",
+        "vmess://"
+        + _b64(
+            json.dumps(
+                {
+                    "v": "2",
+                    "ps": "香港 01",
+                    "add": "m.example",
+                    "port": "443",
+                    "id": "00000000-0000-4000-8000-000000000003",
+                    "aid": "0",
+                    "scy": "auto",
+                    "net": "ws",
+                    "host": "w.example",
+                    "path": "/v",
+                    "tls": "tls",
+                    "sni": "s.example",
+                    "fp": "chrome",
+                }
+            )
+        ),
+        "vmess://"
+        + _b64(
+            json.dumps(
+                {
+                    "add": "m.example",
+                    "port": 8443,
+                    "id": "00000000-0000-4000-8000-000000000003",
+                    "net": "h2",
+                    "host": "a.example,b.example",
+                    "path": "/h",
+                    "tls": "",
+                }
+            )
+        ),
+        "vmess://"
+        + _b64(
+            json.dumps(
+                {
+                    "add": "m.example",
+                    "port": 443,
+                    "id": "00000000-0000-4000-8000-000000000003",
+                    "net": "grpc",
+                    "path": "",
+                    "tls": "tls",
+                    "alpn": "h2",
+                }
+            )
+        ),
+    ]
+    for link in links:
+        o = vp.parse_link(link, "N")
+        back = vp.to_link(o)
+        assert back, f"no link for {link}"
+        eq(vp.parse_link(back, "N"), o, f"round trip of {link}")
+
+
+def test_to_link_keeps_the_name_and_brackets_ipv6():
+    o = vp.parse_link(
+        "vless://00000000-0000-4000-8000-000000000001@[2001:db8::1]:443?security=none#x",
+        "香港 01/JP",
+    )
+    link = vp.to_link(o)
+    assert "@[2001:db8::1]:443?" in link, link
+    eq(vp._link_name(link), "香港 01/JP", "the name travels in the fragment")
+
+
+def test_to_link_ss_uses_sip002_base64_and_sip022_plaintext():
+    classic = vp.to_link(
+        vp.parse_link("ss://" + _b64("aes-256-gcm:pw") + "@s.example:1#c")
+    )
+    assert ":" not in classic.split("@")[0][len("ss://") :], classic
+    key = "A" * 43 + "="
+    v2022 = vp.to_link(
+        vp.parse_link("ss://2022-blake3-aes-256-gcm:" + key + "@s.example:1#k")
+    )
+    assert v2022.startswith("ss://2022-blake3-aes-256-gcm:"), v2022
+
+
+def test_to_link_refuses_what_no_link_carries():
+    """Refused, not written with the setting silently gone."""
+    tuic = vp.parse_link(
+        "tuic://00000000-0000-4000-8000-000000000002:pw@u.example:443#t"
+    )
+    tuic["tls"]["alpn"] = []  # no link can say "none" — absent reads back as h3
+    base = vp.parse_link(
+        "vless://00000000-0000-4000-8000-000000000001@h.example:443?security=tls#v"
+    )
+    odd_transport = {**base, "transport": {"type": "quic"}}
+    tls_not_a_dict = {**base, "tls": "yes"}
+    extra_key = {**base, "packet_encoding": "xudp"}
+    for o in (
+        tuic,
+        odd_transport,
+        tls_not_a_dict,
+        extra_key,
+        {"type": "wireguard"},
+        {},
+    ):
+        eq(vp.to_link(o), None, f"refused: {o}")
+    # An empty alpn list is the same TLS as none, and writes as none.
+    base["tls"]["alpn"] = []
+    assert vp.to_link(base), "an empty alpn list is exportable"
+
+
 def main() -> int:
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

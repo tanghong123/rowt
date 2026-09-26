@@ -107,6 +107,50 @@ pub fn die(cfg: &Path, msg: &str) -> ! {
     std::process::exit(1);
 }
 
+/// `config export` asked for a format other than rowt's own bundle: `--to X` or
+/// `--to=X` with X anything but `rowt`, a missing value included, so the shell
+/// prints the usage. The last `--to` wins, as it does in the shell's loop.
+fn foreign_export(rest: &[String]) -> bool {
+    let mut to: Option<Option<&str>> = None;
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        if a == "--to" {
+            to = Some(it.next().map(String::as_str));
+        } else if let Some(v) = a.strip_prefix("--to=") {
+            to = Some(Some(v));
+        }
+    }
+    matches!(to, Some(t) if t != Some("rowt"))
+}
+
+/// `config export`'s operands for rowt's own bundle: whether to leave the
+/// server pool out (`--no-servers`, or its alias `--routes-only`), and the
+/// file — the first non-flag, as the shell's `$1` was. `Err` is the flag it
+/// refuses, `-` included: stdout is the Shadowrocket target's alone. Any
+/// `--to` here says `rowt`, since every other target was handed to the shell
+/// before dispatch (foreign_export).
+fn export_args(rest: &[String]) -> Result<(bool, Option<String>), String> {
+    let mut no_servers = false;
+    let mut out: Option<String> = None;
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--no-servers" | "--routes-only" => no_servers = true,
+            "--to" => {
+                it.next();
+            }
+            f if f.starts_with("--to=") => {}
+            f if f.starts_with('-') => return Err(f.to_string()),
+            f => {
+                if out.is_none() {
+                    out = Some(f.to_string());
+                }
+            }
+        }
+    }
+    Ok((no_servers, out))
+}
+
 /// Which arms rowt-rs answers itself.
 ///
 /// Everything else falls through to bin/rowt, which is installed alongside for
@@ -931,8 +975,17 @@ fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<Str
                     };
                     let have = geosites(after);
                     for entry in entries {
-                        let entry = entry.trim();
-                        if entry.is_empty() {
+                        // The entry as the shell's loop holds it by the time it
+                        // hints: whitespace gone and `*.z.com` read as `.z.com`
+                        // (the edit stored that) — and none at all for an entry
+                        // either guard declined (a whole namespace, or a `*`
+                        // left over), which `continue`s past the hint there.
+                        let entry = rowt_core::render::unwildcard(&rowt_core::lanes::normalize_entry(entry));
+                        let entry = entry.as_str();
+                        if entry.is_empty()
+                            || entry.contains('*')
+                            || (!force && rowt_core::lanes::entry_risk(entry).is_some())
+                        {
                             continue;
                         }
                         match entry.strip_prefix("geosite:") {
@@ -1491,22 +1544,10 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                     // as the shell's `$1` was.
                     const POOL: [&str; 5] =
                         ["servers.json", "manual.json", "import-review.json", "subs.txt", "outbound.json"];
-                    let mut no_servers = false;
-                    let mut out: Option<String> = None;
-                    for a in &rest[1..] {
-                        match a.as_str() {
-                            "--no-servers" => no_servers = true,
-                            f if f.starts_with('-') => die(
-                                &cfg,
-                                &format!("unknown flag: {f}  (usage: {PROG} config export [file] [--no-servers])"),
-                            ),
-                            f => {
-                                if out.is_none() {
-                                    out = Some(f.to_string());
-                                }
-                            }
-                        }
-                    }
+                    let (no_servers, out) = export_args(&rest[1..]).unwrap_or_else(|f| die(
+                        &cfg,
+                        &format!("unknown flag: {f}  (usage: {PROG} config export [--to rowt|shadowrocket] [file] [--routes-only])"),
+                    ));
                     let names: Vec<&str> = src.iter().copied()
                         .filter(|f| cfg.join(f).is_file())
                         .filter(|f| !(no_servers && POOL.contains(f)))
@@ -1542,7 +1583,7 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                 // the staging/atomic swap and the conflict prompt, with no way
                 // for the two to drift. `config export`/`list` stay native.
                 "import" => delegate(&std::env::args().skip(1).collect::<Vec<String>>()),
-                _ => die(&cfg, &format!("usage: {PROG} config [ list | export [file] [--no-servers] | import <file> [-y] [--replace] ]")),
+                _ => die(&cfg, &format!("usage: {PROG} config [ list | export [--to rowt|shadowrocket] [file] [--routes-only] | import <file> [-y] [--replace] ]")),
             }
         }
         // Per-domain traffic history. The store is SQLite and every arm is a
@@ -2101,6 +2142,11 @@ fn main() -> ExitCode {
             if !wants_help && !native(cmd, &sub) {
                 delegate(&args);
             }
+            // `config export --to <client>`: other clients' formats are the
+            // shell's (_export_shadowrocket); this binary packs rowt's own bundle.
+            if !wants_help && cmd == "config" && sub == "export" && foreign_export(&args[2..]) {
+                delegate(&args);
+            }
         }
     }
     match shell::dispatch(&cfg, &args, |cmd, rest| run(&cfg, cmd, rest)) {
@@ -2154,6 +2200,37 @@ mod tests {
         // An empty sub-command is the arm's own default, and it is claimed.
         assert!(native("router", ""));
         assert!(native("proxy", ""));
+    }
+
+    #[test]
+    fn config_export_hands_other_clients_formats_to_the_shell() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(!foreign_export(&v(&[])));
+        assert!(!foreign_export(&v(&["--no-servers", "x.tgz"])));
+        assert!(!foreign_export(&v(&["--to", "rowt"])));
+        assert!(!foreign_export(&v(&["--to=rowt", "x.tgz"])));
+        assert!(foreign_export(&v(&["--to", "shadowrocket", "-"])));
+        assert!(foreign_export(&v(&["x.conf", "--to=shadowrocket"])));
+        // A missing value goes to the shell too, which prints the usage.
+        assert!(foreign_export(&v(&["--to"])));
+        // The last --to wins, as in the shell's loop.
+        assert!(foreign_export(&v(&["--to", "rowt", "--to", "shadowrocket"])));
+        assert!(!foreign_export(&v(&["--to=shadowrocket", "--to", "rowt"])));
+    }
+
+    /// cli-diff cannot reach the native bundle export — every form of it that
+    /// succeeds writes a .tgz into the working directory — so its argument
+    /// parse is pinned here: `--routes-only` is `--no-servers`, and `-` (stdout,
+    /// which only the Shadowrocket target has) is refused.
+    #[test]
+    fn config_export_routes_only_is_no_servers() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(export_args(&v(&["--routes-only"])), Ok((true, None)));
+        assert_eq!(export_args(&v(&["x.tgz", "--no-servers"])), Ok((true, Some("x.tgz".into()))));
+        assert_eq!(export_args(&v(&["--to", "rowt", "a.tgz", "b.tgz"])), Ok((false, Some("a.tgz".into()))));
+        assert_eq!(export_args(&v(&["--to=rowt", "--routes-only", "a.tgz"])), Ok((true, Some("a.tgz".into()))));
+        assert_eq!(export_args(&v(&["a.tgz", "-"])), Err("-".into()));
+        assert_eq!(export_args(&v(&["--bogus"])), Err("--bogus".into()));
     }
 
     /// The Rust implementation does not transcribe shell-init separately:

@@ -768,6 +768,22 @@ correctness. This one's *name* asserted the false claim, so it read as
 settled. When a comment says "this matches what X does", the cheap move is to
 go ask X — here that was one command and a few seconds.
 
+**Resolved 2026-09-26 — the wildcard spelling.** `rowt corp add
+'*.corp.example.com'` was the example in `onboard` and the README, and both
+implementations stored the `*` literally. sing-box's `domain_suffix` has no
+wildcard, so the entry matched nothing, and `explain` agreed with the router
+that it matched nothing. No differential gate could see this, because the two
+sides were identically wrong. It surfaced while writing the Shadowrocket export
+(Shadowrocket spells "the names under z.com" as `*.z.com`).
+
+Both sides now read `*.z.com` as the dot-led `.z.com` in every list reader:
+`list_json` and `parse_list`, `_longest_domain_hit` and `classify`, and the
+hotspot bypass list, which now hands macOS `*.z.com` alone for either spelling.
+So an entry already on disk works without an edit. `add`/`import` store the
+dot. `rm` and the single-lane pull-out find either spelling (`_lane_has` /
+`lanes::spells`). `add` declines any other `*` (`a*.z.com`, or one under
+`--domain`), since it could only ever be dead.
+
 | Behavior | Where | Why it is not "just fixed" |
 |---|---|---|
 | `resolve_ip` is defined **twice**; the second wins, so `explain` uses dig-then-dscacheutil and `probe` uses a different one | bin/rowt:1843 and :2853 | Two call sites currently depend on the two different behaviors. |

@@ -11,16 +11,24 @@ use crate::render::{is_cidr, parse_list, Filter};
 /// `_hotspot_bypass_entries` — the lane as macOS bypass entries.
 ///
 /// macOS matches a bare name EXACTLY and needs the `*.` form for its
-/// subdomains, so a plain entry becomes both; a `domain:` (exact) entry is the
-/// host alone; an address or CIDR passes as written. Lowercased and
-/// byte-sorted: the setter hands the list to `networksetup` in this order, and
-/// the argv trace is compared across implementations.
+/// subdomains, so a plain entry becomes both; a dot-led entry (`.x`, or `*.x`
+/// as `parse_list` reads it) means the subdomains alone, so it is the `*.` form
+/// alone; a `domain:` (exact) entry is the host alone; an address or CIDR
+/// passes as written. Lowercased and byte-sorted: the setter hands the list to
+/// `networksetup` in this order, and the argv trace is compared across
+/// implementations.
 pub fn bypass_entries(contents: &str) -> Vec<String> {
     // Lowercased BEFORE the `domain:` / `geosite:` prefixes are read, as the
     // shell's `tr` runs ahead of its `grep`/`awk` — so `DOMAIN:x` is exact too.
     let contents = contents.to_ascii_lowercase();
     let mut v: Vec<String> = parse_list(&contents, Filter::Exact);
     for e in parse_list(&contents, Filter::All) {
+        // `.x` → `*.x`. It used to become `.x` and `*..x`, neither of which
+        // macOS matches against a real name.
+        if e.len() > 1 && e.starts_with('.') {
+            v.push(format!("*{e}"));
+            continue;
+        }
         if !is_address(&e) {
             v.push(format!("*.{e}"));
         }
@@ -90,6 +98,14 @@ mod tests {
         // `portal.example` yields `portal.example` twice (plain + exact): once.
         let v = bypass_entries("portal.example\ndomain:portal.example\n");
         assert_eq!(v, vec!["*.portal.example", "portal.example"]);
+    }
+
+    #[test]
+    fn a_dot_led_or_wildcard_entry_is_the_subdomains_alone() {
+        let v = bypass_entries(".Dot.example\n*.wild.example\n");
+        assert_eq!(v, vec!["*.dot.example", "*.wild.example"]);
+        // A lone dot keeps its old treatment (all dots and digits: an address).
+        assert_eq!(bypass_entries(".\n"), vec!["."]);
     }
 
     #[test]

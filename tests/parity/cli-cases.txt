@@ -101,6 +101,26 @@ corp import tests/parity/fixtures/import-list.txt
 # A file that is not there is an error (die, ABORT in the audit log), not an
 # import of nothing: rowt-rs read "" from the missing path and reported "0 new".
 escape import tests/parity/fixtures/no-such-file.txt
+# `*.x` (#42): the spelling rowt's own docs used to show, and Shadowrocket's.
+# It is the dot-led `.x` — stored with the dot on add and import, and read as
+# the dot wherever an older rowt left it on disk (wildcard-lane): explain, the
+# render, rm and the single-lane pull-out must all find it, and the hotspot lane
+# must hand macOS `*.x` alone.
+corp add *.wild.example 10.9.0.0/16
+escape import tests/parity/fixtures/import-wildcards.txt
+escape add cdn*.example.com ok.example
+PARITY_SCENARIO=wildcard-lane explain host.wild.example
+PARITY_SCENARIO=wildcard-lane explain wild.example
+PARITY_SCENARIO=wildcard-lane explain a.b.corp.example
+PARITY_SCENARIO=wildcard-lane explain in.over.example
+PARITY_SCENARIO=wildcard-lane render
+PARITY_SCENARIO=wildcard-lane corp rm .corp.example
+PARITY_SCENARIO=wildcard-lane corp add .wild.example
+PARITY_SCENARIO=wildcard-lane escape add *.wild.example
+PARITY_SCENARIO=wildcard-lane hotspot list
+PARITY_SCENARIO=wildcard-lane proxy env
+PARITY_SCENARIO=wildcard-lane proxy on --force
+PARITY_SCENARIO=wildcard-lane config export --to shadowrocket --routes-only -
 
 # The watchdog tick, compared on everything the machine KEEPS: stdout, exit
 # status, the whole config tree (content and mode) and the audit log.
@@ -411,6 +431,17 @@ nosuchcommand
 config
 config list
 config nosucharm
+# `config export --to shadowrocket --routes-only -`: the lanes as a Shadowrocket
+# config, on stdout, so no file lands outside the sandbox (the other export forms
+# write into the working directory, which is why they have no case). rowt-rs
+# hands this form to the shell, so the case proves the front door plus the whole
+# file, rule order included. The sandbox's sing-box cannot decompile, so its
+# geosite categories come out as skipped comments. Without --routes-only, stdout
+# is refused: the servers go to a file of their own.
+config export --to shadowrocket --routes-only -
+config export --to shadowrocket -
+config export --to clash
+config export --to
 
 # `config import` — unpack a bundle over the config directory. Every refusal
 # comes before the prompt, which is why they are cases at all:

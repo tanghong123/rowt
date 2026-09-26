@@ -440,7 +440,7 @@ pub fn clash_proxy_to_link(p: &Map<String, Value>) -> R<Option<String>> {
 }
 
 /// `base64.b64encode` — standard alphabet, padded.
-fn b64encode(data: &[u8]) -> String {
+pub(crate) fn b64encode(data: &[u8]) -> String {
     const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for c in data.chunks(3) {

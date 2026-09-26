@@ -96,7 +96,7 @@ rowt-remote-on rowt-mac       # client: point this shell at rowt-mac:17890 (rowt
 rowt-remote-system-on rowt-mac # client: point macOS apps there (system-off to undo; needs admin)
 rowt-share-on                 # tailnet-only TCP forward :17890 -> rowt :7890 (rowt-share-off to undo)
 rowt escape add youtube.com   # send another site through the personal tunnel
-rowt corp add '*.intranet.example.com' '10.0.0.0/8'   # send a domain or CIDR into the corp VPN
+rowt corp add intranet.example.com 10.0.0.0/8   # send a domain (and its subdomains) or a CIDR into the corp VPN
 rowt block add ads.example.com   # sinkhole an ad/telemetry domain (no DNS, no dial)
 rowt hotspot add unitedwifi.com  # a venue's captive portal: reached WITHOUT the proxy, so its login page loads
 rowt use JP                   # pick a server (rowt ping shows the fastest)
@@ -198,6 +198,35 @@ The trick: don't run a second `tun`. `rowt` runs **sing-box on the host as
 a rule-router** — a mixed HTTP+SOCKS proxy on `127.0.0.1:7890` — that splits
 traffic **three ways**. Because it's a userspace proxy, there's no default-route
 war with the corp client.
+
+## Your rules on the iPhone (Shadowrocket)
+
+Shadowrocket on the iPhone can route the same way rowt does on the Mac:
+
+```sh
+rowt config export --to shadowrocket          # rowt-shadowrocket.conf + rowt-shadowrocket-servers.txt
+rowt config export --to shadowrocket --routes-only   # the routing config alone
+```
+
+**`rowt-shadowrocket.conf` is the routing**, as a Shadowrocket config:
+escape → `PROXY`, block → `REJECT`, corp and hotspot → `DIRECT`, and everything
+else `FINAL,DIRECT`. The rules come in rowt's own order (Shadowrocket also takes
+the first rule that matches), `geosite:` categories are written out in full
+(bar the few regex entries some carry: Shadowrocket has no rule for a domain
+regex, and the export counts what it leaves out), and `PROXY` means whichever
+server is selected in Shadowrocket. AirDrop it to the
+phone (or save it to iCloud Drive), open it with Shadowrocket, tap it under
+Config, and choose Use Config.
+
+**`rowt-shadowrocket-servers.txt` is your servers**: each hand-added server as a
+share link, followed by your subscription URLs, which Shadowrocket fetches
+itself. Every link is checked when it is written by parsing it back, and a
+server whose settings no share link can carry exactly is named and left out
+rather than exported with those settings missing. Copy the file's text and add it
+in Shadowrocket, which imports share links from the clipboard. **It holds
+credentials:** the file is owner-only, AirDrop moves it encrypted, and it is worth
+deleting once imported. `--routes-only` leaves it out, and `-` prints the
+config to stdout (with `--routes-only`).
 
 ## Running commands with automatic environment set-up
 
@@ -307,7 +336,7 @@ domain into the corp lane while it sits here. CLI tools ignore the macOS list;
 | bucket | list | where it goes | example |
 | --- | --- | --- | --- |
 | **escape** | `config/escape-domains.txt` | your personal **tunnel** (VLESS, VMess, AnyTLS, hysteria2, Shadowsocks, Trojan or TUIC) | google, youtube, github |
-| **corp** | `config/corp-domains.txt` (domains **and** CIDRs) | **into the corp VPN** (via the OS routing table, so the corp client's own routes carry it) | `*.corp.example.com`, `10.0.0.0/8` |
+| **corp** | `config/corp-domains.txt` (domains **and** CIDRs) | **into the corp VPN** (via the OS routing table, so the corp client's own routes carry it) | `corp.example.com`, `10.0.0.0/8` |
 | **direct** | everything else (the default) | **straight out the physical NIC**, bypassing *both* corp and escape | baidu, the China internet |
 
 How each is enforced inside sing-box:
@@ -654,7 +683,7 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 | `report` | full offline diagnostic (deps, configs, per-server reachability, DNS, through-proxy tests, log + audit tail) → `~/.config/rowt/diag-*.txt`, **secrets masked**, for sharing. |
 | `audit [-n N\|all\|path\|clear]` | the **mutation trail** — one line per state-changing op, whether you ran it or the `watch` agent did, with `BEGIN`/`END`/`ABORT`, timing, and a `by=<parent>(<tty>)` field that says whether it was hands-on (`by=zsh`) or the watchdog (`by=launchd`). `BEGIN` is written before the work, so even a command that hangs leaves a trace. Read-only commands aren't recorded. → `~/.config/rowt/log/audit.log`. |
 | `metrics [status\|top\|path\|query]` | **per-domain traffic history** — a `collector` sidecar records bytes in/out per domain/lane into a tiered SQLite store (5s → 1y). `status` shows liveness; `top [secs]` the heaviest domains; `path` the store path + schema; `query "<SQL>"` a read-only SQL passthrough. Surfaced interactively in `monitor` via the `v` flip. See [Traffic metrics](#traffic-metrics). |
-| `config [list\|export\|import]` | **back up / move the whole setup** to another machine. `export [--no-servers]` bundles the source-of-truth files (server pool, subscriptions, escape/corp/block/hotspot lane rules) into a `.tgz` — `--no-servers` omits the pool, so the lane rules are safe to share or commit. `import <file>` **merges** the bundle's lane lists into yours by default (union, deduped, single-lane; entries the bundle would pull into another lane are listed and confirmed first) and leaves your server pool as-is; `--replace` overwrites the matching files instead — a whole-bundle restore. Either re-renders after. Skips the machine-specific `host.json`/`state`/binary — those regenerate via `render`/`up`. Bundle holds credentials: move it encrypted. |
+| `config [list\|export\|import]` | **back up / move the whole setup** to another machine — or, with `export --to shadowrocket`, hand it to Shadowrocket on your iPhone (see [Your rules on the iPhone](#your-rules-on-the-iphone-shadowrocket)). `export [--no-servers]` bundles the source-of-truth files (server pool, subscriptions, escape/corp/block/hotspot lane rules) into a `.tgz` — `--no-servers` omits the pool, so the lane rules are safe to share or commit. `import <file>` **merges** the bundle's lane lists into yours by default (union, deduped, single-lane; entries the bundle would pull into another lane are listed and confirmed first) and leaves your server pool as-is; `--replace` overwrites the matching files instead — a whole-bundle restore. Either re-renders after. Skips the machine-specific `host.json`/`state`/binary — those regenerate via `render`/`up`. Bundle holds credentials: move it encrypted. |
 | `monitor` | **full-screen TUI** (`htop`-style) — the live view of everything at once: connections + throughput, errors/blocked over a rolling window, and server health, plus confirmed, reversible controls (server switch, lane routing, proxy toggle). See [Monitor (TUI)](#monitor-tui). |
 | `run <command> [args…]` | run a command through whatever proxy path actually reaches the internet — probes, in order, the current shell proxy env → the macOS system proxy → rowt's port (if the router is up and the system proxy is off) → direct, and execs the command with the first where the target host answers (default `https://www.google.com/`; override `ROWT_RUN_TARGET`). Aborts without running if none work. Handy for CLI tools (`claude`, `git`, `npm`…) that ignore the system proxy: `rowt run claude`. |
 
@@ -681,7 +710,7 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 | command | what it does |
 | --- | --- |
 | `escape` / `corp` / `block` (no verb) | list the lane. |
-| `hotspot <list\|add\|rm\|import\|clear\|dump>` | **captive-portal hosts that bypass the proxy at the OS level**, so a venue's login page loads while rowt is up: each entry goes on macOS's proxy bypass list as `x.com` *and* `*.x.com` (`--domain` = that exact host only; an IP/CIDR as written). Not a routing lane — nothing is rendered, an edit re-applies the bypass list (where rowt owns the proxy) instead of restarting the router, `corp sync` stops mirroring a DHCP-advertised domain that sits here, and `proxy env`/`run` export the list as `no_proxy`. Same single-lane rule as the others. See [Captive portals](#captive-portals-hotel--airplane-wi-fi). |
+| `hotspot <list\|add\|rm\|import\|clear\|dump>` | **captive-portal hosts that bypass the proxy at the OS level**, so a venue's login page loads while rowt is up: each entry goes on macOS's proxy bypass list as `x.com` *and* `*.x.com` (`.x.com` or `*.x.com` = the `*.x.com` form alone; `--domain` = that exact host only; an IP/CIDR as written). Not a routing lane — nothing is rendered, an edit re-applies the bypass list (where rowt owns the proxy) instead of restarting the router, `corp sync` stops mirroring a DHCP-advertised domain that sits here, and `proxy env`/`run` export the list as `no_proxy`. Same single-lane rule as the others. See [Captive portals](#captive-portals-hotel--airplane-wi-fi). |
 | `… add <d>…` / `… rm <d>…` | add / remove domains (corp also takes CIDRs). Reloads if running. |
 | `… add --domain <d>…` | match the **whole host only**, not its subdomains — stored as `domain:<host>`, rendered as a sing-box `domain` rule instead of `domain_suffix`. `--domain-suffix` names the default explicitly. Applies to every entry of that `add`/`rm`, from any position. |
 | `… add --force <d>…` | add an entry that is a **whole namespace**. Lane entries are suffixes, so `com` is every `.com` and `co.uk` is every `.co.uk`; both are declined unless you say `--force`. |
@@ -695,9 +724,11 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 
 **Suffix vs whole-host.** A lane entry is a `domain_suffix` by default, and
 that is almost always what you want: `z.com` covers `z.com` and `a.z.com`, and —
-since sing-box matches on a **label boundary** — does *not* cover `xz.com`. Reach
-for `--domain` only when one host must go somewhere its own subdomains should
-not:
+since sing-box matches on a **label boundary** — does *not* cover `xz.com`. A
+leading dot, `.z.com`, covers only what is under it (`a.z.com`, not `z.com`);
+`*.z.com`, the way Shadowrocket and Surge write it, is stored as `.z.com` and
+means the same. Reach for `--domain` only when one host must go somewhere its own
+subdomains should not:
 
 ```sh
 rowt corp add --domain dev.g.alicdn.com   # just this host into the corp VPN…

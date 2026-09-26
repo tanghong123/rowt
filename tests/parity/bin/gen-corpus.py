@@ -52,12 +52,26 @@ def read_list(path: str) -> list[str]:
         line = raw.strip()
         if not line or line.startswith("#") or line.startswith("geosite:"):
             continue
+        # `*.z.com` is the dot-led `.z.com`, as every rowt reader takes it.
+        if line.startswith("*.") and len(line) > 2:
+            line = line[1:]
         out.append(line)
     return out
 
 
 def domain_cases(suffix: str, lane: str) -> list[tuple[str, str]]:
     """(destination, why) pairs around one suffix."""
+    if suffix.startswith(".") and len(suffix) > 1:
+        # A dot-led entry is the names UNDER it. Its apex is the case a
+        # matcher that ignores the dot gets wrong, so derive from the name.
+        base = suffix[1:]
+        return [
+            (base, "no match: the apex of a dot-led entry"),
+            (f"sub.{base}", f"{lane}: subdomain of a dot-led entry"),
+            (f"deep.sub.{base}", f"{lane}: deep subdomain of a dot-led entry"),
+            (f"x{base}", "no match: no dot boundary before the suffix"),
+            (f"{base}.example", "no match: suffix appears as a prefix"),
+        ]
     head, _, rest = suffix.partition(".")
     truncated = suffix[:-1] if len(suffix) > 1 else suffix
     return [

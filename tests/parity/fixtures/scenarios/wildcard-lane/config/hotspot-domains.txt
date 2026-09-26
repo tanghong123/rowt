@@ -1,0 +1,4 @@
+# Synthetic parity fixture — a venue written the three ways.
+*.venue.example
+.lounge.example
+Portal.Example

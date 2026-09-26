@@ -1,0 +1,3 @@
+# Synthetic parity fixture.
+*.ads.wild.example
+domain:*.exact.example

@@ -1,0 +1,12 @@
+Lanes written the way rowt's own docs used to show, and Shadowrocket and Surge
+spell it: `*.z.example`. sing-box's domain_suffix has no wildcard, so rowt used to
+store that `*` literally and nothing ever matched it. The docs' example sent a
+corp host straight out the physical NIC.
+
+A `*.x` entry is now read as the dot-led `.x` it means: the names under x, not
+x itself. This scenario holds that spelling in every lane, next to a dot-led
+entry, a bare one and an exact one, so each reader is compared on it:
+- the render, classify, explain and export;
+- the hotspot bypass list;
+- rm and the single-lane dedupe, which must find the old spelling when asked
+  for the dot-led form.

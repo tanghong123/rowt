@@ -30,6 +30,7 @@ local-precedence  PARITY_SCENARIO=render-local-precedence
 # canonical-JSON diff is what proves the `domain` rules land ahead of every
 # `domain_suffix` and that the corp one also gets its `server: local` dns rule.
 exact-lane        PARITY_SCENARIO=exact-lane
+wildcard-lane     PARITY_SCENARIO=wildcard-lane
 # …and in local mode, where the escape lane's outbound retargets to `direct`:
 # the exact rules must retarget with it, or they keep naming a tunnel that the
 # render just removed.

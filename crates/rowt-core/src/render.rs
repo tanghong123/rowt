@@ -63,8 +63,9 @@ pub struct HostInput {
 ///
 /// The order matters and is not obvious: comment/blank lines are dropped on the
 /// RAW line, then *all* whitespace is removed from what survives (not merely
-/// trimmed — an inner space would close up too), then `geosite:` meta lines go,
-/// then the CIDR/domain filter runs, and finally empties are dropped.
+/// trimmed — an inner space would close up too), then a `*.z.com` becomes
+/// `.z.com` (`unwildcard`), then `geosite:` meta lines go, then the CIDR/domain
+/// filter runs, and finally empties are dropped.
 pub fn parse_list(contents: &str, filter: Filter) -> Vec<String> {
     contents
         .lines()
@@ -73,6 +74,7 @@ pub fn parse_list(contents: &str, filter: Filter) -> Vec<String> {
             !(t.is_empty() || t.starts_with('#'))
         })
         .map(|raw| raw.chars().filter(|c| !c.is_whitespace()).collect::<String>())
+        .map(|s| unwildcard(&s))
         .filter(|s| !s.starts_with("geosite:"))
         .filter_map(|s| {
             let exact = s.strip_prefix(EXACT_PREFIX).map(str::to_string);
@@ -97,6 +99,25 @@ pub fn parse_list(contents: &str, filter: Filter) -> Vec<String> {
 /// default `domain_suffix`. Same shape as `geosite:` — a hostname can't contain
 /// a colon, so the prefix is unambiguous, and both readers already split on one.
 pub const EXACT_PREFIX: &str = "domain:";
+
+/// `*.z.com` → `.z.com`: the wildcard spelling of a dot-led entry.
+///
+/// Shadowrocket and Surge write "the names under z.com" as `*.z.com`, and so
+/// did rowt's own onboard and README (`corp add '*.corp.example.com'`). sing-box's
+/// `domain_suffix` has no wildcard, though, so a stored `*.z.com` was a literal
+/// `*` that no name contains: the entry matched nothing, silently. rowt's own
+/// spelling of the same thing is `.z.com` (sing-box: the subdomains, not the
+/// apex), so the wildcard is read as the dot — by every reader of a lane list,
+/// which is what makes an entry already on disk work without an edit, and by
+/// `add`/`import`, which store the dot.
+///
+/// Only that shape: `*.` alone, and a `*` anywhere else, pass as written.
+pub fn unwildcard(e: &str) -> String {
+    match e.strip_prefix("*.") {
+        Some(rest) if !rest.is_empty() => format!(".{rest}"),
+        _ => e.to_string(),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Filter {
@@ -371,6 +392,21 @@ mod tests {
     #[test]
     fn a_line_of_only_whitespace_is_dropped_not_emptied() {
         assert!(parse_list("   \n\t\n", Filter::All).is_empty());
+    }
+
+    /// A `*.z.com` on disk — written by an older rowt, or by hand from the
+    /// docs — is read as the dot-led `.z.com` that sing-box can match. An exact
+    /// `domain:*.z.com` is not a suffix and is left alone, and so are the shapes
+    /// with nothing to anchor on.
+    #[test]
+    fn a_wildcard_entry_reads_as_its_dot_led_form() {
+        let src = "*.wild.example\n  *.Spaced.example \n.dot.example\ndomain:*.exact.example\n*.\n*\na.*.example\n";
+        assert_eq!(parse_list(src, Filter::Domain),
+                   [".wild.example", ".Spaced.example", ".dot.example", "*.", "*", "a.*.example"]);
+        assert_eq!(parse_list(src, Filter::Exact), ["*.exact.example"]);
+        assert_eq!(unwildcard("*.z.com"), ".z.com");
+        assert_eq!(unwildcard(".z.com"), ".z.com");
+        assert_eq!(unwildcard("z.com"), "z.com");
     }
 
     #[test]

@@ -36,6 +36,8 @@
 #   32.  drop the discovery journal's state key   -> the watch tick cases must fire
 #   33.  make the DNS-free fallback give up        -> watch-shadow must fire
 #   34.  read past a base64 pad in the Python      -> vless-diff must fire
+#   35.  let an agent's watch install carry on     -> cli-diff must fire
+#   36.  keep empty query values in a share link   -> vless-diff must fire
 #
 # Everything happens in a throwaway copy of the repo; the real tree is never
 # touched. Run it after changing the harness itself.
@@ -1028,6 +1030,37 @@ else
     ok "cli-diff caught a watch install that carries on without a password"
   fi
   cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+fi
+
+echo "36. a share link written back must be the Python's, byte for byte"
+if [ ! -x "$ROOT/target/release/rowt-vless" ]; then
+  echo "  skip — no release build"
+else
+  # `--links` (to_link) turns outbounds back into share links, for `config export
+  # --to shadowrocket`. Both implementations must write the SAME link, not just
+  # links that parse alike: the file is what the user carries to the phone. Drop
+  # the Python's rule that an empty value is left out of the query — the links
+  # still parse back to the same outbounds, so only a byte comparison can tell.
+  cp "$ROOT/config/vless-parse.py" "$tmp/config/vless-parse.py"
+  _pre="$(cksum < "$tmp/config/vless-parse.py")"
+  # Quiet first, or the catch below proves nothing: under a FORCE_COLOR the
+  # harness did not yet neutralise, a coloured Python traceback failed 33/400
+  # cases unmutated, and this step passed on that alone.
+  if ! PARITY_RUST_VLESS="$ROOT/target/release/rowt-vless" \
+       "$tmp/tests/parity/bin/parity" vless-diff 400 >/dev/null 2>&1; then
+    bad "vless-diff already fails before the mutation"
+  else
+    perl -0pi -e 's/return urlencode\(\[\(k, v\) for k, v in pairs if v\]\)/return urlencode(pairs)/' "$tmp/config/vless-parse.py"
+    if [ "$_pre" = "$(cksum < "$tmp/config/vless-parse.py")" ]; then
+      bad "could not keep empty query values (_query moved?)"
+    elif PARITY_RUST_VLESS="$ROOT/target/release/rowt-vless" \
+         "$tmp/tests/parity/bin/parity" vless-diff 400 >/dev/null 2>&1; then
+      bad "vless-diff passed with the Python writing links the Rust does not"
+    else
+      ok "vless-diff caught a share link written differently"
+    fi
+  fi
+  cp "$ROOT/config/vless-parse.py" "$tmp/config/vless-parse.py"
 fi
 
 echo

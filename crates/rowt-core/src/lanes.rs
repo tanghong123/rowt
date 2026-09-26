@@ -9,6 +9,7 @@
 //! Adding to one lane pulls it out of the other two.
 
 use crate::classify::Lane;
+use crate::render::unwildcard;
 
 /// The three editable lane lists, as file contents — plus the hotspot lane.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -105,6 +106,15 @@ pub fn risk_message(entry: &str, why: &str) -> String {
     format!("  skipped {entry} — {why}; lane entries are suffixes. Use --force if you mean it.")
 }
 
+/// The line for an entry that still holds a `*` once a leading `*.` has been
+/// read as the dot — `a*.z.com`, or `--domain '*.z.com'`. sing-box has no
+/// wildcard, so that `*` is a literal no name contains, and the entry would
+/// match nothing, silently. Declined on `add` whatever `--force` says: there is
+/// no reading of it that routes anything.
+pub fn wildcard_message(entry: &str) -> String {
+    format!("  skipped {entry} — '*' matches nothing in a routing lane; for the names under z.com, add .z.com (or *.z.com) without --domain")
+}
+
 /// Split the rule-kind flags out of a lane command's arguments.
 ///
 /// Returns the remaining operands and whether `--domain` (exact) was chosen.
@@ -150,14 +160,24 @@ pub fn normalize_entry(s: &str) -> String {
     s.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
-fn has_line(body: &str, entry: &str) -> bool {
-    body.lines().any(|l| l == entry)
+/// Is `line` a stored spelling of `entry`? The entry itself, or — for a
+/// dot-led entry — the `*.z.com` an older rowt stored for `.z.com`, which every
+/// reader now takes as the same entry (`render::unwildcard`). Without the
+/// second spelling, `rm .z.com` would say "not found" for an entry the lane
+/// visibly routes, and `add` would put `.z.com` beside its own old twin.
+/// `_lane_has` / `_lane_without` in the shell.
+fn spells(line: &str, entry: &str) -> bool {
+    line == entry || (entry.len() > 1 && entry.starts_with('.') && line.strip_prefix('*') == Some(entry))
 }
 
-/// `grep -vxF` — drop every line equal to `entry`, keeping the trailing newline
-/// shape the shell produces.
+fn has_line(body: &str, entry: &str) -> bool {
+    body.lines().any(|l| spells(l, entry))
+}
+
+/// `grep -vxF` — drop every line that spells `entry`, keeping the trailing
+/// newline shape the shell produces.
 fn drop_line(body: &str, entry: &str) -> String {
-    let kept: Vec<&str> = body.lines().filter(|l| *l != entry).collect();
+    let kept: Vec<&str> = body.lines().filter(|l| !spells(l, entry)).collect();
     if kept.is_empty() {
         String::new()
     } else {
@@ -258,7 +278,10 @@ pub fn apply(lanes: &Lanes, target: Lane, op: &Op) -> Edit {
             let mut added = 0usize;
             let mut already = 0usize;
             for raw in entries {
-                let e = normalize_entry(raw);
+                // `*.z.com` is stored as `.z.com`, before anything else looks
+                // at it — so `*.com` meets the namespace guard as `.com`. An
+                // exact entry was stamped `domain:` already and stays as typed.
+                let e = unwildcard(&normalize_entry(raw));
                 // import skips comments and blanks; add just skips blanks.
                 if e.is_empty() || (importing && e.starts_with('#')) {
                     continue;
@@ -271,6 +294,12 @@ pub fn apply(lanes: &Lanes, target: Lane, op: &Op) -> Edit {
                         msgs.push(risk_message(&e, why));
                         continue;
                     }
+                }
+                // A `*` that survived `unwildcard` matches nothing (see
+                // `wildcard_message`). `import` is left alone, as above.
+                if !importing && e.contains('*') {
+                    msgs.push(wildcard_message(&e));
+                    continue;
                 }
                 // `geosite:` is escape/block only — corp routes internal
                 // domains and CIDRs, and a rule-set cannot express those.
@@ -325,7 +354,7 @@ pub fn apply(lanes: &Lanes, target: Lane, op: &Op) -> Edit {
         }
         Op::Rm(entries) => {
             for raw in entries {
-                let e = normalize_entry(raw);
+                let e = unwildcard(&normalize_entry(raw));
                 let body = out.get(target).to_string();
                 if has_line(&body, &e) {
                     out.set(target, drop_line(&body, &e));
@@ -613,5 +642,61 @@ mod tests {
             &Op::Import { lines: vec!["com".into()], source: "f.txt".into() },
         );
         assert!(e.lanes.block.contains("com"));
+    }
+
+    /// `*.z.com` is stored as `.z.com` — the spelling sing-box can match — on
+    /// add and on import, and the namespace guard sees it that way too.
+    #[test]
+    fn a_wildcard_entry_is_stored_dot_led() {
+        let add = |e: &str| apply(&lanes(), Lane::Corp, &Op::Add { entries: vec![e.into()], force: false });
+        let a = add("*.wild.example");
+        assert!(a.lanes.corp.lines().any(|l| l == ".wild.example"), "{}", a.lanes.corp);
+        assert!(!a.lanes.corp.contains('*'));
+        assert_eq!(a.messages, ["  added: .wild.example"]);
+        let r = add("*.com");
+        assert_eq!(r.lanes.corp, lanes().corp);
+        assert_eq!(r.messages, [risk_message(".com", "a whole top-level domain")]);
+        let i = apply(&lanes(), Lane::Escape,
+                      &Op::Import { lines: vec!["*.imp.example".into()], source: "f".into() });
+        assert!(i.lanes.escape.lines().any(|l| l == ".imp.example"), "{}", i.lanes.escape);
+        // Any other `*` matches nothing, so `add` declines it, `--force` or not:
+        // one inside a name, or an exact entry (stamped before it gets here,
+        // so its `*.` is not the leading one).
+        for bad in ["a*.wild.example", "domain:*.exact.example"] {
+            for force in [false, true] {
+                let x = apply(&lanes(), Lane::Corp, &Op::Add { entries: vec![bad.into()], force });
+                assert_eq!(x.lanes.corp, lanes().corp);
+                assert_eq!(x.messages, [wildcard_message(bad)]);
+            }
+        }
+        // `import` is unguarded, for this as for breadth.
+        let imp = apply(&lanes(), Lane::Corp, &Op::Import { lines: vec!["a*.wild.example".into()], source: "f".into() });
+        assert!(imp.lanes.corp.lines().any(|l| l == "a*.wild.example"));
+    }
+
+    /// A lane written before the dot was stored may still hold `*.z.com`. It is
+    /// the same entry as `.z.com`, so every edit that looks for one finds the
+    /// other: `rm` removes it, `add` reports it present, and the single-lane
+    /// rule pulls it out of another lane.
+    #[test]
+    fn the_old_wildcard_spelling_is_the_same_entry() {
+        let mut l = lanes();
+        l.corp.push_str("*.old.example\n");
+        let rm = apply(&l, Lane::Corp, &Op::Rm(vec![".old.example".into()]));
+        assert!(!rm.lanes.corp.contains("old.example"), "{}", rm.lanes.corp);
+        assert_eq!(rm.messages, ["  removed: .old.example"]);
+        let rm2 = apply(&l, Lane::Corp, &Op::Rm(vec!["*.old.example".into()]));
+        assert_eq!(rm2.lanes, rm.lanes);
+        let again = apply(&l, Lane::Corp, &Op::Add { entries: vec!["*.old.example".into()], force: false });
+        assert_eq!(again.lanes.corp, l.corp);
+        assert_eq!(again.messages, ["  already present: .old.example"]);
+        let moved = apply(&l, Lane::Escape, &Op::Add { entries: vec![".old.example".into()], force: false });
+        assert!(!moved.lanes.corp.contains("old.example"), "{}", moved.lanes.corp);
+        assert!(moved.messages.iter().any(|m| m == "  moved out of corp lane: .old.example"), "{:?}", moved.messages);
+        // Only a dot-led entry has a second spelling: `old.example` is not `*old.example`.
+        let mut b = lanes();
+        b.corp.push_str("*old.example\n");
+        let bare = apply(&b, Lane::Corp, &Op::Rm(vec!["old.example".into()]));
+        assert_eq!(bare.messages, ["  not found: old.example"]);
     }
 }

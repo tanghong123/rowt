@@ -1,0 +1,5 @@
+# Synthetic parity fixture — the wildcard spelling beside the forms it is compared with.
+*.wild.example
+.dot.example
+example.com
+*.over.example

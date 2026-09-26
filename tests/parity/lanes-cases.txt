@@ -29,3 +29,16 @@ escape add --domain com
 block clear
 escape clear
 escape dump
+# `*.x` is the dot-led `.x` (#42): stored with the dot, guarded as the dot, and
+# found by rm in either spelling. An exact entry is stamped first and kept as
+# typed.
+corp add *.wild.example
+corp add *.wild.example .wild.example
+escape add *.com
+escape add --force *.com
+corp rm *.corp.example
+block add --domain *.exact.example
+escape import tests/parity/fixtures/import-wildcards.txt
+# Any other '*' matches nothing, so add declines it, --force or not.
+escape add cdn*.example.com
+escape add --force cdn*.example.com ok.example

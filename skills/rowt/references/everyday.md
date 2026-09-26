@@ -53,7 +53,8 @@ foreground with output redirected to a file (see SKILL.md → Rules).
 - An entry lives in exactly one lane: adding it to one removes it from the others,
   hotspot included.
 - Entries are suffixes on a label boundary: `z.com` matches `z.com` and `a.z.com`, but
-  not `xz.com`. `--domain` matches the whole host only.
+  not `xz.com`. `.z.com` matches only what is under it; `*.z.com` (Shadowrocket's
+  spelling) is stored as `.z.com`. `--domain` matches the whole host only.
 - corp also takes CIDRs. `--force` is required for a whole namespace such as `com`.
 - The longest match wins across lanes, and an exact `domain:` entry beats every
   suffix.
@@ -133,6 +134,13 @@ foreground with output redirected to a file (see SKILL.md → Rules).
   encrypted channel, then `rowt config import <file>` and `rowt up`.
 - **Sharing:** `--no-servers` exports only the lane lists, with no credentials, which
   is safe to hand to a colleague.
+- **To an iPhone:** `rowt config export --to shadowrocket` writes a Shadowrocket
+  config with the lanes in rowt's order (escape → PROXY, block → REJECT, corp and
+  hotspot → DIRECT, everything else DIRECT), plus `…-servers.txt`: the hand-added
+  servers as share links, each checked by parsing it back, and the subscription
+  URLs. That file holds credentials, so it's owner-only; `--routes-only` skips it.
+  The user opens the config with Shadowrocket (Use Config) and pastes the servers
+  file's text into it.
 - **Importing:** `config import` **merges** by default. It unions each lane list,
   reports an entry that lands in a different lane as a conflict, and leaves the
   recipient's servers alone. `--replace` overwrites instead.

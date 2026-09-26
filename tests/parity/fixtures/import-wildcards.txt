@@ -1,0 +1,5 @@
+# an import source in the Shadowrocket/Surge spelling: `*.x` is stored as `.x`
+*.imp.example
+.dot.imp.example
+plain.imp.example
+*.imp.example
