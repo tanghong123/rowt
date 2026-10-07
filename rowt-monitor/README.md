@@ -40,7 +40,11 @@ toggle the system proxy.
 **Auto server selection** (`a`, from any pane; or click `auto` above the strip)
 switches the escape server group between a pinned server and rowt's urltest
 `auto`, which rides the fastest live server and re-probes the pool every
-`ROWT_AUTO_INTERVAL` (default 20m). While it is on, the server auto is actually
+`ROWT_AUTO_INTERVAL` (default 20m). Note that `auto` does not choose by the
+figures shown here: the strip shows each server's median of three samples, while
+`auto` switches on sing-box's own stored figure — the latest single sample from
+any delay test, the monitor's included — so its pick can differ from the
+fastest number on screen. While it is on, the server auto is actually
 using comes first and is marked `▶` (with `—` for latency until its first probe).
 Turning it off pins *that* server, so traffic stays
 where it is — and with no resolved pick yet it refuses rather than guess.
