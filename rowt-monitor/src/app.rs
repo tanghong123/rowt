@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 use regex::RegexBuilder;
 
-use crate::model::{Conn, ConnRow, ConnView, ErrRow, Lane, MetricsBand, Snapshot, Window, AUTO_GROUP};
+use crate::model::{Conn, ConnRow, ConnView, ErrRow, Lane, MetricsBand, Snapshot, Window};
 use crate::source::History;
 use crate::source::Source;
 
@@ -1064,7 +1064,7 @@ impl App {
 
     /// Auto server selection as polled: the state names the urltest group.
     fn snap_auto(&self) -> bool {
-        self.snap.active_server == AUTO_GROUP
+        crate::model::is_auto_mode(&self.snap.active_server)
     }
 
     /// Auto server selection to display: the optimistic target while a toggle
@@ -1073,10 +1073,12 @@ impl App {
         self.auto_optimistic.map_or_else(|| self.snap_auto(), |(on, _)| on)
     }
 
-    /// `a` — global. On: `rowt use auto`. Off: pin the server auto is using right
-    /// now (urltest's live pick), so traffic stays where it is. With no resolved
-    /// pick there is nothing to pin, and a guess could move traffic to a server
-    /// auto never chose — so it says so instead.
+    /// `a` — global. On: `rowt use best` — rowt's watchdog picks by median
+    /// latency (sing-box's own `auto` stays a CLI choice, `rowt use auto`). Off,
+    /// from either auto mode: pin the server in use right now (the live pick),
+    /// so traffic stays where it is. With no resolved pick there is nothing to
+    /// pin, and a guess could move traffic to a server auto never chose — so it
+    /// says so instead.
     fn toggle_auto(&mut self) {
         if self.restart_busy() {
             return;
@@ -1091,9 +1093,9 @@ impl App {
                 None => self.notify("⚠ auto's current server isn't known yet — pick one with u".to_string()),
             }
         } else {
-            self.source.use_server(AUTO_GROUP);
+            self.source.use_server(crate::model::BEST_MODE);
             self.auto_optimistic = Some((true, Instant::now()));
-            self.notify("auto on · fastest live server".to_string());
+            self.notify("auto on · rowt picks the fastest by median latency (best)".to_string());
         }
     }
 

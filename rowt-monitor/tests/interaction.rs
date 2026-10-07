@@ -3,7 +3,7 @@
 //! 10 connections (6 escape / 1 corp / 3 direct), 10 error rows, window = 10m.
 
 use rowt_monitor::app::{Action, App, Focus, Target};
-use rowt_monitor::model::{ConnView, Lane, MetricsBand, Window, AUTO_GROUP};
+use rowt_monitor::model::{ConnView, Lane, MetricsBand, Window, BEST_MODE};
 use rowt_monitor::source::FixtureSource;
 
 mod common;
@@ -915,7 +915,8 @@ fn a_turns_auto_on_from_any_pane() {
         a.focus = focus;
         assert!(!a.auto_display());
         a.update(Action::ToggleAuto);
-        assert_eq!(calls(&c), vec![AUTO_GROUP], "rowt use auto, from {focus:?}");
+        // `a` turns on rowt's own auto mode; sing-box's `auto` is a CLI choice.
+        assert_eq!(calls(&c), vec![BEST_MODE], "rowt use best, from {focus:?}");
         assert!(a.auto_display(), "shown on at once (optimistic), from {focus:?}");
     }
 }
@@ -928,6 +929,16 @@ fn turning_auto_off_pins_the_server_it_is_using() {
     assert!(a.auto_display());
     a.update(Action::ToggleAuto);
     assert_eq!(calls(&c), vec!["KR-Seoul"]);
+    assert!(!a.auto_display());
+}
+
+#[test]
+fn turning_best_off_pins_its_live_pick() {
+    // In `best` the escape selector carries the watchdog's pick: off pins it.
+    let (mut a, _, c) = auto_app(Mode::Best(Some("SG-1")));
+    assert!(a.auto_display(), "best counts as auto on");
+    a.update(Action::ToggleAuto);
+    assert_eq!(calls(&c), vec!["SG-1"]);
     assert!(!a.auto_display());
 }
 
@@ -946,16 +957,16 @@ fn a_second_auto_change_waits_for_the_first_to_land() {
     let (mut a, mode, c) = auto_app(Mode::Manual);
     a.update(Action::ToggleAuto);
     a.update(Action::ToggleAuto);
-    assert_eq!(calls(&c), vec![AUTO_GROUP], "the second press launched nothing");
-    // rowt writes the selection before it restarts, so the next poll confirms…
-    *mode.lock().unwrap() = Mode::Auto(Some("JP-Tokyo"));
+    assert_eq!(calls(&c), vec![BEST_MODE], "the second press launched nothing");
+    // rowt writes the selection before it switches, so the next poll confirms…
+    *mode.lock().unwrap() = Mode::Best(Some("JP-Tokyo"));
     a.tick();
     a.on_frame();
     assert!(a.auto_optimistic.is_none(), "confirmed by the poll");
     assert!(a.auto_display());
     // …and the next change goes through.
     a.update(Action::ToggleAuto);
-    assert_eq!(calls(&c), vec![AUTO_GROUP, "JP-Tokyo"]);
+    assert_eq!(calls(&c), vec![BEST_MODE, "JP-Tokyo"]);
 }
 
 #[test]

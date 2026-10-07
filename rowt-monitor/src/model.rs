@@ -308,6 +308,14 @@ pub struct AllAgg {
 /// `{type:"urltest", tag:"auto"}`), which is also the `rowt use auto` keyword.
 /// It is an outbound, not a server: never a chip, never probed.
 pub const AUTO_GROUP: &str = "auto";
+/// `rowt use best`: rowt's own auto mode — the watchdog picks by median latency
+/// and the escape selector carries the pick (there is no urltest group).
+pub const BEST_MODE: &str = "best";
+
+/// Is this selection one of the two auto modes — sing-box's `auto` or rowt's `best`?
+pub fn is_auto_mode(selected: &str) -> bool {
+    selected == AUTO_GROUP || selected == BEST_MODE
+}
 
 #[derive(Clone, Debug)]
 pub struct Server {

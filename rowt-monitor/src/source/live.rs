@@ -279,8 +279,9 @@ impl LiveSource {
                 // up automatically (immediate first round, then wait).
                 let members = read_escape_members(&cfg);
                 let secret = read_clash_secret(&cfg);
-                let finished = probe_round(&members, &delays,
+                let (finished, round) = probe_round_rows(&members, &delays,
                     |tag| clash_delay(port, secret.as_deref(), tag, &url, 5000));
+                write_latency_table(&cfg, &round);
                 if let Ok(mut at) = last_probe.lock() { *at = finished; }
                 // recv_timeout returns Ok on a force signal, Err(Timeout) after
                 // the interval — either way we loop and probe again (timer reset).
@@ -529,6 +530,14 @@ impl LiveSource {
         let now = v.get("now")?.as_str()?;
         self.escape_members.iter().any(|m| m == now).then(|| now.to_string())
     }
+
+    /// `best`'s live pick: `GET /proxies/escape` → `now`, kept only when it names
+    /// a pool member.
+    fn escape_pick(&self) -> Option<String> {
+        let v = self.clash_get("/proxies/escape")?;
+        let now = v.get("now")?.as_str()?;
+        self.escape_members.iter().any(|m| m == now).then(|| now.to_string())
+    }
 }
 
 /// Derive the strip and the active server's health from the pool and each
@@ -542,7 +551,7 @@ impl LiveSource {
 /// pool: the fastest up server stands in for the latency (it is what urltest
 /// converges on), and the pool is healthy if any member is up.
 fn health_view(members: &[String], selected: String, auto_now: Option<String>, fresh: impl Fn(&str) -> Option<Option<u32>>) -> Health {
-    let auto = selected == AUTO_GROUP;
+    let auto = is_auto_mode(&selected);
     let in_use: Option<String> = if auto { auto_now.clone() } else { Some(selected.clone()) };
     let mut up = 0u32;
     let mut down = 0u32;
@@ -774,10 +783,11 @@ impl Source for LiveSource {
         let (transient, persistent, blocked, errors) = self.errors(window, lane);
         // In auto mode the server in use is urltest's call, not the state file's:
         // one localhost read per tick, and only while auto is on.
-        let auto_now = if router_up && state.get("selected").map(String::as_str) == Some(AUTO_GROUP) {
-            self.auto_pick()
-        } else {
-            None
+        let auto_now = match state.get("selected").map(String::as_str) {
+            Some(AUTO_GROUP) if router_up => self.auto_pick(),
+            // `best` has no urltest group: the escape selector carries the pick.
+            Some(BEST_MODE) if router_up => self.escape_pick(),
+            _ => None,
         };
         let mut h = self.servers(&state, router_up, auto_now);
 
@@ -863,7 +873,7 @@ impl Source for LiveSource {
         // known, else the selection itself (`auto` until the first read lands).
         let server_name = match (h.active.as_str(), h.auto_now.as_deref()) {
             ("", _) => "—".to_string(),
-            (AUTO_GROUP, Some(pick)) => pick.to_string(),
+            (sel, Some(pick)) if is_auto_mode(sel) => pick.to_string(),
             (sel, _) => sel.to_string(),
         };
 
@@ -914,8 +924,17 @@ fn request_probe(tx: Option<&SyncSender<()>>) -> Result<(), &'static str> {
     })
 }
 
+#[cfg(test)]
 fn probe_round(members: &[String], delays: &Delays, probe: impl Fn(&str) -> Option<u32> + Sync) -> Option<Instant> {
+    probe_round_rows(members, delays, probe).0
+}
+
+/// `probe_round`, also returning each server's (tag, figure, samples answered)
+/// — the rows the prober writes into rowt's shared latency table.
+fn probe_round_rows(members: &[String], delays: &Delays, probe: impl Fn(&str) -> Option<u32> + Sync)
+    -> (Option<Instant>, Vec<(String, Option<u32>, usize)>) {
     let next = AtomicUsize::new(0);
+    let rows: Mutex<Vec<(String, Option<u32>, usize)>> = Mutex::new(Vec::new());
     std::thread::scope(|scope| {
         for _ in 0..members.len().min(10) {
             scope.spawn(|| {
@@ -930,11 +949,63 @@ fn probe_round(members: &[String], delays: &Delays, probe: impl Fn(&str) -> Opti
                     if let Ok(mut m) = delays.lock() {
                         m.insert(tag.clone(), (ms, Instant::now()));
                     }
+                    if let Ok(mut r) = rows.lock() {
+                        r.push((tag.clone(), ms, samples.len()));
+                    }
                 }
             });
         }
     });
-    (!members.is_empty()).then(Instant::now)
+    ((!members.is_empty()).then(Instant::now), rows.into_inner().unwrap_or_default())
+}
+
+/// Fold a probe round into rowt's shared latency table (`latency.tsv` in the
+/// config directory), which `rowt use best` switches by and `rowt ping` writes
+/// too — so with the monitor open, the watchdog finds these figures fresh and
+/// chooses from the numbers on screen. The format is rowt_core::latency's:
+/// `tag\tmedian (empty = no answer)\tsamples answered\tUTC time`, byte-sorted
+/// under one header line, replaced whole (0600). This round's servers are
+/// replaced; every other row is kept (pruning to the pool is rowt's job).
+fn write_latency_table(cfg: &std::path::Path, round: &[(String, Option<u32>, usize)]) {
+    if round.is_empty() {
+        return;
+    }
+    let now = std::process::Command::new("date").args(["-u", "+%Y-%m-%d %H:%M:%S"])
+        .stderr(std::process::Stdio::null()).output().ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+    if now.is_empty() {
+        return;
+    }
+    let path = cfg.join("latency.tsv");
+    let digits = |x: &str| !x.is_empty() && x.bytes().all(|b| b.is_ascii_digit());
+    let mut rows: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for l in std::fs::read_to_string(&path).unwrap_or_default().lines() {
+        let f: Vec<&str> = l.split('\t').collect();
+        if l.starts_with('#') || f.len() != 4 || f[0].is_empty() || f[3].is_empty() { continue }
+        if (!f[1].is_empty() && !digits(f[1])) || !digits(f[2]) { continue }
+        let m = if f[1].is_empty() { String::new() } else { f[1].parse::<u64>().map(|v| v.to_string()).unwrap_or_default() };
+        let n = f[2].parse::<u64>().unwrap_or(0);
+        rows.insert(f[0].to_string(), format!("{}\t{m}\t{n}\t{}", f[0], f[3]));
+    }
+    for (tag, ms, n) in round {
+        let m = ms.map(|v| v.to_string()).unwrap_or_default();
+        rows.insert(tag.clone(), format!("{tag}\t{m}\t{n}\t{now}"));
+    }
+    let mut body = String::from("# rowt latency table: tag, median ms (empty = no answer), samples answered, UTC time\n");
+    for line in rows.values() {
+        body.push_str(line);
+        body.push('\n');
+    }
+    let tmp = cfg.join(format!(".latency.tsv.monitor.{}", std::process::id()));
+    if std::fs::write(&tmp, body).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    if std::fs::rename(&tmp, &path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
 }
 
 /// Run one clash delay test for a server through the tunnel (like `rowt ping`):
@@ -1425,6 +1496,25 @@ mod tests {
     }
 
     #[test]
+    fn a_round_is_folded_into_the_shared_latency_table() {
+        let dir = std::env::temp_dir().join(format!("rowt-mon-lat-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("latency.tsv"),
+            "# header\nkeep\t50\t3\t2026-01-01 00:00:00\nB\t999\t3\t2026-01-01 00:00:00\njunk line\n").unwrap();
+        write_latency_table(&dir, &[("B".into(), Some(80), 3), ("a".into(), None, 0)]);
+        let body = std::fs::read_to_string(dir.join("latency.tsv")).unwrap();
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(lines[0], "# rowt latency table: tag, median ms (empty = no answer), samples answered, UTC time");
+        // Byte order (B < a < keep), the probed rows replaced, the rest kept, junk dropped.
+        assert!(lines[1].starts_with("B\t80\t3\t") && lines[2].starts_with("a\t\t0\t"), "{body}");
+        assert_eq!(lines[3], "keep\t50\t3\t2026-01-01 00:00:00");
+        assert_eq!(lines.len(), 4);
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(dir.join("latency.tsv")).unwrap().permissions().mode() & 0o777, 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn probe_round_samples_three_times_and_uses_the_successful_median() {
         for (samples, expected) in [
             ([Some(900), Some(100), Some(200)], Some(200)),
@@ -1593,6 +1683,13 @@ mod watch_cell_tests {
 #[cfg(test)]
 mod auto_selection_tests {
     use super::*;
+
+    #[test]
+    fn best_counts_as_auto_and_its_pick_is_the_active_chip() {
+        let h = health_view(&pool(), BEST_MODE.into(), Some("SG-1".into()), verdicts(&[("JP-1", Some(40)), ("SG-1", Some(80))]));
+        assert!(h.chips.iter().any(|c| c.name == "SG-1" && c.active), "the pick is marked");
+        assert_eq!(h.auto_now.as_deref(), Some("SG-1"));
+    }
 
     fn pool() -> Vec<String> {
         ["JP-1", "SG-1", "US-1"].iter().map(|s| s.to_string()).collect()

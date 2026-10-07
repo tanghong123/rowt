@@ -38,18 +38,20 @@ bound) · `u` use the selected server · `a` auto server selection on/off · `o`
 toggle the system proxy.
 
 **Auto server selection** (`a`, from any pane; or click `auto` above the strip)
-switches the escape server group between a pinned server and rowt's urltest
-`auto`, which rides the fastest live server and re-probes the pool every
-`ROWT_AUTO_INTERVAL` (default 20m). Note that `auto` does not choose by the
-figures shown here: the strip shows each server's median of three samples, while
-`auto` switches on sing-box's own stored figure — the latest single sample from
-any delay test, the monitor's included — so its pick can differ from the
-fastest number on screen. While it is on, the server auto is actually
+switches between a pinned server and **`best`** (`rowt use best`): rowt picks the
+server by the same median-of-three figures the strip shows. Each probe round is
+written to rowt's shared `latency.tsv`, the watchdog chooses from it (switching
+only when another server is more than 50 ms faster), so with the monitor open
+the pick follows the numbers on screen. sing-box's own `auto` (`rowt use auto`,
+the CLI) reads as on here too — but it switches on sing-box's stored single
+sample, not the median shown, so its pick can differ from the fastest number on
+screen. While either is on, the server actually
 using comes first and is marked `▶` (with `—` for latency until its first probe).
 Turning it off pins *that* server, so traffic stays
 where it is — and with no resolved pick yet it refuses rather than guess.
 Selecting a server with `u` also turns auto off: in auto mode `u` pins any chip,
-auto's own pick included. Each change restarts the router, and rowt does not
+auto's own pick included. A change to or from sing-box's `auto` restarts the
+router (between pinned and `best` the switch is live), and rowt does not
 serialize restarts — two overlapping ones can kill each other's routers — so
 while one is still running (a server change, or the batched lane reload) further
 server changes are refused with a toast and a due lane reload waits its turn.

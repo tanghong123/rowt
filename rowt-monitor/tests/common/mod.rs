@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use rowt_monitor::model::{Lane, Server, Snapshot, Window, AUTO_GROUP};
+use rowt_monitor::model::{Lane, Server, Snapshot, Window, AUTO_GROUP, BEST_MODE};
 use rowt_monitor::source::{FixtureSource, History, Source};
 
 /// Which selection the recording source reports.
@@ -13,6 +13,8 @@ pub enum Mode {
     Manual,
     /// Auto server selection with urltest's live pick; `None` = not resolved yet.
     Auto(Option<&'static str>),
+    /// `best` — rowt's watchdog picks; the escape selector's `now` is the pick.
+    Best(Option<&'static str>),
 }
 
 /// The still fixture, switchable into auto mode mid-test — the mode is a shared
@@ -50,11 +52,16 @@ impl Source for Recording {
 
     fn poll(&mut self, window: Window, lane: Option<Lane>) -> Snapshot {
         let mut s = self.inner.poll(window, lane);
-        if let Mode::Auto(pick) = *self.mode.lock().unwrap() {
-            // What `LiveSource` reports in auto mode: the state names the group,
-            // urltest's pick is the active chip — first, and held there even with
-            // no probe reading yet — and the header names it.
-            s.active_server = AUTO_GROUP.to_string();
+        let auto = match *self.mode.lock().unwrap() {
+            Mode::Auto(p) => Some((AUTO_GROUP, p)),
+            Mode::Best(p) => Some((BEST_MODE, p)),
+            Mode::Manual => None,
+        };
+        if let Some((sel, pick)) = auto {
+            // What `LiveSource` reports in either auto mode: the state names the
+            // mode, the live pick is the active chip — first, and held there even
+            // with no probe reading yet — and the header names it.
+            s.active_server = sel.to_string();
             s.auto_now = pick.map(str::to_string);
             for c in &mut s.chips {
                 c.active = Some(c.name.as_str()) == pick;
@@ -65,7 +72,7 @@ impl Source for Recording {
                 }
             }
             s.chips.sort_by_key(|c| !c.active);
-            s.identity.server_name = pick.unwrap_or(AUTO_GROUP).to_string();
+            s.identity.server_name = pick.unwrap_or(sel).to_string();
         }
         s
     }
