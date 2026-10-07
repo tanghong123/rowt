@@ -115,6 +115,20 @@ if [ -n "$envdir" ]; then
     "$name"
   do
     [ -n "$key" ] || continue
+    # A `.seq` response is a SEQUENCE, for a call whose answer legitimately
+    # differs between identical calls — a latency sampled three times. Each
+    # call gets the next line; an empty line, or a call past the last one, is
+    # an empty answer (a failed sample). The position is kept beside it in this
+    # run's own copy of env/, so each implementation's sandbox starts the
+    # sequence afresh. Samples of one server are taken one after another by
+    # both sides, so no two calls race for the same key.
+    if [ -f "$envdir/$key.seq" ]; then
+      _n=$(( $(cat "$envdir/$key.seq.pos" 2>/dev/null || echo 0) + 1 ))
+      printf '%s\n' "$_n" > "$envdir/$key.seq.pos"
+      _line="$(sed -n "${_n}p" "$envdir/$key.seq")"
+      [ -n "$_line" ] && printf '%s\n' "$_line"
+      exit 0
+    fi
     if [ -f "$envdir/$key" ]; then
       cat "$envdir/$key"
       exit "$(cat "$envdir/$key.rc" 2>/dev/null || echo 0)"

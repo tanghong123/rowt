@@ -1384,20 +1384,26 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
             let url = env_or("ROWT_PING_URL", "https://www.gstatic.com/generate_204");
             let timeout: u32 = env_or("ROWT_PING_TIMEOUT", "8").parse().unwrap_or(8);
             let enc = urlencode(&url);
-            eprintln!("==> testing latency to {url} through the tunnel (parallel, {timeout}s each)…");
+            eprintln!("==> testing latency to {url} through the tunnel (parallel; median of {} samples, {timeout}s each)…", rowt_core::latency::SAMPLES);
             // In parallel, as the shell backgrounds a subshell per server: a
             // dozen dead servers serially would be a dozen timeouts.
             let handles: Vec<_> = tags.into_iter().map(|t| {
                 let (secret, enc, ep) = (secret.clone(), enc.clone(), ctx.controller());
                 std::thread::spawn(move || {
-                    let out = std::process::Command::new("curl")
-                        .args(["--noproxy", "*", "-sS", "-m", &(timeout + 3).to_string(),
-                               "-H", &format!("Authorization: Bearer {secret}"),
-                               &format!("http://{ep}/proxies/{t}/delay?timeout={timeout}000&url={enc}")])
-                        .stderr(std::process::Stdio::null()).output().ok();
-                    let ms = out.and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok())
-                        .and_then(|v| v.get("delay").and_then(|d| d.as_u64()));
-                    match ms {
+                    // Three samples one after another, and the median of them —
+                    // the monitor's method, so the two never disagree about a
+                    // server (rowt_core::latency). `auto` still switches on
+                    // sing-box's own stored figure, the last single sample.
+                    let ok: Vec<u64> = (0..rowt_core::latency::SAMPLES).filter_map(|_| {
+                        let out = std::process::Command::new("curl")
+                            .args(["--noproxy", "*", "-sS", "-m", &(timeout + 3).to_string(),
+                                   "-H", &format!("Authorization: Bearer {secret}"),
+                                   &format!("http://{ep}/proxies/{t}/delay?timeout={timeout}000&url={enc}")])
+                            .stderr(std::process::Stdio::null()).output().ok();
+                        out.and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok())
+                            .and_then(|v| v.get("delay").and_then(|d| d.as_u64()))
+                    }).collect();
+                    match rowt_core::latency::aggregate(&ok) {
                         // The sort key is the zero-padded number the shell
                         // prints, so an unreachable server sorts last by being
                         // 999999 rather than by a special case.
@@ -1419,7 +1425,7 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                 let mark = if t == now && !now.is_empty() { "* " } else { "  " };
                 o.push_str(&format!("{mark}{} {disp}\n", pad(&t, 20)));
             }
-            o.push_str(&format!("  * = active. 'unreachable' = server didn't answer in {timeout}s (down, or can't reach the test URL)."));
+            o.push_str(&format!("  * = active. 'unreachable' = none of {} tries answered in {timeout}s (down, or can't reach the test URL).", rowt_core::latency::SAMPLES));
             Ok(o)
         }
         // Find a proxy env that can actually reach the internet, then exec the

@@ -59,7 +59,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.5.22"
+ROWT_VERSION="3.5.23"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -152,7 +152,7 @@ GFW_TIMEOUT="${ROWT_GFW_TIMEOUT:-3}"            # seconds per canary
 # auto-recovery all agree on what's up. (gstatic is a CDN edge that stays
 # reachable from China exits even when google.com proper is blocked.)
 PING_URL="${ROWT_PING_URL:-https://www.gstatic.com/generate_204}"
-PING_TIMEOUT="${ROWT_PING_TIMEOUT:-8}"          # seconds per server
+PING_TIMEOUT="${ROWT_PING_TIMEOUT:-8}"          # seconds per sample (three per server)
 LOG_LEVEL="${ROWT_LOG_LEVEL:-warn}"             # sing-box log level (info is very noisy)
 AUTO_INTERVAL="${ROWT_AUTO_INTERVAL:-20m}"       # how often 'auto' re-probes all servers
 # Watchdog liveness (see 'watch tick'). Network changes are caught instantly by
@@ -2396,16 +2396,27 @@ cmd_ping() {
   ep="$(controller)" || die "clash API endpoint unknown (is the router/VM up?)"
   sec="$(clash_secret)"
   enc="$(_urlencode "$PING_URL")"
-  info "testing latency to $PING_URL through the tunnel (parallel, ${PING_TIMEOUT}s each)…"
+  info "testing latency to $PING_URL through the tunnel (parallel; median of 3 samples, ${PING_TIMEOUT}s each)…"
   local dir; dir="$(mktemp -d)" pids=""
   for t in $tags; do
     (
-      # curl max-time must exceed the clash delay timeout, else it cuts early
-      ms="$(curl --noproxy '*' -sS -m "$((PING_TIMEOUT + 3))" -H "Authorization: Bearer $sec" \
-            "http://$ep/proxies/$t/delay?timeout=${PING_TIMEOUT}000&url=$enc" 2>/dev/null \
-            | jq -r '.delay // empty' 2>/dev/null || true)"
-      case "$ms" in ''|null) printf '999999\t%s\tunreachable\n' "$t" ;;
-                    *)       printf '%06d\t%s\t%s ms\n' "$ms" "$t" "$ms" ;; esac
+      # Three samples one after another, and the median of them — the monitor's
+      # method, so the two never disagree about a server. One sample over a
+      # lossy link spikes or fails on its own. (`auto` still switches on
+      # sing-box's own stored figure, the last single sample: no API can store
+      # a median there — task #s2.)
+      local _s ok=""
+      for _s in 1 2 3; do
+        # curl max-time must exceed the clash delay timeout, else it cuts early
+        ms="$(curl --noproxy '*' -sS -m "$((PING_TIMEOUT + 3))" -H "Authorization: Bearer $sec" \
+              "http://$ep/proxies/$t/delay?timeout=${PING_TIMEOUT}000&url=$enc" 2>/dev/null \
+              | jq -r '.delay // empty' 2>/dev/null || true)"
+        case "$ms" in ''|null) ;; *) ok="$ok $ms" ;; esac
+      done
+      # shellcheck disable=SC2086 — the samples are word-split on purpose
+      ms="$(_latency_of $ok)"
+      case "$ms" in '') printf '999999\t%s\tunreachable\n' "$t" ;;
+                    *)  printf '%06d\t%s\t%s ms\n' "$ms" "$t" "$ms" ;; esac
     ) > "$dir/$t.out" &
     pids="$pids $!"
   done
@@ -2415,7 +2426,19 @@ cmd_ping() {
     printf '%s%-20s %s\n' "$mark" "$t" "$disp"
   done
   rm -rf "$dir"
-  echo "  * = active. 'unreachable' = server didn't answer in ${PING_TIMEOUT}s (down, or can't reach the test URL)."
+  echo "  * = active. 'unreachable' = none of 3 tries answered in ${PING_TIMEOUT}s (down, or can't reach the test URL)."
+}
+
+# One server's figure from the samples that succeeded: the median of three, the
+# mean of two (floored), the one, or nothing at all. rowt_core::latency and the
+# monitor's probe_round use exactly this rule.
+_latency_of() {
+  case "$#" in
+    0) return 0 ;;
+    1) echo "$1" ;;
+    2) echo $(( ($1 + $2) / 2 )) ;;
+    *) printf '%s\n' "$@" | sort -n | sed -n "$(( $# / 2 + 1 ))p" ;;
+  esac
 }
 
 # ---------- probe ------------------------------------------------------------
@@ -6235,7 +6258,7 @@ o@lifecycle@config [list|export|import]@back up / move the whole setup to anothe
 o@servers & selection@server <list|add|rm|clear|import|dump>@manage the server pool
 o@servers & selection@sub <list|add|rm|update|clear|import|dump>@manage subscriptions
 c@servers & selection@use <tag>|auto@pin a server (manual) or auto-pick fastest live
-c@servers & selection@ping [tag]@parallel latency test through the tunnel (fastest first)
+c@servers & selection@ping [tag]@parallel latency test through the tunnel, median of 3 samples each (fastest first)
 a@servers & selection@probe@detect which mode works (host vs vm) with corp VPN up
 c@routing lanes@escape <list|add|rm|import|clear|dump|errors>@edit the escape lane (VPN tunnel)
 o@routing lanes@corp <list|add|rm|import|clear|dump|errors|sync|suggest>@edit the corp lane; 'sync' mirrors an overlay VPN's routes (corp/Tailscale) into it

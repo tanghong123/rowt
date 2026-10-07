@@ -528,6 +528,11 @@ PARITY_TIMEOUT=45 PARITY_UNORDERED=1 ping
 PARITY_UNORDERED=1 PARITY_SCENARIO=router-up ping
 PARITY_SCENARIO=router-up ping alpha
 PARITY_UNORDERED=1 PARITY_SCENARIO=lanes-empty ping
+# Three samples per server, median printed (rowt_core::latency). ping-samples
+# serves each server a different SEQUENCE of answers — unsorted, one failure (a
+# .5 mean to floor), two failures, all timeouts — so the two sides agree only if
+# they combine samples the same way. See its README for the expected figures.
+PARITY_UNORDERED=1 PARITY_SCENARIO=ping-samples ping
 run
 
 # skill / report / uninstall. `report` probes the live machine, so what the gate

@@ -1,0 +1,13 @@
+`rowt ping` takes three delay samples per server, one after another, and prints
+their median — the monitor's method (rowt_core::latency). The recorder's usual
+canned responses are static, so all three samples of a server would agree and
+both implementations would match however they combined them. These `.seq`
+fixtures hand out one line per call instead (an empty line, or a body with no
+`delay`, is a failed sample):
+
+  alpha  300, 100, 200     -> 200 ms   the middle value, from unsorted samples
+  beta   fail, 351, 250    -> 300 ms   two successes: their mean, 300.5 FLOORED
+  gamma  fail, fail, 120   -> 120 ms   one success is the figure
+  delta  three timeouts    -> unreachable
+
+`now` is beta, so it carries the `*`. host.pid.self makes the router read as up.

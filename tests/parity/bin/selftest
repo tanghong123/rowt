@@ -41,6 +41,7 @@
 #   38.  rename the overlay bypass marker          -> cli-diff must fire
 #   39.  stop noticing lane edits made outside rowt -> cli-diff must fire
 #   40.  stop naming the lane an entry LEFT          -> cli-diff must fire
+#   41.  take the lowest sample, not the median      -> cli-diff must fire
 #
 # Everything happens in a throwaway copy of the repo; the real tree is never
 # touched. Run it after changing the harness itself.
@@ -1155,6 +1156,29 @@ else
     bad "cli-diff passed with the two sides naming a lane transition differently"
   else
     ok "cli-diff caught a lane transition named differently"
+  fi
+  cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+fi
+
+echo "41. ping's median of three must be compared, sample by sample"
+cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+if [ ! -x "$ROOT/target/release/rowt-rs" ]; then
+  echo "  skip — no release build"
+else
+  # `rowt ping` prints the median of three delay samples. The recorder's usual
+  # answers are static — three identical samples — so only the ping-samples
+  # scenario's `.seq` fixtures can tell one way of combining them from another.
+  # Take the lowest on one side: if cli-diff still passes, either the scenario
+  # or the recorder's sequencing has stopped reaching the comparison.
+  perl -0pi -e 's|sed -n "\$\(\( \$# / 2 \+ 1 \)\)p"|sed -n 1p|' "$tmp/bin/rowt"
+  if grep -qF 'sed -n "$(( $# / 2 + 1 ))p"' "$tmp/bin/rowt"; then
+    bad "could not change the median (_latency_of moved?)"
+  elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" \
+       PARITY_CASES="$(only 'PARITY_UNORDERED=1 PARITY_SCENARIO=ping-samples ping')" \
+       "$P" cli-diff >/dev/null 2>&1; then
+    bad "cli-diff passed with one side taking the lowest sample instead of the median"
+  else
+    ok "cli-diff caught a ping figure combined differently"
   fi
   cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
 fi

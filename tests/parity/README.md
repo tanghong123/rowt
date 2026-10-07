@@ -100,6 +100,15 @@ it, seeded from `fixtures/config`, and a shim directory first on `PATH`. The
 shims (`shims/_recorder`, symlinked under each name) record their argv and
 return canned responses from `fixtures/env`.
 
+A response is normally static: the same call always gets the same answer. A
+`<key>.seq` file is a sequence instead — each call gets its next line, and an
+empty line or a call past the end is an empty answer — for a call whose answer
+legitimately varies. `rowt ping` samples each server three times and prints the
+median, and with static answers all three samples agree, so both
+implementations would match however they combined them; the `ping-samples`
+scenario feeds each server a different sequence (see its README), and selftest
+step 41 proves the comparison catches a different rule.
+
 That containment is not a nicety — rowt is a daily driver, and the matrix
 includes `up`, `down`, `proxy on` and `restart`. Verified: a sandboxed
 `proxy on --force` produces the full `networksetup` argv sequence in the trace
@@ -245,7 +254,7 @@ reconcile and the watchdog's decision table. Each has a gate:
 | `sr-diff` | stdout + stderr + exit status, over Shadowrocket installs | 1,200 generated cases |
 | `watch-diff` | decisions, read back from watch.log + trace | 6 cases |
 | `platform-diff` | the argv the platform layer produces | 10 cases |
-| `cli-diff` | stdout, status, the config tree + rc files + LaunchAgent plist (content + mode), argv trace, audit log | 376 cases |
+| `cli-diff` | stdout, status, the config tree + rc files + LaunchAgent plist (content + mode), argv trace, audit log | 381 cases |
 
 `merge-diff` is the only gate whose primary artifact is a file written in
 place: `cmd_import` reads the accumulation straight back with jq, and a human

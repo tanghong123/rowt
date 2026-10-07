@@ -747,7 +747,7 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 | `sub import <file>` | restore subscriptions from a `sub dump` (round-trips). |
 | `sub dump [file]` | export the subscription URLs (one per line). |
 | `use <tag>` / `use auto` | pin a server (manual, nothing probed) or auto-pick the fastest live server. |
-| `ping [tag]` | **parallel** latency test through the tunnel (fastest first, `*`=active). `ROWT_PING_URL` (default Cloudflare) / `ROWT_PING_TIMEOUT` (8s). |
+| `ping [tag]` | **parallel** latency test through the tunnel (fastest first, `*`=active). Each server is sampled **three times** and the **median** is shown — the same figure `rowt monitor` shows (two answers give their mean, one gives itself, none is `unreachable`). One sample over a lossy link spikes or fails on its own. `auto` still switches on sing-box's own figure, the latest single sample. `ROWT_PING_URL` (default Google's `generate_204`) / `ROWT_PING_TIMEOUT` (8s per sample). |
 | `probe` | with corp VPN up, test all servers (default route vs physical NIC) and pick `host` or `vm`. |
 
 **Routing lanes** — `escape` and `corp` share the same verbs:

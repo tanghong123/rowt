@@ -57,7 +57,9 @@ foreground with output redirected to a file (see SKILL.md → Rules).
 ## Servers
 
 - `rowt ping` ranks every server through the tunnel, fastest first; `*` marks the
-  active one.
+  active one. Each figure is the median of three samples, the same number the
+  monitor shows, so don't read one slow or failed sample as a dead server. `auto`
+  doesn't use these medians: it switches on sing-box's latest single sample.
 - `rowt use <tag>` pins a server: a plain selector that never health-checks, so
   flaky servers can't spin the CPU.
 - `rowt use auto` switches to the fastest live server and moves off a dead one. In the

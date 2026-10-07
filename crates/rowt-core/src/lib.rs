@@ -18,6 +18,7 @@ pub mod importmerge;
 pub mod laneerr;
 pub mod lanes;
 pub mod lanestate;
+pub mod latency;
 pub mod netdetect;
 pub mod pycli;
 pub mod pyjson;
