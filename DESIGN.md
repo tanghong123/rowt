@@ -447,7 +447,23 @@ as the only VPN, "direct" just meant "off my tunnel". escape splits that
 
 - **Escape tunnel down.** Escape-listed sites use the `escape` outbound only;
   there is no fallback to `direct`, so they **fail closed** rather than leak onto
-  the corp/home path. Switch servers with `rowt use <tag>` or `use auto`.
+  the corp/home path. Switch servers with `rowt use <tag>`, or let one of the two
+  auto modes move off a dead server for you:
+  - **`use best`** — rowt chooses. Each server's figure is the **median of three**
+    delay samples, kept in `latency.tsv` in the config directory (written by the
+    watchdog, `rowt ping` and the monitor alike). Once per tick, right after corp
+    sync and never on a tick where the network just moved, the watchdog re-measures
+    the servers whose figure is older than `ROWT_BEST_INTERVAL` — all of them at the
+    first failed health probe, since the server in use may have died — and keeps the
+    current server unless another's median beats it by more than
+    `ROWT_BEST_TOLERANCE` (50 ms) or it stopped answering. The selector stays a
+    plain one: a switch is a live `PUT`, logged to `watch.log` and the audit log
+    with both medians, and the pick is saved as `best_pick` so a restart renders it.
+  - **`use auto`** — sing-box's `urltest`. It can only switch on single samples:
+    every delay test overwrites sing-box's one stored figure per server (a failure
+    deletes it), there is no API to store a median, and the group skips re-testing
+    any server whose figure is younger than its interval — so it also switches on
+    whatever single sample another prober wrote last.
 - **Corp VPN down.** `corp` traffic (no bound socket) follows the routing table;
   with corp down there's no route to intranet ranges, so those connections fail
   until you reconnect — expected.

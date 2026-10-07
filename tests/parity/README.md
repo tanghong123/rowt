@@ -109,6 +109,17 @@ implementations would match however they combined them; the `ping-samples`
 scenario feeds each server a different sequence (see its README), and selftest
 step 41 proves the comparison catches a different rule.
 
+`best` (rowt's own auto mode) is gated the same way. latency.tsv lives in the
+config tree, not cache/, so the format every writer produces is compared; its
+UTC stamps are the masked `YYYY-MM-DD HH:MM:SS` shape. A fixture table that must
+stay FRESH is dated 2999 and one that must be STALE is dated 2000, so neither
+depends on the day the gate runs. Ticks skip the trace, so a switch shows as the
+audit line with both medians and `best_pick` in state: best-tick-fresh (switch),
+best-tick-keep (inside the 50 ms tolerance, no switch — selftest 42 sets the
+tolerance to 0 on one side and requires cli-diff to fail), best-tick-stale
+(measured through .seq first), best-use (`use best`, live switch), and
+render-best / render-best-nopick in the render matrix.
+
 That containment is not a nicety — rowt is a daily driver, and the matrix
 includes `up`, `down`, `proxy on` and `restart`. Verified: a sandboxed
 `proxy on --force` produces the full `networksetup` argv sequence in the trace
@@ -240,7 +251,7 @@ reconcile and the watchdog's decision table. Each has a gate:
 
 | gate | compares | scale |
 |---|---|---|
-| `render-matrix` | rendered config, canonical JSON | 21 shapes × host + vm |
+| `render-matrix` | rendered config, canonical JSON | 26 shapes × host + vm |
 | `classify-matrix` | `(lane, reason)` per destination | 9 shapes × 92 destinations |
 | `lanes-diff` | all three lane files + messages | 12 edits |
 | `reconcile-diff` | stdout contract vs the Python | 210 cases, 200 randomized |
@@ -252,9 +263,9 @@ reconcile and the watchdog's decision table. Each has a gate:
 | `merge-diff` | the review FILE, plus the streams, vs the Python | 1,500 generated cases |
 | `foreign-diff` | stdout + stderr + exit status, over client config TREES | 1,200 generated cases |
 | `sr-diff` | stdout + stderr + exit status, over Shadowrocket installs | 1,200 generated cases |
-| `watch-diff` | decisions, read back from watch.log + trace | 6 cases |
+| `watch-diff` | decisions, read back from watch.log + trace | 388 cases |
 | `platform-diff` | the argv the platform layer produces | 10 cases |
-| `cli-diff` | stdout, status, the config tree + rc files + LaunchAgent plist (content + mode), argv trace, audit log | 381 cases |
+| `cli-diff` | stdout, status, the config tree + rc files + LaunchAgent plist (content + mode), argv trace, audit log | 388 cases |
 
 `merge-diff` is the only gate whose primary artifact is a file written in
 place: `cmd_import` reads the accumulation straight back with jq, and a human

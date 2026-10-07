@@ -1,0 +1,2 @@
+The `best` mode renders as a plain selector (no urltest group) whose
+default is the watchdog's last pick, so a restart keeps it: beta here.

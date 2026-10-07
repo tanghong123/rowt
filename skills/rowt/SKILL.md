@@ -189,8 +189,9 @@ replaced**, run `rowt fetch host` (with a working path to GitHub) or `rowt reloa
    A **403 through 7890** means the active server exits in a region your API refuses.
    Run `rowt use <another tag>` and re-test; don't let the user switch over until one
    passes. Then run `rowt ping` and let the user choose `rowt use <tag>` (pinned,
-   never probed) or `rowt use auto` (the fastest live server; it moves off a dead
-   one). With `auto`, re-test your API host too.
+   never probed), `rowt use best` (rowt picks by median latency and moves off a
+   dead one; needs the watchdog), or `rowt use auto` (sing-box's urltest). With
+   `best` or `auto`, re-test your API host too.
 7. **Switch over** (the **user**, once you've handed over the resume command). If
    `AGENT_VIA_VPN`, or the proxy env points at another app, say first: "when you turn
    off <client>, this session drops; restart it with
@@ -248,7 +249,7 @@ replaced**, run `rowt fetch host` (with a working path to GitHub) or `rowt reloa
 | why that lane | `rowt explain <domain\|ip>` · `rowt escape errors` / `rowt direct errors` (candidates for escape) |
 | route a site | `rowt escape\|corp\|block\|hotspot add <entry>` (one lane per entry) · `geosite:<name>` (escape and block only) |
 | after a network change | automatic with the watchdog; otherwise `rowt reload` |
-| switch server | `rowt ping` → `rowt use <tag>` / `rowt use auto` |
+| switch server | `rowt ping` → `rowt use <tag>` / `rowt use best` (rowt picks by median latency) / `rowt use auto` |
 | a venue's login page | automatic with the watchdog; recurring venue: `rowt hotspot add <portal-host>` — `watch.log` names the host and prints the exact command |
 | a tailnet/overlay name fails | automatic (`corp sync` bypasses the zone); check with `rowt explain <name>` — `BYPASS` is the healthy answer, `DIRECT` with an overlay-address note means no sync has run yet |
 | abroad, no firewall | `rowt up local` (back: `rowt up host`) |

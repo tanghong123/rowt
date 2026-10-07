@@ -268,7 +268,8 @@ pub fn rebuild(ctx: &Ctx) -> Result<(), String> {
         && batch.outbounds.iter().any(|o| {
             o.get("tag").map(|t| sharelink::py_str(t)).unwrap_or_default() == sel
         });
-    if sel != "auto" && !present {
+    // `auto` and `best` are modes, not tags — `best` must survive a refresh.
+    if sel != "auto" && sel != "best" && !present {
         let first = batch
             .outbounds
             .first()

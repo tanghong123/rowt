@@ -1,0 +1,6 @@
+A `best` tick with a fresh table (dated 2999, so nothing is measured): alpha 140
+vs beta 80 is beyond the 50 ms tolerance, so the tick switches the selector live
+to beta, logs `watchdog best: switched alpha (140 ms) -> beta (80 ms)` to the
+audit log and writes best_pick=beta. Ticks skip the trace in cli-diff, so those
+two are what show the switch. watch.net and the proxy getters make the tick a
+steady-state one (no network move, proxy pointing at rowt).

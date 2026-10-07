@@ -8,6 +8,8 @@
 
 default
 pinned            PARITY_SCENARIO=render-pinned
+best              PARITY_SCENARIO=render-best
+best-nopick       PARITY_SCENARIO=render-best-nopick
 ghost-selection   PARITY_SCENARIO=render-ghost
 empty-servers     PARITY_SCENARIO=render-empty-servers
 geosites          PARITY_SCENARIO=render-geosites

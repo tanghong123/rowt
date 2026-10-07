@@ -1,0 +1,5 @@
+A `best` tick whose table is dated 2000 — every server is stale, so all four are
+measured (three samples each through .seq at the 5 s best timeout): alpha
+140/150/145 -> 145, beta 70/90/80 -> 80, gamma no answer, delta 300. The table is
+rewritten with fresh stamps (masked by the harness) and the tick switches alpha
+-> beta.

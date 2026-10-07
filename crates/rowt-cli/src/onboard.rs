@@ -176,10 +176,10 @@ pub fn run(ctx: &Ctx, here: &Path) -> String {
     let sel = ctx.sget("selected");
     if !sel.is_empty() && sel != "none" {
         ob(&mut o, true, &format!("escape server selected ({sel})"),
-           &format!("{PROG} ping   (rank by latency)   ·   {PROG} use <tag>|auto"));
+           &format!("{PROG} ping   (rank by latency)   ·   {PROG} use <tag>|best|auto"));
     } else {
         ob(&mut o, false, "pick an escape server",
-           &format!("{PROG} ping   →   {PROG} use <tag>   (or {PROG} use auto)"));
+           &format!("{PROG} ping   →   {PROG} use <tag>   (or {PROG} use best)"));
     }
 
     // 6. the watchdog

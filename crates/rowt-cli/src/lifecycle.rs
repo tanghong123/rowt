@@ -184,7 +184,8 @@ pub fn host_running(ctx: &Ctx) -> Option<i32> {
 fn escape_outbounds(ctx: &Ctx) -> Result<(Value, String), String> {
     let servers: Vec<Value> =
         serde_json::from_str(&read(&ctx.cfg.join("servers.json"))).unwrap_or_default();
-    let selected = { let s = ctx.sget("selected"); if s.is_empty() { "auto".into() } else { s } };
+    // `best` renders as a selector defaulting to its pick (`_escape_sel`).
+    let selected = crate::best::escape_sel(ctx);
     let interval = env_or("ROWT_AUTO_INTERVAL", "20m");
     match ctx.mode().as_str() {
         // No tunnel at all: the escape lane's rules point at `direct` instead.
@@ -284,7 +285,7 @@ pub fn cmd_render(ctx: &Ctx) -> Result<String, String> {
 
     let servers: Vec<Value> =
         serde_json::from_str(&read(&ctx.cfg.join("servers.json"))).unwrap_or_default();
-    let selected = { let s = ctx.sget("selected"); if s.is_empty() { "auto".into() } else { s } };
+    let selected = crate::best::escape_sel(ctx);
     let guest = group(&servers, "", &selected, &env_or("ROWT_AUTO_INTERVAL", "20m"));
     let vm = render_vm(&guest, "0.0.0.0", (ctx.port + 1) as u64,
                        &format!("0.0.0.0:{}", ctx.clash_port + 1),

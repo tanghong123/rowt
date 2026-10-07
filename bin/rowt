@@ -59,7 +59,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.5.23"
+ROWT_VERSION="3.6.0"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -155,6 +155,16 @@ PING_URL="${ROWT_PING_URL:-https://www.gstatic.com/generate_204}"
 PING_TIMEOUT="${ROWT_PING_TIMEOUT:-8}"          # seconds per sample (three per server)
 LOG_LEVEL="${ROWT_LOG_LEVEL:-warn}"             # sing-box log level (info is very noisy)
 AUTO_INTERVAL="${ROWT_AUTO_INTERVAL:-20m}"       # how often 'auto' re-probes all servers
+# `best`: rowt's own auto mode. The watchdog measures each server as the median
+# of three delay samples, keeps them in LATENCY_TABLE (shared with `rowt ping`
+# and the monitor), and keeps the current server unless another beats it by more
+# than BEST_TOLERANCE ms or it stopped answering. `auto` above is sing-box's
+# urltest, which can only switch on single samples. See rowt_core::latency.
+BEST_INTERVAL="${ROWT_BEST_INTERVAL:-600}"       # seconds a server's median stays fresh before re-measuring
+BEST_TOLERANCE="${ROWT_BEST_TOLERANCE:-50}"      # ms another server must beat the current one by (urltest's default)
+BEST_TIMEOUT="${ROWT_BEST_TIMEOUT:-5}"           # seconds per sample when rowt measures for `best`
+LATENCY_TABLE="$CFG/latency.tsv"
+LATENCY_HEADER="# rowt latency table: tag, median ms (empty = no answer), samples answered, UTC time"
 # Watchdog liveness (see 'watch tick'). Network changes are caught instantly by
 # the LaunchAgent's WatchPaths; this timer only paces the periodic health probe,
 # so it can be relaxed without hurting network-change response.
@@ -1744,7 +1754,7 @@ group_jq() {
 #   vm-guest  members         + auto + selector      (selector lives in the VM)
 #   vm-host   a single SOCKS hop to the VM           (host just forwards)
 build_escape_outbounds() {
-  local sel; sel="$(sget selected)"; sel="${sel:-auto}"
+  local sel; sel="$(_escape_sel)"   # `best` renders as a selector defaulting to its pick
   case "$1" in
     host)
       local ifc; ifc="$(detect_iface)" || die "no physical interface found"
@@ -2084,7 +2094,7 @@ rebuild_servers() {
   # keep the selection valid; default to the first real server (manual mode has no "auto")
   local sel; sel="$(sget selected)"
   local ok=0
-  [ "$sel" = "auto" ] && ok=1
+  case "$sel" in auto|best) ok=1 ;; esac      # modes, not tags — `best` must survive a refresh
   [ -n "$sel" ] && jq -e --arg t "$sel" 'any(.tag==$t)' "$SERVERS" >/dev/null 2>&1 && ok=1
   if [ "$ok" -ne 1 ]; then sset selected "$(jq -r '.[0].tag // "auto"' "$SERVERS")"; fi
 }
@@ -2366,10 +2376,11 @@ cmd_use() {
     && die "local mode has no tunnel to select from — '$PROG up host' to bring one back"
   [ -s "$SERVERS" ] || die "no servers imported"
   if [ -z "$tag" ]; then servers_list; return 0; fi
-  if [ "$tag" != "auto" ] && ! jq -e --arg t "$tag" 'any(.tag == $t)' "$SERVERS" >/dev/null; then
+  if [ "$tag" != "auto" ] && [ "$tag" != best ] && ! jq -e --arg t "$tag" 'any(.tag == $t)' "$SERVERS" >/dev/null; then
     die "unknown server '$tag' — see: $PROG server"
   fi
   local prev; prev="$(sget selected)"
+  if [ "$tag" = best ]; then _use_best "$prev"; return 0; fi
   sset selected "$tag"
   cmd_render >/dev/null
   if ! host_running; then info "escape -> $tag (applies on next '$PROG router up')"; return 0; fi
@@ -2390,42 +2401,22 @@ cmd_use() {
 cmd_ping() {
   [ -s "$SERVERS" ] || die "no servers imported"
   if ! host_running; then info "starting router for the test…"; cmd_router up >/dev/null 2>&1 || die "could not start router"; fi
-  local target="${1:-}" tags t now ep sec enc
+  local target="${1:-}" tags t now res
   if [ -n "$target" ]; then tags="$target"; else tags="$(jq -r '.[].tag' "$SERVERS")"; fi
   now="$(clash_selected)"
-  ep="$(controller)" || die "clash API endpoint unknown (is the router/VM up?)"
-  sec="$(clash_secret)"
-  enc="$(_urlencode "$PING_URL")"
+  controller >/dev/null || die "clash API endpoint unknown (is the router/VM up?)"
   info "testing latency to $PING_URL through the tunnel (parallel; median of 3 samples, ${PING_TIMEOUT}s each)…"
-  local dir; dir="$(mktemp -d)" pids=""
-  for t in $tags; do
-    (
-      # Three samples one after another, and the median of them — the monitor's
-      # method, so the two never disagree about a server. One sample over a
-      # lossy link spikes or fails on its own. (`auto` still switches on
-      # sing-box's own stored figure, the last single sample: no API can store
-      # a median there — task #s2.)
-      local _s ok=""
-      for _s in 1 2 3; do
-        # curl max-time must exceed the clash delay timeout, else it cuts early
-        ms="$(curl --noproxy '*' -sS -m "$((PING_TIMEOUT + 3))" -H "Authorization: Bearer $sec" \
-              "http://$ep/proxies/$t/delay?timeout=${PING_TIMEOUT}000&url=$enc" 2>/dev/null \
-              | jq -r '.delay // empty' 2>/dev/null || true)"
-        case "$ms" in ''|null) ;; *) ok="$ok $ms" ;; esac
-      done
-      # shellcheck disable=SC2086 — the samples are word-split on purpose
-      ms="$(_latency_of $ok)"
-      case "$ms" in '') printf '999999\t%s\tunreachable\n' "$t" ;;
-                    *)  printf '%06d\t%s\t%s ms\n' "$ms" "$t" "$ms" ;; esac
-    ) > "$dir/$t.out" &
-    pids="$pids $!"
-  done
-  wait $pids   # only the test subshells, NOT the sing-box we may have started
-  cat "$dir"/*.out 2>/dev/null | sort -n | while IFS=$'\t' read -r _ t disp; do
+  # The shared prober (three samples each, at most ten servers at a time), and
+  # its figures go into the latency table `best` and the monitor read too.
+  # shellcheck disable=SC2086 — one argument per tag
+  res="$(_latency_probe "$PING_TIMEOUT" $tags)"
+  printf '%s\n' "$res" | _latency_table_update
+  printf '%s\n' "$res" | awk -F'\t' 'NF >= 3 && $1 != "" {
+      if ($2 == "") printf "999999\t%s\tunreachable\n", $1; else printf "%06d\t%s\t%s ms\n", $2, $1, $2 }' \
+    | sort -n | while IFS=$'\t' read -r _ t disp; do
     mark="  "; [ "$t" = "$now" ] && mark="* "
     printf '%s%-20s %s\n' "$mark" "$t" "$disp"
   done
-  rm -rf "$dir"
   echo "  * = active. 'unreachable' = none of 3 tries answered in ${PING_TIMEOUT}s (down, or can't reach the test URL)."
 }
 
@@ -2439,6 +2430,152 @@ _latency_of() {
     2) echo $(( ($1 + $2) / 2 )) ;;
     *) printf '%s\n' "$@" | sort -n | sed -n "$(( $# / 2 + 1 ))p" ;;
   esac
+}
+
+# Measure servers through the router: three samples each, one after another,
+# at most ten servers at a time. "<tag>\t<median or empty>\t<samples answered>"
+# per server. $1 = seconds per sample, the rest = tags.
+_latency_probe() {
+  local to="$1"; shift
+  local ep sec enc dir t i=0 n=0 pids=""
+  ep="$(controller 2>/dev/null)" || return 0
+  sec="$(clash_secret)"; enc="$(_urlencode "$PING_URL")"
+  dir="$(mktemp -d)"
+  for t in "$@"; do
+    i=$((i + 1))
+    (
+      local _s ms ok="" nok=0
+      for _s in 1 2 3; do
+        # curl max-time must exceed the clash delay timeout, else it cuts early
+        ms="$(curl --noproxy '*' -sS -m "$((to + 3))" -H "Authorization: Bearer $sec" \
+              "http://$ep/proxies/$t/delay?timeout=${to}000&url=$enc" 2>/dev/null \
+              | jq -r '.delay // empty' 2>/dev/null || true)"
+        case "$ms" in ''|null) ;; *) ok="$ok $ms"; nok=$((nok + 1)) ;; esac
+      done
+      # shellcheck disable=SC2086 — the samples are word-split on purpose
+      printf '%s\t%s\t%s\n' "$t" "$(_latency_of $ok)" "$nok"
+    ) > "$dir/$i.out" &
+    pids="$pids $!"; n=$((n + 1))
+    if [ "$n" -ge 10 ]; then wait $pids; pids=""; n=0; fi
+  done
+  [ -z "$pids" ] || wait $pids
+  cat "$dir"/*.out 2>/dev/null || true
+  rm -rf "$dir"
+}
+
+# Fold probe lines (stdin) into LATENCY_TABLE: those servers' rows replaced and
+# stamped now (UTC), every other row kept, rows for servers no longer in the pool
+# dropped. Replaced whole, 0600. rowt_core::latency::{table_merge, table_render}.
+_latency_table_update() {
+  local now pool tmp old; now="$(date -u '+%Y-%m-%d %H:%M:%S')"
+  pool="$(jq -r '.[].tag' "$SERVERS" 2>/dev/null || true)"
+  old="$LATENCY_TABLE"; [ -f "$old" ] || old=/dev/null
+  tmp="$(mktemp)" || return 0
+  { printf '%s\n' "$LATENCY_HEADER"
+    LAT_POOL="$pool" LC_ALL=C awk -F'\t' -v now="$now" '
+      BEGIN { n = split(ENVIRON["LAT_POOL"], p, "\n"); for (i = 1; i <= n; i++) inpool[p[i]] = 1 }
+      FILENAME == ARGV[1] {
+        if ($0 ~ /^#/ || NF != 4 || $1 == "" || $4 == "") next
+        if (($2 != "" && $2 !~ /^[0-9]+$/) || $3 !~ /^[0-9]+$/) next
+        row[$1] = $1 "\t" ($2 == "" ? "" : $2 + 0) "\t" ($3 + 0) "\t" $4; next
+      }
+      NF >= 3 && $1 != "" { row[$1] = $1 "\t" $2 "\t" $3 "\t" now }
+      END { for (t in row) if (t in inpool) print row[t] }
+    ' "$old" - | LC_ALL=C sort -t "$(printf '\t')" -k1,1
+  } > "$tmp"
+  { chmod 600 "$tmp" && mv -f "$tmp" "$LATENCY_TABLE"; } 2>/dev/null || rm -f "$tmp"
+}
+
+# Pool servers whose median is missing or older than $1 (a UTC stamp in the
+# table's format) — what `best` must measure again. rowt_core::latency::stale.
+_latency_stale() {
+  local pool; pool="$(jq -r '.[].tag' "$SERVERS" 2>/dev/null || true)"
+  [ -n "$pool" ] || return 0
+  LAT_POOL="$pool" LC_ALL=C awk -F'\t' -v cutoff="$1" '
+    FILENAME == ARGV[1] {
+      if ($0 ~ /^#/ || NF != 4 || $1 == "" || $4 == "") next
+      if (($2 != "" && $2 !~ /^[0-9]+$/) || $3 !~ /^[0-9]+$/) next
+      at[$1] = $4; next
+    }
+    END { n = split(ENVIRON["LAT_POOL"], p, "\n"); for (i = 1; i <= n; i++) if (p[i] != "" && (!(p[i] in at) || at[p[i]] < cutoff)) print p[i] }
+  ' "$([ -f "$LATENCY_TABLE" ] && echo "$LATENCY_TABLE" || echo /dev/null)"
+}
+
+# `best`'s choice for current server $1: kept unless another pool server's
+# median beats it by more than BEST_TOLERANCE, or it has none; the lowest median
+# wins, ties by tag. Prints nothing when no server has a median.
+# rowt_core::latency::choose.
+_best_choose() {
+  [ -f "$LATENCY_TABLE" ] || return 0
+  local pool; pool="$(jq -r '.[].tag' "$SERVERS" 2>/dev/null || true)"
+  LAT_POOL="$pool" LC_ALL=C awk -F'\t' -v cur="${1:-}" -v tol="$BEST_TOLERANCE" '
+    BEGIN { n = split(ENVIRON["LAT_POOL"], p, "\n"); for (i = 1; i <= n; i++) inpool[p[i]] = 1 }
+    $0 ~ /^#/ || NF != 4 || $1 == "" || $4 == "" { next }
+    ($2 != "" && $2 !~ /^[0-9]+$/) || $3 !~ /^[0-9]+$/ { next }
+    { med[$1] = $2 }
+    END {
+      best = ""; bm = -1
+      for (t in med) {
+        if (!(t in inpool) || med[t] == "") continue
+        m = med[t] + 0
+        if (bm < 0 || m < bm || (m == bm && t < best)) { bm = m; best = t }
+      }
+      if (best == "") exit
+      if ((cur in inpool) && (cur in med) && med[cur] != "" && med[cur] + 0 <= bm + tol + 0) print cur
+      else print best
+    }' "$LATENCY_TABLE"
+}
+
+# "81 ms" / "no answer" / "unmeasured" — a server's figure in the table, for messages.
+_latency_ms() {
+  local m
+  m="$(LC_ALL=C awk -F'\t' -v t="${1:-}" '$0 !~ /^#/ && NF == 4 && $1 == t { m = ($2 == "" ? "-" : $2) } END { print m }' "$LATENCY_TABLE" 2>/dev/null || true)"
+  case "$m" in '') echo "unmeasured" ;; -) echo "no answer" ;; *) echo "$m ms" ;; esac
+}
+
+# The tag the escape selector defaults to in a render, and the health probe
+# asks about: `selected`, except in `best` mode, where it is the watchdog's last
+# pick (empty before its first — group_jq then defaults to the first server).
+_escape_sel() {
+  local sel; sel="$(sget selected)"; sel="${sel:-auto}"
+  if [ "$sel" = best ]; then sget best_pick; else printf '%s\n' "$sel"; fi
+}
+
+# Say when `best` cannot keep itself current: the pick is re-checked by the
+# watchdog alone, and without one it is made once and never again.
+_best_watch_note() {
+  launchctl list "$WATCH_LABEL" >/dev/null 2>&1 \
+    || warn "the watchdog is not running, so this pick will not be re-checked — '$PROG watch install'"
+}
+
+# `rowt use best`: measure every server now, pick, and switch. From `auto` the
+# urltest group has to go, so that is a restart; from a pinned server the switch
+# is live. With the router down: render the mode, and the watchdog picks.
+_use_best() { # $1 = the previous selection
+  local prev="$1" now pick
+  sset selected best
+  if ! host_running; then
+    cmd_render >/dev/null
+    info "escape -> best (applies on next '$PROG router up'; the watchdog picks the fastest server by median latency)"
+    _best_watch_note
+    return 0
+  fi
+  info "measuring every server (median of 3 samples, at most 10 at a time)…"
+  # shellcheck disable=SC2046 — one argument per tag
+  _latency_probe "$BEST_TIMEOUT" $(jq -r '.[].tag' "$SERVERS") | _latency_table_update
+  now="$(clash_selected)"
+  pick="$(_best_choose "$now")"
+  [ -n "$pick" ] || pick="$(sget best_pick)"
+  [ -n "$pick" ] || pick="$(jq -r '.[0].tag // empty' "$SERVERS")"
+  if [ "$prev" != auto ] && clash_curl PUT /proxies/escape "{\"name\":\"$pick\"}" >/dev/null 2>&1; then
+    sset best_pick "$pick"; cmd_render >/dev/null
+    info "escape -> best: $pick ($(_latency_ms "$pick"), live)"
+  else
+    sset best_pick "$pick"; cmd_render >/dev/null
+    cmd_router restart >/dev/null
+    info "escape -> best: $pick ($(_latency_ms "$pick"))"
+  fi
+  _best_watch_note
 }
 
 # ---------- probe ------------------------------------------------------------
@@ -4262,8 +4399,8 @@ then quit the old VPN app and connect the corp VPN ('$PROG reload' if no watcher
 
   # 5. an escape server selected
   local sel; sel="$(sget selected)"
-  if [ -n "$sel" ] && [ "$sel" != none ]; then _ob 0 "escape server selected ($sel)" "$PROG ping   (rank by latency)   ·   $PROG use <tag>|auto"
-  else _ob 1 "pick an escape server" "$PROG ping   →   $PROG use <tag>   (or $PROG use auto)"; fi
+  if [ -n "$sel" ] && [ "$sel" != none ]; then _ob 0 "escape server selected ($sel)" "$PROG ping   (rank by latency)   ·   $PROG use <tag>|best|auto"
+  else _ob 1 "pick an escape server" "$PROG ping   →   $PROG use <tag>   (or $PROG use best)"; fi
 
   # 6. auto-reload / recovery watcher
   if [ -f "$WATCH_PLIST" ] && _watch_plist_stale; then
@@ -4768,7 +4905,11 @@ cmd_status() {
     echo "mode:         $mode"
   fi
   echo "servers:      $(jq length "$SERVERS" 2>/dev/null || echo 0)  (selected: $(sget selected), subs: $(sub_count))"
-  local now; now="$(clash_selected)"; [ -n "$now" ] && echo "active:       $now"
+  local now; now="$(clash_selected)"
+  if [ -n "$now" ]; then
+    if [ "$(sget selected)" = best ]; then echo "active:       $now (best — $(_latency_ms "$now"))"
+    else echo "active:       $now"; fi
+  fi
   [ "$mode" = "vm" ] && echo "vm ip:        $(sget vm_ip)"
   echo "router:       $(host_running && echo "running (pid $(cat "$(host_pidfile)"))" || echo stopped) on 127.0.0.1:$PORT"
   # Which engine, and is it the pin. A brew upgrade once swapped in a 1.14.1
@@ -4935,7 +5076,11 @@ _watch_probe() {
   local ep sec sel enc out t to="${1:-$HEALTH_TIMEOUT}"
   ep="$(controller 2>/dev/null || true)"; [ -n "$ep" ] || return 1   # API gone = wedged
   sec="$(clash_secret)"
-  sel="$(sget selected)"; sel="${sel:-auto}"                          # concrete server, or 'auto' (urltest)
+  # A concrete server, 'auto' (urltest), or in `best` mode the pick — the
+  # selector itself before the first one. Probing `best` by name would ask
+  # about an outbound that does not exist: every tick fails, and the streak
+  # reloads a router that was fine.
+  sel="$(_escape_sel)"; sel="${sel:-escape}"
   enc="$(_urlencode "$HEALTH_URL")"
   for t in 1 2; do
     # curl max-time must exceed the clash delay timeout or it cuts the test early.
@@ -5346,6 +5491,40 @@ _watch_hold_for_network() { # $1=captive verdict  $2=failures  $3=gateway_ok(0|1
   return 0
 }
 
+# `best` mode, once per tick, right after corp sync and only when the network has
+# not just moved: measure the servers whose median is older than BEST_INTERVAL —
+# every server at the FIRST failed health probe of a streak, since the pick may
+# have died — then keep the current server unless another beats it by more than
+# BEST_TOLERANCE, and switch the selector live. A switch is logged to watch.log
+# and the audit log with both medians. Offline, nothing can be measured.
+_watch_best() { # $1 = the physical interface
+  [ "$(sget selected)" = best ] || return 0
+  [ "$(sget mode)" != local ] || return 0
+  [ -n "$(ipconfig getifaddr "${1:-}" 2>/dev/null || true)" ] || return 0
+  local stale now pick fails
+  if [ "$(cat "$WATCH_HEALTH" 2>/dev/null || echo 0)" = 1 ]; then
+    stale="$(jq -r '.[].tag' "$SERVERS" 2>/dev/null || true)"
+  else
+    stale="$(_latency_stale "$(date -u -v-"${BEST_INTERVAL}"S '+%Y-%m-%d %H:%M:%S')")"
+  fi
+  # shellcheck disable=SC2086 — one argument per tag
+  [ -z "$stale" ] || _latency_probe "$BEST_TIMEOUT" $stale | _latency_table_update
+  now="$(clash_selected)"
+  pick="$(_best_choose "$now")"
+  [ -n "$pick" ] || return 0
+  if [ "$pick" = "$now" ]; then
+    [ "$(sget best_pick)" = "$pick" ] || sset best_pick "$pick"
+    return 0
+  fi
+  if ! clash_curl PUT /proxies/escape "{\"name\":\"$pick\"}" >/dev/null 2>&1; then
+    _watch_log "best: could not switch to $pick"
+    return 0
+  fi
+  sset best_pick "$pick"
+  local m="best: switched ${now:-?} ($(_latency_ms "$now")) -> $pick ($(_latency_ms "$pick"))"
+  _watch_log "$m"
+  _audit "watchdog $m"
+}
 _watch_health() { # $1=iface  $2=captive verdict
   # Offline (no interface IP) — a restart can't help and a returning network
   # fires its own resolver-change reload, so just reset the streak and bail.
@@ -5838,6 +6017,9 @@ cmd_watch() {
       local ifc cur svc need=0 nid last
       ifc="$(detect_iface 2>/dev/null || true)"
       cur="$(jq -r '.outbounds[]?|select(.tag=="direct")|.bind_interface // empty' "$HOST_CFG" 2>/dev/null || true)"
+      # `best` re-picks here — but not on a tick where the network just moved:
+      # a reload is coming, and measuring over a half-moved interface is noise.
+      if [ -n "$ifc" ] && [ "$ifc" = "$cur" ]; then _watch_best "$ifc" || true; fi
       svc="$(active_service 2>/dev/null || true)"
       nid="$(net_id "$ifc")"                       # e.g. "MyWifi 192.168.1.42/192.168.1.1"
       last="$(cat "$WATCH_NET" 2>/dev/null || true)"
@@ -6257,7 +6439,7 @@ o@lifecycle@metrics [status|top|path|query]@per-domain traffic history (bytes in
 o@lifecycle@config [list|export|import]@back up / move the whole setup to another machine; 'export --to shadowrocket' for an iPhone
 o@servers & selection@server <list|add|rm|clear|import|dump>@manage the server pool
 o@servers & selection@sub <list|add|rm|update|clear|import|dump>@manage subscriptions
-c@servers & selection@use <tag>|auto@pin a server (manual) or auto-pick fastest live
+c@servers & selection@use <tag>|best|auto@pin a server, or let rowt pick by median latency (best), or sing-box's urltest (auto)
 c@servers & selection@ping [tag]@parallel latency test through the tunnel, median of 3 samples each (fastest first)
 a@servers & selection@probe@detect which mode works (host vs vm) with corp VPN up
 c@routing lanes@escape <list|add|rm|import|clear|dump|errors>@edit the escape lane (VPN tunnel)
@@ -6614,14 +6796,24 @@ $PROG sub <subcommand> — manage subscriptions.
 EOF
 ;;
     use) cat <<EOF
-$PROG use <tag> | use auto — select the escape server.
+$PROG use <tag> | use best | use auto — select the escape server.
 
   use <tag>   pin one server. A plain selector that NEVER health-checks its
               members, so flaky/dead servers just sit idle (no CPU spin).
-  use auto    switch to a urltest that auto-picks the fastest LIVE server and
-              re-probes every ROWT_AUTO_INTERVAL (default $AUTO_INTERVAL).
-Pinned<->pinned switches are live (Clash API); toggling auto restarts the
-router. Run '$PROG ping' first to find a fast server. No arg = list servers.
+  use best    rowt picks: every server is measured as the MEDIAN of three
+              delay samples (shared with '$PROG ping' and the monitor, in
+              latency.tsv), and the watchdog re-measures every
+              ROWT_BEST_INTERVAL (default $BEST_INTERVAL seconds) — at once if the
+              server in use stops answering — keeping it unless another beats
+              it by more than ROWT_BEST_TOLERANCE (default $BEST_TOLERANCE ms).
+              One slow or failed sample can't cause a switch. Needs the watchdog
+              ('$PROG watch install') to keep re-picking.
+  use auto    switch to sing-box's urltest, which picks the fastest live server
+              by its own single samples, re-probed every ROWT_AUTO_INTERVAL
+              (default $AUTO_INTERVAL).
+Switches between pinned servers and best are live (Clash API); to or from auto
+restarts the router. Run '$PROG ping' first to see the figures. No arg = list
+servers.
 EOF
 ;;
     ping) cat <<EOF

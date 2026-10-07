@@ -533,6 +533,20 @@ PARITY_UNORDERED=1 PARITY_SCENARIO=lanes-empty ping
 # .5 mean to floor), two failures, all timeouts — so the two sides agree only if
 # they combine samples the same way. See its README for the expected figures.
 PARITY_UNORDERED=1 PARITY_SCENARIO=ping-samples ping
+# `best`: the watchdog picks by median-of-3 from latency.tsv, the table every
+# rowt prober shares (in the config tree, so its format is compared too). Ticks
+# skip the trace, so a switch must land where cli-diff looks: the audit line
+# with both medians, and best_pick in state. best-tick-fresh's table is dated
+# 2999 so it stays fresh — alpha 140 vs beta 80 crosses the 50 ms tolerance;
+# best-tick-stale's is dated 2000, so every server is measured through .seq
+# first. best-use measures, picks and switches live from a pinned server.
+PARITY_NOTRACE=1 PARITY_SCENARIO=best-tick-fresh watch tick
+PARITY_NOTRACE=1 PARITY_SCENARIO=best-tick-stale watch tick
+PARITY_NOTRACE=1 PARITY_SCENARIO=best-tick-keep watch tick
+PARITY_UNORDERED=1 PARITY_SCENARIO=best-use use best
+use best
+PARITY_SCENARIO=best-tick-fresh status
+PARITY_SCENARIO=best-tick-fresh use alpha
 run
 
 # skill / report / uninstall. `report` probes the live machine, so what the gate

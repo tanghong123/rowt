@@ -584,7 +584,8 @@ subscriptions) is a member of a sing-box **selector** group named `escape`.
 ./bin/rowt server          # list servers; * marks the live one
 ./bin/rowt ping            # parallel latency test (router must run)
 ./bin/rowt use JP          # pin a specific server (manual — the default)
-./bin/rowt use auto        # opt into auto-selection instead
+./bin/rowt use best        # let rowt pick the fastest, by median latency
+./bin/rowt use auto        # or sing-box's own auto-selection
 ```
 
 **Manual is the default** (`use <tag>`): a plain selector that **never
@@ -592,9 +593,20 @@ health-checks its members**, so a flaky or dead subscription server just sits
 idle and can't spin the CPU. Use `ping` to find a good one, then pin it —
 switching between pinned servers is live via sing-box's Clash API.
 
-`use auto` switches to a `urltest` that auto-picks the fastest **live** server
-and re-probes them every `ROWT_AUTO_INTERVAL` (default 20m). Toggling
-auto↔manual re-renders and restarts (the urltest appears/disappears).
+`use best` lets **rowt** pick. Each server is measured as the **median of three**
+delay samples, kept in `latency.tsv` (shared with `rowt ping` and the monitor),
+and the watchdog re-measures every `ROWT_BEST_INTERVAL` (default 600 s) — at
+once when the server in use stops answering. It keeps the current server unless
+another's median beats it by more than `ROWT_BEST_TOLERANCE` (default 50 ms,
+sing-box's own urltest default), so one slow or failed sample can no longer cause
+a switch, and each switch is in the audit log with both medians. The selector
+stays a plain one, so switching is live; it needs the watchdog
+(`rowt watch install`) to keep re-picking.
+
+`use auto` switches to sing-box's `urltest`, which auto-picks the fastest **live**
+server by its own **single** samples and re-probes them every
+`ROWT_AUTO_INTERVAL` (default 20m). Toggling to or from auto re-renders and
+restarts (the urltest appears/disappears).
 
 The selector lives wherever the tunnel runs (host in mode `host`, the VM in mode
 `vm`), so selection works identically for both. `sub add` remembers the URLs;
@@ -746,7 +758,7 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 | `sub import [--apply]` | same as `server import` (Shadowrocket). |
 | `sub import <file>` | restore subscriptions from a `sub dump` (round-trips). |
 | `sub dump [file]` | export the subscription URLs (one per line). |
-| `use <tag>` / `use auto` | pin a server (manual, nothing probed) or auto-pick the fastest live server. |
+| `use <tag>` / `use best` / `use auto` | pin a server (manual, nothing probed); let rowt pick by median latency, re-checked by the watchdog (`best`); or sing-box's urltest (`auto`). |
 | `ping [tag]` | **parallel** latency test through the tunnel (fastest first, `*`=active). Each server is sampled **three times** and the **median** is shown — the same figure `rowt monitor` shows (two answers give their mean, one gives itself, none is `unreachable`). One sample over a lossy link spikes or fails on its own. `auto` still switches on sing-box's own figure, the latest single sample. `ROWT_PING_URL` (default Google's `generate_204`) / `ROWT_PING_TIMEOUT` (8s per sample). |
 | `probe` | with corp VPN up, test all servers (default route vs physical NIC) and pick `host` or `vm`. |
 
@@ -930,9 +942,10 @@ place), or `sys proxy` to toggle it (hover-highlights).
   switch between pinned servers — from auto mode it pins the chip, which turns
   auto off).
 - `a` — auto server selection on/off, from any pane (or click `auto` above the
-  strip). On rides the fastest live server (`rowt use auto`: urltest, re-probed
-  every 20m); the server it is using comes first with a `▶` marker. Off pins that
-  server, so traffic stays put. Each change restarts the router.
+  strip). On is `rowt use best`: rowt picks by median latency and the watchdog
+  keeps re-checking; the server in use comes first with a `▶` marker. Off pins
+  that server, so traffic stays put. sing-box's own auto (`rowt use auto`) also
+  reads as on here, and `a` pins its pick the same way.
 - `o` — toggle the macOS system proxy on/off (immediate).
 
 **Sources:** the clash API (`127.0.0.1:9090`), `host.json`, `state`/`servers.json`,

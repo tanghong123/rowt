@@ -114,7 +114,7 @@ fn curl_why(rc: i32) -> String {
     }
 }
 
-fn watch_log(ctx: &Ctx, msg: &str) {
+pub(crate) fn watch_log(ctx: &Ctx, msg: &str) {
     use std::io::Write;
     let line = format!("{}  {msg}\n", crate::sh_date("+%Y-%m-%d %H:%M:%S"));
     // The quiet half of the shell's bug: `create(true)` creates the FILE, not
@@ -924,7 +924,11 @@ fn health_ok(ctx: &Ctx) -> bool {
 fn health_ok_within(ctx: &Ctx, t: u32) -> bool {
     let Some(ep) = lifecycle::controller(ctx) else { return false };   // API gone = wedged
     let secret = lifecycle::clash_secret(ctx);
-    let sel = { let s = ctx.sget("selected"); if s.is_empty() { "auto".into() } else { s } };
+    // A concrete server, 'auto' (urltest), or in `best` mode the pick — the
+    // selector itself before the first one. Probing `best` by name would ask
+    // about an outbound that does not exist: every tick fails, and the streak
+    // reloads a router that was fine.
+    let sel = { let s = crate::best::escape_sel(ctx); if s.is_empty() { "escape".into() } else { s } };
     let url = env_or("ROWT_HEALTH_URL", "https://www.gstatic.com/generate_204");
     // `python3 -c 'urllib.parse.quote(u, safe="")'` — in-process, same rules.
     let enc = rowt_core::pyurl::quote(&url, "");
@@ -1175,6 +1179,21 @@ fn tick(ctx: &Ctx) {
     if lifecycle::host_running(ctx).is_none() {
         finish_tick(ctx, &lock);
         return;
+    }
+    // `best` re-picks here, where the shell does — but not on a tick where the
+    // network just moved: a reload is coming, and measuring over a half-moved
+    // interface is noise. The health streak as the LAST tick left it decides
+    // whether to measure everyone now (its first failure: the pick may be dead).
+    {
+        let ifc = Mac.detect_iface().unwrap_or_default();
+        let host: serde_json::Value = serde_json::from_str(&read(&ctx.cfg.join("host.json"))).unwrap_or(serde_json::Value::Null);
+        let cur = host.get("outbounds").and_then(|o| o.as_array())
+            .and_then(|a| a.iter().find(|o| o.get("tag").and_then(|t| t.as_str()) == Some("direct")))
+            .and_then(|o| o.get("bind_interface").and_then(|b| b.as_str()))
+            .unwrap_or("").to_string();
+        if !ifc.is_empty() && ifc == cur {
+            crate::best::watch_best(ctx, &ifc, &read(&health_file(ctx)));
+        }
     }
     let hb = ctx.mode() == "local" || health_ok(ctx);
     // SLOW is not DEAD: only when the quick probe failed, and only when this

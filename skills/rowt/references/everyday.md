@@ -62,8 +62,12 @@ foreground with output redirected to a file (see SKILL.md → Rules).
   doesn't use these medians: it switches on sing-box's latest single sample.
 - `rowt use <tag>` pins a server: a plain selector that never health-checks, so
   flaky servers can't spin the CPU.
-- `rowt use auto` switches to the fastest live server and moves off a dead one. In the
-  monitor, `a` toggles auto, and turning it off pins the server in use.
+- `rowt use best` lets rowt pick: the median of three samples per server, re-checked
+  by the watchdog every 10 minutes (at once if the server in use stops answering), and
+  a switch only when another server is more than 50 ms faster. One noisy sample can't
+  move it, and every switch is in `rowt audit` with both medians. Needs the watchdog.
+- `rowt use auto` is sing-box's own auto: the fastest live server by single samples.
+  In the monitor, `a` toggles `best`, and turning either auto off pins the server in use.
 - Pool: `rowt server list|add|rm|clear|import|dump`. Subscriptions:
   `rowt sub list|add|rm|update|clear|import|dump`; `update` re-fetches them.
 - `server dump` and `sub dump` output contains secrets.

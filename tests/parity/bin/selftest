@@ -42,6 +42,7 @@
 #   39.  stop noticing lane edits made outside rowt -> cli-diff must fire
 #   40.  stop naming the lane an entry LEFT          -> cli-diff must fire
 #   41.  take the lowest sample, not the median      -> cli-diff must fire
+#   42.  drop best's 50 ms tolerance to 0             -> cli-diff must fire
 #
 # Everything happens in a throwaway copy of the repo; the real tree is never
 # touched. Run it after changing the harness itself.
@@ -1179,6 +1180,30 @@ else
     bad "cli-diff passed with one side taking the lowest sample instead of the median"
   else
     ok "cli-diff caught a ping figure combined differently"
+  fi
+  cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+fi
+
+echo "42. best's switching rule must be compared, tolerance included"
+cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+if [ ! -x "$ROOT/target/release/rowt-rs" ]; then
+  echo "  skip — no release build"
+else
+  # In `best` the watchdog keeps the current server unless another's median
+  # beats it by MORE than the tolerance — the rule that stops one noisy figure
+  # from switching. best-tick-keep sits inside it (110 vs 80 ms): drop the
+  # tolerance to 0 on one side and that side switches. A tick skips the trace,
+  # so if cli-diff still passes, the audit line and best_pick in state have
+  # fallen out of what it compares.
+  perl -0pi -e 's|BEST_TOLERANCE="\$\{ROWT_BEST_TOLERANCE:-50\}"|BEST_TOLERANCE="\${ROWT_BEST_TOLERANCE:-0}"|' "$tmp/bin/rowt"
+  if grep -qF 'BEST_TOLERANCE="${ROWT_BEST_TOLERANCE:-50}"' "$tmp/bin/rowt"; then
+    bad "could not change the tolerance (BEST_TOLERANCE moved?)"
+  elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" \
+       PARITY_CASES="$(only 'PARITY_NOTRACE=1 PARITY_SCENARIO=best-tick-keep watch tick')" \
+       "$P" cli-diff >/dev/null 2>&1; then
+    bad "cli-diff passed with the two sides switching on different tolerances"
+  else
+    ok "cli-diff caught best switching by a different rule"
   fi
   cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
 fi

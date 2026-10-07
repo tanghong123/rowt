@@ -1,0 +1,6 @@
+`best` keeps the current server unless another beats it by MORE than the
+tolerance (50 ms, sing-box's urltest default): alpha 110 vs beta 80 is inside
+it, so this tick must NOT switch — no audit line, best_pick stays alpha. The
+table is dated 2999 so it is always fresh and nothing is measured. selftest
+sets the tolerance to 0 on one side, where 110 > 80 switches, and requires
+cli-diff to fail on this case.

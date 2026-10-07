@@ -37,6 +37,8 @@ fn vars(cfg: &Path) -> Vec<(&'static str, String)> {
         ("DNS_DIRECT", env("ROWT_DNS_DIRECT", "223.5.5.5")),
         ("DNS_LOCAL", env("ROWT_DNS_LOCAL", "1.1.1.1")),
         ("AUTO_INTERVAL", env("ROWT_AUTO_INTERVAL", "20m")),
+        ("BEST_INTERVAL", env("ROWT_BEST_INTERVAL", "600")),
+        ("BEST_TOLERANCE", env("ROWT_BEST_TOLERANCE", "50")),
         ("SHELL", env("SHELL", "")),
     ];
     v

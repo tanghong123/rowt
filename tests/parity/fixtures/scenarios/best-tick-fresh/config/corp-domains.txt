@@ -1,0 +1,8 @@
+# Synthetic parity fixture — documentation ranges (RFC 5737) only.
+corp.example
+intranet.corp.example
+198.51.100.0/24
+10.99.0.0/16
+
+# --- rowt corp sync: DHCP search domains (auto-managed, do not edit below) ---
+corp.example

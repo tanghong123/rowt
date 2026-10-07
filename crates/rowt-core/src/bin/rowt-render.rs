@@ -68,10 +68,8 @@ fn run() -> Result<String, String> {
     let cache = cfg.join("cache");
 
     let state = read(&cfg.join("state"));
-    let selected = {
-        let s = sget(&state, "selected");
-        if s.is_empty() { "auto".to_string() } else { s }
-    };
+    // `best` renders as a selector defaulting to its pick.
+    let selected = rowt_core::latency::escape_selection(&sget(&state, "selected"), &sget(&state, "best_pick"));
     let secret = sget(&state, "clash_secret");
 
     let servers: Vec<Value> = serde_json::from_str(&read(&cfg.join("servers.json")))

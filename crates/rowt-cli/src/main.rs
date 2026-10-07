@@ -18,6 +18,7 @@ mod diag;
 mod fetch;
 mod help;
 mod lifecycle;
+mod best;
 mod importer;
 mod lanelog;
 mod onboard;
@@ -400,7 +401,7 @@ fn sh_date_r(epoch: i64, fmt: &str) -> String {
 /// `urllib.parse.quote(s, safe="")` — every byte outside the unreserved set is
 /// percent-encoded, INCLUDING `/` and `:`, because the result is a query-string
 /// value inside the clash delay URL.
-fn urlencode(s: &str) -> String {
+pub(crate) fn urlencode(s: &str) -> String {
     let mut o = String::new();
     for b in s.bytes() {
         match b {
@@ -1380,40 +1381,24 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                     .collect(),
             };
             let now = lifecycle::clash_selected(&ctx).unwrap_or_default();
-            let secret = lifecycle::clash_secret(&ctx);
+            if lifecycle::controller(&ctx).is_none() {
+                die(&cfg, "clash API endpoint unknown (is the router/VM up?)");
+            }
             let url = env_or("ROWT_PING_URL", "https://www.gstatic.com/generate_204");
             let timeout: u32 = env_or("ROWT_PING_TIMEOUT", "8").parse().unwrap_or(8);
-            let enc = urlencode(&url);
             eprintln!("==> testing latency to {url} through the tunnel (parallel; median of {} samples, {timeout}s each)…", rowt_core::latency::SAMPLES);
-            // In parallel, as the shell backgrounds a subshell per server: a
-            // dozen dead servers serially would be a dozen timeouts.
-            let handles: Vec<_> = tags.into_iter().map(|t| {
-                let (secret, enc, ep) = (secret.clone(), enc.clone(), ctx.controller());
-                std::thread::spawn(move || {
-                    // Three samples one after another, and the median of them —
-                    // the monitor's method, so the two never disagree about a
-                    // server (rowt_core::latency). `auto` still switches on
-                    // sing-box's own stored figure, the last single sample.
-                    let ok: Vec<u64> = (0..rowt_core::latency::SAMPLES).filter_map(|_| {
-                        let out = std::process::Command::new("curl")
-                            .args(["--noproxy", "*", "-sS", "-m", &(timeout + 3).to_string(),
-                                   "-H", &format!("Authorization: Bearer {secret}"),
-                                   &format!("http://{ep}/proxies/{t}/delay?timeout={timeout}000&url={enc}")])
-                            .stderr(std::process::Stdio::null()).output().ok();
-                        out.and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok())
-                            .and_then(|v| v.get("delay").and_then(|d| d.as_u64()))
-                    }).collect();
-                    match rowt_core::latency::aggregate(&ok) {
-                        // The sort key is the zero-padded number the shell
-                        // prints, so an unreachable server sorts last by being
-                        // 999999 rather than by a special case.
-                        Some(ms) => (format!("{ms:06}"), t, format!("{ms} ms")),
-                        None => ("999999".to_string(), t, "unreachable".to_string()),
-                    }
-                })
+            // The shared prober (three samples each, at most ten servers at a
+            // time), and its figures go into the latency table `best` and the
+            // monitor read too.
+            let res = best::probe(&ctx, timeout, &tags);
+            best::table_update(&ctx, &res);
+            let mut rows: Vec<(String, String, String)> = res.into_iter().map(|(t, m, _)| match m {
+                // The sort key is the zero-padded number the shell prints, so an
+                // unreachable server sorts last by being 999999 rather than by a
+                // special case.
+                Some(ms) => (format!("{ms:06}"), t, format!("{ms} ms")),
+                None => ("999999".to_string(), t, "unreachable".to_string()),
             }).collect();
-            let mut rows: Vec<(String, String, String)> =
-                handles.into_iter().filter_map(|h| h.join().ok()).collect();
             // `cat "$dir"/*.out | sort -n`: glob order in, numeric sort out, and
             // the whole line as the last resort.
             rows.sort_by(|a, b| {
@@ -1559,10 +1544,13 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                 return run(&cfg, "server", &["list".to_string()]);
             };
             let known = |t: &str| servers.iter().any(|s| s.get("tag").and_then(|x| x.as_str()) == Some(t));
-            if tag != "auto" && !known(&tag) {
+            if tag != "auto" && tag != "best" && !known(&tag) {
                 die(&cfg, &format!("unknown server '{tag}' — see: {PROG} server"));
             }
             let prev = ctx.sget("selected");
+            if tag == "best" {
+                return best::use_best(&ctx, &prev);
+            }
             lifecycle::sset(&ctx, "selected", &tag);
             lifecycle::cmd_render(&ctx)?;
             if lifecycle::host_running(&ctx).is_none() {
@@ -1956,7 +1944,11 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
             let sel = { let s = ctx.sget("selected"); if s.is_empty() { String::new() } else { s } };
             o.push(format!("servers:      {}  (selected: {sel}, subs: {subs})", servers.len()));
             if let Some(now) = lifecycle::clash_selected(&ctx) {
-                o.push(format!("active:       {now}"));
+                if ctx.sget("selected") == "best" {
+                    o.push(format!("active:       {now} (best — {})", best::latency_ms(&ctx, &now)));
+                } else {
+                    o.push(format!("active:       {now}"));
+                }
             }
             if mode == "vm" {
                 o.push(format!("vm ip:        {}", ctx.sget("vm_ip")));

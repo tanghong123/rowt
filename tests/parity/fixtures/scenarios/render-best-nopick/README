@@ -1,0 +1,2 @@
+`best` before its first pick: no best_pick, so the selector defaults to the
+first server, as a pinned selection naming no known server does.

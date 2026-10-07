@@ -1,0 +1,5 @@
+`rowt use best` with the router up, from a pinned server (alpha): measure every
+server (the same .seq samples as best-tick-stale), pick beta by median, and
+switch the selector LIVE — no restart, since a pinned selector is already a
+plain selector. State gets selected=best and best_pick=beta; latency.tsv is
+written.

@@ -1,0 +1,90 @@
+[
+  {
+    "type": "vless",
+    "tag": "alpha",
+    "server": "203.0.113.10",
+    "server_port": 443,
+    "uuid": "00000000-0000-4000-8000-000000000001",
+    "flow": "xtls-rprx-vision",
+    "packet_encoding": "xudp",
+    "tls": {
+      "enabled": true,
+      "server_name": "alpha.example",
+      "utls": {
+        "enabled": true,
+        "fingerprint": "chrome"
+      },
+      "reality": {
+        "enabled": true,
+        "public_key": "PARITYFIXTUREPUBLICKEY",
+        "short_id": "01"
+      }
+    }
+  },
+  {
+    "type": "vless",
+    "tag": "beta",
+    "server": "203.0.113.11",
+    "server_port": 443,
+    "uuid": "00000000-0000-4000-8000-000000000002",
+    "flow": "xtls-rprx-vision",
+    "packet_encoding": "xudp",
+    "tls": {
+      "enabled": true,
+      "server_name": "alpha.example",
+      "utls": {
+        "enabled": true,
+        "fingerprint": "chrome"
+      },
+      "reality": {
+        "enabled": true,
+        "public_key": "PARITYFIXTUREPUBLICKEY",
+        "short_id": "01"
+      }
+    }
+  },
+  {
+    "type": "vless",
+    "tag": "gamma",
+    "server": "203.0.113.12",
+    "server_port": 443,
+    "uuid": "00000000-0000-4000-8000-000000000003",
+    "flow": "xtls-rprx-vision",
+    "packet_encoding": "xudp",
+    "tls": {
+      "enabled": true,
+      "server_name": "alpha.example",
+      "utls": {
+        "enabled": true,
+        "fingerprint": "chrome"
+      },
+      "reality": {
+        "enabled": true,
+        "public_key": "PARITYFIXTUREPUBLICKEY",
+        "short_id": "01"
+      }
+    }
+  },
+  {
+    "type": "vless",
+    "tag": "delta",
+    "server": "203.0.113.13",
+    "server_port": 443,
+    "uuid": "00000000-0000-4000-8000-000000000004",
+    "flow": "xtls-rprx-vision",
+    "packet_encoding": "xudp",
+    "tls": {
+      "enabled": true,
+      "server_name": "alpha.example",
+      "utls": {
+        "enabled": true,
+        "fingerprint": "chrome"
+      },
+      "reality": {
+        "enabled": true,
+        "public_key": "PARITYFIXTUREPUBLICKEY",
+        "short_id": "01"
+      }
+    }
+  }
+]
