@@ -174,6 +174,24 @@ fn yank_copies_the_focused_key_field() {
 }
 
 #[test]
+fn repeated_probe_key_reports_busy_without_starting_another_round() {
+    let source = Recording::new(Mode::Manual);
+    let calls = source.calls.clone();
+    let busy = source.probe_busy.clone();
+    let mut app = App::new(Box::new(source));
+    app.update(Action::ForceProbe);
+    assert_eq!(app.toast.as_ref().unwrap().0, "re-probing servers…");
+    for _ in 0..5 {
+        app.update(Action::ForceProbe);
+        assert_eq!(app.toast.as_ref().unwrap().0, "previous probe still running…");
+    }
+    assert_eq!(*calls.lock().unwrap(), vec!["probe"]);
+    *busy.lock().unwrap() = false;
+    app.update(Action::ForceProbe);
+    assert_eq!(*calls.lock().unwrap(), vec!["probe", "probe"]);
+}
+
+#[test]
 fn pause_and_help_toggle() {
     let mut a = app();
     assert!(!a.paused);

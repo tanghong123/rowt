@@ -24,6 +24,7 @@ pub struct Recording {
     pub mode: Arc<Mutex<Mode>>,
     pub calls: Arc<Mutex<Vec<String>>>,
     pub busy: Arc<Mutex<bool>>,
+    pub probe_busy: Arc<Mutex<bool>>,
 }
 
 impl Recording {
@@ -33,11 +34,20 @@ impl Recording {
             mode: Arc::new(Mutex::new(mode)),
             calls: Arc::new(Mutex::new(Vec::new())),
             busy: Arc::new(Mutex::new(false)),
+            probe_busy: Arc::new(Mutex::new(false)),
         }
     }
 }
 
 impl Source for Recording {
+    fn force_probe(&self) -> Result<(), &'static str> {
+        let mut busy = self.probe_busy.lock().unwrap();
+        if *busy { return Err("previous probe still running…"); }
+        *busy = true;
+        self.calls.lock().unwrap().push("probe".into());
+        Ok(())
+    }
+
     fn poll(&mut self, window: Window, lane: Option<Lane>) -> Snapshot {
         let mut s = self.inner.poll(window, lane);
         if let Mode::Auto(pick) = *self.mode.lock().unwrap() {
@@ -51,7 +61,7 @@ impl Source for Recording {
             }
             if let Some(p) = pick {
                 if !s.chips.iter().any(|c| c.name == p) {
-                    s.chips.push(Server { name: p.to_string(), ms: None, active: true });
+                    s.chips.push(Server { down: false, name: p.to_string(), ms: None, active: true });
                 }
             }
             s.chips.sort_by_key(|c| !c.active);

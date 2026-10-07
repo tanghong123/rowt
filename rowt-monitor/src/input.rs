@@ -2,7 +2,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
-use crate::app::{Action, App, Armed, Edit};
+use crate::app::{Action, App, Armed, Edit, ServerMode};
 use crate::model::Lane;
 use crate::ui::Hit;
 
@@ -59,6 +59,8 @@ pub fn key(k: KeyEvent, app: &App) -> Option<Action> {
         KeyCode::Down | KeyCode::Char('j') => Action::Down,
         KeyCode::Left | KeyCode::Char('h') => Action::FocusLeft,
         KeyCode::Right | KeyCode::Char('l') => Action::FocusRight,
+        KeyCode::PageUp if app.focus == crate::app::Focus::Health && app.server_mode == ServerMode::List => Action::PageServers(-1),
+        KeyCode::PageDown if app.focus == crate::app::Focus::Health && app.server_mode == ServerMode::List => Action::PageServers(1),
         KeyCode::Tab => Action::CycleFocus,
         KeyCode::BackTab => Action::CycleFocusBack,
         KeyCode::Char('f') => Action::LaneCycle,
@@ -66,6 +68,7 @@ pub fn key(k: KeyEvent, app: &App) -> Option<Action> {
         KeyCode::Char('2') => Action::LaneSet(Some(Lane::Corp)),
         KeyCode::Char('3') => Action::LaneSet(Some(Lane::Direct)),
         KeyCode::Char('0') => Action::LaneSet(None),
+        KeyCode::Char('g') => Action::ToggleServers,
         KeyCode::Char('v') => Action::ConnViewCycle,
         KeyCode::Char('s') => Action::BandCycle,
         KeyCode::Char('w') => Action::WindowCycle,
@@ -143,7 +146,9 @@ pub fn mouse(m: MouseEvent, hit: &Hit) -> Option<Action> {
         // the pointer is actually over a pane; over anything else it's a no-op.
         MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
             let d = if matches!(m.kind, MouseEventKind::ScrollDown) { 1 } else { -1 };
-            if in_rect(hit.err_pane, col, row) || in_rect(hit.err_list, col, row) {
+            if in_rect(hit.server_list, col, row) {
+                Some(Action::PageServers(d))
+            } else if in_rect(hit.err_pane, col, row) || in_rect(hit.err_list, col, row) {
                 Some(Action::ScrollErr(d))
             } else if in_rect(hit.conn_pane, col, row) || in_rect(hit.conn_list, col, row) {
                 Some(Action::ScrollConn(d))

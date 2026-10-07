@@ -14,6 +14,7 @@ Invoked as `rowt monitor`; also runs standalone as `rowt-monitor`.
 ```sh
 rowt-monitor              # live TUI (falls back to a demo fixture when the
                           # proxy / clash API isn't reachable)
+rowt-monitor --servers list   # start with a two-row paged server list
 rowt-monitor --fixtures   # force the offline demo data
 rowt-monitor --render 150x38   # print one frame as plain text (dev/testing)
 ```
@@ -22,7 +23,7 @@ rowt-monitor --render 150x38   # print one frame as plain text (dev/testing)
 
 **Navigate:** `↑↓`/`jk` move (first press locks a row by domain; leaving a pane
 forgets it) · `←→`/`hl` switch pane / pick a server chip · `Tab` cycle focus
-(conns → errors → health) · `v` flip the connections pane (live / ↑ upload /
+(conns → errors → health) · `g` toggle servers: scroll / list · `v` flip the connections pane (live / ↑ upload /
 ↓ download history) · `s` span (metrics timescale band) · `f` lane filter
 (`1`/`2`/`3` jump, `0` clear) · `/` search hosts (regex, filters both panes;
 `↵` commit, `esc` clear) · `w` or `[`/`]` errors window · `y` yank selected
@@ -40,8 +41,8 @@ toggle the system proxy.
 switches the escape server group between a pinned server and rowt's urltest
 `auto`, which rides the fastest live server and re-probes the pool every
 `ROWT_AUTO_INTERVAL` (default 20m). While it is on, the server auto is actually
-using holds the strip's left edge (with `—` for latency until its first probe)
-and the rest scroll past it. Turning it off pins *that* server, so traffic stays
+using comes first and is marked `▶` (with `—` for latency until its first probe).
+Turning it off pins *that* server, so traffic stays
 where it is — and with no resolved pick yet it refuses rather than guess.
 Selecting a server with `u` also turns auto off: in auto mode `u` pins any chip,
 auto's own pick included. Each change restarts the router, and rowt does not
@@ -147,11 +148,24 @@ lane / window-tab to activate, a server chip to select it in place, or `sys prox
   presenting a days-old binary as current.
 - **`live connections`** and **`errors & blocked`** panes — side by side,
   split by a center rule (tab labels shorten on narrow terminals).
-- Full-width **`server health`** strip, merged onto the closing `┴` rule. The row
-  above it leads with the **`auto` on/off toggle**, then the pool counts. When the
-  pool overflows the row it marquees, with the active `▶` server — the pinned one,
-  or in auto mode the one urltest is using — held at the left edge (` │ ` seam) so
-  it never scrolls out of view.
+- Full-width **`server health`**, merged onto the closing `┴` rule. The row
+  above it leads with the **`auto` on/off toggle**, then pool counts.
+  **Scroll is the default:** one scrolling row, with the active `▶` server
+  pinned when space permits. Selecting freezes the strip; `Esc` resumes it,
+  and `↑` returns to connections. Press **`g`** to toggle modes, or choose the
+  initial mode with **`--servers scroll|list`**.
+  **List mode** shows up to **two rows**, with the active server first and the
+  rest ordered by latency; pending readings follow, then failed servers.
+  Focus with `Tab`, select with `←→`, and page with `↑↓`/`jk`, `PgUp`/`PgDn`,
+  or the mouse wheel. All servers are listed: `—` means pending, and `down`
+  means the probe failed. Down servers can be selected but cannot be used with `u`.
+  Probes run every 10 minutes; `r` starts a round when idle. The caption shows
+  the age of the last completed round. See [Probing](DESIGN.md#54-server-health--the-prober)
+  for measurement details.
+
+The interactive layout supports **40 columns × 12 rows** (including the footer).
+Small windows use a compact layout; limited height reduces the server list to
+one row. Below the minimum, a resize hint appears; expanding restores the display.
 
 ## Data sources
 
@@ -167,17 +181,12 @@ Everything is derived on a 2-second tick from: the clash API
   pipeline (clash API, incremental log tailing, block-lane bucketing, the
   server-health prober), rendering, interactions, resource characteristics, and
   the testing strategy.
-- **[`renders/`](renders/)** — the reference frames: `.txt` captures frozen
-  from the original design, and `.ansi` renders of the current UI, regenerated
-  when the layout changes (DESIGN.md §4.2).
+- **[`renders/`](renders/)** — the reference frames: `.txt` glyph baselines and
+  dark/light `.ansi` captures. Scroll and list modes have separate baselines;
+  see [Testing](DESIGN.md#9-testing) for checks and render commands.
 - **[`../archive/ux-design/rowt_monitor/`](../archive/ux-design/rowt_monitor/)**
   — the original UX handoff (spec + HTML prototype), archived. The monitor has
   moved past it; DESIGN.md §10 lists the deliberate deviations.
-
-The layout and 130-column reflow reproduce the `.txt` captures byte-for-byte in
-width. `tests/golden.rs` renders each geometry via ratatui's `TestBackend` and
-diffs against them, masking the deliberate deviations; `--render WxH` is the
-same path exposed on the CLI.
 
 ## Themes
 

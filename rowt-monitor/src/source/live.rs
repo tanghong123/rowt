@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use crate::source::parse::BlockBuckets;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -22,7 +22,7 @@ use crate::source::parse::{self, ErrAgg, ErrEvent, RawConn};
 use crate::source::{FixtureSource, Source};
 
 /// Server latency results shared with the background prober: tag -> (delay ms
-/// or None if the last test failed, when it was measured).
+/// or None if all samples failed, when the samples completed).
 type Delays = Arc<Mutex<HashMap<String, (Option<u32>, Instant)>>>;
 
 /// Lane logs (name, lane) aggregated into the errors pane.
@@ -94,9 +94,10 @@ pub struct LiveSource {
     prev_members: Vec<String>, // sorted; to detect pool changes -> auto re-probe
     host_cache: Option<(SystemTime, HostInfo)>, // re-parse host.json only on mtime change
     delays: Delays,
+    last_probe: Arc<Mutex<Option<Instant>>>,
     prober_started: bool,
     probe_interval: Duration,
-    probe_tx: Option<Sender<()>>, // signal the prober to run now
+    probe_tx: Option<SyncSender<()>>, // wake an idle prober without queueing requests
     prev_router_up: bool,         // detect router down->up (reload / net switch)
     last_force: Option<Instant>,  // throttle self-heal re-probes
     last_active_traffic: Option<Instant>, // last tick the escape lane moved bytes (health override)
@@ -166,6 +167,7 @@ impl LiveSource {
             prev_members: Vec::new(),
             host_cache: None,
             delays: Arc::new(Mutex::new(HashMap::new())),
+            last_probe: Arc::new(Mutex::new(None)),
             prober_started: false,
             probe_interval,
             probe_tx: None,
@@ -259,6 +261,7 @@ impl LiveSource {
         }
         self.prober_started = true;
         let delays = Arc::clone(&self.delays);
+        let last_probe = Arc::clone(&self.last_probe);
         let cfg = self.cfg.clone();
         let port = self.clash_port;
         // Probe target: Google's generate_204 (blocked in CN when direct, so it
@@ -266,7 +269,7 @@ impl LiveSource {
         // reachability, matching rowt's auto-select urltest. Override via env.
         let url = std::env::var("ROWT_PING_URL").unwrap_or_else(|_| "https://www.gstatic.com/generate_204".to_string());
         let interval = self.probe_interval;
-        let (tx, rx) = mpsc::channel::<()>();
+        let (tx, rx) = mpsc::sync_channel::<()>(0);
         self.probe_tx = Some(tx);
         std::thread::Builder::new()
             .name("rowt-monitor-prober".into())
@@ -276,21 +279,9 @@ impl LiveSource {
                 // up automatically (immediate first round, then wait).
                 let members = read_escape_members(&cfg);
                 let secret = read_clash_secret(&cfg);
-                let handles: Vec<_> = members
-                    .into_iter()
-                    .map(|tag| {
-                        let (delays, secret, url) = (Arc::clone(&delays), secret.clone(), url.clone());
-                        std::thread::spawn(move || {
-                            let ms = clash_delay(port, secret.as_deref(), &tag, &url, 5000);
-                            if let Ok(mut m) = delays.lock() {
-                                m.insert(tag, (ms, Instant::now()));
-                            }
-                        })
-                    })
-                    .collect();
-                for h in handles {
-                    let _ = h.join();
-                }
+                let finished = probe_round(&members, &delays,
+                    |tag| clash_delay(port, secret.as_deref(), tag, &url, 5000));
+                if let Ok(mut at) = last_probe.lock() { *at = finished; }
                 // recv_timeout returns Ok on a force signal, Err(Timeout) after
                 // the interval — either way we loop and probe again (timer reset).
                 match rx.recv_timeout(interval) {
@@ -510,10 +501,9 @@ impl LiveSource {
     /// we never mislabel unprobed servers as down — the original bug).
     fn servers(&self, state: &HashMap<String, String>, router_up: bool, auto_now: Option<String>) -> Health {
         let selected = state.get("selected").cloned().unwrap_or_default();
-        let total = self.escape_members.len() as u32;
         if !router_up {
-            // Can't probe through a down router; report the pool size only.
-            return Health { total, up: 0, down: 0, active: selected, auto_now: None, chips: Vec::new(), active_ms: None, active_ok: None };
+            // The pool is still useful when the router cannot provide readings.
+            return health_view(&self.escape_members, selected, None, |_| None);
         }
         let map = self.delays.lock().ok();
         // Results stay valid across a full probe interval (plus margin); only
@@ -547,7 +537,7 @@ impl LiveSource {
 ///
 /// The *active* server is the one carrying escape traffic: the pinned tag in
 /// manual mode, urltest's live pick (`auto_now`) in auto mode. It is marked in
-/// the strip — which pins it at the left — and its own probe drives the header's
+/// the strip, and its own probe drives the header's
 /// latency and the LIVE/ERROR dot. Auto with no resolved pick falls back to the
 /// pool: the fastest up server stands in for the latency (it is what urltest
 /// converges on), and the pool is healthy if any member is up.
@@ -562,22 +552,18 @@ fn health_view(members: &[String], selected: String, auto_now: Option<String>, f
             Some(Some(ms)) => {
                 up += 1;
                 // All up servers appear in the strip; the active one is marked.
-                chips.push(Server { name: tag.clone(), ms: Some(ms), active: in_use.as_deref() == Some(tag.as_str()) });
+                chips.push(Server { down: false, name: tag.clone(), ms: Some(ms), active: in_use.as_deref() == Some(tag.as_str()) });
             }
-            Some(None) => down += 1,
-            None => {} // pending first probe — neither up nor down yet
+            Some(None) => {
+                down += 1;
+                chips.push(Server { down: true, name: tag.clone(), ms: None, active: in_use.as_deref() == Some(tag.as_str()) });
+            }
+            None => {
+                chips.push(Server { down: false, name: tag.clone(), ms: None, active: in_use.as_deref() == Some(tag.as_str()) });
+            }
         }
     }
-    // Auto's pick holds the left of the strip even without a probe reading for
-    // it — right after `use auto` restarts the router, or when the prober and
-    // urltest disagree. An empty slot under "auto on" would read as broken; the
-    // latency shows `—` until a probe lands.
-    if let (true, Some(pick)) = (auto, auto_now.as_deref()) {
-        if !chips.iter().any(|c| c.name == pick) {
-            chips.push(Server { name: pick.to_string(), ms: None, active: true });
-        }
-    }
-    // Active first, then the rest by latency (a missing reading last).
+    // Keep the source's active-first order; the UI sorts by health and latency.
     chips.sort_by_key(|c| (!c.active, c.ms.is_none(), c.ms));
 
     let probed = |up: u32, down: u32| if up > 0 { Some(true) } else if down > 0 { Some(false) } else { None };
@@ -633,11 +619,8 @@ impl Source for LiveSource {
         crate::metrics::history_map(&conn, now, spans, lane_s).unwrap_or_default()
     }
 
-    fn force_probe(&self) {
-        // Wake the prober; ignore if it hasn't started or the channel is gone.
-        if let Some(tx) = &self.probe_tx {
-            let _ = tx.send(());
-        }
+    fn force_probe(&self) -> Result<(), &'static str> {
+        request_probe(self.probe_tx.as_ref())
     }
 
     fn use_server(&self, tag: &str) {
@@ -784,7 +767,7 @@ impl Source for LiveSource {
             // Pool changed (server add/rm, sub update) -> probe now rather than
             // waiting up to the full interval.
             if pool_changed {
-                self.force_probe();
+                let _ = self.force_probe();
             }
         }
 
@@ -829,7 +812,7 @@ impl Source for LiveSource {
             let recovered = !self.prev_router_up;
             let since = self.last_force.map(|t| t.elapsed());
             if should_force_probe(probe_failed, traffic_recent, recovered, since) {
-                self.force_probe();
+                let _ = self.force_probe();
                 self.last_force = Some(Instant::now());
             }
         }
@@ -912,6 +895,7 @@ impl Source for LiveSource {
             servers_total: h.total,
             servers_up: h.up,
             servers_down: h.down,
+            probe_age: self.last_probe.lock().ok().and_then(|at| at.map(|t| t.elapsed().as_secs())),
             active_server: h.active,
             auto_now: h.auto_now,
             chips: h.chips,
@@ -920,6 +904,38 @@ impl Source for LiveSource {
 }
 
 // ---------------- helpers ----------------
+
+fn request_probe(tx: Option<&SyncSender<()>>) -> Result<(), &'static str> {
+    // The zero-capacity channel only accepts a request while the worker is
+    // waiting between rounds; a busy round cannot accumulate another one.
+    tx.ok_or("probe unavailable")?.try_send(()).map_err(|e| match e {
+        mpsc::TrySendError::Full(()) => "previous probe still running…",
+        mpsc::TrySendError::Disconnected(()) => "probe unavailable",
+    })
+}
+
+fn probe_round(members: &[String], delays: &Delays, probe: impl Fn(&str) -> Option<u32> + Sync) -> Option<Instant> {
+    let next = AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..members.len().min(10) {
+            scope.spawn(|| {
+                while let Some(tag) = members.get(next.fetch_add(1, Ordering::Relaxed)) {
+                    let mut samples: Vec<_> = (0..3).filter_map(|_| probe(tag)).collect();
+                    samples.sort_unstable();
+                    let ms = match samples.as_slice() {
+                        [] => None,
+                        [a, b] => Some(((*a as u64 + *b as u64) / 2) as u32),
+                        values => Some(values[values.len() / 2]),
+                    };
+                    if let Ok(mut m) = delays.lock() {
+                        m.insert(tag.clone(), (ms, Instant::now()));
+                    }
+                }
+            });
+        }
+    });
+    (!members.is_empty()).then(Instant::now)
+}
 
 /// Run one clash delay test for a server through the tunnel (like `rowt ping`):
 /// `GET /proxies/{tag}/delay`. Returns the RTT in ms, or None on failure.
@@ -1371,6 +1387,137 @@ mod tests {
     use super::*;
 
     #[test]
+    fn probe_requests_while_the_worker_is_busy_are_not_queued() {
+        let (tx, rx) = mpsc::sync_channel(0);
+        for _ in 0..5 {
+            assert_eq!(request_probe(Some(&tx)), Err("previous probe still running…"));
+        }
+        assert_eq!(rx.try_recv(), Err(mpsc::TryRecvError::Empty));
+    }
+
+    #[test]
+    fn unavailable_prober_does_not_claim_to_start_a_round() {
+        assert_eq!(request_probe(None), Err("probe unavailable"));
+        let (tx, rx) = mpsc::sync_channel(0);
+        drop(rx);
+        assert_eq!(request_probe(Some(&tx)), Err("probe unavailable"));
+    }
+
+    #[test]
+    fn idle_prober_accepts_one_request_then_ignores_repeated_requests() {
+        let (tx, rx) = mpsc::sync_channel(0);
+        let (finish_tx, finish_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            finish_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert_eq!(rx.try_recv(), Err(mpsc::TryRecvError::Empty));
+        });
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while request_probe(Some(&tx)).is_err() {
+            assert!(Instant::now() < deadline, "idle worker did not accept a request");
+            std::thread::yield_now();
+        }
+        for _ in 0..5 {
+            assert_eq!(request_probe(Some(&tx)), Err("previous probe still running…"));
+        }
+        finish_tx.send(()).unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn probe_round_samples_three_times_and_uses_the_successful_median() {
+        for (samples, expected) in [
+            ([Some(900), Some(100), Some(200)], Some(200)),
+            ([None, Some(100), Some(200)], Some(150)),
+            ([None, Some(100), None], Some(100)),
+            ([None, None, None], None),
+        ] {
+            let delays = Arc::new(Mutex::new(HashMap::new()));
+            let calls = AtomicUsize::new(0);
+            let before = Instant::now();
+            let finished = probe_round(&["server".into()], &delays,
+                |_| samples[calls.fetch_add(1, Ordering::SeqCst)]);
+            assert_eq!(calls.load(Ordering::SeqCst), 3);
+            let result = delays.lock().unwrap()["server"];
+            assert_eq!(result.0, expected);
+            assert!(result.1 >= before);
+            assert!(finished.is_some_and(|at| at >= result.1), "age starts after the round completes");
+        }
+    }
+
+    #[test]
+    fn probe_round_limits_concurrent_nodes_to_ten_and_covers_the_pool() {
+        let delays = Arc::new(Mutex::new(HashMap::new()));
+        let members: Vec<_> = (0..20).map(|i| format!("server-{i}")).collect();
+        let calls = Mutex::new(HashMap::<String, usize>::new());
+        let active = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let (started_tx, started_rx) = mpsc::channel();
+        let gate = (Mutex::new(false), std::sync::Condvar::new());
+        std::thread::scope(|scope| {
+            scope.spawn(|| probe_round(&members, &delays, |tag| {
+                let n = {
+                    let mut calls = calls.lock().unwrap();
+                    let count = calls.entry(tag.to_string()).or_default();
+                    *count += 1;
+                    *count
+                };
+                let running = active.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(running, Ordering::SeqCst);
+                if n == 1 {
+                    started_tx.send(()).unwrap();
+                    drop(gate.1.wait_while(gate.0.lock().unwrap(), |open| !*open).unwrap());
+                }
+                std::thread::sleep(Duration::from_millis(2));
+                active.fetch_sub(1, Ordering::SeqCst);
+                Some(100)
+            }));
+            for _ in 0..10 {
+                if started_rx.recv_timeout(Duration::from_secs(1)).is_err() { break; }
+            }
+            *gate.0.lock().unwrap() = true;
+            gate.1.notify_all();
+        });
+        assert_eq!(peak.load(Ordering::SeqCst), 10);
+        assert_eq!(delays.lock().unwrap().len(), members.len());
+        assert!(calls.lock().unwrap().values().all(|&n| n == 3));
+    }
+
+    #[test]
+    fn completed_nodes_are_published_and_replaced_without_waiting_for_slow_nodes() {
+        let delays = Arc::new(Mutex::new(HashMap::new()));
+        let members: Vec<_> = (0..11).map(|i| format!("server-{i}")).collect();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        let (started_tx, started_rx) = mpsc::channel();
+        let slow_calls = AtomicUsize::new(0);
+        let next_started = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| probe_round(&members, &delays, |tag| {
+                if tag == "server-0" && slow_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    release_rx.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+                if tag == "server-10" { started_tx.send(()).unwrap(); }
+                Some(100)
+            }));
+            let next_started = started_rx.recv_timeout(Duration::from_secs(1)).is_ok();
+            let early_results = delays.lock().unwrap().clone();
+            release_tx.send(()).unwrap();
+            worker.join().unwrap();
+            assert!(!early_results.contains_key("server-0"), "slow node is still running");
+            assert!(!early_results.is_empty(), "finished nodes are visible before the round ends");
+            next_started
+        });
+        assert!(next_started, "node 11 must start while an earlier node is still running");
+        assert_eq!(delays.lock().unwrap().len(), 11);
+    }
+
+    #[test]
+    fn empty_probe_round_has_no_completion_time() {
+        let delays = Arc::new(Mutex::new(HashMap::new()));
+        assert!(probe_round(&[], &delays, |_| panic!("empty pool")).is_none());
+    }
+
+    #[test]
     fn etime_parse() {
         assert_eq!(parse_etime("05:10"), Some(310));
         assert_eq!(parse_etime("03:15:20"), Some(3 * 3600 + 15 * 60 + 20));
@@ -1458,12 +1605,35 @@ mod auto_selection_tests {
     }
 
     #[test]
+    fn all_servers_are_visible_before_any_probe_completes() {
+        for (selected, pick) in [("SG-1", None), (AUTO_GROUP, None), (AUTO_GROUP, Some("US-1".into()))] {
+            let h = health_view(&pool(), selected.into(), pick.clone(), |_| None);
+            assert_eq!((h.total, h.up, h.down), (3, 0, 0));
+            assert_eq!(h.chips.len(), 3);
+            assert!(h.chips.iter().all(|c| c.ms.is_none() && !c.down));
+            let active = if selected == AUTO_GROUP { pick.as_deref() } else { Some(selected) };
+            assert_eq!(h.chips.iter().find(|c| c.active).map(|c| c.name.as_str()), active);
+        }
+    }
+
+    #[test]
+    fn partial_probe_results_keep_pending_servers_in_the_list() {
+        let h = health_view(&pool(), "SG-1".into(), None,
+            verdicts(&[("JP-1", Some(40)), ("US-1", None)]));
+        assert_eq!((h.total, h.up, h.down), (3, 1, 1));
+        assert_eq!(h.chips.len(), 3);
+        let pending = h.chips.iter().find(|c| c.name == "SG-1").unwrap();
+        assert!(pending.active && !pending.down && pending.ms.is_none());
+    }
+
+    #[test]
     fn manual_mode_marks_the_pinned_server() {
         let h = health_view(&pool(), "SG-1".into(), None, verdicts(&[("JP-1", Some(40)), ("SG-1", Some(80)), ("US-1", None)]));
         let chips: Vec<_> = h.chips.iter().map(|c| (c.name.as_str(), c.active)).collect();
-        assert_eq!(chips, vec![("SG-1", true), ("JP-1", false)], "pinned first, down servers are not chips");
+        assert_eq!(chips, vec![("SG-1", true), ("JP-1", false), ("US-1", false)], "down servers remain visible");
         assert_eq!((h.active_ms, h.active_ok), (Some(80), Some(true)));
         assert_eq!((h.total, h.up, h.down), (3, 2, 1));
+        assert!(h.chips.iter().find(|c| c.name == "US-1").unwrap().down);
     }
 
     #[test]
@@ -1480,6 +1650,7 @@ mod auto_selection_tests {
         let h = health_view(&pool(), AUTO_GROUP.into(), Some("US-1".into()), verdicts(&[("JP-1", Some(40))]));
         assert_eq!((h.chips[0].name.as_str(), h.chips[0].ms, h.chips[0].active), ("US-1", None, true), "pinned, drawn with —");
         assert_eq!((h.active_ms, h.active_ok), (None, None), "pending: no alarm");
+        assert!(!h.chips[0].down);
     }
 
     #[test]
@@ -1487,6 +1658,17 @@ mod auto_selection_tests {
         let h = health_view(&pool(), AUTO_GROUP.into(), Some("US-1".into()), verdicts(&[("JP-1", Some(40)), ("US-1", None)]));
         assert_eq!((h.chips[0].name.as_str(), h.chips[0].ms, h.chips[0].active), ("US-1", None, true));
         assert_eq!(h.active_ok, Some(false));
+        assert!(h.chips[0].down);
+    }
+
+    #[test]
+    fn all_down_servers_remain_visible_including_the_manual_pin() {
+        let h = health_view(&pool(), "SG-1".into(), None,
+            verdicts(&[("JP-1", None), ("SG-1", None), ("US-1", None)]));
+        assert_eq!((h.total, h.up, h.down), (3, 0, 3));
+        assert_eq!(h.chips.len(), 3);
+        assert!(h.chips.iter().all(|c| c.down && c.ms.is_none()));
+        assert!(h.chips.iter().any(|c| c.name == "SG-1" && c.active));
     }
 
     #[test]

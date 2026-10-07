@@ -1,0 +1,41 @@
+╭──────────────────────────────────────────────────────────────────────────────────────────────╮
+│   _ __ _____      __| |_   MONITOR                                            uptime  3h 15m │
+│  | '__/ _ \ \ /\ / /| __|  ● LIVE  mode      host · en0     server  JP-Tokyo 42 ms           │
+│  | | | (_) \ V  V / | |_           sys proxy on             router  running · 3%             │
+│  |_|  \___/ \_/\_/   \__|          collector on             watch   on                       │
+│                                                                                              │
+├─┤ live connections ├─────────────────────────────────┬─┤ errors & blocked ├──────────────────┤
+│ all           27     426.4M      1.9G                │ aggregated over       5m [10m] 1h 24h │
+│ escape        18     417.1M      1.3G                │ transient    12 · 1 dom               │
+│ corp           5       8.1M    414.6M                │ persistent   50 · 5 dom               │
+│ direct         4       1.2M    176.9M                │ blocked      57 · 5 dom               │
+├──────────────────────────────────────────────────────┼───────────────────────────────────────┤
+│ LANE   HOST:POR#         UP      DOWN  RULE          │ COUNT   TYPE        DOMAIN            │
+│ escape i.ytim… 5       8.0M    352.2M  domain_suffix │    15   timeout     vpn.corp.example.…│
+│ escape raw.gi… 2       915K     96.8M  domain_suffix │    13   blocked     googlesyndication…│
+│ escape fonts.… 3      12.5M     43.1M  domain_suffix │    13   blocked     doubleclick.net   │
+│ escape www.yo… 5      18.2M    427.7M  domain_suffix │    12   dns         gateway.icloud.com│
+│ escape api.an… 2     376.1M    414.4M  domain_suffix │    11   timeout     dl.google.com     │
+│ escape en.wik… 1       1.4M      1.8M  domain_suffix │    11   blocked     criteo.com        │
+│ corp   jira.c… 5       8.1M    414.6M  domain_suffix │    10   blocked     adnxs.com         │
+│ direct mirror… 1       509K    128.6M  final         │    10   blocked     google-analytics.…│
+│ direct dl.goo… 1       104K     47.8M  final         │    10   reset       x.com             │
+│ direct gatewa… 2       610K      519K  final         │     8   timeout     rr5.googlevideo.c…│
+│ escape netfli… 0         0B        0B                │                                       │
+│ corp   backup… 0         0B        0B                │                                       │
+│ escape mail.g… 0         0B        0B                │                                       │
+│                                                      │                                       │
+│                                                      │                                       │
+│                                                      │                                       │
+│                                                      │                                       │
+│                                                      │                                       │
+│                                                      │                                       │
+│                                                      │                                       │
+│                                                      │                                       │
+│                                                      │                                       │
+│                                                      │                                       │
+├──────────────────────────────────────────────────────┴─┤ server health · probe — ├───────────┤
+│ auto off   10 servers · 9 up · 1 down                                                        │
+│ ▶ JP-Tokyo  42 ms │ NL-Ams  68 ms   KR-Seoul  72 ms   SG-1  81 ms   HK-1  82 ms              │
+│ TW-Taipei 110 ms   US-LA 151 ms   JP-Osaka 175 ms   DE-Frankfurt 195 ms                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────╯

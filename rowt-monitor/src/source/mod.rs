@@ -37,9 +37,8 @@ pub trait Source {
         History::new()
     }
 
-    /// Force an immediate server re-probe (and reset the periodic timer). No-op
-    /// for sources without an active prober (e.g. fixtures).
-    fn force_probe(&self) {}
+    /// Request an immediate server re-probe, or explain why it cannot start.
+    fn force_probe(&self) -> Result<(), &'static str> { Err("probe unavailable") }
 
     // ---- control layer (CONTROLS.md) — default no-ops so fixtures stay inert.
     // Each spawns the corresponding `rowt` command off the UI thread and reports

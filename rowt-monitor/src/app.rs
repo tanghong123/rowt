@@ -220,6 +220,23 @@ pub struct Search {
     pub changed_at: Option<Instant>, // when the committed pattern last changed (10s degrade)
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ServerMode {
+    #[default]
+    Scroll,
+    List,
+}
+
+impl ServerMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "scroll" => Some(Self::Scroll),
+            "list" => Some(Self::List),
+            _ => None,
+        }
+    }
+}
+
 /// One interaction, decoded from a key or mouse event (see `input.rs`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Action {
@@ -264,6 +281,8 @@ pub enum Action {
     FocusErr,
     ScrollConn(i8),
     ScrollErr(i8),
+    PageServers(i8),
+    ToggleServers,
     SelectConn(usize), // absolute index in the filtered view
     SelectErr(usize),
     SelectServer(usize), // click a server chip: focus the strip + select it in place
@@ -301,24 +320,18 @@ pub struct App {
     pub conn_key: Option<String>,
     pub err_key: Option<String>,
 
-    // Server strip (§5.4): `None` = marqueeing, no selection. Set on first ←/→.
+    // Selection indexes the snapshot in either server display mode.
     pub strip_sel: Option<usize>,
-    // Frozen scroll position of the strip's ring, in cells (matches the marquee's
-    // own offset). Captured at the exact instant the first ←/→ freezes the scroll
-    // — so the display doesn't jump; a partial chip may sit before the selection —
-    // then nudged just enough to keep the selection visible as it moves.
+    pub server_mode: ServerMode,
     pub strip_off: usize,
-    pub strip_w: u16,          // the ring's viewport width, fed back from the renderer
-    pub strip_render_off: usize, // the marquee offset the renderer last drew (freeze to it → no jump)
-    // The chip the renderer pinned at the strip's left edge (the active server) —
-    // it sits *outside* the scrolling ring, so it's always visible and never needs
-    // revealing. `None` = nothing pinned (pool fits, or too narrow to pin).
+    pub strip_render_off: usize,
     pub strip_pin: Option<usize>,
-    // Server-strip marquee runs off a resettable baseline (offset at t0), not raw
-    // elapsed time, so unfreezing resumes from the frozen offset instead of jumping
-    // to where a free-running clock would be.
     pub marquee_off0: usize,
     pub marquee_t0: Instant,
+    pub strip_reveal: bool,
+    pub strip_page: usize,
+    pub strip_w: u16,
+    pub strip_rows: usize,
 
     // Control layer: the armed-but-uncommitted lane edit, and the batched-reload
     // deadline (7s after the last committed edit).
@@ -382,12 +395,16 @@ impl App {
             conn_key: None,
             err_key: None,
             strip_sel: None,
+            server_mode: ServerMode::Scroll,
             strip_off: 0,
-            strip_w: 0,
             strip_render_off: 0,
             strip_pin: None,
             marquee_off0: 0,
             marquee_t0: Instant::now(),
+            strip_reveal: false,
+            strip_page: 0,
+            strip_w: u16::MAX,
+            strip_rows: 2,
             armed: None,
             pending_reload: None,
             proxy_optimistic: None,
@@ -416,7 +433,7 @@ impl App {
     /// Data tick: re-poll unless paused.
     pub fn tick(&mut self) {
         if !self.paused {
-            self.snap = self.source.poll(self.window, self.lane_filter);
+            self.repoll();
             self.refetch_history();
             self.resolve_keys();
             self.clamp_selection();
@@ -467,7 +484,7 @@ impl App {
         self.expire_idle_selection(Instant::now());
     }
 
-    /// Drop any active selection (row lock / frozen strip) after
+    /// Drop any active selection (domain or server) after
     /// `SELECTION_IDLE_TIMEOUT` of input inactivity, so the panes resume live
     /// scrolling/updating. `now` is a parameter for testability.
     pub fn expire_idle_selection(&mut self, now: Instant) {
@@ -475,7 +492,7 @@ impl App {
         if has_selection && now.duration_since(self.last_input) >= SELECTION_IDLE_TIMEOUT {
             self.conn_key = None;
             self.err_key = None;
-            self.clear_strip(); // resumes the marquee from the frozen offset
+            self.clear_strip();
         }
     }
 
@@ -508,7 +525,9 @@ impl App {
     /// Re-poll now with the current window + lane filter (immediate feedback on
     /// a window/lane change; cheap — errors re-aggregate in memory).
     fn repoll(&mut self) {
+        let selected = self.strip_sel.and_then(|i| self.snap.chips.get(i)).map(|c| c.name.clone());
         self.snap = self.source.poll(self.window, self.lane_filter);
+        self.strip_sel = selected.and_then(|name| self.snap.chips.iter().position(|c| c.name == name));
     }
 
     /// Show a transient footer message (auto-clears — see `draw_footer`).
@@ -550,9 +569,19 @@ impl App {
             Quit => self.should_quit = true,
             ToggleHelp => self.help = !self.help,
             TogglePause => self.paused = !self.paused,
+            ToggleServers => {
+                self.server_mode = match self.server_mode {
+                    ServerMode::Scroll => ServerMode::List,
+                    ServerMode::List => ServerMode::Scroll,
+                };
+                self.strip_reveal = true;
+            },
             ForceProbe => {
-                self.source.force_probe();
-                self.notify("re-probing servers…".to_string());
+                let message = match self.source.force_probe() {
+                    Ok(()) => "re-probing servers…",
+                    Err(message) => message,
+                };
+                self.notify(message.to_string());
             }
             Route(lane) => self.arm(Target::Lane(lane), false),
             Unroute => self.arm(Target::Direct, false),
@@ -624,6 +653,12 @@ impl App {
             SelectErr(i) => {
                 self.set_focus(Focus::Err);
                 self.set_err_index(i.min(self.err_len().saturating_sub(1)));
+            }
+            PageServers(d) => {
+                if self.server_mode == ServerMode::List {
+                    self.set_focus(Focus::Health);
+                    self.page_servers(d as i32);
+                }
             }
             SelectServer(i) => self.select_server(i),
             SearchOpen => self.search_open(),
@@ -780,16 +815,13 @@ impl App {
         self.err_key = None;
     }
 
-    /// Click a server chip: focus the strip and select that chip *in place* — the
-    /// strip freezes exactly where it is (the clicked chip doesn't move).
+    /// Click a server in place, freezing the marquee when in scroll mode.
     fn select_server(&mut self, i: usize) {
         if i >= self.snap.chips.len() {
             return;
         }
         self.set_focus(Focus::Health);
-        // Freeze the ring at the exact rendered offset only if it wasn't already
-        // frozen, so re-clicking another visible chip keeps the display put.
-        if self.strip_sel.is_none() {
+        if self.server_mode == ServerMode::Scroll && self.strip_sel.is_none() {
             let (_, _, span) = self.strip_layout();
             self.strip_off = self.strip_render_off % span.max(1);
         }
@@ -812,10 +844,6 @@ impl App {
         self.focus = f;
     }
 
-    /// Clear the server-strip selection and **resume the marquee from the frozen
-    /// offset** — reset the marquee baseline to the current position and restart
-    /// its clock, so unfreezing continues scrolling from there instead of jumping
-    /// to where a free-running clock would be.
     fn clear_strip(&mut self) {
         if self.strip_sel.take().is_some() {
             self.marquee_off0 = self.strip_off;
@@ -998,6 +1026,10 @@ impl App {
         let Some(s) = self.strip_sel.and_then(|i| self.snap.chips.get(i)).cloned() else {
             return;
         };
+        if s.down {
+            self.notify(format!("{} is down · cannot use", s.name));
+            return;
+        }
         // In auto mode the active chip is urltest's pick, not a choice: `u` on it —
         // or on any chip — pins that server, which is the other way auto turns
         // off. Only a server you pinned yourself is "already active".
@@ -1084,18 +1116,93 @@ impl App {
         self.notify(format!("system proxy → {target}"));
     }
 
-    /// Take the server strip's geometry back from the renderer after a draw. All
-    /// three values describe what was *actually* drawn — the ring's viewport width,
-    /// the marquee offset it was drawn at, and which chip (if any) was pinned
-    /// outside the ring — so freezing and scrolling mirror the screen exactly.
-    /// Always feed them together; feeding one without the others desyncs the mirror.
     pub fn feed_strip(&mut self, hit: &crate::ui::Hit) {
+        // An undersized frame has no server geometry; keep the last real page
+        // so restoring the terminal doesn't reset navigation.
+        if hit.strip_rows == 0 {
+            return;
+        }
         self.strip_w = hit.strip_w;
+        self.strip_rows = hit.strip_rows.max(1);
+        self.strip_page = hit.strip_page;
         self.strip_render_off = hit.strip_render_off;
         self.strip_pin = hit.strip_pin;
+        if self.server_mode == ServerMode::Scroll && self.strip_sel.is_some() {
+            self.strip_off = hit.strip_render_off;
+        }
+        self.strip_reveal = false;
+    }
+
+    pub fn server_order(&self) -> Vec<usize> {
+        let mut order: Vec<_> = (0..self.snap.chips.len()).collect();
+        order.sort_by(|&a, &b| {
+            let (a, b) = (&self.snap.chips[a], &self.snap.chips[b]);
+            (!a.active, a.down, a.ms.is_none(), a.ms, &a.name)
+                .cmp(&(!b.active, b.down, b.ms.is_none(), b.ms, &b.name))
+        });
+        order
+    }
+
+    pub fn server_width(&self, i: usize, width: u16) -> u16 {
+        let c = &self.snap.chips[i];
+        let latency = if c.down { "down".to_string() }
+            else { c.ms.map_or_else(|| "—".to_string(), |v| format!("{v:>3} ms")) };
+        let label = format!("{}{} {latency}", if c.active { "▶ " } else { "" }, c.name);
+        ratatui::text::Span::raw(label).width().min(width as usize) as u16
+    }
+
+    /// Pack whole entries into rows; oversized names are clipped by the renderer.
+    pub fn server_rows(&self, width: u16) -> Vec<Vec<usize>> {
+        let mut rows = vec![Vec::new()];
+        let mut used = 0u16;
+        for i in self.server_order() {
+            let w = self.server_width(i, width);
+            let gap = if used > 0 { 3 } else { 0 };
+            if used as usize + gap + w as usize > width as usize {
+                rows.push(Vec::new());
+                used = 0;
+            }
+            if used > 0 { used += 3; }
+            rows.last_mut().unwrap().push(i);
+            used += w;
+        }
+        rows
+    }
+
+    pub fn server_page(&self, rows: &[Vec<usize>], height: usize) -> usize {
+        let selected_row = self.strip_sel.and_then(|i| rows.iter().position(|r| r.contains(&i)));
+        selected_row.map_or(self.strip_page, |r| r / height.max(1))
+            .min(rows.len().saturating_sub(1) / height.max(1))
+    }
+
+    fn page_servers(&mut self, d: i32) {
+        let rows = self.server_rows(self.strip_w);
+        let page = self.server_page(&rows, self.strip_rows);
+        let last = rows.len().saturating_sub(1) / self.strip_rows.max(1);
+        let next = (page as i32 + d).clamp(0, last as i32) as usize;
+        if next != page {
+            self.strip_sel = None;
+            self.strip_page = next;
+        }
     }
 
     fn strip_move(&mut self, d: i32) {
+        if self.server_mode == ServerMode::Scroll {
+            self.scroll_strip_move(d);
+            return;
+        }
+        let order = self.server_order();
+        if order.is_empty() { return; }
+        self.strip_sel = Some(match self.strip_sel.and_then(|i| order.iter().position(|&j| i == j)) {
+            Some(pos) => order[(pos as i32 + d).rem_euclid(order.len() as i32) as usize],
+            None => {
+                let rows = self.server_rows(self.strip_w);
+                rows[self.server_page(&rows, self.strip_rows) * self.strip_rows.max(1)][0]
+            }
+        });
+    }
+
+    fn scroll_strip_move(&mut self, d: i32) {
         let n = self.snap.chips.len();
         if n == 0 {
             return;
@@ -1120,11 +1227,14 @@ impl App {
         }
     }
 
-    /// Cell width of server chip `i`, matching `draw_chips`'s cell buffer exactly
-    /// (char counts: name + ` ` + `NNN ms`, plus `▶ ` for the active one).
+    /// Cell width of server chip `i`, matching the scrolling cell buffer.
     fn chip_w(&self, i: usize) -> u16 {
         match self.snap.chips.get(i) {
-            Some(c) => c.name.chars().count() as u16 + 7 + if c.active { 2 } else { 0 },
+            Some(c) => {
+                let latency = if c.down { "down".to_string() }
+                    else { c.ms.map_or_else(|| "—".to_string(), |v| format!("{v:>3} ms")) };
+                (c.name.chars().count() + 1 + latency.chars().count() + if c.active { 2 } else { 0 }) as u16
+            }
             None => 0,
         }
     }
@@ -1339,11 +1449,9 @@ impl App {
 
     fn move_sel(&mut self, d: i32) {
         match self.focus {
-            // ↑ leaves the server strip back to the connections pane (§5.3).
             Focus::Health => {
-                if d < 0 {
-                    self.set_focus(Focus::Conn);
-                }
+                if self.server_mode == ServerMode::List { self.page_servers(d); }
+                else if d < 0 { self.set_focus(Focus::Conn); }
             }
             Focus::Conn => {
                 let len = self.conn_len();
@@ -1399,7 +1507,7 @@ impl App {
         }
     }
 
-    /// Move focus to the server strip without selecting a chip (keeps marqueeing).
+    /// Move focus to the server list without selecting a server.
     fn enter_health(&mut self) {
         self.set_focus(Focus::Health);
         self.strip_sel = None;

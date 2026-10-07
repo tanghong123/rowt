@@ -19,7 +19,12 @@ use ratatui::Terminal;
 /// Render one still-fixture frame at WxH to plain text (glyphs only). Used by
 /// `--render` and the golden-diff tests.
 pub fn render_text(w: u16, h: u16) -> String {
-    let a = app::App::new(Box::new(source::FixtureSource::still()));
+    render_text_with_servers(w, h, app::ServerMode::Scroll)
+}
+
+pub fn render_text_with_servers(w: u16, h: u16, mode: app::ServerMode) -> String {
+    let mut a = app::App::new(Box::new(source::FixtureSource::still()));
+    a.server_mode = mode;
     render_app_text(&a, w, h)
 }
 
@@ -27,7 +32,12 @@ pub fn render_text(w: u16, h: u16) -> String {
 /// reset at each line end). Used by `--render-ansi` to regenerate the colored
 /// design captures; not consumed by the golden-diff tests.
 pub fn render_ansi(w: u16, h: u16) -> String {
-    let a = app::App::new(Box::new(source::FixtureSource::still()));
+    render_ansi_with_servers(w, h, app::ServerMode::Scroll)
+}
+
+pub fn render_ansi_with_servers(w: u16, h: u16, mode: app::ServerMode) -> String {
+    let mut a = app::App::new(Box::new(source::FixtureSource::still()));
+    a.server_mode = mode;
     let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
     term.draw(|f| {
         let area = f.area();

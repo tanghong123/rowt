@@ -4,6 +4,7 @@
 //!   rowt-monitor            run the live TUI
 //!   rowt-monitor --render WxH   print one fixture frame as plain text (for
 //!                               diffing against the golden renders) and exit
+//!   rowt-monitor --servers list   start with the paged server list
 //!   rowt-monitor --fixtures     force the fixture source (offline demo)
 //!   rowt-monitor --theme T      dark | light | auto (default auto)
 //!   rowt-monitor --version / --help
@@ -19,10 +20,10 @@ use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::layout::Rect;
 use ratatui::Terminal;
 
-use rowt_monitor::app::App;
+use rowt_monitor::app::{App, ServerMode};
 use rowt_monitor::source::{FixtureSource, LiveSource, Source};
 use rowt_monitor::theme::{self, ThemeArg};
-use rowt_monitor::{input, render_text, ui};
+use rowt_monitor::{input, render_text_with_servers, ui};
 
 const DATA_TICK: Duration = Duration::from_secs(2);
 // Redraw cadence for the pulse / marquee. ~14 fps keeps the breathing dot smooth
@@ -32,6 +33,7 @@ const ANIM_TICK: Duration = Duration::from_millis(70);
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut force_fixtures = false;
+    let mut server_mode = ServerMode::Scroll;
     let mut render: Option<String> = None;
     let mut render_ansi_spec: Option<String> = None;
     // `--theme` wins over `ROWT_MONITOR_THEME` (set it in a profile to pin a
@@ -55,6 +57,14 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             "--fixtures" | "--demo" => force_fixtures = true,
+            "--servers" => {
+                i += 1;
+                let value = args.get(i).map(String::as_str).unwrap_or("");
+                server_mode = ServerMode::parse(value).unwrap_or_else(|| {
+                    eprintln!("rowt-monitor: bad --servers '{value}', want scroll|list");
+                    std::process::exit(2);
+                });
+            }
             "--theme" => {
                 i += 1;
                 let v = args.get(i).cloned().unwrap_or_default();
@@ -93,11 +103,11 @@ fn main() -> Result<()> {
         theme::set(theme::resolve(theme_arg));
     }
     if let Some(spec) = render {
-        return render_frame(&spec);
+        return render_frame(&spec, server_mode);
     }
     if let Some(spec) = render_ansi_spec {
         let (w, h) = parse_wh(&spec).ok_or_else(|| anyhow::anyhow!("bad --render-ansi spec '{}', want WxH", spec))?;
-        print!("{}", rowt_monitor::render_ansi(w, h));
+        print!("{}", rowt_monitor::render_ansi_with_servers(w, h, server_mode));
         return Ok(());
     }
 
@@ -106,24 +116,27 @@ fn main() -> Result<()> {
     } else {
         Box::new(LiveSource::new())
     };
-    run(App::new(source), theme_arg)
+    let mut app = App::new(source);
+    app.server_mode = server_mode;
+    run(app, theme_arg)
 }
 
 fn print_help() {
     println!(
         "rowt monitor — read-only proxy observer\n\n\
-         USAGE:\n  rowt-monitor [--theme dark|light|auto] [--fixtures] [--render WxH] [--render-ansi WxH] [--version]\n\n\
+         USAGE:\n  rowt-monitor [--theme dark|light|auto] [--fixtures] [--render WxH] [--render-ansi WxH] [--servers scroll|list] [--version]\n\n\
+         SERVERS: scroll (default) keeps a single scrolling row; list wraps across up to two rows. g toggles modes.\n\n\
          THEME: --theme auto (default) reads the terminal's background — COLORFGBG, then an\n\
          OSC 11 query — and picks the light palette only for a near-paper background, else dark.\n\
          Pin it with --theme dark|light, or ROWT_MONITOR_THEME.\n\n\
-         KEYS: ↑↓/jk move · ←→/hl pane · Tab focus · v flip · s span · f lane · / search · w window · y copy · p pause · ? help · q quit"
+         KEYS: ↑↓/jk move · ←→/hl pane · Tab focus · v flip · s span · f lane · / search · w window · y copy · p pause · g servers · ? help · q quit"
     );
 }
 
 /// Render one fixture frame at WxH to plain text (glyphs only) and print it.
-fn render_frame(spec: &str) -> Result<()> {
+fn render_frame(spec: &str, server_mode: ServerMode) -> Result<()> {
     let (w, h) = parse_wh(spec).ok_or_else(|| anyhow::anyhow!("bad --render spec '{}', want WxH", spec))?;
-    print!("{}", render_text(w, h));
+    print!("{}", render_text_with_servers(w, h, server_mode));
     Ok(())
 }
 

@@ -355,6 +355,12 @@ would mislabel every server "down". Instead a **background thread** actively run
 clash delay tests through the tunnel (like `rowt ping`) and writes results into a
 shared map; the UI reads the latest.
 
+- **Sampling:** each node is measured three times sequentially, with at most
+  10 workers. Each worker publishes a completed node and takes the next;
+  results appear on the next UI data tick. Latency is the median of successful
+  samples (the mean for two, the value for one); all failing means down.
+  Each request has a 5-second timeout. `probe 2m ago` measures time since the
+  last full round completed; `probe —` means no round has completed yet.
 - **Target:** `https://www.gstatic.com/generate_204` (overridable via
   `ROWT_PING_URL`). Google's endpoint is blocked when direct, so it 204s only
   *through* a working escape — this tests real escape reachability, matching
@@ -363,9 +369,11 @@ shared map; the UI reads the latest.
 - **Cadence:** every 10 min (`ROWT_MONITOR_PROBE_INTERVAL` secs); first round
   runs immediately. The thread re-reads the pool + secret from config each round,
   so `server add` / `sub update` / a rotated secret are picked up without a
-  restart. It waits on a channel with the interval as a timeout, so a **force
-  signal** (below) wakes it instantly.
-- **Force / self-heal.** `r` forces a re-probe; a pool-membership change forces
+  restart. Between rounds it waits on a zero-capacity channel with the interval
+  as a timeout, so an accepted **force signal** (below) wakes it instantly.
+  Requests during a round are ignored, never queued; `r` reports
+  `previous probe still running…` without resetting the round or its timestamp.
+- **Force / self-heal.** When idle, `r` forces a re-probe; a pool-membership change requests
   one automatically; and — key for network switches — the monitor forces a
   re-probe when the **router transitions down→up** (reload / Wi-Fi change) and
   keeps re-probing ~every 60s while the active server is failing, so a stale
@@ -375,9 +383,10 @@ shared map; the UI reads the latest.
   is treated as *pending* (prober likely dead), never as "down". (Was a fixed
   90s, which emptied the strip between 10-min probes.)
 - **Display.** `up` = last probe succeeded, `down` = tested and failed, pending =
-  not yet probed (shown as `probing…` while the first round runs). All up servers
-  appear in the strip, the active one marked `▶` and sorted first (and pinned at
-  the left edge once the strip marquees, §6); it's not repeated in the stats line
+  no fresh reading (shown as `—`, counted as neither up nor down). All pool
+  members appear immediately, including before the first probe and while the
+  router is down, the active one first and marked `▶` when known (§6);
+  it's not repeated in the stats line
   (it's already in the identity band). Latency is colored by threshold.
 
 ### 5.5 system facts
@@ -403,32 +412,30 @@ interface, the system-proxy state, and router liveness/port.
   if the domain leaves the list — so the acted-on domain can't shift under the 2s
   re-sort. `Esc` releases it, and it also **auto-clears after 15s of input
   inactivity** (`SELECTION_IDLE_TIMEOUT`, checked in `on_frame`; any key/click
-  resets the timer, hover doesn't) so a held selection / frozen strip doesn't
+  resets the timer, hover doesn't) so a held selection doesn't
   stay stuck if the operator walks away — the panes then resume live scrolling.
-- **Server strip:** when the pool overflows the row, the **active `▶` chip is
-  pinned** at the strip's left edge and only the rest marquees past it, in the
-  width left over (a ` │ ` seam marks the join) — so the server you're actually on
-  never scrolls out of view. The pinned chip sits *outside* the ring: it's excluded
-  from the ring's cell buffer, and the viewport width fed back is the **ring's**,
-  not the whole strip's. Pinning is skipped when it would leave less than
-  `MIN_RING_W` to scroll in (narrow terminal / long active name), and when the pool
-  fits (static layout) there's nothing to pin. Focusing keeps the marquee running;
-  the first `←/→` (or a click) **freezes it at the exact offset the renderer last
-  drew** — the renderer feeds its marquee offset back each frame as
-  `Hit::strip_render_off`, and App freezes to that value, so the frozen view is
-  precisely the snapshot on screen (no jump; a partial chip may sit before the
-  selection). It then selects the first fully-visible chip — the pinned one when
-  there is one, since it's held at the left edge. Moves wrap at the ends and scroll
-  the frozen ring one cell at a time to keep the selection visible (a no-op on the
-  pinned chip, which is always visible); the frozen ring renders circularly (wraps
-  past the last chip to fill the row). Ring viewport width and the pinned index
-  also come back via `Hit` — `App::feed_strip` takes all three together, since
-  feeding one without the others desyncs App's mirror of the layout. The marquee
-  runs off a **resettable baseline** (`marquee_off0` at
-  `marquee_t0`), not raw elapsed time: on **unfreeze** (Esc / focus-leave / idle
-  timeout) the baseline is set to the frozen offset and the clock restarted, so it
-  **resumes scrolling from where it stopped** rather than jumping to where a
-  free-running clock would be.
+- **Server modes:** `ServerMode::Scroll` is the default; lowercase `g` toggles
+  modes, and `--servers scroll|list` sets the initial mode. Selection survives
+  mode switches and is remapped by server name on poll, so sorting cannot change
+  the target of `u`; removing a server clears its selection. Failed servers
+  remain selectable, but `u` refuses to use them.
+- **Scroll mode:** one row, preserving the original connection/error pane
+  heights. When the pool overflows, the active `▶` chip is pinned outside the
+  scrolling ring if at least `MIN_RING_W` cells remain; a ` │ ` seam separates
+  it from the ring. `Hit` feeds back the ring width, pinned index, and rendered
+  offset together so selection freezes exactly the frame shown. `←→` wraps
+  through entries and reveals the selected chip. Clearing selection resets
+  `marquee_off0` / `marquee_t0` to resume from the frozen offset; `↑` leaves
+  the strip for connections.
+- **List mode:** the active server comes first, even when down, followed by
+  reachable servers in latency order, pending readings, and failed servers;
+  names break latency ties. Whole entries wrap into at most two rows, falling
+  back to one when height is limited. The renderer reserves those rows before
+  laying out the panes and feeds width, row count, and page back through `Hit`.
+  Additional rows form manual pages; selecting across a boundary reveals that
+  page, while `Esc` clears selection without changing pages. Oversized names
+  are clipped at the right edge, retaining latency; actions use the full name.
+  Undersized frames preserve the last valid geometry for restoration on resize.
 - **Control layer** (§1): contextual keys act on the current selection —
   `e`/`c`/`b`/`d` route the locked domain to escape/corp/block/direct, `t` puts
   it on the hotspot lane (the OS proxy-bypass list — `app::Target::Hotspot`,
@@ -500,7 +507,7 @@ interface, the system-proxy state, and router liveness/port.
   captions. Changing it re-polls immediately (cheap in-memory re-aggregation).
 - **Mouse:** wheel scrolls (and focuses) the list under the pointer; clicking a
   row / lane / window-tab activates it; clicking a **server chip** focuses the
-  strip and selects it *in place* (both partial edge chips are hit-tested);
+  list and selects it *in place* (every visible entry is hit-tested);
   clicking **`sys proxy`** toggles it. Hover over `sys proxy` highlights it — this
   needs any-motion reporting (xterm `1003`, enabled alongside SGR-1006 capture and
   disabled on exit). Clickable regions are recorded into `Hit` each draw.
@@ -548,7 +555,12 @@ pool.
 ## 9. Testing
 
 - **Golden diff** (`tests/golden.rs`): byte-exact plain-text match at 96/150/212
-  vs the frozen captures, with masked divergences (§10) and a color spot-check.
+  vs the original frozen captures, with masked divergences (§10) and a color
+  spot-check. These tests and captures are unchanged by the list feature.
+- **List and mode tests** (`tests/server_list.rs`, `tests/server_modes.rs`,
+  `tests/resize.rs`): paging, sorting, selection, mode switches, CLI options,
+  and compact/resized frames. List glyphs match separate
+  `renders/rowt-monitor-list-*.txt` captures without masks.
 - **Parsers** (`source/parse.rs`): clash JSON → connections/lanes/rates,
   timestamp/civil math, rule normalization, error classification, window
   aggregation, and the split (sparse + block-bucket) aggregation with lane
@@ -560,13 +572,27 @@ pool.
 - **Headless smoke:** `tmux` drives the real binary (send-keys / capture-pane) to
   confirm the frame renders, the filter chip appears, and it exits cleanly.
 
+Capture filenames retain legacy dimensions: `96x30`, `150x38`, and `212x52`
+correspond to actual render sizes **96×41**, **150×30**, and **212×30**, in both
+modes. For example, generate list captures at the middle size with:
+
+```sh
+rowt-monitor --servers list --render 150x30
+rowt-monitor --servers list --theme dark --render-ansi 150x30
+rowt-monitor --servers list --theme light --render-ansi 150x30
+```
+
+ANSI captures are visual references; the automated golden comparisons use
+plain-text glyphs. Preserve the original scroll baselines when updating list
+captures.
+
 ---
 
 ## 10. Intentional deviations from the frozen capture
 
-The `renders/*.txt` captures are a frozen snapshot of the handoff; a few things were
-deliberately changed after review (each masked in the golden test and covered by
-a dedicated assertion):
+The original scrolling `.txt` captures are a frozen snapshot of the handoff.
+Deliberate deviations are masked in `tests/golden.rs` and covered by dedicated
+assertions. List mode uses separate baselines (§9).
 
 - **Logo bottom row** shifted one space left so its stems align with the rows
   above.
