@@ -605,7 +605,10 @@ stays a plain one, so switching is live; it needs the watchdog
 
 `use auto` switches to sing-box's `urltest`, which auto-picks the fastest **live**
 server by its own **single** samples and re-probes them every
-`ROWT_AUTO_INTERVAL` (default 20m). `rowt use auto --every 3m` remembers an
+`ROWT_AUTO_INTERVAL` (default 20m, or 3m when any server is given by name — sing-box's
+urltest re-selects only on that tick, so it is the failover time; switches need a
+`ROWT_AUTO_TOLERANCE` (100 ms) lead and drop connections left on the old server, and
+a failed watchdog probe re-tests the group at once). `rowt use auto --every 3m` remembers an
 interval in rowt's state, so the watchdog's re-renders keep it too
 (`--every default` forgets it; the env var still wins). Toggling to or from auto re-renders and
 restarts (the urltest appears/disappears).

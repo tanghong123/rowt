@@ -157,6 +157,12 @@ PING_URL="${ROWT_PING_URL:-https://www.gstatic.com/generate_204}"
 PING_TIMEOUT="${ROWT_PING_TIMEOUT:-8}"          # seconds per sample (three per server)
 LOG_LEVEL="${ROWT_LOG_LEVEL:-warn}"             # sing-box log level (info is very noisy)
 AUTO_INTERVAL="${ROWT_AUTO_INTERVAL:-20m}"       # how often 'auto' re-probes all servers (env pin; see _auto_interval)
+# urltest knobs for failover. sing-box 1.13's urltest re-selects only on its
+# interval tick (a failed dial just forgets that member's delay), so the interval
+# IS the failover latency; tolerance damps latency-only flapping at a short
+# interval, and interrupt_exist_connections drops connections left on the old,
+# dead member instead of letting them hang.
+AUTO_TOLERANCE="${ROWT_AUTO_TOLERANCE:-100}"     # ms a member must beat the current one by
 # Resolver for the escape servers' OWN names (host mode). sing-box 1.13 resolves
 # an outbound's server name only through its domain_resolver (else
 # route.default_domain_resolver) — dns.rules, and so their ip_cidr/ip_is_private
@@ -380,7 +386,9 @@ _dur_secs() {
   esac
 }
 # The effective 'auto' re-probe interval: ROWT_AUTO_INTERVAL (env) > the value
-# 'use auto --every' stored > 20m. A function, not the constant above, because
+# 'use auto --every' stored > 3m when any server is given by name (its IP can
+# move under it — an entry-IP rotation — and urltest re-selects only on this
+# tick) > 20m. A function, not the constant above, because
 # it reads state — and the watchdog's re-render must get the same answer as the
 # CLI: the LaunchAgent does not carry ROWT_AUTO_INTERVAL unless it was set when
 # the plist was written, so an env-only interval quietly fell back to 20m.
@@ -388,7 +396,7 @@ _auto_interval() {
   [ -n "${ROWT_AUTO_INTERVAL:-}" ] && { echo "$ROWT_AUTO_INTERVAL"; return 0; }
   local v; v="$(sget auto_interval)"
   [ -n "$v" ] && { echo "$v"; return 0; }
-  echo 20m
+  if _has_domain_servers; then echo 3m; else echo 20m; fi
 }
 # urltest refuses interval > idle_timeout (default 30m): stretch idle to match.
 _auto_idle() { local n; n="$(_dur_secs "$1")" || return 0; [ "$n" -gt 1800 ] && echo "$1"; return 0; }
@@ -1823,7 +1831,7 @@ detect_iface() {
 group_jq() {
   local interval; interval="$(_auto_interval)"
   jq --arg if "$2" --arg sel "$3" --arg interval "$interval" --arg idle "$(_auto_idle "$interval")" \
-     --arg edns "$ESCAPE_DNS" "$JQ_DOMAIN_SERVER"'
+     --argjson tol "$AUTO_TOLERANCE" --arg edns "$ESCAPE_DNS" "$JQ_DOMAIN_SERVER"'
     def fb: . + {domain_resolver:{server:"dns-escape-fallback", strategy:"prefer_ipv4"}};
     (if $if == "" then . else map(. + {bind_interface:$if}) end)
     | (if $if != "" and $edns == "fallback" then map(if domain_server then fb else . end) else . end) as $m
@@ -1833,7 +1841,8 @@ group_jq() {
     | (if $sel == "auto"                 # auto: urltest health-checks every $interval
        then $m + $twins
             + [{type:"urltest", tag:"auto", outbounds:($tags + ($twins | map(.tag))),
-                url:"https://www.gstatic.com/generate_204", interval:$interval}
+                url:"https://www.gstatic.com/generate_204", interval:$interval,
+                tolerance:$tol, interrupt_exist_connections:true}
                + (if $idle != "" then {idle_timeout:$idle} else {} end)]
             + [{type:"selector", tag:"escape", outbounds:(["auto"] + $tags), default:"auto"}]
        else $m                           # manual: plain selector, nothing is probed
@@ -5521,6 +5530,15 @@ _watch_probe() {
     out="$(curl --noproxy '*' -sS -m "$(( to + 3 ))" -H "Authorization: Bearer $sec" \
           "http://$ep/proxies/$sel/delay?timeout=${to}000&url=$enc" 2>/dev/null || true)"
     printf '%s' "$out" | jq -e '.delay // empty' >/dev/null 2>&1 && return 0
+    # In auto mode the failed probe made sing-box forget the selected member's
+    # delay, but 1.13's urltest re-selects only on its interval tick.
+    # /group/auto/delay runs the group's URLTest now (re-tests the members with no
+    # fresh result, then re-selects), so the retry below already rides the new
+    # pick instead of waiting up to a whole interval on a dead entry IP.
+    if [ "$t" = 1 ] && [ "$sel" = auto ]; then
+      curl --noproxy '*' -sS -m "$(( to + 3 ))" -H "Authorization: Bearer $sec" \
+        "http://$ep/group/auto/delay?timeout=${to}000&url=$enc" >/dev/null 2>&1 || true
+    fi
     [ "$t" = 1 ] && sleep 2
   done
   return 1
@@ -6116,7 +6134,7 @@ _watch_plist_body() {
   local envxml v val
   envxml="    <key>PATH</key><string>$agent_path</string>"
   for v in XDG_CONFIG_HOME ROWT_PORT ROWT_CLASH_PORT ROWT_FINAL ROWT_IFACE ROWT_DNS_DIRECT ROWT_DNS_LOCAL ROWT_GFW_CANARIES ROWT_GFW_TIMEOUT SINGBOX_VERSION ROWT_LOG_LEVEL ROWT_WATCH_INTERVAL ROWT_HEALTH_FAILS ROWT_HEALTH_COOLDOWN ROWT_HEALTH_TIMEOUT ROWT_HEALTH_URL ROWT_CAPTIVE_CHECK ROWT_CAPTIVE_URL ROWT_CAPTIVE_TIMEOUT ROWT_CAPTIVE_RETRY ROWT_CAPTIVE_FALLBACK ROWT_WATCH_SHADOW ROWT_RENDER_SHADOW ROWT_PPROF ROWT_CPU_SPIN_PCT ROWT_CPU_SPIN_BYTES ROWT_CPU_SPIN_TICKS ROWT_CPU_HEAL_COOLDOWN \
-           ROWT_AUTO_INTERVAL ROWT_ESCAPE_DNS ROWT_DNS_ESCAPE_FALLBACK ROWT_ESCAPE_DNS_BAD; do
+           ROWT_AUTO_INTERVAL ROWT_AUTO_TOLERANCE ROWT_ESCAPE_DNS ROWT_DNS_ESCAPE_FALLBACK ROWT_ESCAPE_DNS_BAD; do
     val="${!v:-}"; [ -n "$val" ] && envxml="$envxml
     <key>$v</key><string>$val</string>"
   done
@@ -7318,7 +7336,8 @@ $PROG use <tag> | use best | use auto — select the escape server.
               ('$PROG watch install') to keep re-picking.
   use auto    switch to sing-box's urltest, which picks the fastest live server
               by its own single samples, re-probed every ROWT_AUTO_INTERVAL,
-              else the stored --every, else 20m (now: $(_auto_interval)).
+              else the stored --every, else 3m with servers given by name,
+              else 20m (now: $(_auto_interval)).
   use auto --every 3m   … and remember that interval ('--every default' forgets it).
 Switches between pinned servers and best are live (Clash API); to or from auto
 restarts the router. Run '$PROG ping' first to see the figures. No arg = list
