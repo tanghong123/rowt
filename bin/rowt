@@ -55,6 +55,8 @@
 #      ROWT_HEALTH_FAILS  consecutive probe failures before auto-recover (default 3)
 #      ROWT_HEALTH_COOLDOWN  min seconds between auto-recoveries (default 600)
 #      ROWT_HEALTH_TIMEOUT  per-probe delay-test timeout, seconds (default 8)
+#      ROWT_ESCAPE_DNS  twin|direct|fallback — resolver for the escape servers' own names
+#      ROWT_DNS_ESCAPE_FALLBACK  second DoH for those names (default 1.12.12.12)
 #      SINGBOX_VERSION  pinned sing-box release (default 1.13.14, >=1.12 AnyTLS)
 set -euo pipefail
 
@@ -155,6 +157,26 @@ PING_URL="${ROWT_PING_URL:-https://www.gstatic.com/generate_204}"
 PING_TIMEOUT="${ROWT_PING_TIMEOUT:-8}"          # seconds per sample (three per server)
 LOG_LEVEL="${ROWT_LOG_LEVEL:-warn}"             # sing-box log level (info is very noisy)
 AUTO_INTERVAL="${ROWT_AUTO_INTERVAL:-20m}"       # how often 'auto' re-probes all servers (env pin; see _auto_interval)
+# Resolver for the escape servers' OWN names (host mode). sing-box 1.13 resolves
+# an outbound's server name only through its domain_resolver (else
+# route.default_domain_resolver) — dns.rules, and so their ip_cidr/ip_is_private
+# answer filters, never see it, and there is no fallback DNS type. So the
+# fallback is a twin member per domain-based server that resolves via a second
+# DoH (see group_jq):
+#   twin (default)  'auto' adds "<tag>~fb" resolving via $DNS_ESCAPE_FALLBACK; a
+#                   hijacked/sinkholed answer fails the primary's probe and the
+#                   urltest moves to the twin. Other modes: as direct.
+#   direct          dns-direct only (the old behavior)
+#   fallback        every domain-based member resolves via $DNS_ESCAPE_FALLBACK
+ESCAPE_DNS="${ROWT_ESCAPE_DNS:-twin}"
+# Not Alibaba (a corp DNS hijack came back through AliDNS too) and reachable from
+# inside China: DNSPod serves RFC 8484 + JSON on 1.12.12.12 with an IP-valid
+# cert, while 8.8.8.8 / 1.1.1.1 / 9.9.9.9 DoH time out from a CN network.
+DNS_ESCAPE_FALLBACK="${ROWT_DNS_ESCAPE_FALLBACK:-1.12.12.12}"
+# Answers for an escape server's name that can never be the real VPS beyond the
+# private/CGNAT/fake-ip ranges `status` already knows (space-separated IPs) — e.g.
+# a corp hijack target like 59.82.113.122 (*.ckai.uk, 2026-10-26).
+ESCAPE_DNS_BAD="${ROWT_ESCAPE_DNS_BAD:-59.82.113.122}"
 # `best`: rowt's own auto mode. The watchdog measures each server as the median
 # of three delay samples, keeps them in LATENCY_TABLE (shared with `rowt ping`
 # and the monitor), and keeps the current server unless another beats it by more
@@ -343,6 +365,11 @@ sset() {
   grep -v "^$k=" "$STATE" > "$tmp" 2>/dev/null || true
   echo "$k=$v" >> "$tmp"; mv "$tmp" "$STATE"
 }
+
+# A server whose address is a NAME (not an IPv4/IPv6 literal): sing-box looks its
+# IP up at dial time, so a DNS hijack or an entry-IP rotation reaches it.
+JQ_DOMAIN_SERVER='def domain_server: (.server // "") | (. != "") and (test("^[0-9.]+$") | not) and (test(":") | not);'
+_has_domain_servers() { [ -s "$SERVERS" ] && jq -e "$JQ_DOMAIN_SERVER any(.[]; domain_server)" "$SERVERS" >/dev/null 2>&1; }
 
 # "3m" / "90s" / "1h" -> seconds (empty + rc 1 if not that shape)
 _dur_secs() {
@@ -1790,14 +1817,22 @@ detect_iface() {
 # $1=servers-file  $2=bind-interface-or-empty  $3=selected-default
 # $sel=="auto" builds a urltest (probes every _auto_interval); anything else is a
 # plain selector that never probes its members (flaky/dead servers stay idle).
+# On the host ($if set), ROWT_ESCAPE_DNS adds the fallback resolver for
+# domain-based members — as "<tag>~fb" twins inside the urltest (twin), or on the
+# members themselves (fallback). The VM guest has only its own resolver: untouched.
 group_jq() {
   local interval; interval="$(_auto_interval)"
-  jq --arg if "$2" --arg sel "$3" --arg interval "$interval" --arg idle "$(_auto_idle "$interval")" '
-    (if $if == "" then . else map(. + {bind_interface:$if}) end) as $m
+  jq --arg if "$2" --arg sel "$3" --arg interval "$interval" --arg idle "$(_auto_idle "$interval")" \
+     --arg edns "$ESCAPE_DNS" "$JQ_DOMAIN_SERVER"'
+    def fb: . + {domain_resolver:{server:"dns-escape-fallback", strategy:"prefer_ipv4"}};
+    (if $if == "" then . else map(. + {bind_interface:$if}) end)
+    | (if $if != "" and $edns == "fallback" then map(if domain_server then fb else . end) else . end) as $m
     | ($m | map(.tag)) as $tags
+    | (if $if != "" and $sel == "auto" and $edns == "twin"
+       then $m | map(select(domain_server) | fb | .tag += "~fb") else [] end) as $twins
     | (if $sel == "auto"                 # auto: urltest health-checks every $interval
-       then $m
-            + [{type:"urltest", tag:"auto", outbounds:$tags,
+       then $m + $twins
+            + [{type:"urltest", tag:"auto", outbounds:($tags + ($twins | map(.tag))),
                 url:"https://www.gstatic.com/generate_204", interval:$interval}
                + (if $idle != "" then {idle_timeout:$idle} else {} end)]
             + [{type:"selector", tag:"escape", outbounds:(["auto"] + $tags), default:"auto"}]
@@ -1951,6 +1986,7 @@ assemble_host() {
     --arg lvl "$LOG_LEVEL" \
     --arg ads "$ads" \
     --arg dns_direct "$dns_srv" \
+    --arg dns_esc_fb "$DNS_ESCAPE_FALLBACK" \
     --arg esc_out "$esc_out" \
     --argjson esc_dom "$(domains_json)" \
     --argjson corp_dom "$(corp_domains_json)" \
@@ -2030,8 +2066,11 @@ assemble_host() {
     # the dead fd (~200% CPU, traffic-independent). DoH is connection-based (a
     # wedged conn errors + re-dials instead of spinning) and encrypted; 223.5.5.5
     # serves DoH on 443 with an IP-valid cert, so no bootstrap DNS is needed.
+    # dns-escape-fallback is the second DoH for escape servers whose names
+    # dns-direct answers wrongly (see ROWT_ESCAPE_DNS); referenced only by them.
     ([ {type:"local", tag:"local"},
-       {type:"https", tag:"dns-direct", server:$dns_direct, detour:"direct"} ]) as $dns_servers
+       {type:"https", tag:"dns-direct", server:$dns_direct, detour:"direct"},
+       {type:"https", tag:"dns-escape-fallback", server:$dns_esc_fb, detour:"direct"} ]) as $dns_servers
     |
     # Corp names must resolve through the corp resolver or they answer with a
     # public IP and leave the tunnel — so an EXACT corp entry needs this rule
@@ -5221,6 +5260,60 @@ _uplink_verdict() { # $1=mode
   fi
 }
 
+# Is this IPv4 answer one an escape VPS can never have? (private, CGNAT,
+# loopback, link-local, this-net, fake-ip 198.18/15, multicast+, or a known
+# hijack target in ROWT_ESCAPE_DNS_BAD). rc 0 = suspect.
+_ip_suspect() {
+  local ip="$1" a b x
+  for x in $ESCAPE_DNS_BAD; do [ "$ip" = "$x" ] && return 0; done
+  IFS=. read -r a b _ <<EOF
+$ip
+EOF
+  case "$a" in ''|*[!0-9]*) return 0 ;; esac
+  case "$b" in ''|*[!0-9]*) b=0 ;; esac
+  { [ "$a" -eq 0 ] || [ "$a" -eq 10 ] || [ "$a" -eq 127 ] || [ "$a" -ge 224 ]; } && return 0
+  [ "$a" -eq 100 ] && [ "$b" -ge 64 ] && [ "$b" -le 127 ] && return 0
+  [ "$a" -eq 169 ] && [ "$b" -eq 254 ] && return 0
+  [ "$a" -eq 172 ] && [ "$b" -ge 16 ] && [ "$b" -le 31 ] && return 0
+  [ "$a" -eq 192 ] && [ "$b" -eq 168 ] && return 0
+  [ "$a" -eq 198 ] && { [ "$b" -eq 18 ] || [ "$b" -eq 19 ]; } && return 0
+  return 1
+}
+# A-record answers for $2 from DoH JSON at https://$1/resolve (AliDNS, DNSPod and
+# Google all serve it on an IP-valid cert), one per line; empty when it fails.
+# Bound to the physical NIC like dns-direct itself, so it sees what sing-box sees.
+_doh_a() {
+  local ifc; ifc="$(detect_iface 2>/dev/null || true)"
+  curl ${ifc:+--interface "$ifc"} --noproxy '*' -sS -m 3 -H 'accept: application/dns-json' \
+    "https://$1/resolve?name=$2&type=A" 2>/dev/null \
+    | jq -r '.Answer[]? | select(.type == 1) | .data' 2>/dev/null || true
+}
+# One 'escape dns:' line per domain-based server (max 6): what dns-direct's DoH
+# answers, flagged when it is a private/sinkhole address, plus the fallback's
+# answer when the first is missing or suspect. This is the check sing-box 1.13
+# cannot do itself — an outbound's server name never passes through dns.rules.
+_escape_dns_report() {
+  _has_domain_servers || return 0
+  local d ips ip bad fb fbips
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    ips="$(_doh_a "$DNS_DIRECT" "$d" | paste -sd' ' -)"; bad=""
+    for ip in $ips; do _ip_suspect "$ip" && bad=1; done
+    if [ -n "$ips" ] && [ -z "$bad" ]; then
+      printf 'escape dns:   %s -> %s (%s) ok\n' "$d" "$ips" "$DNS_DIRECT"; continue
+    fi
+    fbips="$(_doh_a "$DNS_ESCAPE_FALLBACK" "$d" | paste -sd' ' -)"; fb="ok"
+    for ip in $fbips; do _ip_suspect "$ip" && fb="SUSPECT"; done
+    [ -n "$fbips" ] || fb="no answer"
+    printf 'escape dns:   %s -> %s (%s) %s; %s -> %s %s%s\n' "$d" "${ips:-none}" "$DNS_DIRECT" \
+      "$([ -n "$bad" ] && echo 'SUSPECT (private/sinkhole)' || echo 'NO ANSWER')" \
+      "$DNS_ESCAPE_FALLBACK" "${fbips:-none}" "$fb" \
+      "$([ "$ESCAPE_DNS" = direct ] && echo '  (ROWT_ESCAPE_DNS=direct: no fallback rendered)')"
+  done <<EOF
+$(jq -r "$JQ_DOMAIN_SERVER"' [.[] | select(domain_server) | .server] | unique | .[:6][]' "$SERVERS" 2>/dev/null)
+EOF
+}
+
 cmd_status() {
   local mode; mode="$(sget mode)"; mode="${mode:-?}"
   if [ "$mode" = "local" ]; then
@@ -5237,6 +5330,7 @@ cmd_status() {
     elif [ "$now" = auto ]; then echo "active:       auto (re-probe $(_auto_interval))"
     else echo "active:       $now"; fi
   fi
+  [ "$mode" != local ] && _escape_dns_report
   [ "$mode" = "vm" ] && echo "vm ip:        $(sget vm_ip)"
   echo "router:       $(host_running && echo "running (pid $(cat "$(host_pidfile)"))" || echo stopped) on 127.0.0.1:$PORT"
   # Which engine, and is it the pin. A brew upgrade once swapped in a 1.14.1
@@ -6022,7 +6116,7 @@ _watch_plist_body() {
   local envxml v val
   envxml="    <key>PATH</key><string>$agent_path</string>"
   for v in XDG_CONFIG_HOME ROWT_PORT ROWT_CLASH_PORT ROWT_FINAL ROWT_IFACE ROWT_DNS_DIRECT ROWT_DNS_LOCAL ROWT_GFW_CANARIES ROWT_GFW_TIMEOUT SINGBOX_VERSION ROWT_LOG_LEVEL ROWT_WATCH_INTERVAL ROWT_HEALTH_FAILS ROWT_HEALTH_COOLDOWN ROWT_HEALTH_TIMEOUT ROWT_HEALTH_URL ROWT_CAPTIVE_CHECK ROWT_CAPTIVE_URL ROWT_CAPTIVE_TIMEOUT ROWT_CAPTIVE_RETRY ROWT_CAPTIVE_FALLBACK ROWT_WATCH_SHADOW ROWT_RENDER_SHADOW ROWT_PPROF ROWT_CPU_SPIN_PCT ROWT_CPU_SPIN_BYTES ROWT_CPU_SPIN_TICKS ROWT_CPU_HEAL_COOLDOWN \
-           ROWT_AUTO_INTERVAL; do
+           ROWT_AUTO_INTERVAL ROWT_ESCAPE_DNS ROWT_DNS_ESCAPE_FALLBACK ROWT_ESCAPE_DNS_BAD; do
     val="${!v:-}"; [ -n "$val" ] && envxml="$envxml
     <key>$v</key><string>$val</string>"
   done

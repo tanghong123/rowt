@@ -619,6 +619,17 @@ unchanged — and failed fetches keep the previous servers. Each watchdog refres
 is in `rowt audit` with its outcome, and a restart it causes as a
 `BEGIN`/`END watchdog reload` pair.
 
+**Escape servers given by name.** sing-box looks a server's name up at dial
+time through `dns-direct`, and its `dns.rules` never see that lookup — so a
+resolver that answers the name with a hijack or sinkhole address takes the
+server down. In `auto` mode (host), rowt therefore adds a twin `<tag>~fb` for
+each name-based server that resolves through a second DoH,
+`ROWT_DNS_ESCAPE_FALLBACK` (default `1.12.12.12`, DNSPod); a wrong answer fails
+the primary's probe and the urltest moves to the twin. `ROWT_ESCAPE_DNS=direct`
+turns this off, `=fallback` resolves every name-based server through the second
+DoH in every mode. `rowt status` prints an `escape dns:` line per name, flagging
+private / CGNAT / fake-ip answers and `ROWT_ESCAPE_DNS_BAD`.
+
 ## Do apps need proxy config?
 
 Mostly **no**. `rowt proxy on` sets the macOS **system proxy** (SOCKS +
