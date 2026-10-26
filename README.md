@@ -605,7 +605,9 @@ stays a plain one, so switching is live; it needs the watchdog
 
 `use auto` switches to sing-box's `urltest`, which auto-picks the fastest **live**
 server by its own **single** samples and re-probes them every
-`ROWT_AUTO_INTERVAL` (default 20m). Toggling to or from auto re-renders and
+`ROWT_AUTO_INTERVAL` (default 20m). `rowt use auto --every 3m` remembers an
+interval in rowt's state, so the watchdog's re-renders keep it too
+(`--every default` forgets it; the env var still wins). Toggling to or from auto re-renders and
 restarts (the urltest appears/disappears).
 
 The selector lives wherever the tunnel runs (host in mode `host`, the VM in mode

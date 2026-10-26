@@ -154,7 +154,7 @@ GFW_TIMEOUT="${ROWT_GFW_TIMEOUT:-3}"            # seconds per canary
 PING_URL="${ROWT_PING_URL:-https://www.gstatic.com/generate_204}"
 PING_TIMEOUT="${ROWT_PING_TIMEOUT:-8}"          # seconds per sample (three per server)
 LOG_LEVEL="${ROWT_LOG_LEVEL:-warn}"             # sing-box log level (info is very noisy)
-AUTO_INTERVAL="${ROWT_AUTO_INTERVAL:-20m}"       # how often 'auto' re-probes all servers
+AUTO_INTERVAL="${ROWT_AUTO_INTERVAL:-20m}"       # how often 'auto' re-probes all servers (env pin; see _auto_interval)
 # `best`: rowt's own auto mode. The watchdog measures each server as the median
 # of three delay samples, keeps them in LATENCY_TABLE (shared with `rowt ping`
 # and the monitor), and keeps the current server unless another beats it by more
@@ -343,6 +343,28 @@ sset() {
   grep -v "^$k=" "$STATE" > "$tmp" 2>/dev/null || true
   echo "$k=$v" >> "$tmp"; mv "$tmp" "$STATE"
 }
+
+# "3m" / "90s" / "1h" -> seconds (empty + rc 1 if not that shape)
+_dur_secs() {
+  case "${1:-}" in
+    *[!0-9smh]*|''|[smh]*) return 1 ;;
+    *s) echo "${1%s}" ;; *m) echo "$(( ${1%m} * 60 ))" ;; *h) echo "$(( ${1%h} * 3600 ))" ;;
+    *) return 1 ;;
+  esac
+}
+# The effective 'auto' re-probe interval: ROWT_AUTO_INTERVAL (env) > the value
+# 'use auto --every' stored > 20m. A function, not the constant above, because
+# it reads state — and the watchdog's re-render must get the same answer as the
+# CLI: the LaunchAgent does not carry ROWT_AUTO_INTERVAL unless it was set when
+# the plist was written, so an env-only interval quietly fell back to 20m.
+_auto_interval() {
+  [ -n "${ROWT_AUTO_INTERVAL:-}" ] && { echo "$ROWT_AUTO_INTERVAL"; return 0; }
+  local v; v="$(sget auto_interval)"
+  [ -n "$v" ] && { echo "$v"; return 0; }
+  echo 20m
+}
+# urltest refuses interval > idle_timeout (default 30m): stretch idle to match.
+_auto_idle() { local n; n="$(_dur_secs "$1")" || return 0; [ "$n" -gt 1800 ] && echo "$1"; return 0; }
 
 # Persisted secret for the sing-box clash API (used for live server switching).
 clash_secret() {
@@ -1766,16 +1788,18 @@ detect_iface() {
 
 # servers.json -> [ ...members, (urltest 'auto' when $sel=="auto"), escape(selector) ]
 # $1=servers-file  $2=bind-interface-or-empty  $3=selected-default
-# $sel=="auto" builds a urltest (probes every $AUTO_INTERVAL); anything else is a
+# $sel=="auto" builds a urltest (probes every _auto_interval); anything else is a
 # plain selector that never probes its members (flaky/dead servers stay idle).
 group_jq() {
-  jq --arg if "$2" --arg sel "$3" --arg interval "$AUTO_INTERVAL" '
+  local interval; interval="$(_auto_interval)"
+  jq --arg if "$2" --arg sel "$3" --arg interval "$interval" --arg idle "$(_auto_idle "$interval")" '
     (if $if == "" then . else map(. + {bind_interface:$if}) end) as $m
     | ($m | map(.tag)) as $tags
     | (if $sel == "auto"                 # auto: urltest health-checks every $interval
        then $m
             + [{type:"urltest", tag:"auto", outbounds:$tags,
-                url:"https://www.gstatic.com/generate_204", interval:$interval}]
+                url:"https://www.gstatic.com/generate_204", interval:$interval}
+               + (if $idle != "" then {idle_timeout:$idle} else {} end)]
             + [{type:"selector", tag:"escape", outbounds:(["auto"] + $tags), default:"auto"}]
        else $m                           # manual: plain selector, nothing is probed
             + [{type:"selector", tag:"escape", outbounds:$tags,
@@ -2542,11 +2566,30 @@ servers_remove() {
 
 # Select the escape server:
 #   use <tag>   pin one server (manual selector; nothing is health-checked)
-#   use auto    auto-pick the fastest live server, re-probed every $AUTO_INTERVAL
+#   use auto    auto-pick the fastest live server, re-probed every _auto_interval
+#   use auto --every 3m   … and persist that interval in state ('default' forgets it)
 # Toggling auto<->manual changes the config shape (urltest present/absent), so we
 # re-render and restart; a plain tag->tag change in manual mode can switch live.
 cmd_use() {
-  local tag="${1:-}"
+  local tag="${1:-}" every="" a
+  [ "$#" -gt 0 ] && shift
+  # --every persists the auto re-probe interval (state auto_interval), so a
+  # watchdog re-render — which does not carry ROWT_AUTO_INTERVAL — keeps it.
+  while [ "$#" -gt 0 ]; do
+    a="$1"; shift
+    case "$a" in
+      --every)   [ "$#" -ge 1 ] || die "usage: $PROG use auto [--every <N>s|<N>m|<N>h|default]"; every="$1"; shift ;;
+      --every=*) every="${a#--every=}" ;;
+      *) die "unknown argument: $a  (usage: $PROG use <tag> | use best | use auto [--every 3m])" ;;
+    esac
+  done
+  if [ -n "$every" ]; then
+    [ "$tag" = auto ] || die "--every applies to 'use auto' only"
+    if [ "$every" != default ]; then
+      local secs; secs="$(_dur_secs "$every")" || die "--every wants <N>s, <N>m or <N>h (e.g. 3m), got '$every'"
+      [ "$secs" -ge 30 ] || die "--every below 30s would probe every server non-stop"
+    fi
+  fi
   # In local mode there is no escape selector to switch — say so plainly rather
   # than letting the clash call fail with something cryptic.
   [ "$(sget mode)" = "local" ] \
@@ -2559,14 +2602,16 @@ cmd_use() {
   local prev; prev="$(sget selected)"
   if [ "$tag" = best ]; then _use_best "$prev"; return 0; fi
   sset selected "$tag"
+  if [ "$every" = default ]; then sset auto_interval ""
+  elif [ -n "$every" ]; then sset auto_interval "$every"; fi
   cmd_render >/dev/null
-  if ! host_running; then info "escape -> $tag (applies on next '$PROG router up')"; return 0; fi
+  if ! host_running; then info "escape -> $tag$([ "$tag" = auto ] && echo " (re-probe $(_auto_interval))") (applies on next '$PROG router up')"; return 0; fi
   # same mode + concrete tag -> live switch; any auto toggle -> restart to (de)activate urltest
   if [ "$prev" != "auto" ] && [ "$tag" != "auto" ] && clash_curl PUT /proxies/escape "{\"name\":\"$tag\"}" >/dev/null 2>&1; then
     info "escape -> $tag (live)"
   else
     cmd_router restart >/dev/null
-    [ "$tag" = "auto" ] && info "escape -> auto (fastest live server, re-probed every $AUTO_INTERVAL)" \
+    [ "$tag" = "auto" ] && info "escape -> auto (fastest live server, re-probed every $(_auto_interval))" \
                         || info "escape -> $tag"
   fi
 }
@@ -5183,10 +5228,13 @@ cmd_status() {
   else
     echo "mode:         $mode"
   fi
-  echo "servers:      $(jq length "$SERVERS" 2>/dev/null || echo 0)  (selected: $(sget selected), subs: $(sub_count))"
+  local sel_s; sel_s="$(sget selected)"
+  [ "$sel_s" = auto ] && sel_s="auto, re-probe $(_auto_interval)"
+  echo "servers:      $(jq length "$SERVERS" 2>/dev/null || echo 0)  (selected: $sel_s, subs: $(sub_count))"
   local now; now="$(clash_selected)"
   if [ -n "$now" ]; then
     if [ "$(sget selected)" = best ]; then echo "active:       $now (best — $(_latency_ms "$now"))"
+    elif [ "$now" = auto ]; then echo "active:       auto (re-probe $(_auto_interval))"
     else echo "active:       $now"; fi
   fi
   [ "$mode" = "vm" ] && echo "vm ip:        $(sget vm_ip)"
@@ -5973,7 +6021,8 @@ _watch_plist_body() {
   done
   local envxml v val
   envxml="    <key>PATH</key><string>$agent_path</string>"
-  for v in XDG_CONFIG_HOME ROWT_PORT ROWT_CLASH_PORT ROWT_FINAL ROWT_IFACE ROWT_DNS_DIRECT ROWT_DNS_LOCAL ROWT_GFW_CANARIES ROWT_GFW_TIMEOUT SINGBOX_VERSION ROWT_LOG_LEVEL ROWT_WATCH_INTERVAL ROWT_HEALTH_FAILS ROWT_HEALTH_COOLDOWN ROWT_HEALTH_TIMEOUT ROWT_HEALTH_URL ROWT_CAPTIVE_CHECK ROWT_CAPTIVE_URL ROWT_CAPTIVE_TIMEOUT ROWT_CAPTIVE_RETRY ROWT_CAPTIVE_FALLBACK ROWT_WATCH_SHADOW ROWT_RENDER_SHADOW ROWT_PPROF ROWT_CPU_SPIN_PCT ROWT_CPU_SPIN_BYTES ROWT_CPU_SPIN_TICKS ROWT_CPU_HEAL_COOLDOWN; do
+  for v in XDG_CONFIG_HOME ROWT_PORT ROWT_CLASH_PORT ROWT_FINAL ROWT_IFACE ROWT_DNS_DIRECT ROWT_DNS_LOCAL ROWT_GFW_CANARIES ROWT_GFW_TIMEOUT SINGBOX_VERSION ROWT_LOG_LEVEL ROWT_WATCH_INTERVAL ROWT_HEALTH_FAILS ROWT_HEALTH_COOLDOWN ROWT_HEALTH_TIMEOUT ROWT_HEALTH_URL ROWT_CAPTIVE_CHECK ROWT_CAPTIVE_URL ROWT_CAPTIVE_TIMEOUT ROWT_CAPTIVE_RETRY ROWT_CAPTIVE_FALLBACK ROWT_WATCH_SHADOW ROWT_RENDER_SHADOW ROWT_PPROF ROWT_CPU_SPIN_PCT ROWT_CPU_SPIN_BYTES ROWT_CPU_SPIN_TICKS ROWT_CPU_HEAL_COOLDOWN \
+           ROWT_AUTO_INTERVAL; do
     val="${!v:-}"; [ -n "$val" ] && envxml="$envxml
     <key>$v</key><string>$val</string>"
   done
@@ -7174,8 +7223,9 @@ $PROG use <tag> | use best | use auto — select the escape server.
               One slow or failed sample can't cause a switch. Needs the watchdog
               ('$PROG watch install') to keep re-picking.
   use auto    switch to sing-box's urltest, which picks the fastest live server
-              by its own single samples, re-probed every ROWT_AUTO_INTERVAL
-              (default $AUTO_INTERVAL).
+              by its own single samples, re-probed every ROWT_AUTO_INTERVAL,
+              else the stored --every, else 20m (now: $(_auto_interval)).
+  use auto --every 3m   … and remember that interval ('--every default' forgets it).
 Switches between pinned servers and best are live (Clash API); to or from auto
 restarts the router. Run '$PROG ping' first to see the figures. No arg = list
 servers.
