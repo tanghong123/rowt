@@ -773,7 +773,7 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 | `server add '<vless://\|vmess://\|anytls://\|hysteria2://\|ss://\|trojan://\|tuic://…>' [more…]` | add manual server(s) from link(s), deduped. |
 | `server rm <tag>` / `server clear` | remove a manual server / clear all manual. |
 | `server import [--from shadowrocket\|clash-verge\|v2box\|flclash] [--apply]` | import servers **and** subs from another client via an editable, source-independent review file. |
-| `server import <file.json>` | restore manual servers from a `server dump` (round-trips). |
+| `server import <file.json> [--replace]` | restore manual servers from a `server dump` (round-trips); merged into the manual set, or with `--replace` instead of it. |
 | `server dump [file]` | export the manual servers as JSON (backup; has secrets). Subscription servers come from their subs — use `sub dump`. |
 | `sub list\|add <url>\|rm <n>\|update\|clear` | manage subscriptions. |
 | `sub import [--apply]` | same as `server import` (Shadowrocket). |

@@ -2247,9 +2247,12 @@ cmd_import() {
 
 # Restore manual servers from a `server dump` JSON (an array of outbounds).
 # Merged into the manual set and deduped, so re-importing is idempotent.
+# $2=replace swaps the manual set for the dump instead (`--replace`): a provider
+# that rotated its entry hosts otherwise leaves the old ones in the pool.
 server_load_dump() {
   local f="$1"
   jq -e 'type=="array"' "$f" >/dev/null 2>&1 || die "not a 'server dump' (expected a JSON array): $f"
+  if [ "${2:-}" = replace ]; then echo '[]' > "$MANUAL"; info "replacing the manual servers with $f"; fi
   [ -s "$MANUAL" ] || echo '[]' > "$MANUAL"
   jq -s 'add' "$MANUAL" "$f" | "${PY_VLESS[@]}" --combine > "$MANUAL.n" && mv "$MANUAL.n" "$MANUAL"
   chmod 600 "$MANUAL"
@@ -2559,6 +2562,21 @@ apply_import() {
 }
 
 # Server pool: rowt server [list | add <link>… | rm <tag>… | clear | import [--apply]]
+# `server import`'s arguments: '<file> [--replace]' (either order) restores a
+# `server dump`; anything else is another client's import.
+_server_import() {
+  local rf="" rrep="" ra
+  if [ "$#" -le 2 ]; then
+    for ra in "$@"; do
+      case "$ra" in --replace) rrep=replace ;; *) [ -z "$rf" ] && [ -f "$ra" ] && rf="$ra" ;; esac
+    done
+  fi
+  if [ -n "$rf" ] && [ "$rf" != "--apply" ] && [ "$rf" != "--from" ] \
+     && { [ "$#" = 1 ] || [ -n "$rrep" ]; }; then server_load_dump "$rf" "$rrep"
+  elif [ -n "$rrep" ]; then die "--replace needs a 'server dump' JSON file: $PROG server import <file> --replace"
+  else cmd_from_shadowrocket "$@"; fi
+}
+
 cmd_server() {
   local action="${1:-list}"; [ "$#" -gt 0 ] && shift || true
   case "$action" in
@@ -2566,15 +2584,15 @@ cmd_server() {
     add)       cmd_import "$@" ;;               # parse vless:// … ss:// / trojan:// / tuic:// link(s)
     rm|remove) servers_remove "$@" ;;
     clear)     echo '[]' > "$MANUAL"; chmod 600 "$MANUAL"; info "manual servers cleared"; rebuild_servers; after_import ;;
-    import)    # a JSON file (not --apply/--from) restores a `server dump`; else
-               # import from another client: --from shadowrocket|clash-verge|v2box|flclash
-      if [ -n "${1:-}" ] && [ "$1" != "--apply" ] && [ "$1" != "--from" ] && [ -f "$1" ]; then server_load_dump "$1"
-      else cmd_from_shadowrocket "$@"; fi ;;
+    import)    # a JSON file (not --apply/--from) restores a `server dump` (merged,
+               # or replacing the manual set with --replace); else import from
+               # another client: --from shadowrocket|clash-verge|v2box|flclash
+      _server_import "$@" ;;
     dump)      # export the manual servers (JSON) for backup; subs -> 'sub dump'
       local out; out="$([ -s "$MANUAL" ] && jq . "$MANUAL" 2>/dev/null || echo '[]')"
       if [ -n "${1:-}" ]; then printf '%s\n' "$out" > "$1"; chmod 600 "$1"; echo "  dumped manual servers -> $1 (contains secrets, chmod 600)" >&2
       else printf '%s\n' "$out"; fi ;;
-    *) die "usage: $PROG server [list | add <link>… | rm <tag>… | clear | import <--detect|--from SRC [--output FILE]|--apply [--input FILE]> | dump [file]]" ;;
+    *) die "usage: $PROG server [list | add <link>… | rm <tag>… | clear | import <file [--replace]|--detect|--from SRC [--output FILE]|--apply [--input FILE]> | dump [file]]" ;;
   esac
 }
 
