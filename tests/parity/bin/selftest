@@ -293,6 +293,11 @@ if [ ! -x "$rwatch" ]; then
   echo "  skip — no release build (cargo build --release -p rowt-core)"
 else
   export PARITY_RUST_WATCH="$rwatch"
+  # A PRISTINE shell first: steps 4-8 mutate the copy and leave it so, and
+  # step 4's altered bypass list alone is a different captive probe in the
+  # trace, which this gate compares — 6/8 before anything here was touched.
+  # 10b says the same about the shadow, and starts from a fresh copy too.
+  command cp -f "$ROOT/bin/rowt" "$tmp/bin/rowt"
   if ! "$P" watch-diff >/dev/null 2>&1; then
     bad "watch-diff already fails before the mutation"
   else
@@ -672,10 +677,12 @@ else
   # manual.json — sing-box is handed those objects and an unknown key is not
   # something to find out about at router start. Dropping the `del` leaves
   # every applied server carrying it, which changes nothing anyone would SEE
-  # until the config fails to load.
-  perl -0pi -e 's/\(\(\.\[1\]\.servers \/\/ \[\]\) \| map\(del\(\._source\)\)\)/((.[1].servers \/\/ []))/' \
-    "$tmp/bin/rowt"
-  if grep -q 'map(del(._source))' "$tmp/bin/rowt"; then
+  # until the config fails to load. The strip is the `o: del(._source)` of
+  # apply_import's jq (it was a `map(del(._source))` over the servers once;
+  # the old pattern matched nothing, the absence check read that as applied,
+  # and the gate "passed" on an unmutated shell for two releases).
+  perl -0pi -e 's/o: del\(\._source\)\}/o: .}/' "$tmp/bin/rowt"
+  if grep -q 'o: del(._source)' "$tmp/bin/rowt" || ! grep -q 'o: \.}' "$tmp/bin/rowt"; then
     bad "could not drop the _source strip (apply_import moved?)"
   elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" \
        PARITY_CASES="$(only 'PARITY_SCENARIO=import-review server import --apply')" \
