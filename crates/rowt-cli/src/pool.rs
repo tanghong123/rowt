@@ -315,8 +315,12 @@ pub fn after_import(ctx: &Ctx) -> Result<String, String> {
         ));
     }
     o.push_str(&format!("  stored (secret) at: {}", servers_file(cfg).display()));
-    lifecycle::reload_if_running(ctx)?;
-    Ok(o)
+    // The listing is on the terminal before the shell's `reload_if_running`
+    // runs, so the restart's lines — `✓ running (pid N)`, or no-limbo's proxy
+    // line — come after it; and the reload is the arm's last statement in
+    // every caller, so its outcome is the exit status.
+    println!("{o}");
+    lifecycle::reload_if_running(ctx)
 }
 
 /// `server add` — parse share links into the manual set.
@@ -446,8 +450,10 @@ pub fn remove_servers(ctx: &Ctx, tags: &[String]) -> Result<String, String> {
     set_mode(&manual_file(cfg), 0o600);
     crate::sources::prune(cfg);
     rebuild(ctx)?;
-    out.push_str(&after_import(ctx)?);
-    Ok(out)
+    // The "removed:" lines are on the terminal before `after_import` prints
+    // the listing; the reload's line, and its exit status, are the arm's.
+    print!("{out}");
+    after_import(ctx)
 }
 
 /// `server clear` — forget every manually-imported server. Subscriptions are
@@ -668,7 +674,7 @@ fn refresh_subs(ctx: &Ctx, watchdog: bool) -> Result<String, String> {
     set_mode(&stamp, 0o600);
     info(&format!("re-fetching {} subscription(s)…", sub_count(&ctx.cfg)));
     let result = refresh_pool(ctx, watchdog);
-    let message = match &result { Ok(m) => m.clone(), Err(e) => format!("error: {e}") };
+    let message = match &result { Ok((_, m)) => m.clone(), Err(e) => format!("error: {e}") };
     let tmp = ctx.cfg.join("sub-update.result.tmp");
     if std::fs::write(&tmp, format!("{message}\n")).is_ok() {
         set_mode(&tmp, 0o600);
@@ -678,7 +684,9 @@ fn refresh_subs(ctx: &Ctx, watchdog: bool) -> Result<String, String> {
     if watchdog {
         crate::shell::audit(&ctx.cfg, &format!("watchdog: subscription refresh — {message}"));
     }
-    result
+    // What reaches the terminal — or the watchdog's `$(_sub_update watchdog)`,
+    // which it `info`s whole: the restart's `✓ running` line, then the summary.
+    result.map(|(restarted, message)| if restarted.is_empty() { message } else { format!("{restarted}\n{message}") })
 }
 
 /// A server as a canonical string: object keys sorted at every level, so two
@@ -706,7 +714,11 @@ fn same_pool(old: &[Value], new: &[Value]) -> bool {
     key(old) == key(new)
 }
 
-fn refresh_pool(ctx: &Ctx, watchdog: bool) -> Result<String, String> {
+/// Ok is (the restart's `✓ running` line or empty, the summary): `_sub_update`
+/// prints the first as the reload runs and `echo`es the second at its end, and
+/// only the second is `_SUB_RESULT`, which its exit trap writes to
+/// sub-update.result and the audit line.
+fn refresh_pool(ctx: &Ctx, watchdog: bool) -> Result<(String, String), String> {
     let mut fetched = Vec::new();
     for url in read(&subs_file(&ctx.cfg)).lines().filter(|u| !u.is_empty() && !u.starts_with('#')) {
         fetched.push(fetch_sub(url).map_err(|status| format!("subscription fetch failed: {}{}; previous servers kept",
@@ -718,7 +730,7 @@ fn refresh_pool(ctx: &Ctx, watchdog: bool) -> Result<String, String> {
     let changed = !same_pool(&old, &batch.outbounds);
     let pending = ctx.cfg.join("sub-update.pending");
     let retrying = pending.exists();
-    if !changed && !retrying { return Ok("subscriptions unchanged".into()); }
+    if !changed && !retrying { return Ok((String::new(), "subscriptions unchanged".into())); }
     let message = if changed { refresh_summary(&old, &batch.outbounds) } else { "subscriptions unchanged; pending update applied".into() };
     // Retain a retry marker if applying fails after the pool has been saved.
     std::fs::write(&pending, "").map_err(|e| format!("write pending update: {e}"))?;
@@ -739,20 +751,31 @@ fn refresh_pool(ctx: &Ctx, watchdog: bool) -> Result<String, String> {
     }
     // The watchdog's reload is bracketed in the audit log, as its other
     // reloads are; a manual one is already inside the command's own bracket.
-    if watchdog && lifecycle::host_running(ctx).is_some() {
+    // `_sub_update_fail "subscriptions saved but apply failed"`: a restart that
+    // did not come back has said so already (SILENT), and the shell's line
+    // carries no reason; any other failure — a render that died — carries its.
+    let apply_failed = |e: String| if e == crate::SILENT {
+        "subscriptions saved but apply failed".to_string()
+    } else {
+        format!("subscriptions saved but apply failed: {e}")
+    };
+    let restarted = if watchdog && lifecycle::host_running(ctx).is_some() {
         crate::shell::audit(&ctx.cfg, &format!("BEGIN watchdog reload — {message}"));
         match lifecycle::reload_if_running(ctx) {
-            Ok(_) => crate::shell::audit(&ctx.cfg, "END   watchdog reload — ok"),
+            Ok(s) => {
+                crate::shell::audit(&ctx.cfg, "END   watchdog reload — ok");
+                s
+            }
             Err(e) => {
                 crate::shell::audit(&ctx.cfg, "END   watchdog reload — FAILED");
-                return Err(format!("subscriptions saved but apply failed: {e}"));
+                return Err(apply_failed(e));
             }
         }
     } else {
-        lifecycle::reload_if_running(ctx).map_err(|e| format!("subscriptions saved but apply failed: {e}"))?;
-    }
+        lifecycle::reload_if_running(ctx).map_err(apply_failed)?
+    };
     std::fs::remove_file(pending).map_err(|e| format!("clear pending update: {e}"))?;
-    Ok(message)
+    Ok((restarted, message))
 }
 
 /// `sub clear` — drop every subscription. `: >` truncates in place, so the

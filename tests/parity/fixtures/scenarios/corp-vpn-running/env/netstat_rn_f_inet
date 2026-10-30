@@ -1,0 +1,12 @@
+Routing tables
+
+Internet:
+Destination        Gateway            Flags               Netif Expire
+default            192.0.2.1          UGScg                 en0
+127                127.0.0.1          UCS                   lo0
+192.0.2.0/24       link#4             UCS                   en0
+198.18/19          198.18.0.1         UGSc                utun1
+198.18/20          198.18.0.1         UGSc                utun1
+198.51.100         198.18.0.1         UGSc                utun1
+203.0.113/24       198.18.0.1         UGSc                utun1
+198.18.0.1         198.18.0.1         UH                  utun1

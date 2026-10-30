@@ -1,0 +1,5 @@
+mode=host
+selected=auto
+auto_interval=3m
+proxy_intent=on
+clash_secret=PARITYFIXTURESECRET00000

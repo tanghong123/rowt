@@ -267,7 +267,7 @@ reconcile and the watchdog's decision table. Each has a gate:
 | `sr-diff` | stdout + stderr + exit status, over Shadowrocket installs | 1,200 generated cases |
 | `watch-diff` | decisions, read back from watch.log + trace; a case file names its phase with `_phase` (`guard` unless it says `netcheck`) | 8 cases |
 | `platform-diff` | the argv the platform layer produces | 12 cases |
-| `cli-diff` | stdout, status, the config tree + rc files + LaunchAgent plist (content + mode), argv trace, audit log | 506 cases |
+| `cli-diff` | stdout, status, the config tree + rc files + LaunchAgent plist (content + mode), argv trace, audit log | 521 cases |
 
 `merge-diff` is the only gate whose primary artifact is a file written in
 place: `cmd_import` reads the accumulation straight back with jq, and a human
@@ -367,13 +367,19 @@ Three limits, stated rather than implied:
   installs each — and `yq` is not on the sandbox PATH, so the Clash YAML path
   could not be compared here even with a fixture. The half that writes,
   `--apply`, IS fully compared, from a seeded `import-review.json`.
-* **No case runs a lifecycle arm under `router-up`.** That scenario makes the
-  router "running" by writing the harness's own pid into `host.pid`, so any
-  case that stops or restarts it kills the gate. It rules out
-  `PARITY_SCENARIO=router-up` for `up`, `down`, `reload`, `restart` and
-  `uninstall` alike — the arms themselves ARE gated, from a router-down start,
-  which is the state whose failure path decides the exit status and clears the
-  proxy. `corp sync` is out of reach for the same reason.
+* **A lifecycle arm under a running router runs against a stand-in.** A
+  scenario's `host.pid.self` makes `make_sandbox` start a throwaway `sleep` as
+  the router (it once wrote the harness's own pid, and the first case to reach
+  `reload` shot the gate), so a case may stop or restart it. What such a case
+  reaches is the restart's FAILURE path: the sandbox's sing-box exits at once,
+  readiness never sees it, and both sides run the no-limbo step — which is the
+  path on which the two implementations had quietly disagreed (exit status,
+  a stray proxy line on stdout, a missing reload) until the restart cases in
+  `cli-cases.txt`. A scenario that ships `env/sing-box-run-stays` and a canned
+  `/version` answer gets the restart that comes back instead
+  (`router-restart-ok`), with the sidecars kept off by the case's own
+  `ROWT_METRICS=off ROWT_AUTO_FOLLOW=0`. The arms are still gated from a
+  router-down start too, the state whose failure path clears the proxy.
 * **A purge leaves nothing to compare, and that is agreement.** `diff -q` on
   two files that are both absent exits 2, which reads like "differs" — so the
   lane-file check asks whether either side still has the file before it

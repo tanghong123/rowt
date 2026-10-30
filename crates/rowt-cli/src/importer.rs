@@ -188,10 +188,15 @@ pub fn apply(ctx: &Ctx, file: &Path, replace: bool) -> Result<String, String> {
 
     info("importing… rebuilding server set (this fetches the subscriptions)");
     pool::rebuild(ctx)?;
-    let out = pool::after_import(ctx)?;
+    // `rebuild_servers; after_import` and on to the next line: a restart that
+    // did not come back is stepped over, and `--apply` then `return 0`s.
+    let out = crate::lifecycle::stepped_over(pool::after_import(ctx))?.unwrap_or_default();
+    if !out.is_empty() {
+        println!("{out}");
+    }
     let n = rowt_core::lanes::dump(&read(&domains_path)).len();
     info(&format!("escape-domains now has {n} domains. Next: {} up", crate::PROG));
-    Ok(out)
+    Ok(String::new())
 }
 
 /// `server import <file>` where the file is a `server dump` — an array of

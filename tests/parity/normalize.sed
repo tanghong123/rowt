@@ -41,3 +41,8 @@ s#/var/folders/[^ ]*/T/*[A-Za-z0-9._-]*#<TMP>#g
 # gate is asking about. Scoped to the FIXTURE URL — a closed local port both
 # sides fail against — so a real curl anywhere else still shows up in the trace.
 /^curl .* -- http:\/\/127\.0\.0\.1:9\//d
+
+# host.running (PR #5) is `cksum < host.json`, and host.json names the config
+# dir, so the CRC is the sandbox's own; the byte count is the same on both
+# sides and stays. Only that file is a bare "<number> <number>" line.
+s/^[0-9]\{1,10\} \([0-9]\{1,\}\)$/<CRC> \1/

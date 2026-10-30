@@ -95,6 +95,32 @@ pub fn redirected<T>(path: &Path, f: impl FnOnce() -> T) -> T {
     out
 }
 
+/// `>/dev/null` on stdout alone — `cmd_router restart >/dev/null` in `use` and
+/// `use best`: the restart's own stdout (the ✓ line, no-limbo's proxy line) is
+/// dropped while its stderr still reaches the user.
+pub fn stdout_dropped<T>(f: impl FnOnce() -> T) -> T {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let devnull = std::fs::OpenOptions::new().append(true).open("/dev/null").ok();
+    let saved = devnull.as_ref().and_then(|n| unsafe {
+        use std::os::unix::io::AsRawFd;
+        let o = libc::dup(1);
+        (o >= 0).then(|| {
+            libc::dup2(n.as_raw_fd(), 1);
+            o
+        })
+    });
+    let out = f();
+    if let Some(o) = saved {
+        let _ = std::io::stdout().flush();
+        unsafe {
+            libc::dup2(o, 1);
+            libc::close(o);
+        }
+    }
+    out
+}
+
 /// A failure the command has already reported itself. The shell has arms that
 /// print their outcome on stdout and `return 1` — `config import`'s "aborted."
 /// is one — which is neither an `error:` line nor a `die`: the audit END must
@@ -1054,6 +1080,18 @@ fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<Str
                 _ => Op::Rm(mark(args)),
             };
             let e = apply(&lanes, lane, &op);
+            // `edit_list`'s snapshot of the three routing lanes, the way it
+            // takes it — `$(cat "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS")`,
+            // one string, trailing newlines gone — so the router is reloaded
+            // below only when that string changed.
+            let routed = |l: &Lanes| {
+                let mut s = String::with_capacity(l.escape.len() + l.corp.len() + l.block.len());
+                s.push_str(&l.escape);
+                s.push_str(&l.corp);
+                s.push_str(&l.block);
+                s.trim_end_matches('\n').to_string()
+            };
+            let routed_changed = routed(&lanes) != routed(&e.lanes);
             for l in [Lane::Escape, Lane::Corp, Lane::Block] {
                 let (before, after) = match l {
                     Lane::Escape => (&lanes.escape, &e.lanes.escape),
@@ -1147,6 +1185,18 @@ fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<Str
             // and the TUI's batched reload never touches the proxy.
             if lanes.hotspot != e.lanes.hotspot {
                 out.push(lifecycle::hotspot_apply(&Ctx::new(cfg.to_path_buf())));
+            }
+            // …and `edit_list` ends in `reload_if_running` when a routing lane
+            // changed, unless --no-reload. The edit's lines are on the terminal
+            // by then, so they go out here and the restart's line is what the
+            // arm returns; a restart that did not come back is stepped over.
+            if routed_changed && !no_reload {
+                let o = out.join("\n");
+                if !o.is_empty() {
+                    println!("{o}");
+                }
+                let ctx = Ctx::new(cfg.to_path_buf());
+                return Ok(lifecycle::stepped_over(lifecycle::reload_if_running(&ctx))?.unwrap_or_default());
             }
             Ok(out.join("\n"))
         }
@@ -1716,8 +1766,12 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                 // at the next reload.
                 lifecycle::start_follow(&ctx);
             } else {
+                // `cmd_router restart >/dev/null`: the restart's stdout is
+                // dropped, and a restart that did not come back is stepped
+                // over (lifecycle::stepped_over) — the selection line below
+                // prints either way, and the command exits 0.
                 lifecycle::router_stop(&ctx);
-                lifecycle::router_up(&ctx)?;
+                lifecycle::stepped_over(stdout_dropped(|| lifecycle::router_up(&ctx)))?;
                 if tag == "auto" {
                     eprintln!("==> escape -> auto (fastest live server, re-probed every {})",
                               lifecycle::auto_interval(&ctx));

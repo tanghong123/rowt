@@ -1,0 +1,6 @@
+pool-seeded's manual servers with the router up (host.pid.self): `server rm
+alpha` says what it removed, then `after_import` lists the pool and ends in
+`reload_if_running`. The sandbox's sing-box exits at once, so the restart does
+not come back: "removed" line, listing, no-limbo's proxy line, in that order on
+stdout, and the exit status is the restart's (1), the reload being the arm's
+last statement.

@@ -4,7 +4,14 @@
 case "${1:-}" in
   version) echo "sing-box version 1.13.14" ;;
   check|format) exit 0 ;;
-  run) exit 0 ;;
+  run)
+    # A restart under host.pid.self must FAIL on both sides unless the scenario
+    # says otherwise: the process exits at once, readiness never sees it, and
+    # the arm's failure path runs. env/sing-box-run-stays keeps it up instead,
+    # long enough for both sides' readiness probes, so with a canned /version
+    # answer the restart comes back and `✓ running` is printed.
+    if [ -f "${PARITY_ENV:-}/sing-box-run-stays" ]; then exec sleep 30; fi
+    exit 0 ;;
   tools)
     # `tools fetch -c <cfg> -o <tag> <url>` — the delay probe escape-dns runs
     # for each candidate address of a disputed name. Every candidate passes,

@@ -1,0 +1,7 @@
+import-review's review file with the router up (host.pid.self): `server import
+--apply` rewrites the pool, lists it (`after_import`) and reloads. The sandbox's
+sing-box exits at once, so the restart does not come back: the listing is on
+stdout, then no-limbo's proxy line — and the exit status is 0, because
+`apply_import` goes on to say how many domains the escape lane has and the arm
+then `return 0`s. (`server rm`, by contrast, ends in the reload: see
+pool-seeded-running.)

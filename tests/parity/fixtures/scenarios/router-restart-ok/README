@@ -1,0 +1,14 @@
+A restart that comes back. use-auto-unchanged's machine (router up, auto,
+--every 3m saved, host.json what that renders), plus two things the sandbox's
+sing-box reads from env/:
+
+    sing-box-run-stays                  `run` stays up (sleep 30) instead of
+                                        exiting at once
+    curl_http_127_0_0_1_9090_version    the readiness probe is answered
+
+So a case that restarts the router here sees `✓ running (pid N)` on both sides
+(the pid is masked), where every other restart case sees the failure path. The
+sidecars a successful start would launch — the metrics collector, auto's
+follower — are kept off by the case's own ROWT_METRICS=off ROWT_AUTO_FOLLOW=0:
+either would outlive the case and poll the clash port from outside the shims.
+The fake router outlives the case too, by up to 30 s, and nothing reads it.

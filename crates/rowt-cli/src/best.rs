@@ -166,8 +166,9 @@ pub fn use_best(ctx: &Ctx, prev: &str) -> Result<String, String> {
     if live {
         eprintln!("==> escape -> best: {pick} ({}, live)", latency_ms(ctx, &pick));
     } else {
+        // `cmd_router restart >/dev/null`, stepped over as `use` does it.
         lifecycle::router_stop(ctx);
-        lifecycle::router_up(ctx)?;
+        lifecycle::stepped_over(crate::stdout_dropped(|| lifecycle::router_up(ctx)))?;
         eprintln!("==> escape -> best: {pick} ({})", latency_ms(ctx, &pick));
     }
     watch_note();

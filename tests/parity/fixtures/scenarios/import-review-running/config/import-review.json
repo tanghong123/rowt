@@ -1,0 +1,31 @@
+{
+  "servers": [
+    {
+      "type": "vless",
+      "tag": "epsilon",
+      "server": "203.0.113.40",
+      "server_port": 443,
+      "uuid": "00000000-0000-4000-8000-000000000005",
+      "tls": { "enabled": true, "server_name": "epsilon.example" },
+      "_source": "clash-verge"
+    },
+    {
+      "type": "anytls",
+      "tag": "zeta",
+      "server": "203.0.113.41",
+      "server_port": 8443,
+      "password": "PARITYFIXTUREPASSWORD",
+      "tls": { "enabled": true, "server_name": "zeta.example" },
+      "_source": "shadowrocket"
+    }
+  ],
+  "subscriptions": [
+    { "url": "http://127.0.0.1:9/feed-review", "_source": "clash-verge" }
+  ],
+  "proxy_domains": [
+    "review-one.example",
+    "review-two.example",
+    "example.com"
+  ],
+  "skipped": {}
+}

@@ -1,0 +1,3 @@
+# 127.0.0.1:9 is load-bearing (closed port + a normalize.sed rule keyed to it) — see README
+http://127.0.0.1:9/feed-one
+http://127.0.0.1:9/feed-two?token=PARITYFIXTURETOKEN

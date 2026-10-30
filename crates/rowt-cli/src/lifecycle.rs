@@ -145,10 +145,16 @@ pub fn private(p: &Path) {
 /// sync, an import. With the router down there is nothing to reload and the
 /// next `up` renders anyway, so this is silent; with it up, the `==>` lines are
 /// deliberately NOT swallowed, because a watchdog-triggered reload is only
-/// legible in watch.log if the restart said whether it worked.
-pub fn reload_if_running(ctx: &Ctx) -> Result<(), String> {
+/// legible in watch.log if the restart said whether it worked — and that goes
+/// for `router up`'s own `✓ running (pid N)` line, which the shell's
+/// `cmd_router restart` prints on stdout. It is returned here, for the caller
+/// to print where the shell would: after whatever the arm printed before the
+/// reload. A restart that did not come back has reported itself (`SILENT`);
+/// whether the arm steps over that or ends on it is the caller's — see
+/// `stepped_over`.
+pub fn reload_if_running(ctx: &Ctx) -> Result<String, String> {
     if host_running(ctx).is_none() {
-        return Ok(());
+        return Ok(String::new());
     }
     eprintln!("==> reloading router");
     // `cmd_render >/dev/null` — the rendered paths are noise here; its `==>`
@@ -156,8 +162,24 @@ pub fn reload_if_running(ctx: &Ctx) -> Result<(), String> {
     // shell's cmd_render dies rather than returning.
     cmd_render(ctx)?;
     router_stop(ctx);
-    router_up(ctx)?;
-    Ok(())
+    router_up(ctx)
+}
+
+/// How the shell treats a restart that did not come back, on the arms that run
+/// `cmd_router restart` or `reload_if_running` as a bare statement (`use`,
+/// `use best`, a lane edit, `corp sync`): bin/rowt's `main` runs every command
+/// as `run_command … || _rc=$?`, which switches `set -e` off inside the arm, so
+/// the failed restart is stepped over and the arm goes on to its own lines and
+/// exit 0. The router's no-limbo step has already turned the proxy off, so the
+/// machine is not stranded; the exit status is what lies (PORTING.md §6.7). A
+/// `die` on the way — a render that failed validation, no sing-box to run —
+/// still ends the command, which is every error here that is not `SILENT`.
+pub fn stepped_over<T>(r: Result<T, String>) -> Result<Option<T>, String> {
+    match r {
+        Ok(v) => Ok(Some(v)),
+        Err(e) if e == crate::SILENT => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 /// The cksum of the host.json the running router was started from (`router
@@ -326,6 +348,17 @@ pub fn build_host(ctx: &Ctx) -> Result<Value, String> {
     let cached = |n: &str| cache.join(format!("geosite-{n}.srs")).is_file();
     let all: BTreeSet<String> =
         geosites_of(&esc_src).into_iter().chain(geosites_of(&blk_src)).collect();
+    // `_warn_uncached_geosites`, then the corp-lane check: the shell says on
+    // stderr which referenced categories this render skips. stderr only, so no
+    // gate compares it; whoever runs `rowt reload` reads it.
+    for n in &all {
+        if !cached(n) {
+            eprintln!("error: geosite:{n} not cached — run '{} fetch host' (skipping it in this render)", crate::PROG);
+        }
+    }
+    if !geosites_of(&corp_src).is_empty() {
+        eprintln!("error: geosite: in corp-domains.txt is ignored — only the escape and block lanes support geosite:");
+    }
     let ads = cache.join("geosite-category-ads-all.srs");
     let local = ctx.mode() == "local";
     Ok(render_host(&HostInput {
@@ -1050,14 +1083,13 @@ pub fn curl_code_direct(url: &str) -> String {
     }
 }
 
-/// `tail -8 "$HOST_LOG" >&2` — the last thing sing-box said before it gave up.
-///
-/// Spelled as the external command the shell runs, not read in-process: the
-/// point of showing it is the same either way, but `cli-diff` compares the argv
-/// trace, and a `tail` that never happens is a difference.
+/// `tail -8 "$HOST_LOG" >&2` — the last thing sing-box said before it gave up,
+/// on STDERR like the shell's: `use`/`use best` drop the restart's stdout, and
+/// this is the one thing on it a user would want to see.
 fn tail_host_log(ctx: &Ctx) {
-    let _ = Command::new("tail").arg("-8").arg(ctx.host_log())
-        .stdout(Stdio::inherit()).stderr(Stdio::inherit()).status();
+    if let Ok(o) = Command::new("tail").arg("-8").arg(ctx.host_log()).stderr(Stdio::inherit()).output() {
+        eprint!("{}", String::from_utf8_lossy(&o.stdout));
+    }
 }
 
 pub fn router_up(ctx: &Ctx) -> Result<String, String> {
@@ -1270,7 +1302,10 @@ pub fn cmd_setup(ctx: &Ctx, here: &Path, args: &[String]) -> Result<String, Stri
                 say(&crate::vm::cmd(ctx, here, "up")?);
                 say(&cmd_render(ctx)?);
                 router_stop(ctx);
-                say(&router_up(ctx)?);
+                // `cmd_router restart` as a bare statement: stepped over.
+                if let Some(s) = stepped_over(router_up(ctx))? {
+                    say(&s);
+                }
                 say(&cmd_proxy_on(ctx, false));
                 eprintln!("==> re-wired to {cur}.");
                 return Ok(String::new());

@@ -433,10 +433,10 @@ PARITY_SCENARIO=pool-seeded server rm alpha gamma
 PARITY_SCENARIO=pool-seeded server rm alpha nosuchtag
 server clear
 PARITY_SCENARIO=pool-seeded server clear
-# No `router-up` case here, and none is possible: the scenario makes the router
-# "running" by writing the HARNESS's own pid into host.pid, so the reload that
-# every pool edit ends with would stop the gate itself. The reload path is
-# shared with `corp sync`, which is unreachable in this gate for the same reason.
+# The reload every pool edit ends with is cased under a running router from
+# the use-auto-unchanged block below (`server import --apply` on
+# import-review-running, `corp sync` on corp-vpn-running); the pool edits here
+# run with the router down, where `reload_if_running` is a no-op.
 sub add http://127.0.0.1:9/feed-three
 sub add
 PARITY_SCENARIO=pool-seeded sub add http://127.0.0.1:9/feed-three
@@ -570,6 +570,32 @@ ROWT_AUTO_INTERRUPT=1 PARITY_SCENARIO=auto-status status
 # Already auto and the render changes nothing: the router is not restarted.
 PARITY_SCENARIO=use-auto-unchanged use auto --every 3m
 PARITY_SCENARIO=use-auto-unchanged use auto
+# The restart path under a running router — reachable since make_sandbox's
+# stand-in became a throwaway `sleep` (a case may stop it). The sandbox's
+# sing-box exits at once, so the restart does not come back on either side:
+# `use`/`use best` drop its stdout and step over it (the selection line still
+# prints, rc 0); a lane edit reloads and steps over it; `corp sync` likewise;
+# `server import --apply` steps over it and returns 0; `server rm` ends in the
+# reload, so its rc is the restart's. The shell's `set -e` is off inside an arm
+# (main's `run_command … || _rc=$?`), which is what makes a bare `cmd_router
+# restart` a step and not an exit — PORTING.md §6.7, and
+# lifecycle::stepped_over on the Rust side. `use best` measures its servers
+# concurrently, so its trace is compared unordered.
+PARITY_SCENARIO=use-auto-unchanged use auto --every 5m
+PARITY_UNORDERED=1 PARITY_SCENARIO=use-auto-unchanged use best
+PARITY_SCENARIO=use-auto-unchanged escape add new.example
+PARITY_SCENARIO=use-auto-unchanged escape add --no-reload other.example
+PARITY_SCENARIO=use-auto-unchanged escape add example.com
+PARITY_SCENARIO=corp-vpn-running corp sync
+PARITY_SCENARIO=import-review-running server import --apply
+PARITY_SCENARIO=pool-seeded-running server rm alpha
+# …and the restart that comes back: the fake sing-box stays up and /version
+# answers (router-restart-ok), so `✓ running (pid N)` reaches stdout where the
+# shell puts it — after the edit's own lines, or dropped by `use`. The sidecars
+# stay off: a collector or follower started here would outlive the case and
+# poll the clash port from outside the shims.
+ROWT_METRICS=off ROWT_AUTO_FOLLOW=0 PARITY_SCENARIO=router-restart-ok escape add new.example
+ROWT_METRICS=off ROWT_AUTO_FOLLOW=0 PARITY_SCENARIO=router-restart-ok use auto --every 5m
 # status in auto with the router up: the pick, the interval and its source,
 # the follower, the last switch.
 PARITY_SCENARIO=auto-status status
