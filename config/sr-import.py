@@ -219,9 +219,11 @@ def _to_hysteria2(s: dict, tag: str) -> dict | None:
     shape no store has shown. `udp` is not read, as for every other type. The
     pin is dropped — sing-box pins a public key, not a certificate, and one
     hash cannot be made from the other — as `server add` drops it from a link.
-    Settings in `pluginParam` are not read; a note on stderr says so. The
-    outbound has the shape parse_hysteria2 builds from a link, so a store
-    import and a link import of one node agree (no uTLS: QUIC has none)."""
+    Both are said on stderr: the dropped pin, with what that leaves checking
+    the server's identity (with allowInsecure set, nothing), and settings in
+    `pluginParam`, which are not read. The outbound has the shape
+    parse_hysteria2 builds from a link, so a store import and a link import of
+    one node agree (no uTLS: QUIC has none)."""
     host, port, pw = s.get("host"), s.get("port"), s.get("password")
     if not host or not pw:
         return None
@@ -254,9 +256,23 @@ def _to_hysteria2(s: dict, tag: str) -> dict | None:
         out["obfs"] = {"type": "salamander", "password": str(opw)}
     elif obfs != "none":
         return None
-    # Only for an entry that converts: a skipped one says nothing. An archived
-    # dictionary holds settings when its key list is non-empty; any other
-    # shape (a string, from an older store) when it is truthy.
+    # Only for an entry that converts: a skipped one says nothing. The pin
+    # first: sing-box 1.13 takes tls.certificate_public_key_sha256 and no
+    # certificate hash, and Shadowrocket's hpkp is the latter (Hysteria 2's
+    # pinSHA256), so it cannot be carried over. Silently, the import "worked"
+    # while the one check the entry had for a self-signed server was gone.
+    if s.get("hpkp"):
+        left = (
+            "with allowInsecure set, nothing now checks the server's identity"
+            if s.get("allowInsecure")
+            else "the certificate is still checked against the system roots"
+        )
+        print(
+            f"note: '{tag}': the certificate pin (hpkp) is dropped — sing-box pins a public key, not a certificate; {left}",
+            file=sys.stderr,
+        )
+    # An archived dictionary holds settings when its key list is non-empty;
+    # any other shape (a string, from an older store) when it is truthy.
     pp = s.get("pluginParam")
     held = pp.get("NS.keys") if isinstance(pp, dict) else pp
     if held:

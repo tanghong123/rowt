@@ -113,6 +113,14 @@ server; some servers fail it while carrying real traffic. Verify with
 - Fix with a lane `add`. A running router picks it up live (3.8.11+; earlier
   versions restart, so run it in the foreground there).
 
+**`note: '<tag>': the … certificate pin (pinSHA256 / hpkp) is dropped` when a server
+is added or imported.** A hysteria2 link pinned the server's certificate; sing-box pins
+a public key and has no field for a certificate hash, so rowt uses the server without
+the pin and says so. The rest of the line says what still checks the server: with
+`insecure=1` (self-signed servers, the common case for this pin), nothing — tell the
+user it connects exactly as an unpinned insecure link would, and that keeping the pin
+is a pending rowt decision, not something to set. Nothing to fix on the Mac.
+
 **Escape lane: many timeouts or resets.**
 
 - If every error points at the same server port, the path to that server is the

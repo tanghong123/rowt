@@ -156,6 +156,32 @@ def test_tuic_roundtrips():
     eq(o["tls"]["alpn"], ["h3"], "alpn")
 
 
+def test_hysteria2_fingerprint_rides_the_link_as_its_pin():
+    import contextlib
+    import io
+
+    proxy = {
+        "name": "H",
+        "type": "hysteria2",
+        "server": "h.example",
+        "port": 443,
+        "password": "p",
+        "skip-cert-verify": True,
+        "fingerprint": "AB:CD:EF",
+    }
+    link = fi.clash_proxy_to_link(proxy)
+    assert "pinSHA256=AB%3ACD%3AEF" in link, link
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        o = vp.parse_link(link, "H")
+    assert "certificate_public_key_sha256" not in o["tls"], o
+    assert err.getvalue().startswith(
+        "note: 'H': the link's certificate pin (pinSHA256) is dropped"
+    ), err.getvalue()
+    proxy["fingerprint"] = ""
+    assert "pinSHA256" not in fi.clash_proxy_to_link(proxy)
+
+
 def test_unsupported_type_is_none():
     for t in ("ssr", "wireguard", "snell", "hysteria"):
         eq(

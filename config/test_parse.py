@@ -63,6 +63,27 @@ def test_obfs_and_alpn():
     eq(o["server_port"], 8443, "port")
 
 
+def test_a_pinned_certificate_is_announced_as_dropped():
+    import contextlib
+    import io
+
+    pin = "0123456789abcdef" * 4
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        o = vp.parse_hysteria2(
+            f"hysteria2://pw@h.example:443?insecure=1&pinSHA256={pin}#P", "P"
+        )
+        vp.parse_hysteria2(f"hy2://pw@h.example:443?pinSHA256={pin}#Q", "Q")
+        vp.parse_hysteria2("hysteria2://pw@h.example:443?insecure=1&pinSHA256=#R", "R")
+    assert "certificate_public_key_sha256" not in o["tls"], o
+    eq(
+        err.getvalue(),
+        "note: 'P': the link's certificate pin (pinSHA256) is dropped — sing-box pins a public key, not a certificate; with insecure=1, nothing now checks the server's identity\n"
+        "note: 'Q': the link's certificate pin (pinSHA256) is dropped — sing-box pins a public key, not a certificate; the certificate is still checked against the system roots\n",
+        "one note per pinned link, none for a blank pin",
+    )
+
+
 def test_obfs_none_is_no_obfs_and_salamander_needs_a_password():
     o = vp.parse_hysteria2(
         "hysteria2://pw@h.example:8443?insecure=1&alpn=h3&obfs=none#N", "N"

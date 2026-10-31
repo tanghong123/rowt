@@ -327,6 +327,11 @@ pub fn clash_proxy_to_link(p: &Map<String, Value>) -> R<Option<String>> {
             let ob = p.get("obfs-password").cloned().unwrap_or(Value::String(String::new()));
             q.push(("obfs-password", qvo(Some(ob))));
         }
+        // Clash's `fingerprint` is the certificate's SHA-256 — Hysteria 2's
+        // pinSHA256. Carried into the link so the parser says it is dropped.
+        if truthy(p.get("fingerprint")) {
+            q.push(("pinSHA256", qv(p.get("fingerprint"))));
+        }
         return Ok(Some(format!(
             "hysteria2://{}@{server}:{port}?{}{frag}",
             pyurl::quote(&pw, "/"),
@@ -1108,6 +1113,19 @@ mod tests {
         let v = link(json!({"type": "vless", "server": "h", "port": 1, "uuid": "u",
                             "sni": "S", "servername": "N"}));
         assert!(v.contains("sni=N"), "{v}");
+    }
+
+    #[test]
+    fn a_clash_fingerprint_rides_the_hysteria2_link_as_its_pin() {
+        let h = link(json!({"type": "hysteria2", "server": "h", "port": 1, "password": "p",
+                            "skip-cert-verify": true, "fingerprint": "AB:CD:EF"}));
+        assert!(h.contains("pinSHA256=AB%3ACD%3AEF"), "{h}");
+        // Parsed, the pin is not in the outbound — the parser's note says so.
+        let o = sharelink::parse_link(&h, "H").unwrap();
+        assert!(o["tls"].get("certificate_public_key_sha256").is_none());
+        assert!(sharelink::pin_note(&h, "H").is_some_and(|n| n.ends_with("nothing now checks the server's identity")));
+        let h = link(json!({"type": "hysteria2", "server": "h", "port": 1, "password": "p", "fingerprint": ""}));
+        assert!(!h.contains("pinSHA256"), "{h}");
     }
 
     #[test]

@@ -149,6 +149,10 @@ def clash_proxy_to_link(p: dict) -> str | None:
         if p.get("obfs"):
             q["obfs"] = p.get("obfs")
             q["obfs-password"] = p.get("obfs-password", "")
+        # Clash's `fingerprint` is the certificate's SHA-256 — Hysteria 2's
+        # pinSHA256. Carried into the link so the parser says it is dropped.
+        if p.get("fingerprint"):
+            q["pinSHA256"] = p.get("fingerprint")
         return f"hysteria2://{quote(str(pw))}@{server}:{port}?{q_str(q)}{frag}"
 
     if t == "anytls":

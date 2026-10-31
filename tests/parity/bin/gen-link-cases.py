@@ -15,7 +15,7 @@ has no coverage today and the port has no evidence.
 Each case is a directory holding `argv` (one argument per line) and `stdin`.
 """
 from __future__ import annotations
-import json, os, random, sys
+import contextlib, io, json, os, random, sys
 
 UUIDS = [f"00000000-0000-4000-8000-{i:012d}" for i in range(1, 7)]
 # Userinfo shapes: plain, percent-encoded, doubly-encoded, the last-@ rule,
@@ -111,6 +111,9 @@ def q(r: random.Random, proto: str) -> str:
             if r.random() < 0.5:
                 add("obfs", r.choice(["", "salamander", "none", "xor"]))
                 add("obfs-password", r.choice(["", "obfs-1", "o%20p"]))
+            if r.random() < 0.5:
+                # A pinned certificate: noted as dropped (blank = no pin).
+                add("pinSHA256", r.choice(["", "0123456789abcdef" * 4, "AB%3ACD%3AEF"]))
     if r.random() < 0.7:
         add("sni", r.choice(["", "sni.example", "s%2Ee.example"]))
     if r.random() < 0.4:
@@ -396,7 +399,10 @@ def case(r: random.Random, d: str) -> None:
                 # parses, so a case carries the outbounds it was meant to.
                 for _attempt in range(40):
                     try:
-                        outs.append(_vp().parse_link(link(r).strip(), r.choice(NAMES) or "x"))
+                        # The parser's own stderr (a note on a dropped pin) is
+                        # the gate's to compare when the case runs, not noise now.
+                        with contextlib.redirect_stderr(io.StringIO()):
+                            outs.append(_vp().parse_link(link(r).strip(), r.choice(NAMES) or "x"))
                         break
                     except Exception:  # noqa: BLE001 — a refused link is not an input here
                         continue

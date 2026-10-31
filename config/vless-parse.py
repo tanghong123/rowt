@@ -470,7 +470,13 @@ def parse_hysteria2(link: str, tag: str = "escape") -> dict:
     """Turn a hysteria2:// (or hy2://) URI into a sing-box hysteria2 outbound.
 
     hysteria2 is QUIC-based, so TLS is always on. The auth string lives in the
-    URI userinfo. Port-hopping (mport) is intentionally not handled.
+    URI userinfo. Port-hopping (mport) is intentionally not handled. A pinned
+    certificate (pinSHA256, the URI scheme's own parameter, which the official
+    client recommends beside insecure=1 for a self-signed server) cannot be
+    kept: sing-box pins a server's PUBLIC KEY (tls.certificate_public_key_sha256)
+    and has no field for a certificate hash, and one cannot be made from the
+    other without the certificate. It is dropped, and a note on stderr says so
+    — silently, the link "worked" while the check it carried was gone.
     """
     u = urlsplit(link)
     password = unquote(u.username or "")
@@ -515,6 +521,17 @@ def parse_hysteria2(link: str, tag: str = "escape") -> dict:
     elif obfs and obfs != "none":
         raise ValueError(f"hysteria2 link has an obfs rowt cannot use: {obfs}")
 
+    # Last, after every raise: a link that is skipped says nothing about its pin.
+    if _first(qs, "pinSHA256"):
+        left = (
+            "with insecure=1, nothing now checks the server's identity"
+            if insecure
+            else "the certificate is still checked against the system roots"
+        )
+        print(
+            f"note: '{tag}': the link's certificate pin (pinSHA256) is dropped — sing-box pins a public key, not a certificate; {left}",
+            file=sys.stderr,
+        )
     return out
 
 

@@ -129,6 +129,9 @@ def proxy(rng: random.Random) -> dict:
     if rng.random() < 0.3:
         p["client-fingerprint"] = rng.choice(["chrome", "", None])
     if rng.random() < 0.3:
+        # The certificate pin; only the hysteria2 branch carries it (as pinSHA256).
+        p["fingerprint"] = rng.choice(["AB:CD:EF:01", "0123456789abcdef" * 4, "", None])
+    if rng.random() < 0.3:
         p["flow"] = rng.choice(["xtls-rprx-vision", "", False, None])
     if rng.random() < 0.35:
         # A non-mapping here is an AttributeError that ends the whole import.

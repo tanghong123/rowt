@@ -552,6 +552,17 @@ the two plugins sing-box builds in. `trojan://` takes VLESS's `security`/`type`
 parameters (TLS unless `security=none`), and `tuic://` is v5
 (`uuid:password@host`), offering h3 when the link names no ALPN.
 
+A `hysteria2://` link's **certificate pin** (`pinSHA256`, which Hysteria 2's own
+docs recommend beside `insecure=1` for a self-signed server; Shadowrocket keeps
+it as `hpkp`, Clash as `fingerprint`) **is dropped, and a `note:` on stderr
+says so.** sing-box pins a server's public key
+(`tls.certificate_public_key_sha256`; checked against 1.13.14 with `sing-box
+check`) and has no field for a certificate hash, and one cannot be made from
+the other without the certificate. The note says what is left checking the
+server's identity: with `insecure=1`, nothing — the server then connects
+exactly as an unpinned insecure link would. Keeping the pin is a pending
+decision, not a setting.
+
 A server the pinned sing-box would refuse is **skipped with a warning when it
 is added**, not saved: an unknown cipher, a 2022 key of the wrong length, another
 plugin (`shadow-tls`, `kcptun`, …), or a malformed TUIC uuid. Saved, it would

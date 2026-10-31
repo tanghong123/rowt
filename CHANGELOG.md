@@ -5,12 +5,21 @@ release is cut; everything under Unreleased ships with the next one.
 
 ## Unreleased
 
+- A hysteria2 **certificate pin is announced when it is dropped** — `pinSHA256`
+  in a link given to `server add`, `hpkp` in a Shadowrocket entry, a Clash
+  proxy's `fingerprint` — with a `note:` on stderr naming the server and what
+  is left checking its identity (with `insecure=1`, nothing). It was dropped
+  silently: the server connected, and the one check a self-signed server had
+  was gone. A subscription fetch still discards every per-link warning, this
+  note included, as it always has. sing-box pins a public key
+  (`tls.certificate_public_key_sha256`, present in 1.13.14) and has no field
+  for a certificate hash; one cannot be made from the other without the
+  certificate. Keeping the pin is a pending decision.
 - `server import` from Shadowrocket converts Hysteria2 entries (auth string,
   ALPN, allow-insecure, Salamander obfs with its password in the obfs
-  argument; the certificate pin has no sing-box field and is dropped, as
-  `server add` drops it from a link). They were counted under `skipped`. An
-  entry with a plugin or an SSR-style proto set is skipped, as a Shadowsocks
-  one is; settings in `pluginParam` are not read, and a note says so.
+  argument). They were counted under `skipped`. An entry with a plugin or an
+  SSR-style proto set is skipped, as a Shadowsocks one is; settings in
+  `pluginParam` are not read, and a note says so.
 - `use <tag>`, `use best`, a lane edit and `corp sync` exit 1 when the router
   does not come back from the restart after them. They exited 0 before, with
   their own "escape -> …" or "added:" line, over a router that was down (the

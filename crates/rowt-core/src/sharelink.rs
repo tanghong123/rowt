@@ -615,6 +615,33 @@ pub fn parse_hysteria2(link: &str, tag: &str) -> Result<Value, String> {
     Ok(out.into())
 }
 
+/// The note `parse_hysteria2` prints in the Python, as the LAST thing it does,
+/// when the link carries `pinSHA256`: a pinned certificate sing-box cannot
+/// keep (it pins a public key — `tls.certificate_public_key_sha256` — and
+/// has no field for a certificate hash, and one cannot be made from the
+/// other without the certificate). Here the parser stays a pure function and
+/// the caller asks for the note after a successful parse — `parse_many` for
+/// every link, the single-link entry point for its one — which is the same
+/// moment, since the Python prints it after its last raise. A link of any
+/// other scheme, or with no pin, has none.
+pub fn pin_note(link: &str, tag: &str) -> Option<String> {
+    if !(link.starts_with("hysteria2://") || link.starts_with("hy2://")) {
+        return None;
+    }
+    let u = urlsplit(link).ok()?;
+    let qs = parse_qs(&u.query);
+    if first(&qs, "pinSHA256", "").is_empty() {
+        return None;
+    }
+    let insecure = matches!(first(&qs, "insecure", "0").as_str(), "1" | "true" | "True");
+    let left = if insecure {
+        "with insecure=1, nothing now checks the server's identity"
+    } else {
+        "the certificate is still checked against the system roots"
+    };
+    Some(format!("note: '{tag}': the link's certificate pin (pinSHA256) is dropped — sing-box pins a public key, not a certificate; {left}"))
+}
+
 pub fn parse_vmess(link: &str, tag: &str) -> Result<Value, String> {
     let cfg = vmess_body(link).map_err(|e| format!("vmess link is not base64-JSON ({e})"))?;
     let Value::Object(cfg) = cfg else {
@@ -1068,8 +1095,11 @@ pub fn parse_many(links: &[String]) -> Result<Batch, (Batch, String)> {
         // is reserved by the time `parse_link` runs, so a link that parses
         // badly has still taken its name — but a link whose URI will not split
         // at all fails inside `tag_for` and takes nothing.
-        match tag_for(link, index, &mut used).and_then(|tag| parse_link(link, &tag)) {
-            Ok(o) => b.outbounds.push(o),
+        match tag_for(link, index, &mut used).and_then(|tag| parse_link(link, &tag).map(|o| (o, tag))) {
+            Ok((o, tag)) => {
+                b.warnings.extend(pin_note(link, &tag));
+                b.outbounds.push(o);
+            }
             Err(e) => b.warnings.push(format!("warning: skipping a link ({e})")),
         }
     }
@@ -1555,6 +1585,34 @@ mod tests {
             parse_link("hysteria2://pw@h.example:443?obfs=xor&obfs-password=x", "t").unwrap_err(),
             "hysteria2 link has an obfs rowt cannot use: xor"
         );
+    }
+
+    #[test]
+    fn a_pinned_certificate_is_announced_as_dropped() {
+        let head = "note: 'P': the link's certificate pin (pinSHA256) is dropped — sing-box pins a public key, not a certificate; ";
+        let pin = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        // With insecure=1 the pin was the only check; without it the roots still are.
+        let b = parse_many(&[
+            format!("hysteria2://pw@h1.example:443?insecure=1&pinSHA256={pin}#P"),
+            format!("hy2://pw@h2.example:443?pinSHA256={pin}#Q"),
+            "hysteria2://pw@h3.example:443?insecure=1#R".into(),
+            format!("hysteria2://pw@h4.example:443?insecure=1&pinSHA256={pin}&obfs=xor#S"),
+        ])
+        .unwrap();
+        assert_eq!(b.outbounds.len(), 3);
+        assert!(b.outbounds.iter().all(|o| o.get("tls").and_then(|t| t.get("certificate_public_key_sha256")).is_none()));
+        assert_eq!(
+            b.warnings,
+            [
+                format!("{head}with insecure=1, nothing now checks the server's identity"),
+                format!("note: 'Q': the link's certificate pin (pinSHA256) is dropped — sing-box pins a public key, not a certificate; the certificate is still checked against the system roots"),
+                // A link that is skipped says nothing about its pin.
+                "warning: skipping a link (hysteria2 link has an obfs rowt cannot use: xor)".to_string(),
+            ]
+        );
+        // An empty pin is no pin (parse_qs drops a blank value), and no other scheme has one.
+        assert_eq!(pin_note("hysteria2://pw@h.example:443?pinSHA256=&insecure=1", "t"), None);
+        assert_eq!(pin_note(&format!("trojan://pw@h.example:443?pinSHA256={pin}"), "t"), None);
     }
 
     #[test]

@@ -267,7 +267,7 @@ reconcile and the watchdog's decision table. Each has a gate:
 | `sr-diff` | stdout + stderr + exit status, over Shadowrocket installs | 1,200 generated cases |
 | `watch-diff` | decisions, read back from watch.log + trace; a case file names its phase with `_phase` (`guard` unless it says `netcheck`) | 8 cases |
 | `platform-diff` | the argv the platform layer produces | 12 cases |
-| `cli-diff` | stdout, status, the config tree + rc files + LaunchAgent plist (content + mode), argv trace, audit log | 542 cases |
+| `cli-diff` | stdout, status, the config tree + rc files + LaunchAgent plist (content + mode), argv trace, audit log | 546 cases |
 | `live-fixtures` | each scenario whose committed host.json spells `@CFG@` is still a render of that scenario, byte for byte (vm.json too) | 4 scenarios |
 
 `merge-diff` is the only gate whose primary artifact is a file written in
