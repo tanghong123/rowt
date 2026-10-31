@@ -455,22 +455,36 @@ pub fn to_shadowsocks(s: &Entry, tag: &str) -> R<Option<Value>> {
     .ok())
 }
 
-/// `_to_hysteria2`. Shadowrocket's Hysteria2 entry, as a colleague's names-only
-/// dump of a real store showed it (2026-10-31): the auth string in `password`
-/// (`uuid` is Shadowrocket's own id, as for VLESS), `alpn`, `allowInsecure`,
-/// `hpkp` — a certificate pin sing-box has no field for, dropped here as
-/// `server add` drops it from a link — the port a string, and `obfs`,
-/// `plugin`, `proto`, `pluginParam`, `udp` whose meaning for this type the
-/// dump did not show. Only `obfs` is acted on: Salamander is the one obfs
-/// hysteria2 has and takes a password, assumed to sit where the other types
-/// keep their obfs argument (`obfsParam`); without one, or with any other
-/// obfs, the entry is skipped rather than guessed at. The outbound has the
-/// shape `sharelink::parse_hysteria2` builds from a link, so a store import
-/// and a link import of one node agree (no uTLS: QUIC has none).
-pub fn to_hysteria2(s: &Entry, tag: &str) -> R<Option<Value>> {
+/// `_to_hysteria2`. Shadowrocket's Hysteria2 entry, as a colleague's dump of a
+/// real store showed it (names 2026-10-31, non-secret values 2026-11-01): the
+/// auth string in `password` (`uuid` is Shadowrocket's own id, as for VLESS),
+/// `alpn` ("h3"), `allowInsecure` and `udp` as ints, the port a string, `tls`
+/// False — meaningless for a protocol that is TLS over QUIC, so not read —
+/// `obfs`, `plugin` and `proto` all "none", `hpkp` a certificate pin, and
+/// `pluginParam` an archived NSDictionary whose contents the dump did not
+/// show. Salamander is the one obfs hysteria2 has and takes a password,
+/// assumed to sit where the other types keep their obfs argument
+/// (`obfsParam`) — unconfirmed, the real entry having no obfs; without one,
+/// or with any other obfs, the entry is skipped rather than guessed at. So is
+/// one with a plugin or a proto other than none, as a Shadowsocks entry is: a
+/// shape no store has shown. `udp` is not read, as for every other type. The
+/// pin is dropped — sing-box pins a public key, not a certificate, and one
+/// hash cannot be made from the other — as `server add` drops it from a link.
+/// Settings in `pluginParam` are not read; a note says so — pushed to
+/// `notes`, which the scan prints to stderr where the Python prints it. The
+/// outbound has the shape `sharelink::parse_hysteria2` builds from a link, so
+/// a store import and a link import of one node agree (no uTLS: QUIC has
+/// none).
+pub fn to_hysteria2(s: &Entry, tag: &str, notes: &mut Vec<String>) -> R<Option<Value>> {
     let host = get(s, "host");
     let pw = get(s, "password");
     if !truthy(host) || !truthy(pw) {
+        return Ok(None);
+    }
+    if str_or(get(s, "plugin"), "none").to_lowercase() != "none" {
+        return Ok(None);
+    }
+    if str_or(get(s, "proto"), "none").to_lowercase() != "none" {
         return Ok(None);
     }
     let host = host.unwrap();
@@ -503,6 +517,18 @@ pub fn to_hysteria2(s: &Entry, tag: &str) -> R<Option<Value>> {
         out.insert("obfs".into(), Value::Object(o));
     } else if obfs != "none" {
         return Ok(None);
+    }
+    // Only for an entry that converts: the Python prints these after its last
+    // `return None`, so a skipped entry says nothing. An archived dictionary
+    // holds settings when its `NS.keys` is truthy; any other shape when it is.
+    let held = match get(s, "pluginParam") {
+        Some(PlVal::Dict(d)) => {
+            truthy(d.iter().find(|(k, _)| matches!(k, PlVal::Str(n) if n == "NS.keys")).map(|(_, v)| v))
+        }
+        other => truthy(other),
+    };
+    if held {
+        notes.push(format!("note: '{tag}': settings in Shadowrocket's pluginParam are not imported (the importer does not read that field)"));
     }
     Ok(Some(Value::Object(out)))
 }
@@ -639,12 +665,19 @@ pub fn scan_store(root: &PlVal) -> R<Scan> {
             // `sharelink::parse_many` has.
             let name = str_of(or2(get(s, "title"), get(s, "host")));
             let tag = sanitize(&name, index, &mut used);
+            let mut notes = Vec::new();
             let v = match typ.as_str() {
                 "VLESS" => to_vless(s, &tag)?,
                 "AnyTLS" => to_anytls(s, &tag)?,
-                "Hysteria2" => to_hysteria2(s, &tag)?,
+                "Hysteria2" => to_hysteria2(s, &tag, &mut notes)?,
                 _ => to_shadowsocks(s, &tag)?,
             };
+            // Printed per entry, as the Python prints them from inside the
+            // converter: a note stands before a later entry's traceback, which
+            // collecting them for after the scan would lose.
+            for n in &notes {
+                eprintln!("{n}");
+            }
             match v {
                 Some(v) => out.servers.push(v),
                 None => out.skipped.incr(&typ),
@@ -742,24 +775,62 @@ mod tests {
         e
     }
 
+    /// `to_hysteria2` with the notes it pushed.
+    fn hy2(extra: &[(&str, PlVal)]) -> (Option<Value>, Vec<String>) {
+        let mut notes = Vec::new();
+        let o = to_hysteria2(&hy2_entry(extra), "t", &mut notes).unwrap();
+        (o, notes)
+    }
+
+    /// `pluginParam` as NSKeyedArchiver stores a dictionary — two parallel
+    /// lists of UIDs and a class reference — which is what a real entry holds.
+    fn archived(keys: Vec<PlVal>) -> PlVal {
+        PlVal::Dict(vec![
+            (s("NS.keys"), PlVal::Array(keys)),
+            (s("NS.objects"), PlVal::Array(vec![])),
+            (s("$class"), PlVal::Uid(9)),
+        ])
+    }
+
     #[test]
     fn hysteria2_takes_the_auth_from_password_and_drops_the_pin() {
-        let o = to_hysteria2(&hy2_entry(&[]), "t").unwrap().unwrap();
+        let (o, notes) = hy2(&[]);
+        let o = o.unwrap();
         assert_eq!(o, json!({
             "type": "hysteria2", "tag": "t", "server": "198.51.100.7", "server_port": 8443,
             "password": "auth-string",
             "tls": {"enabled": true, "server_name": "198.51.100.7", "insecure": true, "alpn": ["h3"]}
         }));
-        assert!(o.get("hpkp").is_none(), "sing-box has no field for the pin");
+        assert!(o.get("hpkp").is_none(), "no sing-box field takes a certificate pin");
+        assert!(notes.is_empty(), "{notes:?}");
         // `peer` is the SNI when set; `alpn` splits on commas; `allowInsecure` 0 is false.
-        let o = to_hysteria2(&hy2_entry(&[("peer", s("sni.example")), ("alpn", s("h3,h2")), ("allowInsecure", PlVal::Int(0))]), "t")
-            .unwrap().unwrap();
-        assert_eq!(o["tls"], json!({"enabled": true, "server_name": "sni.example", "insecure": false, "alpn": ["h3", "h2"]}));
-        // Salamander takes its password from obfsParam; without one it is skipped, as is any other obfs.
-        let o = to_hysteria2(&hy2_entry(&[("obfs", s("salamander")), ("obfsParam", s("opw"))]), "t").unwrap().unwrap();
-        assert_eq!(o["obfs"], json!({"type": "salamander", "password": "opw"}));
-        for (k, v) in [("obfs", s("salamander")), ("obfs", s("ws")), ("password", s("")), ("host", s(""))] {
-            assert_eq!(to_hysteria2(&hy2_entry(&[(k, v.clone())]), "t").unwrap(), None, "{k}={v:?}");
+        let (o, _) = hy2(&[("peer", s("sni.example")), ("alpn", s("h3,h2")), ("allowInsecure", PlVal::Int(0))]);
+        assert_eq!(o.unwrap()["tls"], json!({"enabled": true, "server_name": "sni.example", "insecure": false, "alpn": ["h3", "h2"]}));
+        // Salamander takes its password from obfsParam.
+        let (o, _) = hy2(&[("obfs", s("salamander")), ("obfsParam", s("opw"))]);
+        assert_eq!(o.unwrap()["obfs"], json!({"type": "salamander", "password": "opw"}));
+        // Skipped, and silent: Salamander without a password, any other obfs, a
+        // plugin or a proto that is not none, no password, no host.
+        for (k, v) in [("obfs", s("salamander")), ("obfs", s("ws")), ("plugin", s("v2ray-plugin")), ("proto", s("origin")), ("password", s("")), ("host", s(""))] {
+            let (o, notes) = hy2(&[(k, v.clone()), ("pluginParam", s("/plugin"))]);
+            assert_eq!(o, None, "{k}={v:?}");
+            assert!(notes.is_empty(), "{k}={v:?}: {notes:?}");
+        }
+        // A plugin or proto spelled "NONE", "", or None is none.
+        for v in [s("NONE"), s(""), PlVal::None] {
+            assert!(hy2(&[("plugin", v.clone()), ("proto", v.clone())]).0.is_some(), "{v:?}");
+        }
+    }
+
+    #[test]
+    fn hysteria2_says_when_plugin_param_holds_settings_it_does_not_read() {
+        let note = "note: 't': settings in Shadowrocket's pluginParam are not imported (the importer does not read that field)";
+        // An archived dictionary with keys, or a plain non-empty value: noted.
+        assert_eq!(hy2(&[("pluginParam", archived(vec![PlVal::Uid(3), PlVal::Uid(4)]))]).1, [note]);
+        assert_eq!(hy2(&[("pluginParam", s("/plugin"))]).1, [note]);
+        // An empty archived dictionary, an empty string, or None: nothing to say.
+        for v in [archived(vec![]), s(""), PlVal::None] {
+            assert!(hy2(&[("pluginParam", v.clone())]).1.is_empty(), "{v:?}");
         }
     }
 

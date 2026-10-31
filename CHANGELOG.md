@@ -8,7 +8,9 @@ release is cut; everything under Unreleased ships with the next one.
 - `server import` from Shadowrocket converts Hysteria2 entries (auth string,
   ALPN, allow-insecure, Salamander obfs with its password in the obfs
   argument; the certificate pin has no sing-box field and is dropped, as
-  `server add` drops it from a link). They were counted under `skipped`.
+  `server add` drops it from a link). They were counted under `skipped`. An
+  entry with a plugin or an SSR-style proto set is skipped, as a Shadowsocks
+  one is; settings in `pluginParam` are not read, and a note says so.
 - `use <tag>`, `use best`, a lane edit and `corp sync` exit 1 when the router
   does not come back from the restart after them. They exited 0 before, with
   their own "escape -> …" or "added:" line, over a router that was down (the

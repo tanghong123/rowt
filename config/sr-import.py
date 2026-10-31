@@ -204,20 +204,30 @@ def _to_shadowsocks(s: dict, tag: str) -> dict | None:
 
 
 def _to_hysteria2(s: dict, tag: str) -> dict | None:
-    """Shadowrocket's Hysteria2 entry, as a colleague's names-only dump of a real
-    store showed it (2026-10-31): the auth string in `password` (`uuid` is
-    Shadowrocket's own id, as for VLESS), `alpn`, `allowInsecure`, `hpkp` — a
-    certificate pin sing-box has no field for, dropped here as `server add`
-    drops it from a link — the port a string, and `obfs`, `plugin`, `proto`,
-    `pluginParam`, `udp` whose meaning for this type the dump did not show.
-    Only `obfs` is acted on: Salamander is the one obfs hysteria2 has and takes
-    a password, which is assumed to sit where the other types keep their obfs
-    argument (`obfsParam`); without one, or with any other obfs, the entry is
-    skipped rather than guessed at. The outbound has the shape parse_hysteria2
-    builds from a link, so a store import and a link import of one node agree
-    (no uTLS: QUIC has none)."""
+    """Shadowrocket's Hysteria2 entry, as a colleague's dump of a real store
+    showed it (names 2026-10-31, non-secret values 2026-11-01): the auth string
+    in `password` (`uuid` is Shadowrocket's own id, as for VLESS), `alpn`
+    ("h3"), `allowInsecure` and `udp` as ints, the port a string, `tls` False
+    — meaningless for a protocol that is TLS over QUIC, so not read — `obfs`,
+    `plugin` and `proto` all "none", `hpkp` a certificate pin, and
+    `pluginParam` an archived NSDictionary whose contents the dump did not
+    show. Salamander is the one obfs hysteria2 has and takes a password, which
+    is assumed to sit where the other types keep their obfs argument
+    (`obfsParam`) — unconfirmed, the real entry having no obfs; without one, or
+    with any other obfs, the entry is skipped rather than guessed at. So is one
+    with a plugin or a proto other than none, as a Shadowsocks entry is: a
+    shape no store has shown. `udp` is not read, as for every other type. The
+    pin is dropped — sing-box pins a public key, not a certificate, and one
+    hash cannot be made from the other — as `server add` drops it from a link.
+    Settings in `pluginParam` are not read; a note on stderr says so. The
+    outbound has the shape parse_hysteria2 builds from a link, so a store
+    import and a link import of one node agree (no uTLS: QUIC has none)."""
     host, port, pw = s.get("host"), s.get("port"), s.get("password")
     if not host or not pw:
+        return None
+    if str(s.get("plugin") or "none").lower() != "none":
+        return None
+    if str(s.get("proto") or "none").lower() != "none":
         return None
     sni = str(s.get("peer") or host)
     tls: dict = {
@@ -244,6 +254,16 @@ def _to_hysteria2(s: dict, tag: str) -> dict | None:
         out["obfs"] = {"type": "salamander", "password": str(opw)}
     elif obfs != "none":
         return None
+    # Only for an entry that converts: a skipped one says nothing. An archived
+    # dictionary holds settings when its key list is non-empty; any other
+    # shape (a string, from an older store) when it is truthy.
+    pp = s.get("pluginParam")
+    held = pp.get("NS.keys") if isinstance(pp, dict) else pp
+    if held:
+        print(
+            f"note: '{tag}': settings in Shadowrocket's pluginParam are not imported (the importer does not read that field)",
+            file=sys.stderr,
+        )
     return out
 
 

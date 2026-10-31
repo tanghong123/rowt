@@ -100,8 +100,10 @@ TYPES = [
 ]
 PORTS = [443, 8443, 0, "8443", " 8443 ", "abc", 1.5, True, None, -1, 65536, "8388", [1]]
 OBFS = ["none", "ws", "WebSocket", "grpc", "", None, "tls", "http", "HTTP", "salamander", "Salamander"]
-# Hysteria2's own fields, as a names-only dump of a real store listed them:
-# alpn, allowInsecure, hpkp (a pin), udp, plugin/proto "none", the port a string.
+# Hysteria2's own fields, as a colleague's dump of a real store showed them:
+# alpn "h3", allowInsecure and udp ints, hpkp (a certificate pin), plugin and
+# proto "none", tls False, the port a string, and pluginParam an archived
+# NSDictionary (archived_dict below).
 HY2_ALPN = ["h3", "h3", "h3,h2", "", None, 7]
 # Shadowsocks's own fields, in the shapes a real store holds them (method and
 # obfs as strings, `plugin`/`proto` "none", a `chain` as another entry's id) —
@@ -137,6 +139,23 @@ def scalar(rng: random.Random):
             datetime.datetime(2026, 8, 9, 12, 0, 0),
         ]
     )
+
+
+def archived_dict(objs: list, items: list[tuple[str, str]]) -> UID:
+    """An NSDictionary as NSKeyedArchiver stores one: its keys and values as
+    UIDs into $objects in two parallel lists, plus a class reference — and the
+    dictionary itself reached through a UID."""
+    keys: list[UID] = []
+    vals: list[UID] = []
+    for k, v in items:
+        objs.append(k)
+        keys.append(UID(len(objs) - 1))
+        objs.append(v)
+        vals.append(UID(len(objs) - 1))
+    objs.append({"$classname": "NSDictionary", "$classes": ["NSDictionary", "NSObject"]})
+    cls = UID(len(objs) - 1)
+    objs.append({"NS.keys": keys, "NS.objects": vals, "$class": cls})
+    return UID(len(objs) - 1)
 
 
 def server_entry(rng: random.Random, objs: list) -> dict:
@@ -175,9 +194,9 @@ def server_entry(rng: random.Random, objs: list) -> dict:
         e["udp"] = ref(rng.choice([1, 0, True, None]))
     if rng.random() < (0.9 if ss else 0.1):
         e["method"] = ref(rng.choice(SS_METHODS))
-    if rng.random() < (0.5 if ss else 0.1):
+    if rng.random() < (0.5 if ss or hy2 else 0.1):
         e["plugin"] = ref(rng.choice(["none", "none", "", None, "v2ray-plugin", "NONE", 5]))
-    if rng.random() < (0.5 if ss else 0.1):
+    if rng.random() < (0.5 if ss or hy2 else 0.1):
         e["proto"] = ref(rng.choice(["none", "none", "origin", "", None, "auth_aes128_md5"]))
     if rng.random() < (0.15 if ss else 0.05):
         e["chain"] = ref(rng.choice(["9F88A164-B8EC-4DA3-830E-7F36A790BDA2", "", None]))
@@ -199,9 +218,17 @@ def server_entry(rng: random.Random, objs: list) -> dict:
         e["obfs"] = ref(rng.choice(OBFS))
     if rng.random() < 0.4:
         e["obfsParam"] = ref(rng.choice(["/ws", "", None, "svc", "cdn.example.com"]))
-    if rng.random() < 0.25:
-        e["pluginParam"] = ref(rng.choice(["/plugin", "", None]))
-    if rng.random() < 0.3:
+    if rng.random() < (0.6 if hy2 else 0.25):
+        # A real Hysteria2 entry holds an archived NSDictionary here; the
+        # importer notes one with keys and says nothing of an empty one.
+        pick = rng.random()
+        if pick < 0.3:
+            e["pluginParam"] = archived_dict(objs, [])
+        elif pick < 0.6:
+            e["pluginParam"] = archived_dict(objs, [("upmbps", "20"), ("downmbps", "100")])
+        else:
+            e["pluginParam"] = ref(rng.choice(["/plugin", "", None]))
+    if rng.random() < (0.7 if hy2 else 0.3):
         e["allowInsecure"] = ref(rng.choice([True, False, 1, 0, "0", "", None]))
     if rng.random() < 0.25:
         e["data"] = ref(rng.choice(["upload=1", "", None, b"raw"]))
