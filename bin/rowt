@@ -62,7 +62,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.8.24"
+ROWT_VERSION="3.8.25"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -7210,6 +7210,13 @@ _watch_plist_body() {
     val="${!v:-}"; [ -n "$val" ] && envxml="$envxml
     <key>$v</key><string>$val</string>"
   done
+  # Which implementation the tick runs: `watch install|refresh` remembers
+  # ROWT_IMPL in state (below), and only rust is written, because the front door
+  # reads anything else as the shell, so a plist nobody switched stays exactly
+  # what it was. From state rather than the environment, so the tick's own
+  # self-heal and a refresh with an empty environment write the same file.
+  [ "$(sget watch_impl)" = rust ] && envxml="$envxml
+    <key>ROWT_IMPL</key><string>rust</string>"
   cat <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -7336,6 +7343,10 @@ cmd_watch() {
       # quietly end a shadow window at the next brew upgrade.
       [ -n "${ROWT_WATCH_SHADOW:-}" ]  && sset shadow_watch  "$ROWT_WATCH_SHADOW"
       [ -n "${ROWT_RENDER_SHADOW:-}" ] && sset shadow_render "$ROWT_RENDER_SHADOW"
+      # The same for which implementation the tick runs. ROWT_IMPL=rust reaches
+      # rowt-rs before this shell, so what normally lands here is bash: the way
+      # back, `ROWT_IMPL=bash rowt watch refresh`.
+      [ -n "${ROWT_IMPL:-}" ] && sset watch_impl "$([ "$ROWT_IMPL" = rust ] && echo rust || echo bash)"
       if [ "$refresh" = 1 ] && [ ! -f "$WATCH_PLIST" ]; then info "watch not installed — nothing to refresh"; return 0; fi
       local self; self="$(_watch_self)"
       [ -x "$self" ] || die "cannot resolve the rowt binary path ($self)"

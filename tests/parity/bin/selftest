@@ -1365,6 +1365,28 @@ else
 fi
 cp "$ROOT/tests/parity/fixtures/scenarios/lanes-live/config/host.json" "$tmp/tests/parity/fixtures/scenarios/lanes-live/config/host.json"
 
+echo "49. a watchdog switched to rowt-rs must keep ROWT_IMPL in its plist on both sides"
+cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+if [ ! -x "$ROOT/target/release/rowt-rs" ]; then
+  echo "  skip — no release build"
+else
+  # rowt #s65. The choice lives in state and reaches launchd only through the
+  # plist's environment, so a side that stops writing the key puts the
+  # watchdog back on the shell at the next refresh, and says nothing. The plist
+  # sits outside the config tree; cli-diff compares it as its own file. Make the
+  # shell's plist ignore the remembered choice; the refresh case must differ.
+  perl -0pi -e 's/\[ "\$\(sget watch_impl\)" = rust \]/[ "\$(sget watch_impl)" = never ]/' "$tmp/bin/rowt"
+  if ! grep -qF '[ "$(sget watch_impl)" = never ]' "$tmp/bin/rowt"; then
+    bad "could not make the plist ignore watch_impl (_watch_plist_body moved?)"
+  elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" PARITY_CASES="$(only 'PARITY_SCENARIO=watch-impl-rust watch refresh')" \
+       "$P" cli-diff >/dev/null 2>&1; then
+    bad "cli-diff passed with one side's plist dropping ROWT_IMPL=rust"
+  else
+    ok "cli-diff caught a plist that dropped the watchdog's ROWT_IMPL"
+  fi
+  cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+fi
+
 echo
 echo "selftest: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

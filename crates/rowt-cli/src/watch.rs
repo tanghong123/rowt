@@ -187,6 +187,13 @@ fn plist_body(ctx: &Ctx, self_bin: &Path) -> String {
             }
         }
     }
+    // Which implementation the tick runs, remembered by `install|refresh`. Only
+    // rust is written (the front door reads anything else as the shell), and it
+    // comes from state, so the tick's self-heal writes the same file as the
+    // refresh that chose it.
+    if ctx.sget("watch_impl") == "rust" {
+        envxml.push_str("\n    <key>ROWT_IMPL</key><string>rust</string>");
+    }
     let interval = env_or("ROWT_WATCH_INTERVAL", "120");
     format!(r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1334,6 +1341,15 @@ pub fn cmd(ctx: &Ctx, self_bin: &Path, action: &str) -> Result<String, String> {
                     if !v.is_empty() {
                         lifecycle::sset(ctx, key, &v);
                     }
+                }
+            }
+            // And which implementation the tick runs. Through the front door
+            // ROWT_IMPL=rust lands here, never in the shell, so this is the side
+            // that switches the watchdog over; `ROWT_IMPL=bash rowt watch
+            // refresh` reaches the shell and switches it back.
+            if let Ok(v) = std::env::var("ROWT_IMPL") {
+                if !v.is_empty() {
+                    lifecycle::sset(ctx, "watch_impl", if v == "rust" { "rust" } else { "bash" });
                 }
             }
             if refresh && !plist.is_file() {

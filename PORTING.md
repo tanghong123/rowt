@@ -766,6 +766,21 @@ through it. Three details are load-bearing:
 * **A missing binary is an error, not a fallback.** Silently handing bash to
   someone who asked for rust is how a fourteen-day window fills with evidence
   about the wrong implementation.
+* **The watchdog follows only when asked** (rowt #s65). launchd starts the tick
+  with the plist's environment, never a shell's, so an `export` in `~/.zshrc`
+  leaves it on bash. `watch install|refresh` remembers an explicit `ROWT_IMPL`
+  in state as `watch_impl`, the way the shadow knobs are remembered (a
+  post-upgrade refresh runs with an empty environment), and the plist carries
+  `ROWT_IMPL=rust` only when state says rust, so a plist nobody switched is
+  byte-for-byte what it was. It comes from state rather than the environment
+  so the tick's own self-heal writes the same file as the refresh that chose
+  it. Through the front door `ROWT_IMPL=rust` reaches rowt-rs before the
+  shell, so rowt-rs is the side that records rust and the shell, in practice,
+  records the way back: `ROWT_IMPL=bash rowt watch refresh`. A watchdog on
+  rowt-rs ends §6.5's tick shadow on that machine, since the shadow compares
+  the shell's tick and the shell's tick no longer runs; what is left there is
+  behaviour (watch.log, the audit's restarts, captive episodes). Keep one
+  machine on the shell's watchdog, shadow armed, while another runs rowt-rs.
 
 `PARITY_BASH_IMPL=rust parity cli-diff` runs the whole matrix with the bash side
 wrapped. Be blunt about what that proves: both sides are then the same binary,

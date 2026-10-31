@@ -1019,3 +1019,10 @@ PARITY_SCENARIO=watch-proxy-repoint ROWT_PARITY_SUDO=no-tty proxy on
 # installed. Under no-tty, install stops BEFORE writing anything and says why.
 watch install
 ROWT_PARITY_SUDO=no-tty watch install
+# Which implementation the watchdog's tick runs (rowt #s65). A watchdog already
+# switched to rowt-rs keeps it through a refresh with an empty environment (what
+# an upgrade does) — the plist carries ROWT_IMPL=rust, from state — and
+# ROWT_IMPL=bash is the way back: state says bash and the key goes. The plain
+# `watch install` above is the third case: nobody chose, so no key at all.
+PARITY_SCENARIO=watch-impl-rust watch refresh
+PARITY_SCENARIO=watch-impl-rust ROWT_IMPL=bash watch refresh

@@ -500,7 +500,7 @@ rowt version
 
 A second command, `rowt-rust`, ships alongside `rowt` on Apple Silicon. It is a
 Rust port of the whole CLI, and it is a **preview you can ignore**: nothing runs
-it for you, `rowt` does not delegate to it, and removing it changes nothing.
+it unless you ask (below), and removing it changes nothing.
 
 It exists so the two can be run side by side on the same config:
 
@@ -509,9 +509,10 @@ rowt status          # the shell
 rowt-rust status     # the port, same config, same output
 ```
 
-Every one of the 37 command arms answers natively and is compared against the
-shell — stdout, exit status, the config tree with file modes, the argv trace and
-the audit log — over 241 cases (`tests/parity/`). What is NOT yet proven is time
+37 of the 41 command arms answer natively (the other four still run in the
+shell), and every one is compared against the shell — stdout, exit status, the
+config tree with file modes, the argv trace and the audit log — over 500 cases
+(`tests/parity/`). What is NOT yet proven is time
 on real networks, which is what the preview is for. If the two ever disagree on
 your machine, that is worth reporting: the whole design of the port is that they
 should not.
@@ -520,6 +521,22 @@ Two smaller binaries ship next to it, `rowt-render` and `rowt-watch-tick`. Those
 are inert unless you turn a comparison on (`ROWT_RENDER_SHADOW=1`,
 `ROWT_WATCH_SHADOW=1`), which makes `rowt` record where the Rust would have
 disagreed with it, and act on its own answer regardless.
+
+**Trying it as your everyday `rowt`.** `export ROWT_IMPL=rust` (in `~/.zshrc`)
+makes `rowt` itself hand each command to the Rust version; the few it does not
+answer yet come back to the shell on their own. The watchdog never reads your
+shell's settings, so it stays on the shell until you run `rowt watch refresh`
+from a shell with `ROWT_IMPL=rust` set. rowt remembers that choice, so an
+upgrade keeps it. The way back:
+
+```sh
+ROWT_IMPL=bash rowt watch refresh   # the watchdog, back on the shell
+export ROWT_IMPL=bash               # this terminal; delete the export for new ones
+```
+
+A watchdog on the Rust version is no longer compared with anything: the
+watchdog comparison (`ROWT_WATCH_SHADOW`) checks the shell's tick, and the
+shell's tick has stopped running.
 
 The installer is **version-guarded**: re-running it does nothing if the installed
 copy is the same or newer than the source (`--force` overrides; `--uninstall`
