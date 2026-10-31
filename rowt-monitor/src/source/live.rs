@@ -732,12 +732,16 @@ impl Source for LiveSource {
     }
 
     fn reload_router(&self) {
-        // Lane edits were written with --no-reload; issue ONE reload now. We do
+        // Lane edits were written with --no-reload; apply them ONCE now. We do
         // render + router restart (the lightweight lane-reload) rather than
         // `rowt reload`, which would also re-assert the system proxy and fight
         // the `o` toggle / captive-portal flow (CONTROLS.md §4.3 deviation).
+        // Since the lanes became rule-sets the router watches (rowt #s54), the
+        // render alone reaches a router that runs what it rendered, and the
+        // restart is skipped (rowt #s56).
         let out = Arc::clone(&self.ctl_out);
         let in_flight = InFlight::new(&self.restarts);
+        let cfg = self.cfg.clone();
         std::thread::Builder::new()
             .name("rowt-monitor-ctl".into())
             .spawn(move || {
@@ -745,6 +749,9 @@ impl Source for LiveSource {
                 let bin = std::env::var("ROWT_BIN").unwrap_or_else(|_| "rowt".to_string());
                 let render = std::process::Command::new(&bin).arg("render").output();
                 let outcome = match render {
+                    Ok(o) if o.status.success() && router_runs_rendered(&cfg) => {
+                        crate::source::CtlOutcome::Ok("lane edits applied live — router not restarted".into())
+                    }
                     Ok(o) if o.status.success() => {
                         match std::process::Command::new(&bin).args(["router", "restart"]).output() {
                             Ok(o2) if o2.status.success() => crate::source::CtlOutcome::Ok("router reloaded".into()),
@@ -1349,6 +1356,35 @@ fn first_err_line(stderr: &[u8], fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_string())
 }
 
+/// Does the running router run exactly the host.json `rowt render` just wrote?
+/// Then the render alone has put the batched lane edits into it, through the
+/// lane rule-sets it watches, and a restart would drop every connection for
+/// nothing (rowt #s56). The same test as the shell's `_lanes_apply`: the knob
+/// on, a live `host.pid`, and `host.running` (the cksum the router was started
+/// from) equal to `cksum < host.json`, from the same tool so the same number.
+/// Anything missing or unreadable answers "restart", as before.
+fn router_runs_rendered(cfg: &Path) -> bool {
+    let knob = std::env::var("ROWT_LANES_HOT").ok().filter(|v| !v.is_empty())
+        .or_else(|| std::env::var("ROWT_CORP_HOT").ok().filter(|v| !v.is_empty()))
+        .unwrap_or_else(|| "1".into());
+    if knob != "1" {
+        return false;
+    }
+    let pid = std::fs::read_to_string(cfg.join("host.pid")).ok()
+        .and_then(|s| s.trim().parse::<i32>().ok()).filter(|p| *p > 0);
+    if !pid.is_some_and(|p| unsafe { libc::kill(p, 0) } == 0) {
+        return false;
+    }
+    let running = std::fs::read_to_string(cfg.join("host.running")).unwrap_or_default();
+    let running = running.trim();
+    let Ok(host) = std::fs::File::open(cfg.join("host.json")) else { return false };
+    let now = std::process::Command::new("cksum").stdin(std::process::Stdio::from(host)).output();
+    match now {
+        Ok(o) if o.status.success() => !running.is_empty() && String::from_utf8_lossy(&o.stdout).trim() == running,
+        _ => false,
+    }
+}
+
 fn config_dir() -> PathBuf {
     if let Some(x) = std::env::var_os("XDG_CONFIG_HOME") {
         PathBuf::from(x).join("rowt")
@@ -1687,6 +1723,40 @@ fn parse_etime(s: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// rowt #s56: a batched lane edit skips the restart only when the router
+    /// is alive AND was started from the host.json just rendered; a stale
+    /// mark, a dead pid, a different render or the knob off all restart.
+    #[test]
+    fn a_router_running_the_rendered_config_takes_lane_edits_live() {
+        let dir = std::env::temp_dir().join(format!("rowt-mon-hot-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mark = |dir: &Path| {
+            let host = std::fs::File::open(dir.join("host.json")).unwrap();
+            let o = std::process::Command::new("cksum").stdin(std::process::Stdio::from(host)).output().unwrap();
+            std::fs::write(dir.join("host.running"), o.stdout).unwrap();
+        };
+        std::fs::write(dir.join("host.json"), "{\"outbounds\":[]}\n").unwrap();
+        std::fs::write(dir.join("host.pid"), format!("{}\n", std::process::id())).unwrap();
+        assert!(!router_runs_rendered(&dir), "no host.running yet: the router predates live lane updates");
+        mark(&dir);
+        assert!(router_runs_rendered(&dir));
+        std::fs::write(dir.join("host.json"), "{\"outbounds\":[{}]}\n").unwrap();
+        assert!(!router_runs_rendered(&dir), "a render the router does not run (a geosite: came or went)");
+        mark(&dir);
+        let mut gone = std::process::Command::new("true").spawn().unwrap();
+        let gone_pid = gone.id();
+        gone.wait().unwrap();
+        std::fs::write(dir.join("host.pid"), format!("{gone_pid}\n")).unwrap();
+        assert!(!router_runs_rendered(&dir), "a stale mark from a stopped router");
+        std::fs::write(dir.join("host.pid"), format!("{}\n", std::process::id())).unwrap();
+        std::env::set_var("ROWT_LANES_HOT", "0");
+        let off = router_runs_rendered(&dir);
+        std::env::remove_var("ROWT_LANES_HOT");
+        assert!(!off, "ROWT_LANES_HOT=0 always restarts");
+        assert!(router_runs_rendered(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn probe_requests_while_the_worker_is_busy_are_not_queued() {

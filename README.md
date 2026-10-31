@@ -1114,8 +1114,10 @@ place), or `sys proxy` to toggle it (hover-highlights).
 - `e` / `c` / `b` / `d` — route the locked domain into **escape** / **corp** /
   **block**, or `d` back to **direct**. Armed by the first press (a confirm bar
   previews the change); a second press of the same key or `↵` commits, `Esc`
-  cancels. Edits are batched — one router reload fires ~7s after the last edit
-  settles.
+  cancels. Edits are batched: ~7s after the last edit settles, one render puts
+  them all into the running router, live, with no connection dropped. Only a
+  router started from a different config (an older rowt, or a `geosite:`
+  entry that came or went) gets one restart instead.
 - `t` — put the locked domain on the **hotspot** lane (macOS's proxy bypass
   list, so a venue's captive-portal page loads with the proxy on; see
   [Captive portals](#captive-portals-hotel--airplane-wi-fi)). Same arm/commit

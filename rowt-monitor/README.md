@@ -31,7 +31,8 @@ domain · `p` pause · `?` help · `q` quit. (`v`/`s`/`f`/`/`/`w` are all global
 
 **Controls** (confirmed, reversible; each runs the matching `rowt` command):
 `e`/`c`/`b`/`d` route the locked domain → escape/corp/block/direct (arm, then
-re-press or `↵` to commit; batched into one reload ~7s later) · `t` put it on
+re-press or `↵` to commit; batched ~7s later into one render the router takes
+live, or one restart when it runs a different config) · `t` put it on
 the **hotspot** lane — macOS's proxy *bypass* list, so a venue's captive-portal
 page loads with the proxy on (`t` is the one letter of "hotspot" not already
 bound) · `u` use the selected server · `a` auto server selection on/off · `o`
@@ -64,7 +65,7 @@ A hotspot edit is not a routing edit: nothing in that lane is rendered, and the
 CLI refreshes the bypass list on the spot instead of bouncing the router. The
 batched reload still fires, because `t` on a host that sits in a routing lane
 pulls it out of there (single-lane rule), and the router keeps routing it until
-something reloads. `d` clears a hotspot entry too. Refreshing the bypass list is
+the render reaches it. `d` clears a hotspot entry too. Refreshing the bypass list is
 a `sudo networksetup` call with no terminal to prompt on — like `o`, it works
 silently with the passwordless rule `rowt watch install` adds and is otherwise
 skipped, in which case the entry is written and lands on the next `rowt proxy on`.
