@@ -961,16 +961,29 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 | --- | --- |
 | `escape` / `corp` / `block` (no verb) | list the lane. |
 | `hotspot <list\|add\|rm\|import\|clear\|dump>` | **captive-portal hosts — and overlay DNS zones — that bypass the proxy at the OS level**, so a venue's login page loads while rowt is up: each entry goes on macOS's proxy bypass list as `x.com` *and* `*.x.com` (`.x.com` or `*.x.com` = the `*.x.com` form alone; `--domain` = that exact host only; an IP/CIDR as written). Not a routing lane — nothing is rendered, an edit re-applies the bypass list (where rowt owns the proxy) instead of restarting the router, `corp sync` stops mirroring a DHCP-advertised domain that sits here, and `proxy env`/`run` export the list as `no_proxy`. Same single-lane rule as the others. `corp sync` also WRITES here, in its own auto-managed block: the DNS zones only an overlay resolver answers (a tailnet's, say), which no lane can resolve — see [Tailnet names](#tailnet-names-and-any-other-scoped-only-zone--automatic). See [Captive portals](#captive-portals-hotel--airplane-wi-fi). |
-| `… add <d>…` / `… rm <d>…` | add / remove domains (corp also takes CIDRs). Reloads if running. |
+| `… add <d>…` / `… rm <d>…` | add / remove domains (corp also takes CIDRs). A running router picks the change up **live**, no restart, no dropped connection — see below. |
 | `… add --domain <d>…` | match the **whole host only**, not its subdomains — stored as `domain:<host>`, rendered as a sing-box `domain` rule instead of `domain_suffix`. `--domain-suffix` names the default explicitly. Applies to every entry of that `add`/`rm`, from any position. |
 | `… add --force <d>…` | add an entry that is a **whole namespace**. Lane entries are suffixes, so `com` is every `.com` and `co.uk` is every `.co.uk`; both are declined unless you say `--force`. |
 | `… import <file>` | batch-add one domain per line from a file (merges; never replaces). |
-| `… clear` | remove every entry (keeps the file's comment header). Reloads if running. |
+| `… clear` | remove every entry (keeps the file's comment header). Live if running, as above. |
 | `… dump [file]` | export the lane (stdout, or to a file for backup/versioning). |
 | `direct errors [5m\|10m\|1h\|…\|all]` | **which domains failed on the default DIRECT lane** in that window (default 10m) — your escape candidates. Reason is categorized (timeout/reset/refused ⇒ likely blocked; dns ⇒ transient). Reproduce a misbehaving app, then `direct errors 10m` and `escape add` the real ones. |
 | `<lane> errors [5m\|…\|all]` | same for any lane: `block errors` (default 24h) = what got sinkholed; `escape errors` / `corp errors` = failures on those lanes. Only *failed/refused* connections are logged — an empty list means no errors, **not** no traffic. |
 | `<lane> log` | live-tail that lane's connection-error log. |
 | `connections [lane\|-w]` | **live view of active connections** and which lane each is on (escape/direct/corp/block), with bytes up/down and the matched rule. Unlike `errors`, this shows *successful* traffic — "what's actually going through escape right now". `-w` refreshes every 2s. |
+
+**Edits are live.** A lane `add`, `rm`, `import` or `clear`, and a `corp sync`
+that changed the lane, reach a running router without a restart: the lane
+rules are rule-set files under `~/.config/rowt/rule-sets/` (one per lane per
+label count, so the longest suffix still wins across lanes), `host.json` only
+points at them, and sing-box re-reads a replaced file in place. The command
+says so (`applied live through the lane rule-sets — router not restarted`).
+What still restarts, because sing-box builds it at start: servers and
+subscriptions, `use` and auto's knobs, ports, mode and interface changes,
+`config import`, and a `geosite:` add or rm (its set is named in `host.json`).
+The first edit after upgrading restarts once, since the running router predates
+the sets; `ROWT_LANES_HOT=0` restarts every time, as before. `--no-reload`
+still means "touch the router not at all".
 
 **Suffix vs whole-host.** A lane entry is a `domain_suffix` by default, and
 that is almost always what you want: `z.com` covers `z.com` and `a.z.com`, and —
@@ -1018,7 +1031,7 @@ corp/escape/direct.
 | `proxy status\|check\|on\|off\|env [--off]` | show / verify / set / unset the macOS system proxy; `env` prints CLI env exports. `on`/`off` are **idempotent** — they read the current state first (no sudo) and only invoke admin for what's actually wrong, so re-running never prompts if already correct. `on` is a **no-op unless the router is running** (else it would just point the system proxy at a dead port and break traffic) — run `rowt up` first, or `proxy on --force` to override. `check` exits 0 iff fully configured (used to re-apply after the OS config drifts). |
 | `shell-init` | shell integration to `eval` in your rc — defines `rowt-proxy-on`/`-off`, client-side `rowt-remote-on <remote-host>`/`-off`, system-wide `rowt-remote-system-on <remote-host>`/`-off`, the Tailscale `rowt-share-on`/`-off`/`-status` helpers, and loads tab-completion for subcommands (zsh/bash), idempotent. Add `eval "$(rowt shell-init)"` to `~/.zshrc`. |
 | `completion <zsh\|bash>` | print a tab-completion script (normally auto-loaded by `shell-init`; defers to the live command set so it never drifts). |
-| `render` | regenerate the sing-box configs from current state. |
+| `render` | regenerate the sing-box configs from current state: `host.json`, `vm.json` and the lane rule-set files under `rule-sets/`, which a running router re-reads at once — so a lane file edited by hand goes live with a `render`; servers, ports and mode still need `reload`. |
 | `fetch [host\|vm\|both]` | pre-download while a VPN is on so `up` works offline. `host` = the macOS sing-box binary; `vm` = the ubuntu image + linux sing-box tarball into `~/.config/rowt/cache/` (then `up vm` boots from the local image and installs sing-box into the guest from that cache — **the VM never reaches GitHub itself**). Default `both`. |
 | `router up\|down\|restart\|status\|log` | the local rule-router process — the always-on proxy on `127.0.0.1:7890` (the front door your system proxy points at), which runs in **both** modes. (`router` is a process, not a mode — switch modes with `up host`/`up vm`.) |
 | `vm up\|down\|restart\|status\|log\|delete` | the bridged Lima VM (mode `vm`). |

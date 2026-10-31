@@ -162,8 +162,8 @@ replaced**, run `rowt fetch host` (with a working path to GitHub) or `rowt reloa
    vmess, anytls, hysteria2, ss, trojan, tuic) or `rowt sub add '<url>'`. The user
    pastes secrets into the chat, so pass them straight to the command and never
    repeat them back. Finish with `rowt server list`.
-3. **Lanes** (agent). Editing a lane doesn't start anything; it only restarts a router
-   that is already running.
+3. **Lanes** (agent). Editing a lane doesn't start anything; a running router picks
+   the change up live (3.8.10+; a `geosite:` add/rm still restarts it).
    - For `AGENT_API_NEEDS_TUNNEL`, check `rowt explain <your API host>`. A new
      install's defaults already escape Anthropic, Claude, OpenAI and ChatGPT, next to
      Google (which covers Gemini), GitHub, Meta and X.
@@ -232,8 +232,9 @@ replaced**, run `rowt fetch host` (with a working path to GitHub) or `rowt reloa
 
 ## Rules when operating rowt
 
-- **Run `up`, `reload`, `restart`, `down` and `router …`, and lane `add`/`rm` (they
-  restart), in the FOREGROUND, with output redirected to a file:**
+- **Run `up`, `reload`, `restart`, `down` and `router …` — and a lane `add`/`rm` on
+  a rowt before 3.8.10, where they restart — in the FOREGROUND, with output
+  redirected to a file:**
   `rowt reload >| /tmp/rowt-out 2>&1; echo "exit=$?"; tail -15 /tmp/rowt-out`.
   The shell here may be zsh with `noclobber`, hence `>|`. **Never background them.**
   On rowt ≤ 3.6.6 sing-box and its log splitter stay in the launcher's process group,
@@ -241,8 +242,10 @@ replaced**, run `rowt fetch host` (with a working path to GitHub) or `rowt reloa
   start in their own session). **Never pipe them.** On rowt ≤ 3.5.8 the pipe never
   closed and the caller hung, although the change had already applied. They finish
   in well under 30 s.
-- **There is no hot reload.** Lane `add`/`rm` restart the router themselves. After
-  editing a lane file by hand, run `rowt reload`.
+- **Lane edits are live** (3.8.10+): `add`/`rm`/`import`/`clear` and `corp sync`
+  reach a running router without a restart; the first edit after an upgrade
+  restarts once and says so. After editing a lane file by hand, `rowt render` is
+  enough for the lanes; servers, ports and mode still take `rowt reload`.
 - **Never type or ask for a password**, and never kill the user's other apps. Admin
   steps go to the user's own terminal.
 - **Don't change what the user chose**: the pinned server, their lane entries, the

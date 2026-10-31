@@ -1,7 +1,8 @@
 # Lane edits without a restart — the lane rules as local rule-sets
 
-*Design, 2026-10-31. Hong said build it the same day (#s53, see 4.11); nothing
-is built yet. It covers rowt 3.8.8 (main at 52c0dcc when written; PR #5 merged
+*Design, 2026-10-31. Hong said build it the same day (#s53, see 4.11), and it
+was built on #s54 (rowt 3.8.10 and later); 4.1 and 4.2 note where the build
+departs from this text. It covers rowt 3.8.8 (main at 52c0dcc when written; PR #5 merged
 since, main at e833881) with sing-box pinned at 1.13.14, and was written on
 rowt #s52 after contributor PR #5 (#s47) showed the mechanism for the corp lane. The question
 it answers: can `rowt escape|corp|block add|rm|import|clear`, and `corp sync`'s
@@ -45,7 +46,8 @@ not between lanes (§3). This design keeps that ordering.
   a bad set is logged and the old rules kept; a VirtioFS share delivers no
   event at all (`~/.config` is never one).
 - **`sing-box check` loads set contents.** **[P]** Measured here: a config with
-  27 lane sets (24 of them empty) and one DNS rule over nine sets passes;
+  27 lane sets (24 of them empty) and one DNS rule over nine sets passes, and
+  so does the built shape, 49 sets and one DNS rule over sixteen;
   truncate one set file and it fails with `parse rule-set[22]: unexpected
   EOF`; a set holding an odd line (`a.b.example/x`) passes — an entry's
   validity stays rowt's job, exactly as with inline rules.
@@ -103,17 +105,27 @@ the single-lane rule and to the sets. So:
   stay first, in lane order escape/corp/block, which is what `explain`'s
   `_longest_domain_hit` and `classify::longest_domain_hit` encode today.
 
-`explain` and `route` therefore keep every verdict, with no change to their
-code. **[I]**
+`explain` and `route` therefore keep every verdict; the one change to their
+code is comparing entries lowercased, as the sets hold them (4.2). **[I]**
+
+**As built — one correction.** A dot-led entry `.z.example` (the names under
+z.example) splits to three like the bare `x.z.example`, and both can match one
+host; inline, the bare one — always the longer string — won. One set per lane
+per split count would let lane order decide that pair, so each band has a bare
+set and a dot-led set per lane, bare first: 3 exact + 3×8 bare + 3×7 dot = 48
+lane sets. The argument above holds within each of the two kinds.
 
 ### 4.2 The sets
 
-Beside host.json, mode 0600 like PR #5's (corp names are sensitive):
+Under `<config dir>/rule-sets/`, one directory per set (`<tag>/<tag>.json`,
+below), mode 0600 like PR #5's (corp names are sensitive):
 
-    escape-exact.json  corp-exact.json  block-exact.json      key `domain`
-    escape-1.json … escape-8.json, corp-1…8, block-1…8        key `domain_suffix`
+    escape-exact.json  corp-exact.json  block-exact.json              key `domain`
+    escape-1.json … escape-8.json, corp-1…8, block-1…8                key `domain_suffix`, bare entries
+    escape-2-dot.json … escape-8-dot.json, corp-2…8-dot, block-2…8-dot  the dot-led entries
+    corp-cidr.json                                                  key `ip_cidr` (PR #5's set, kept)
 
-27 files, always all present; an empty one is `{"version":1,"rules":[]}`,
+48 lane sets and the CIDR set, always all present; an empty one is `{"version":1,"rules":[]}`,
 which `check` accepts (§2). Band `N` holds the lane's suffixes with exactly `N`
 labels; band 8 holds eight or more.
 
@@ -136,16 +148,17 @@ Route rules, first match wins:
 
     sniff
     rule_set [escape-exact] → escape   rule_set [corp-exact] → corp   rule_set [block-exact] → block
-    for N = 8 … 1:  rule_set [escape-N] → escape,  [corp-N] → corp,  [block-N] → block
+    for N = 8 … 1:  rule_set [escape-N] → escape,  [corp-N] → corp,  [block-N] → block,
+                    then, for N ≥ 2, [escape-N-dot], [corp-N-dot], [block-N-dot] the same way
     the geosite rules, the ad set, the resolve rule, corp-cidr, the private ranges — as today
 
 Lane order inside a band is free (§4.1); escape/corp/block is kept for
 readability and for `explain`'s tie convention. Named ports keep splicing
 their catch-alls before the resolve rule; nothing changes for them. The DNS
-rules become one rule, `{rule_set: [corp-exact, corp-1 … corp-8], server:
-"local"}` **[P]** (measured: a DNS rule over nine sets passes `check`).
-`route.rule_set` lists the 27 sets with their absolute paths, the geosites and
-the ad set.
+rules become one rule, `{rule_set: [corp-exact, corp-8, corp-8-dot … corp-1],
+server: "local"}` **[P]** (measured: a DNS rule over sixteen sets passes
+`check`). `route.rule_set` lists the 49 sets with their absolute paths, the
+geosites and the ad set.
 
 After this, host.json depends on: mode, the servers and the selection (auto
 and its knobs), the ports, the `geosite:` references, whether the ad set is
@@ -220,8 +233,8 @@ like host.json. The hotspot lane is the OS bypass list, not a sing-box rule,
 and is untouched. Nothing in rowt, the monitor or the fork's fleet reads the lane
 rules out of host.json (checked on #s47).
 
-**The contract that does change:** host.json's shape (27 rule-set references
-and one DNS rule where inline lists were), 27 new files in the config dir, and
+**The contract that does change:** host.json's shape (49 rule-set references
+and one DNS rule where inline lists were), a `rule-sets/` directory of 49 files, and
 a lane edit under a running router no longer restarts it — its exit status and
 its `added:`/`removed:` lines are as before; `==> reloading router` and the
 `✓ running` line give way to the applied-live line.
@@ -235,8 +248,7 @@ without changing the shape (one render shape, as PR #5 chose, so the goldens
 and the sandbox stay single). It replaces PR #5's `ROWT_CORP_HOT`, which is in
 the same unreleased train (3.8.9), so nothing depends on that name yet; the
 watchdog plist passes the new knob through as PR #5 passes the old one. A
-downgrade renders inline again and leaves the
-27 files unused; `uninstall --purge` removes the directory as today.
+downgrade renders inline again and leaves the `rule-sets/` directory unused; `uninstall --purge` removes the directory as today.
 
 ### 4.9 Failure handling
 
@@ -249,7 +261,10 @@ downgrade renders inline again and leaves the
   differs; the writer is idempotent.
 - A watcher that misses an event (a shared folder): the knob above forces the
   restart path; on APFS the event arrives (the fork's measurement).
-- 27 watchers on one directory: one `fsnotify` watch per set in sing-box
+- 49 watchers, one per set, each on its set's own directory — **as built**,
+  because a watcher on macOS (kqueue) holds a descriptor for every file in the
+  directory it watches, and 49 sets in one directory measured 2,550 open files
+  against 100 with a directory each. The design's "one `fsnotify` watch per set
   **[I]** from the source reference; kqueue on macOS handles that number without
   a thought, but the live test below should confirm there is no startup cost.
 
@@ -257,8 +272,8 @@ downgrade renders inline again and leaves the
 
 - `render-matrix`: every scenario's host.json golden changes shape. Regenerate
   deliberately and read the diff once; the change is the same in all of them.
-- `cli-diff`: the config tree gains 27 files, all deterministic, with their
-  0600 modes compared. The #s50 restart cases under `use-auto-unchanged`
+- `cli-diff`: the config tree gains the `rule-sets/` directory, 49 files, all
+  deterministic, with their 0600 modes compared. The #s50 restart cases under `use-auto-unchanged`
   (`escape add new.example`) keep restarting unless the scenario can say the
   router runs the rendered host.json — and host.running cannot be a static
   fixture, since the cksum covers the sandbox's own path. So `make_sandbox`
