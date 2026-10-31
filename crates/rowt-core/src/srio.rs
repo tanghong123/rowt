@@ -83,7 +83,11 @@ pub fn extract(store: Option<&str>, conf_arg: Option<&str>) -> Result<Value, SrE
     };
 
     let scan = match &root {
-        Some(r) => Some(srimport::scan_store(r).map_err(SrErr::Exc)?),
+        Some(r) => {
+            let scan = srimport::scan_store(r).map_err(SrErr::Exc)?;
+            for warning in &scan.warnings { eprintln!("{warning}"); }
+            Some(scan)
+        }
         None => {
             eprintln!("warning: no Shadowrocket server store found");
             None

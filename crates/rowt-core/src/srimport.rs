@@ -455,19 +455,16 @@ pub fn to_shadowsocks(s: &Entry, tag: &str) -> R<Option<Value>> {
     .ok())
 }
 
-/// `_to_hysteria2`. Shadowrocket's Hysteria2 entry, as a colleague's names-only
-/// dump of a real store showed it (2026-10-31): the auth string in `password`
-/// (`uuid` is Shadowrocket's own id, as for VLESS), `alpn`, `allowInsecure`,
-/// `hpkp` — a certificate pin sing-box has no field for, dropped here as
-/// `server add` drops it from a link — the port a string, and `obfs`,
-/// `plugin`, `proto`, `pluginParam`, `udp` whose meaning for this type the
-/// dump did not show. Only `obfs` is acted on: Salamander is the one obfs
-/// hysteria2 has and takes a password, assumed to sit where the other types
-/// keep their obfs argument (`obfsParam`); without one, or with any other
-/// obfs, the entry is skipped rather than guessed at. The outbound has the
-/// shape `sharelink::parse_hysteria2` builds from a link, so a store import
-/// and a link import of one node agree (no uTLS: QUIC has none).
+/// `_to_hysteria2`; the outbound follows the share-link parser (no uTLS on QUIC).
 pub fn to_hysteria2(s: &Entry, tag: &str) -> R<Option<Value>> {
+    // WARNING: temporary bypass ignores hpkp with explicit allowInsecure=1.
+    // Unlike Shadowrocket, this does not authenticate the server (MITM risk).
+    // TODO: enforce certificate_sha256 after the engine upgrade, remove this
+    // fallback and test wrong-pin rejection. Re-import previously imported nodes.
+    let flag = str_or(get(s, "allowInsecure"), "0").to_lowercase();
+    if !matches!(flag.as_str(), "0" | "1" | "false" | "true") { return Ok(None); }
+    let insecure = matches!(flag.as_str(), "1" | "true");
+    if truthy(get(s, "hpkp")) && !insecure { return Ok(None); }
     let host = get(s, "host");
     let pw = get(s, "password");
     if !truthy(host) || !truthy(pw) {
@@ -478,7 +475,7 @@ pub fn to_hysteria2(s: &Entry, tag: &str) -> R<Option<Value>> {
     let mut tls = Map::new();
     tls.insert("enabled".into(), Value::Bool(true));
     tls.insert("server_name".into(), Value::String(sni));
-    tls.insert("insecure".into(), Value::Bool(truthy(get(s, "allowInsecure"))));
+    tls.insert("insecure".into(), Value::Bool(insecure));
     let alpn = str_or(get(s, "alpn"), "");
     if !alpn.is_empty() {
         let list: Vec<Value> = alpn.split(',').filter(|a| !a.is_empty()).map(|a| Value::String(a.into())).collect();
@@ -608,6 +605,7 @@ pub struct Scan {
     pub subscriptions: Vec<Value>,
     pub servers: Vec<Value>,
     pub skipped: Counter,
+    pub warnings: Vec<String>,
 }
 
 /// The loop over `$objects`: subscriptions, convertible servers, and a count of
@@ -646,8 +644,19 @@ pub fn scan_store(root: &PlVal) -> R<Scan> {
                 _ => to_shadowsocks(s, &tag)?,
             };
             match v {
-                Some(v) => out.servers.push(v),
-                None => out.skipped.incr(&typ),
+                Some(v) => {
+                    out.servers.push(v);
+                    if typ == "Hysteria2" && truthy(get(s, "hpkp")) {
+                        out.warnings.push("warning: Shadowrocket Hysteria2 imported with allowInsecure=1; certificate pin (hpkp) ignored (temporary bypass; server identity NOT verified)".into());
+                    }
+                }
+                None => {
+                    out.skipped.incr(&typ);
+                    if typ == "Hysteria2" && truthy(get(s, "hpkp"))
+                        && !matches!(str_or(get(s, "allowInsecure"), "0").to_lowercase().as_str(), "1" | "true") {
+                        out.warnings.push("warning: skipped Shadowrocket Hysteria2: certificate pin (hpkp) cannot be preserved by sing-box 1.13".into());
+                    }
+                }
             }
         } else {
             out.skipped.incr(&typ);
@@ -743,6 +752,24 @@ mod tests {
     }
 
     #[test]
+    fn hysteria2_pin_requires_explicit_insecure_and_warns() {
+        for (flag, accepted) in [(s("0"), false), (PlVal::Int(0), false),
+            (PlVal::None, false), (PlVal::Bool(false), false), (s("false"), false),
+            (s("bad"), false), (s("1"), true), (PlVal::Int(1), true),
+            (PlVal::Bool(true), true), (s("true"), true)] {
+            let e = hy2_entry(&[("allowInsecure", flag)]);
+            let root = PlVal::Dict(entry(&[("$objects", PlVal::Array(vec![PlVal::Dict(e)]))]));
+            let scan = scan_store(&root).unwrap();
+            assert_eq!(scan.servers.len(), usize::from(accepted));
+            assert_eq!(scan.warnings, vec![if accepted {
+                "warning: Shadowrocket Hysteria2 imported with allowInsecure=1; certificate pin (hpkp) ignored (temporary bypass; server identity NOT verified)"
+            } else {
+                "warning: skipped Shadowrocket Hysteria2: certificate pin (hpkp) cannot be preserved by sing-box 1.13"
+            }]);
+        }
+    }
+
+    #[test]
     fn hysteria2_takes_the_auth_from_password_and_drops_the_pin() {
         let o = to_hysteria2(&hy2_entry(&[]), "t").unwrap().unwrap();
         assert_eq!(o, json!({
@@ -752,7 +779,7 @@ mod tests {
         }));
         assert!(o.get("hpkp").is_none(), "sing-box has no field for the pin");
         // `peer` is the SNI when set; `alpn` splits on commas; `allowInsecure` 0 is false.
-        let o = to_hysteria2(&hy2_entry(&[("peer", s("sni.example")), ("alpn", s("h3,h2")), ("allowInsecure", PlVal::Int(0))]), "t")
+        let o = to_hysteria2(&hy2_entry(&[("peer", s("sni.example")), ("alpn", s("h3,h2")), ("allowInsecure", PlVal::Int(0)), ("hpkp", s(""))]), "t")
             .unwrap().unwrap();
         assert_eq!(o["tls"], json!({"enabled": true, "server_name": "sni.example", "insecure": false, "alpn": ["h3", "h2"]}));
         // Salamander takes its password from obfsParam; without one it is skipped, as is any other obfs.
