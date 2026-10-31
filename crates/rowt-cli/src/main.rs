@@ -1195,11 +1195,12 @@ fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<Str
                 if !o.is_empty() {
                     println!("{o}");
                 }
-                // `_lanes_apply`: the render rewrites the lane rule-sets the
-                // running router watches, and the router restarts only when it
-                // does not run this host.json (its ✓ line printed there).
+                // `_lanes_apply || return 1`: the render rewrites the lane
+                // rule-sets the running router watches, and the router restarts
+                // only when it does not run this host.json (its ✓ line printed
+                // there); a restart that does not come back is exit 1.
                 let ctx = Ctx::new(cfg.to_path_buf());
-                lifecycle::stepped_over(lifecycle::lanes_apply(&ctx))?;
+                lifecycle::lanes_apply(&ctx)?;
                 return Ok(String::new());
             }
             Ok(out.join("\n"))
@@ -1770,12 +1771,14 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                 // at the next reload.
                 lifecycle::start_follow(&ctx);
             } else {
-                // `cmd_router restart >/dev/null`: the restart's stdout is
-                // dropped, and a restart that did not come back is stepped
-                // over (lifecycle::stepped_over) — the selection line below
-                // prints either way, and the command exits 0.
+                // `cmd_router restart >/dev/null || return 1`: the restart's
+                // stdout is dropped, and a restart that did not come back ends
+                // the command with exit 1 — it has reported itself (`SILENT`),
+                // and the selection line below would claim a switch that did
+                // not happen. (Stepped over, exit 0, until 3.8.12: PORTING.md
+                // 6.7.2.)
                 lifecycle::router_stop(&ctx);
-                lifecycle::stepped_over(stdout_dropped(|| lifecycle::router_up(&ctx)))?;
+                stdout_dropped(|| lifecycle::router_up(&ctx))?;
                 if tag == "auto" {
                     eprintln!("==> escape -> auto (fastest live server, re-probed every {})",
                               lifecycle::auto_interval(&ctx));

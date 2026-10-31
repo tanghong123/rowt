@@ -859,7 +859,6 @@ dot. `rm` and the single-lane pull-out find either spelling (`_lane_has` /
 | A domain whose failures tie across two categories gets whichever `for (k in cc)` reaches first | `lane_errors`'s awk | Genuinely unspecified, so there is no behavior to copy. rowt-rs takes the lexicographically first to be repeatable. Do not build a fixture that hits this — it would compare two implementations against a coin flip. |
 | `render` guards on `[ -s "$SERVERS" ]`, so a `servers.json` of `[]` — or of anything unparseable — renders happily, emitting an `auto` selector with no servers under it | `cmd_render`, mirrored in `lifecycle::cmd_render` | Whether `render` succeeds is what `up`, `reload` and `config import` branch on, so a stricter guard changes three other commands in a commit that is not about them. The scenario has existed as `render-empty-servers` all along; what was missing was a cli-diff case, since `render-diff` compares the two renders and not the two REFUSALS. |
 | `up` never checks whether the router came up: it sets the system proxy and prints "done — mode=host. Listed domains now route through your escape VPN." over a router that is not there, and **exits 0** | `cmd_setup`, mirrored in `lifecycle::cmd_setup` | Its two siblings already do the right thing — `restart` and `reload` both require the clash API to answer before they touch the proxy, and say so when it does not. `up` is the one that forgot, and the fix is a two-line gate on the shell side. Nothing is stranded meanwhile (the router's own no-limbo step clears the proxy first); what lies is the exit status, which is exactly what a script or a `&&` chain reads. |
-| `use <tag>`, `use best`, a lane edit (`edit_list`) and `corp sync` run `cmd_router restart` or `reload_if_running` as a bare statement, and a restart that does not come back is stepped over: the arm prints its own "escape -> …" / "added:" line and **exits 0** over a router that is down | `cmd_use`, `_use_best`, `edit_list`, `corp_sync` — `main` runs every arm as `run_command … \|\| _rc=$?`, which turns `set -e` off inside it; mirrored by `lifecycle::stepped_over` | The `up` row's family: nothing is stranded (no-limbo has turned the proxy off), the exit status lies, and the fix is the shell's — a `\|\| return 1` on four lines. It changes the exit code a fleet play reads, so it waits for the owner's word. `cli-diff` reaches the path through the restart cases (use-auto-unchanged, import-review-running, and corp-vpn-running with `ROWT_LANES_HOT=0` — its default is the live path through the lane rule-sets). |
 | A geosite download interrupted after the 200 leaves a truncated `geosite-<name>.srs` in the cache, and `cached()` globs `*.srs` — so the half-file is offered as already-downloaded from then on and that category's hint is dead until someone clears the cache by hand | `geosite-lookup.py`'s `urlretrieve`, mirrored in `pycli::geosite_lookup::fetch` | Three lines fix it (download to `.part`, rename on success) and the fix is strictly better, which is exactly why it is not in the port commit. Worth knowing before writing it: **no gate can see this one**. `curl -fsSL -o` and `urlretrieve` were measured against each other and agree on every failure that ENDS the request — refused, unresolvable, HTTP error, `file://` miss — leaving no destination file in any of them. Only an interruption mid-body separates them, and `geosite-diff` has no way to stage one. |
 | `down` turns the system proxy off **three times** and says so each time — once itself, once inside `router down`'s no-limbo check, once more inside `vm down`'s | `cmd_revert`, mirrored in `lifecycle::cmd_revert` | Harmless and idempotent, and the repetition is the visible half of a real invariant: every teardown step independently refuses to leave a proxy pointing at a dead port. Collapsing it means deciding which step owns the guarantee, which is a design change, not a tidy-up. |
 
@@ -907,6 +906,26 @@ Retired on the same grounds as §6.7.1: nothing can depend on an option that
 always fails. It surfaced while exercising the import flow for the agent skill,
 through a user-level path (`--path` was undocumented until this change), not
 through the gate, which had pinned the failure as behavior.
+
+#### 6.7.2 Retired: a failed restart after `use`, `use best`, a lane edit or `corp sync` exited 0
+
+`main` runs every mutating arm as `run_command … || _rc=$?`, which switches
+`set -e` off inside it, so `cmd_use`, `_use_best`, `edit_list` and `corp_sync`
+ran their restart as a bare statement and went on past one that did not come
+back: the arm printed its own "escape -> …" or "added:" line and exited 0 over
+a router that was down. Nothing was stranded — the no-limbo step had already
+turned the proxy off — but the exit status lied, and a fleet play that read it
+took a dead router for a switch that worked. rowt-rs reproduced it with
+`lifecycle::stepped_over` once cli-diff's restart cases (use-auto-unchanged,
+corp-vpn-running under `ROWT_LANES_HOT=0`, router-restart-ok) reached the path
+on both sides.
+
+Retired on Hong's word (2026-10-31, rowt #s55): the four arms now `|| return 1`
+(rowt-rs: the `?` is back), the selection or edit lines after the restart are
+not printed, and the same restart cases pin exit 1 on both sides. The audit END
+line records rc=1 as for `reload`. `stepped_over` stays for the two arms whose
+shell does step over a failed restart and were not part of the decision:
+`server import --apply` (an explicit `return 0`) and the vm arm.
 
 ### 6.8 Coverage ledger
 

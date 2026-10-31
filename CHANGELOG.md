@@ -5,6 +5,11 @@ release is cut; everything under Unreleased ships with the next one.
 
 ## Unreleased
 
+- `use <tag>`, `use best`, a lane edit and `corp sync` exit 1 when the router
+  does not come back from the restart after them. They exited 0 before, with
+  their own "escape -> …" or "added:" line, over a router that was down (the
+  proxy already turned off by the no-limbo step); a fleet play that read 0 now
+  sees the failure.
 - **Lane edits are live.** `escape|corp|block add|rm|import|clear` and a
   `corp sync` that changed the lane reach a running router without a restart
   and drop no connection. Every lane rule is a local sing-box rule-set under

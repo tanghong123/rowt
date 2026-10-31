@@ -62,7 +62,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.8.14"
+ROWT_VERSION="3.8.15"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -1052,8 +1052,9 @@ edit_list() {
   _hafter="$(cat "$HOTSPOT_DOMAINS" 2>/dev/null || true)"
   [ "$_hbefore" != "$_hafter" ] && _hotspot_apply || true
   # …live through the lane rule-sets when the router runs this host.json, a
-  # restart only when it must (_lanes_apply).
-  [ "$no_reload" -eq 0 ] && [ "$_before" != "$_after" ] && _lanes_apply || true
+  # restart only when it must (_lanes_apply) — and a restart that does not come
+  # back is this command's failure, exit 1 (PORTING.md 6.7.2).
+  if [ "$no_reload" -eq 0 ] && [ "$_before" != "$_after" ]; then _lanes_apply || return 1; fi
 }
 
 cmd_escape() {
@@ -1670,7 +1671,10 @@ corp_sync() {
   # Log the reason even under --quiet: this is a real change that triggers a reload,
   # so the watchdog log should record WHY it reloaded (no-op ticks stay silent above).
   info "corp sync: updated corp lane — $nd DHCP domain(s) + $nc CIDR(s) (superset of $na live route(s))"
-  [ "$noreload" = 0 ] && _lanes_apply || true   # live when it can be, a restart only when it must
+  # Live when it can be, a restart only when it must — and a restart that does
+  # not come back is this command's failure, exit 1 (the watchdog tick runs
+  # `corp_sync --quiet || true` and goes on; PORTING.md 6.7.2).
+  if [ "$noreload" = 0 ]; then _lanes_apply || return 1; fi
   return 0
 }
 
@@ -3058,7 +3062,8 @@ cmd_use() {
     # A new episode: the last move shown by `status` was the old one's.
     [ "$fo_was" = 1 ] || [ -z "$(sget failover_switch)" ] || sset failover_switch ""
   elif [ "$fo_was" = 1 ]; then sset failover ""; fi
-  if [ "$tag" = best ]; then _use_best "$prev"; _failover_note "$tag" "$fo_was"; return 0; fi
+  # `use best`: a restart that does not come back is this command's failure too.
+  if [ "$tag" = best ]; then _use_best "$prev" || return 1; _failover_note "$tag" "$fo_was"; return 0; fi
   sset selected "$tag"
   if [ "$every_set" = 1 ] && [ "$every" = default ]; then
     sset auto_interval ""
@@ -3085,7 +3090,11 @@ cmd_use() {
     info "escape -> $tag (live)"
     _start_follow          # a live switch into --failover needs its follower now, not at the next reload
   else
-    cmd_router restart >/dev/null
+    # A restart that does not come back ends the command with its status: the
+    # restart has said why, the no-limbo step has turned the proxy off, and the
+    # selection line below would claim a switch that did not happen. (Until
+    # 3.8.12 this arm stepped over the failure and exited 0 — PORTING.md 6.7.2.)
+    cmd_router restart >/dev/null || return 1
     [ "$tag" = "auto" ] && info "escape -> auto (fastest live server, re-probed every $(_auto_interval))" \
                         || info "escape -> $tag"
   fi
@@ -3543,7 +3552,7 @@ _use_best() { # $1 = the previous selection
     info "escape -> best: $pick ($(_latency_ms "$pick"), live)"
   else
     sset best_pick "$pick"; cmd_render >/dev/null
-    cmd_router restart >/dev/null
+    cmd_router restart >/dev/null || return 1   # a restart that does not come back is this command's failure (cmd_use)
     info "escape -> best: $pick ($(_latency_ms "$pick"))"
   fi
   _best_watch_note

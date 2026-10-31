@@ -165,15 +165,16 @@ pub fn reload_if_running(ctx: &Ctx) -> Result<String, String> {
     router_up(ctx)
 }
 
-/// How the shell treats a restart that did not come back, on the arms that run
-/// `cmd_router restart` or `reload_if_running` as a bare statement (`use`,
-/// `use best`, a lane edit, `corp sync`): bin/rowt's `main` runs every command
-/// as `run_command … || _rc=$?`, which switches `set -e` off inside the arm, so
-/// the failed restart is stepped over and the arm goes on to its own lines and
-/// exit 0. The router's no-limbo step has already turned the proxy off, so the
-/// machine is not stranded; the exit status is what lies (PORTING.md §6.7). A
-/// `die` on the way — a render that failed validation, no sing-box to run —
-/// still ends the command, which is every error here that is not `SILENT`.
+/// A restart that did not come back, stepped over: the arm goes on to its own
+/// lines and exits 0, as the shell does where it says `return 0` past one on
+/// purpose (`server import --apply`) or runs it as a bare statement under the
+/// `set -e` that `main`'s `run_command … || _rc=$?` switches off (the vm arm).
+/// The router's no-limbo step has already turned the proxy off, so the machine
+/// is not stranded; the exit status is what lies (PORTING.md §6.7). `use`,
+/// `use best`, a lane edit and `corp sync` did this too until 3.8.12, and now
+/// exit 1 instead (PORTING.md 6.7.2). A `die` on the way — a render that
+/// failed validation, no sing-box to run — still ends the command, which is
+/// every error here that is not `SILENT`.
 pub fn stepped_over<T>(r: Result<T, String>) -> Result<Option<T>, String> {
     match r {
         Ok(v) => Ok(Some(v)),
