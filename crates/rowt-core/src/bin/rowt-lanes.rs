@@ -17,7 +17,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 fn read(p: &Path) -> String {
-    std::fs::read_to_string(p).unwrap_or_default()
+    // Lossy, as the shell's readers are: a bad byte is U+FFFD, not an empty file.
+    std::fs::read(p).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default()
 }
 
 fn file_of(cfg: &Path, lane: Lane) -> PathBuf {

@@ -1,0 +1,4 @@
+# Synthetic parity fixture â€” never real destinations.
+good.example
+badÿ.example
+last.example

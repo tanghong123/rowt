@@ -356,7 +356,10 @@ rust_root() {
 normalize() {    # $1=file $2=outdir — strip everything that legitimately varies
   [ -f "$1" ] || { : ; return 0; }
   local rr; rr="$(rust_root)"
-  sed -e "s#$2#<RUN>#g" \
+  # As bytes (LC_ALL=C): the config tree can hold a file that is not valid
+  # UTF-8 (the lane-bad-byte scenario), and BSD sed under a UTF-8 locale stops
+  # there with "RE error: illegal byte sequence" instead of normalizing it.
+  LC_ALL=C sed -e "s#$2#<RUN>#g" \
       -e "s#$ROOT#<REPO>#g" \
       ${rr:+-e "s#$rr#<REPO>#g"} \
       -f "$NORMALIZE" "$1"

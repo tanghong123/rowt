@@ -475,8 +475,10 @@ fn set_mode(p: &Path, mode: u32) -> std::io::Result<()> {
     std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode))
 }
 
+/// Lossy on purpose, as `lifecycle::read` is: a byte that is not UTF-8 becomes
+/// U+FFFD, as `jq -R` makes it on the shell side, instead of emptying the file.
 pub fn read(p: &Path) -> String {
-    std::fs::read_to_string(p).unwrap_or_default()
+    std::fs::read(p).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default()
 }
 
 fn lane_file(cfg: &Path, l: Lane) -> PathBuf {

@@ -18,7 +18,7 @@ fn state(cfg: &Path) -> PathBuf {
 }
 
 fn live(cfg: &Path) -> String {
-    lanestate::snapshot(|f| std::fs::read_to_string(cfg.join(f)).unwrap_or_default())
+    lanestate::snapshot(|f| crate::read(&cfg.join(f)))
 }
 
 /// `_lane_state_keep` — write the new baseline, 0600, via a rename.

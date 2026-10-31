@@ -120,7 +120,15 @@ pub fn env_num(k: &str, d: u16) -> u16 {
 pub fn env_or(k: &str, d: &str) -> String {
     std::env::var(k).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| d.to_string())
 }
-pub fn read(p: &Path) -> String { fs::read_to_string(p).unwrap_or_default() }
+/// A file as a string, or "" when it is not there — and a file that is not
+/// valid UTF-8 as the shell sees it: `jq -R` turns each invalid byte into
+/// U+FFFD and keeps the line, and `read_to_string` would have returned an
+/// error that `unwrap_or_default` turned into an EMPTY file. For a lane file
+/// that emptied the whole lane on this side, and with the lane rules as live
+/// rule-sets the empty lane reached the running router on the next render.
+pub fn read(p: &Path) -> String {
+    fs::read(p).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default()
+}
 pub fn sget(state: &str, key: &str) -> String {
     state.lines().filter_map(|l| l.strip_prefix(&format!("{key}="))).next_back().unwrap_or("").into()
 }

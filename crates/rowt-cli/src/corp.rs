@@ -438,7 +438,7 @@ pub fn sync(ctx: &Ctx, quiet: bool) -> Result<String, String> {
 /// is a cache, and losing it must not break a sync. `_seen_map` in the Python.
 fn read_seen(path: &Path) -> std::collections::BTreeMap<String, i64> {
     let mut out = std::collections::BTreeMap::new();
-    let Ok(body) = std::fs::read_to_string(path) else { return out };
+    let Ok(body) = std::fs::read(path).map(|b| String::from_utf8_lossy(&b).into_owned()) else { return out };
     for raw in body.lines() {
         let f: Vec<&str> = raw.split_whitespace().collect();
         if f.len() != 2 {

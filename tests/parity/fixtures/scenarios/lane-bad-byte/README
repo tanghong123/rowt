@@ -1,0 +1,13 @@
+An escape lane with a byte that is not UTF-8 (`bad\xff.example`, between two
+good entries). The shell's list_json keeps the line — `jq -R` turns the byte
+into U+FFFD — provided its grep/sed run under the C locale (in a UTF-8 shell
+BSD sed stopped at the byte and every entry after it was lost); rowt-rs read
+such a file as EMPTY (read_to_string failed and the error became ""), which
+emptied the whole lane and, with the lane rules as live rule-sets, reached the
+running router on the next render. Both now render good.example, bad\uFFFD.example
+and last.example into escape-2.json, byte for byte.
+
+Not compared, and different: `escape list`/`dump` print the raw byte on the
+shell side and U+FFFD on the Rust side, and a Rust-side edit (`add`, `rm`)
+writes the file back with U+FFFD in place of the byte, where the shell's
+append keeps it. Recorded in PORTING.md's 6.7 table.

@@ -642,6 +642,15 @@ PARITY_SCENARIO=lanes-case render
 PARITY_SCENARIO=lanes-case explain a.mixed.example
 PARITY_SCENARIO=lanes-case explain MIXED.example
 PARITY_SCENARIO=lanes-case escape add mixed.example
+# A lane file with a byte that is not UTF-8 (lane-bad-byte: one such entry in
+# escape): the shell keeps the line with the byte as U+FFFD (jq -R, under the
+# C locale list_json now forces), rowt-rs decodes the file the same way — the
+# whole lane used to come back empty there — and the sets agree byte for byte,
+# as does explain. `list`/`dump` and an edit of such a file are NOT pinned: the
+# shell shows and keeps the raw byte, rowt-rs shows U+FFFD and writes it back
+# on its next edit (PORTING.md 6.7's table).
+PARITY_SCENARIO=lane-bad-byte render
+PARITY_SCENARIO=lane-bad-byte explain a.good.example
 ROWT_METRICS=off ROWT_AUTO_FOLLOW=0 PARITY_SCENARIO=router-restart-ok use auto --every 5m
 # status in auto with the router up: the pick, the interval and its source,
 # the follower, the last switch.

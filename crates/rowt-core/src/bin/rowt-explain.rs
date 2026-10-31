@@ -21,7 +21,8 @@ fn env_or(key: &str, default: &str) -> String {
 }
 
 fn read(p: &Path) -> String {
-    std::fs::read_to_string(p).unwrap_or_default()
+    // Lossy, as the shell's readers are: a bad byte is U+FFFD, not an empty file.
+    std::fs::read(p).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default()
 }
 
 fn sget(state: &str, key: &str) -> String {
