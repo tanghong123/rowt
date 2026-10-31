@@ -137,6 +137,15 @@ replaced**, run `rowt fetch host` (with a working path to GitHub) or `rowt reloa
      VLESS, AnyTLS, Shadowsocks and Hysteria2), or the entry is an unsupported variant such as
      SSR, a plugin or a chain. If the user needs one, ask for its share link and use
      `rowt server add`.
+     **WARNING — temporary verification bypass:** explicit `allowInsecure=1`
+     imports with `tls.insecure=true` and ignores `hpkp`, warning on stderr.
+     Server identity is not verified (impersonation / MITM risk). Shadowrocket
+     still checks its pin in this mode, so this temporarily weakens its behavior.
+     Without explicit insecure mode, pinned nodes are skipped: sing-box 1.13's
+     public-key hash cannot represent a certificate fingerprint.
+     **TODO:** once the bundled engine supports `certificate_sha256`, enforce
+     the source pin, remove this fallback and test wrong-pin rejection. Existing
+     imported nodes need re-importing; an engine upgrade alone cannot restore pins.
    - `proxy_domains` are the client's own PROXY-rule domains, which `--apply` merges
      into the escape lane. Ask the user; `.proxy_domains = []` keeps rowt's defaults
      instead.

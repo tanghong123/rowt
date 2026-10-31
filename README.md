@@ -585,6 +585,20 @@ Clash Verge *remote* profile). Clash sources need [`yq`](https://github.com/mike
 (`brew install yq`); V2Box is read from its local database. The apps don't need to be
 running — rowt reads their on-disk config.
 
+> [!WARNING]
+> **Temporary Hysteria2 verification bypass:** an explicit `allowInsecure=1`
+> imports with `tls.insecure=true` and **ignores any `hpkp` certificate pin**,
+> with a warning on stderr. TLS still encrypts traffic, but the server's identity
+> is not verified, leaving the connection vulnerable to impersonation / MITM.
+> This is weaker than Shadowrocket 2.2.93, which still checks its stored pin even
+> with Allow Insecure enabled. Without explicit insecure mode, pinned nodes are
+> skipped because the pinned sing-box 1.13 cannot represent that certificate hash.
+>
+> **TODO:** when the bundled engine supports `certificate_sha256`, preserve and
+> enforce the source certificate pin, remove this fallback, and add wrong-pin
+> rejection tests. Previously imported nodes will need re-importing; upgrading
+> the engine alone will not restore a discarded pin.
+
 Anything you **already have is skipped** and reported: servers are matched by
 *identity* (address / port / credentials — **not** name), so importing the same node
 under a different name (say `Elm` when you already have `Hong-Server`) won't create a
@@ -592,10 +606,10 @@ duplicate; and a **subscription URL already in `subs.txt`** is skipped too (matc
 ignoring a display-only `name=` param). `import --apply` is source-independent: it
 applies whatever's in the review file, regardless of which client it came from.
 
-VLESS, AnyTLS and Shadowsocks servers import (Shadowsocks with its simple-obfs
+VLESS, AnyTLS, Hysteria2 and Shadowsocks servers import (Shadowsocks with its simple-obfs
 setting). Other protocols, and a Shadowsocks server chained through another,
 are not imported: the line after the import's summary names them by protocol
-(`not imported: Hysteria2 (1)`), and the review file counts them under
+(`not imported: SSR (1)`), and the review file counts them under
 `skipped`. For one you need, export its share link from the app and
 `rowt server add` it. `PROXY`-rule domains are merged into your escape list.
 

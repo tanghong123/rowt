@@ -204,18 +204,16 @@ def _to_shadowsocks(s: dict, tag: str) -> dict | None:
 
 
 def _to_hysteria2(s: dict, tag: str) -> dict | None:
-    """Shadowrocket's Hysteria2 entry, as a colleague's names-only dump of a real
-    store showed it (2026-10-31): the auth string in `password` (`uuid` is
-    Shadowrocket's own id, as for VLESS), `alpn`, `allowInsecure`, `hpkp` — a
-    certificate pin sing-box has no field for, dropped here as `server add`
-    drops it from a link — the port a string, and `obfs`, `plugin`, `proto`,
-    `pluginParam`, `udp` whose meaning for this type the dump did not show.
-    Only `obfs` is acted on: Salamander is the one obfs hysteria2 has and takes
-    a password, which is assumed to sit where the other types keep their obfs
-    argument (`obfsParam`); without one, or with any other obfs, the entry is
-    skipped rather than guessed at. The outbound has the shape parse_hysteria2
-    builds from a link, so a store import and a link import of one node agree
-    (no uTLS: QUIC has none)."""
+    # WARNING: temporary bypass ignores hpkp with explicit allowInsecure=1.
+    # Unlike Shadowrocket, this does not authenticate the server (MITM risk).
+    # TODO: enforce certificate_sha256 after the engine upgrade, remove this
+    # fallback and test wrong-pin rejection. Re-import previously imported nodes.
+    flag = str(s.get("allowInsecure") or "0").lower()
+    if flag not in ("0", "1", "false", "true"):
+        return None
+    insecure = flag in ("1", "true")
+    if s.get("hpkp") and not insecure:
+        return None
     host, port, pw = s.get("host"), s.get("port"), s.get("password")
     if not host or not pw:
         return None
@@ -223,7 +221,7 @@ def _to_hysteria2(s: dict, tag: str) -> dict | None:
     tls: dict = {
         "enabled": True,
         "server_name": sni,
-        "insecure": bool(s.get("allowInsecure")),
+        "insecure": insecure,
     }
     alpn = str(s.get("alpn") or "")
     if alpn:
@@ -317,6 +315,7 @@ def main() -> int:
         servers = _load_servers(store)
         used: set[str] = set(RESERVED)
         skipped: Counter = Counter()
+        warnings: list[str] = []
         for i, s in enumerate(servers, 1):
             typ = str(s.get("type"))
             if typ == "Subscribe":
@@ -340,11 +339,26 @@ def main() -> int:
                 v = convert(s, tag)
                 if v:
                     result["servers"].append(v)
+                    if typ == "Hysteria2" and s.get("hpkp"):
+                        warnings.append(
+                            "warning: Shadowrocket Hysteria2 imported with allowInsecure=1; certificate pin (hpkp) ignored (temporary bypass; server identity NOT verified)"
+                        )
                 else:
                     skipped[typ] += 1
+                    if (
+                        typ == "Hysteria2"
+                        and s.get("hpkp")
+                        and str(s.get("allowInsecure") or "0").lower()
+                        not in ("1", "true")
+                    ):
+                        warnings.append(
+                            "warning: skipped Shadowrocket Hysteria2: certificate pin (hpkp) cannot be preserved by sing-box 1.13"
+                        )
             else:
                 skipped[typ] += 1
         result["skipped"] = dict(skipped)
+        for warning in warnings:
+            print(warning, file=sys.stderr)
     else:
         print("warning: no Shadowrocket server store found", file=sys.stderr)
 
