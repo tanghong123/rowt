@@ -20,6 +20,8 @@
 #   parity corpus            replay the generated corpus through the classifier
 #   parity render-diff       one render case, bash vs Rust, compared canonically
 #   parity render-matrix     every render case (the Phase 1 gate)
+#   parity live-fixtures     each scenario whose committed host.json is a render
+#                            of it (spelled @CFG@) still is one; --update rewrites
 #   parity classify-diff     one classifier case, bash vs Rust: lane AND reason
 #   parity classify-matrix   every classifier case (the Phase 2 gate)
 #   parity lanes-diff        lane-list edits, bash vs Rust: files + messages
@@ -1799,6 +1801,56 @@ cmd_render_diff() {   # [VAR=VALUE …]
   return "$rc"
 }
 
+# The committed host.json of a scenario that spells the config dir `@CFG@` is a
+# RENDER of that scenario, and a case depends on that: `use auto` leaves the
+# router alone because the render changes nothing (use-auto-unchanged,
+# router-restart-ok), and `host.running.self` marks the router as running
+# exactly that file, so a lane edit takes the live path (lanes-live,
+# corp-vpn-running). Nothing held them to it — a render change that forgot to
+# regenerate them would quietly turn every live-path case into a restart case
+# on BOTH sides, and cli-diff would stay green. So each is compared, byte for
+# byte after the `@CFG@` substitution, to a fresh shell render of the scenario
+# (vm.json too, where committed: `use auto` hashes both). `--update` rewrites
+# them from that render; read the diff it makes before committing it.
+cmd_live_fixtures() {   # [--update]
+  local update=0; [ "${1:-}" = --update ] && update=1
+  local d scen out cfg f rendered fails=0 total=0
+  for d in "$DIR"/fixtures/scenarios/*/; do
+    scen="$(basename "$d")"
+    [ -f "$d/config/host.json" ] && grep -q '@CFG@' "$d/config/host.json" || continue
+    total=$((total + 1))
+    out="$(mktemp -d "${TMPDIR:-/tmp}/parity-fixture.XXXXXX")"
+    make_sandbox "$out" "$scen"
+    cfg="$out/home/rowt"
+    run_in "$out" PARITY_SCENARIO="$scen" render >/dev/null 2>&1 || true
+    if [ ! -s "$cfg/host.json" ]; then
+      echo "[$scen] the scenario rendered no host.json"; fails=$((fails + 1)); rm -rf "$out"; continue
+    fi
+    local bad=""
+    for f in host.json vm.json; do
+      [ -f "$d/config/$f" ] || continue
+      rendered="$out/rendered-$f"
+      sed "s#$cfg#@CFG@#g" "$cfg/$f" > "$rendered"
+      if [ "$update" = 1 ]; then
+        cmp -s "$rendered" "$d/config/$f" || { cp "$rendered" "$d/config/$f"; echo "[$scen] $f rewritten from the render"; }
+      elif ! cmp -s "$rendered" "$d/config/$f"; then
+        bad="$bad $f"
+        echo "[$scen] $f is NOT what the scenario renders (fixture vs render):"
+        { diff -u "$d/config/$f" "$rendered" 2>/dev/null || true; } | sed 's/^/    /' | head -24
+      fi
+    done
+    if [ "$update" = 0 ]; then
+      if [ -n "$bad" ]; then fails=$((fails + 1)); else echo "[$scen] a render of the scenario"; fi
+    fi
+    rm -rf "$out"
+  done
+  echo
+  if [ "$update" = 1 ]; then echo "live fixtures: $total scenario(s) rewritten where they differed"; return 0; fi
+  echo "live fixtures: $((total - fails))/$total still a render of their scenario"
+  [ "$fails" -eq 0 ] || echo "  regenerate with: parity live-fixtures --update   (and read the diff)"
+  [ "$fails" -eq 0 ]
+}
+
 # Every render case, so one green run means the whole matrix agreed.
 cmd_render_matrix() {
   local fails=0 total=0 id rest
@@ -1837,6 +1889,7 @@ case "${1:-}" in
   cli-ledger)      shift; cmd_cli_ledger "$@" ;;
   replay-bundle)   shift; cmd_replay_bundle "$@" ;;
   render-matrix)   shift; cmd_render_matrix "$@" ;;
+  live-fixtures)   shift; cmd_live_fixtures "$@" ;;
   run)    shift; cmd_run "$@" ;;
   mask)   shift; cmd_mask "$@" ;;
   ledger) shift; cmd_ledger "$@" ;;

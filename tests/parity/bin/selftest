@@ -48,6 +48,7 @@
 #   45.  file the router's lookup failure as escape  -> splitter-diff must fire
 #   46.  stop auditing the watchdog's sub refresh    -> cli-diff must fire
 #   47.  stop writing one band's lane rule-sets      -> cli-diff must fire (config tree)
+#   48.  let a live-path fixture go stale             -> live-fixtures must fire
 #
 # Everything happens in a throwaway copy of the repo; the real tree is never
 # touched. Run it after changing the harness itself.
@@ -1348,6 +1349,21 @@ else
   fi
   cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
 fi
+
+echo "48. a live-path fixture that is no longer a render of its scenario must be caught"
+# lanes-live's host.json has to be what the scenario renders, or host.running
+# (its cksum) never matches a fresh render and every live case quietly takes
+# the restart path on both sides. Change one byte of the committed fixture in
+# the throwaway copy; live-fixtures must say so.
+perl -0pi -e 's/"level": "warn"/"level": "info"/' "$tmp/tests/parity/fixtures/scenarios/lanes-live/config/host.json"
+if ! grep -qF '"level": "info"' "$tmp/tests/parity/fixtures/scenarios/lanes-live/config/host.json"; then
+  bad "could not alter the lanes-live fixture (its log level moved?)"
+elif "$P" live-fixtures >/dev/null 2>&1; then
+  bad "live-fixtures passed with a fixture that no longer matches its render"
+else
+  ok "live-fixtures caught a stale live-path fixture"
+fi
+cp "$ROOT/tests/parity/fixtures/scenarios/lanes-live/config/host.json" "$tmp/tests/parity/fixtures/scenarios/lanes-live/config/host.json"
 
 echo
 echo "selftest: $pass passed, $fail failed"

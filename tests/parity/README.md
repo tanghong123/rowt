@@ -268,6 +268,7 @@ reconcile and the watchdog's decision table. Each has a gate:
 | `watch-diff` | decisions, read back from watch.log + trace; a case file names its phase with `_phase` (`guard` unless it says `netcheck`) | 8 cases |
 | `platform-diff` | the argv the platform layer produces | 12 cases |
 | `cli-diff` | stdout, status, the config tree + rc files + LaunchAgent plist (content + mode), argv trace, audit log | 542 cases |
+| `live-fixtures` | each scenario whose committed host.json spells `@CFG@` is still a render of that scenario, byte for byte (vm.json too) | 4 scenarios |
 
 `merge-diff` is the only gate whose primary artifact is a file written in
 place: `cmd_import` reads the accumulation straight back with jq, and a human
@@ -383,7 +384,9 @@ Three limits, stated rather than implied:
   scenario that also ships `host.running.self` gets `host.running`, the cksum of
   its filled-in host.json, so a lane edit or corp sync there takes the LIVE
   path — the rule-set files under `rule-sets/` change and the router is left
-  alone (`lanes-live`, `corp-vpn-running`).
+  alone (`lanes-live`, `corp-vpn-running`). That holds only while the committed
+  host.json IS what the scenario renders; `parity live-fixtures` checks it, and
+  `--update` regenerates it after a deliberate render change.
 * **A purge leaves nothing to compare, and that is agreement.** `diff -q` on
   two files that are both absent exits 2, which reads like "differs" — so the
   lane-file check asks whether either side still has the file before it

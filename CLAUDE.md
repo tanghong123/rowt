@@ -107,8 +107,8 @@ argv trace, and the whole config tree** against the bash original.
 They are **not in CI**: `parity cli-diff` alone is ~241 cases and ~11 minutes,
 and five cases wait on a router designed not to come up. CI's job is catching
 what doesn't compile. `parity list` shows the matrix; the main gates are
-`cli-diff`, `lanes-diff`, `render-matrix`, `classify-matrix`, `golden`, and
-`selftest`. **See `tests/parity/README.md`** — it is the source of truth, and
+`cli-diff`, `lanes-diff`, `render-matrix`, `classify-matrix`, `golden`,
+`live-fixtures`, and `selftest`. **See `tests/parity/README.md`** — it is the source of truth, and
 `LEDGER.md` / `CLI-LEDGER.md` record how much of the shell `rowt-rs` covers.
 
 Run these before any release that touches `bin/rowt` or `crates/`.
