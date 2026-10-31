@@ -12,7 +12,7 @@ foreground with output redirected to a file (see SKILL.md → Rules).
   reloads only if the corp lane changed. Without the watchdog, run `rowt reload`.
   `rowt restart` bounces sing-box in place without re-rendering. `rowt down` stops
   everything: proxy off, router down.
-- **Lane edits are live** (3.8.10+): `rowt escape|corp|block add|rm|import|clear` and
+- **Lane edits are live** (3.8.11+): `rowt escape|corp|block add|rm|import|clear` and
   `corp sync` change a running router's rules without a restart — the rules are
   rule-set files under `~/.config/rowt/rule-sets/` that sing-box re-reads. The first
   edit after the upgrade restarts once and says so; a `geosite:` add/rm, servers,

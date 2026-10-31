@@ -171,7 +171,7 @@ pub fn reload_if_running(ctx: &Ctx) -> Result<String, String> {
 /// `set -e` that `main`'s `run_command … || _rc=$?` switches off (the vm arm).
 /// The router's no-limbo step has already turned the proxy off, so the machine
 /// is not stranded; the exit status is what lies (PORTING.md §6.7). `use`,
-/// `use best`, a lane edit and `corp sync` did this too until 3.8.12, and now
+/// `use best`, a lane edit and `corp sync` did this too until 3.8.14, and now
 /// exit 1 instead (PORTING.md 6.7.2). A `die` on the way — a render that
 /// failed validation, no sing-box to run — still ends the command, which is
 /// every error here that is not `SILENT`.

@@ -62,7 +62,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.8.16"
+ROWT_VERSION="3.8.17"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -3093,7 +3093,7 @@ cmd_use() {
     # A restart that does not come back ends the command with its status: the
     # restart has said why, the no-limbo step has turned the proxy off, and the
     # selection line below would claim a switch that did not happen. (Until
-    # 3.8.12 this arm stepped over the failure and exited 0 — PORTING.md 6.7.2.)
+    # 3.8.14 this arm stepped over the failure and exited 0 — PORTING.md 6.7.2.)
     cmd_router restart >/dev/null || return 1
     [ "$tag" = "auto" ] && info "escape -> auto (fastest live server, re-probed every $(_auto_interval))" \
                         || info "escape -> $tag"

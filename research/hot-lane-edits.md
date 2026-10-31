@@ -1,7 +1,7 @@
 # Lane edits without a restart — the lane rules as local rule-sets
 
 *Design, 2026-10-31. Hong said build it the same day (#s53, see 4.11), and it
-was built on #s54 (rowt 3.8.10 and later); 4.1 and 4.2 note where the build
+was built on #s54 (rowt 3.8.11 and later); 4.1 and 4.2 note where the build
 departs from this text. It covers rowt 3.8.8 (main at 52c0dcc when written; PR #5 merged
 since, main at e833881) with sing-box pinned at 1.13.14, and was written on
 rowt #s52 after contributor PR #5 (#s47) showed the mechanism for the corp lane. The question

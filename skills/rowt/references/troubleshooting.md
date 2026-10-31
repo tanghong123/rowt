@@ -110,7 +110,7 @@ server; some servers fail it while carrying real traffic. Verify with
   suffix wins across lanes, and an exact `domain:` entry beats all suffixes.
 - Failures are listed per lane: `rowt escape errors`, `rowt direct errors` (escape
   candidates), `rowt block errors` (what got blocked).
-- Fix with a lane `add`. A running router picks it up live (3.8.10+; earlier
+- Fix with a lane `add`. A running router picks it up live (3.8.11+; earlier
   versions restart, so run it in the foreground there).
 
 **Escape lane: many timeouts or resets.**
