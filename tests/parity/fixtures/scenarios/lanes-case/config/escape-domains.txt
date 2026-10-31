@@ -1,0 +1,4 @@
+# Synthetic parity fixture — never real destinations.
+Mixed.Example
+c.d.e.f.g.h.i.example
+domain:Exact.Twin.Example

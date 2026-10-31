@@ -1,0 +1,3 @@
+# Synthetic parity fixture — never real destinations.
+ads.example
+domain:exact.twin.example

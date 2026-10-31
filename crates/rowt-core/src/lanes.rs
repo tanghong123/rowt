@@ -166,8 +166,17 @@ pub fn normalize_entry(s: &str) -> String {
 /// second spelling, `rm .z.com` would say "not found" for an entry the lane
 /// visibly routes, and `add` would put `.z.com` beside its own old twin.
 /// `_lane_has` / `_lane_without` in the shell.
+///
+/// And in either CASE: DNS names are case-insensitive, and the rule-sets hold
+/// every entry lowercased (`render::lane_sets`), so `Example.com` in one lane
+/// and `example.com` in another would be one entry in two sets, ranked by lane
+/// order — the single-lane rule has to see them as one entry too. ASCII
+/// folding, as `grep -i` folds under the C locale the gates run in.
 fn spells(line: &str, entry: &str) -> bool {
-    line == entry || (entry.len() > 1 && entry.starts_with('.') && line.strip_prefix('*') == Some(entry))
+    line.eq_ignore_ascii_case(entry)
+        || (entry.len() > 1
+            && entry.starts_with('.')
+            && line.strip_prefix('*').is_some_and(|rest| rest.eq_ignore_ascii_case(entry)))
 }
 
 fn has_line(body: &str, entry: &str) -> bool {

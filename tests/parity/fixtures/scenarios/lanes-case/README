@@ -1,0 +1,13 @@
+Lane files a hand edit left with what the bands cannot rank.
+
+`Mixed.Example` in escape and `mixed.example` in corp: one entry to the router
+(the sets hold both lowercased), which takes escape's rule, the first lane in
+the band — and `explain` says escape too, since it compares lowercased and
+keeps the first lane on a tie. `domain:Exact.Twin.Example` in escape and
+`domain:exact.twin.example` in block: the same, for exact entries. And a band-8
+pair: corp's `a.b.c.d.e.f.g.h.i.example` under escape's `c.d.e.f.g.h.i.example`
+(eight labels) — the router consults escape-8 before corp-8, so names under the
+deeper corp entry take escape, where inline the longer entry won; `explain`
+still ranks by length there, which is the one documented gap. The render warns
+on all three (stderr). `escape add mixed.example` must find the differently-cased
+twin already present and pull corp's out.

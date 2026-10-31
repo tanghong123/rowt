@@ -5,8 +5,8 @@
 //! still goes through `rowt_platform`, which honours ROWT_NO_SYSPROXY — so this
 //! whole path can be exercised on a machine that is using rowt for real.
 
-use rowt_core::render::{geosites_of, group, lane_sets, parse_list, render_host, render_vm, rule_set_json, Filter, Geo,
-                        HostInput, Lists, CORP_SET_CIDR, RULE_SETS_DIR};
+use rowt_core::render::{case_twins, geosites_of, group, lane_sets, overflow_pairs, parse_list, render_host, render_vm,
+                        rule_set_json, Filter, Geo, HostInput, Lists, BANDS, CORP_SET_CIDR, RULE_SETS_DIR};
 use rowt_platform::{Mac, Platform};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -315,6 +315,20 @@ fn lanes_write(ctx: &Ctx) -> Result<(), String> {
     Ok(())
 }
 
+/// `_lane_sets_warn` — what the bands cannot rank, said once per render on
+/// stderr: a case twin a hand edit left in two lanes (one entry to the router,
+/// which takes the first lane's rule), and a band-8 pair the band ranks by
+/// lane order where inline ranked by length (`render::overflow_pairs`).
+fn lanes_warn(ctx: &Ctx) {
+    let lists = read_lists(ctx);
+    for (e, la, lb) in case_twins(&lists) {
+        eprintln!("warning: {e} is in both the {la} and {lb} lanes in different case — one entry to the router, which takes the {la} lane; remove one");
+    }
+    for (a, la, b, lb) in overflow_pairs(&lists) {
+        eprintln!("warning: {a} ({la}) ranks below {b} ({lb}): both have {BANDS} labels or more, and the deepest band ranks by lane order, not length — move one, or expect names under {a} to take the {lb} lane");
+    }
+}
+
 /// How many entries a set file holds: its rules' lists, summed. 0 for a file
 /// that does not parse, which then counts as having lost everything.
 fn entry_count(bytes: &[u8]) -> usize {
@@ -497,6 +511,7 @@ pub fn cmd_render(ctx: &Ctx) -> Result<String, String> {
     // render guards what it can (escape_dns; the shell's cmd_render, same spot).
     crate::escape_dns::before_render(ctx);
     lanes_write(ctx)?;
+    lanes_warn(ctx);
     let host = build_host(ctx)?;
 
     let servers: Vec<Value> =

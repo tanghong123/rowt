@@ -62,7 +62,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.8.12"
+ROWT_VERSION="3.8.13"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -786,16 +786,22 @@ _lane_label() {
 # `add`/`import` store the dot, and these two treat a lane still holding the
 # old spelling as holding the entry. Mirrors rowt_core::render::unwildcard.
 #
+# And in either CASE: DNS names are case-insensitive, and the rule-sets hold
+# every entry lowercased (_lane_set_bodies), so `Example.com` in one lane and
+# `example.com` in another would be one entry in two sets, ranked by lane order
+# — the single-lane rule has to see them as one entry too. ASCII folding, as
+# under the C locale the gates run in; mirrors rowt_core::lanes::spells.
+#
 # Is entry $2 a line of lane file $1 — as written, or as its old wildcard?
 _lane_has() { # $1=file $2=entry
-  grep -qxF -e "$2" "$1" 2>/dev/null && return 0
-  case "$2" in .?*) grep -qxF -e "*$2" "$1" 2>/dev/null ;; *) return 1 ;; esac
+  grep -qixF -e "$2" "$1" 2>/dev/null && return 0
+  case "$2" in .?*) grep -qixF -e "*$2" "$1" 2>/dev/null ;; *) return 1 ;; esac
 }
-# Lane file $1 without entry $2 (either spelling), to stdout.
+# Lane file $1 without entry $2 (either spelling, either case), to stdout.
 _lane_without() { # $1=file $2=entry
   case "$2" in
-    .?*) grep -vxF -e "$2" -e "*$2" "$1" || true ;;
-    *)   grep -vxF -e "$2" "$1" || true ;;
+    .?*) grep -vixF -e "$2" -e "*$2" "$1" || true ;;
+    *)   grep -vixF -e "$2" "$1" || true ;;
   esac
 }
 
@@ -1358,6 +1364,36 @@ _lane_sets_write() {
   done < <(cat "$grew" "$rest")
   rm -f "$all" "$grew" "$rest"
   return "$rc"
+}
+# What the bands cannot rank, said once per render on stderr. A case twin: the
+# same entry in two lanes spelled in different case (a hand-edited file; `add`
+# declines it), one entry to the router, which takes the first lane's rule. A
+# band-8 pair: an entry of more than LANE_BANDS labels whose suffix of
+# LANE_BANDS labels or more sits in another lane AND in a set the router
+# consults first — band 8 keeps lane order (bare sets, then dot-led, escape /
+# corp / block in each), not length. Mirrors rowt_core::render::case_twins and
+# overflow_pairs.
+_lane_sets_warn() {
+  jq -r -n --argjson bands "$LANE_BANDS" \
+    --argjson es "$(domains_json)" --argjson cs "$(corp_domains_json)" --argjson bs "$(block_domains_json)" \
+    --argjson ee "$(escape_exact_json)" --argjson ce "$(corp_exact_json)" --argjson be "$(block_exact_json)" '
+    def lanes: [["escape", $es, $ee], ["corp", $cs, $ce], ["block", $bs, $be]];
+    def twins: [ lanes | combinations(2) | select(.[0][0] != .[1][0]) | . as [$a, $b]
+                 | select(([lanes[] | .[0]] | index($a[0])) < ([lanes[] | .[0]] | index($b[0])))
+                 | ( $a[1][] as $e | select(($b[1] | map(ascii_downcase) | index($e | ascii_downcase)) != null)
+                     | "warning: \($e | ascii_downcase) is in both the \($a[0]) and \($b[0]) lanes in different case — one entry to the router, which takes the \($a[0]) lane; remove one" ),
+                   ( $a[2][] as $e | select(($b[2] | map(ascii_downcase) | index($e | ascii_downcase)) != null)
+                     | "warning: domain:\($e | ascii_downcase) is in both the \($a[0]) and \($b[0]) lanes in different case — one entry to the router, which takes the \($a[0]) lane; remove one" ) ];
+    def deep: [ lanes | to_entries[] | .key as $li | .value[0] as $l | .value[1][] | ascii_downcase
+                | select((split(".") | length) >= $bands)
+                | {e: ., lane: $l, n: (split(".") | length), rank: ((if startswith(".") then 3 else 0 end) + $li)} ];
+    def under($a; $b): if ($b | startswith(".")) then ($a | endswith($b)) and (($a | length) > ($b | length)) or ($a == ($b | ltrimstr(".")))
+                       else ($a | endswith("." + $b)) end;
+    def overflow: [ deep[] as $a | deep[] as $b
+                    | select($a.lane != $b.lane and $a.n > $bands and $a.e != $b.e and under($a.e; $b.e) and $a.rank > $b.rank)
+                    | "warning: \($a.e) (\($a.lane)) ranks below \($b.e) (\($b.lane)): both have \($bands) labels or more, and the deepest band ranks by lane order, not length — move one, or expect names under \($a.e) to take the \($b.lane) lane" ];
+    (twins + overflow)[]' 2>/dev/null | while IFS= read -r line; do [ -n "$line" ] && printf '%s\n' "$line" >&2; done
+  return 0
 }
 _lane_sets_restore() { # a render that failed validation puts the previous sets back
   local tag f
@@ -2201,6 +2237,7 @@ assemble_host() {
   # The lane rules are rule-set files under LANE_SETS_DIR, written here as a
   # side effect of the render, the way host.json is (see LANE_SETS_DIR).
   _lane_sets_write || die "could not write the lane rule-sets ($LANE_SETS_DIR)"
+  _lane_sets_warn
   jq -n \
     --arg sets_dir "$LANE_SETS_DIR" --argjson lane_sets "$(_lane_set_tags_json)" \
     --argjson esc_geo "$esc_geo" \

@@ -1,0 +1,5 @@
+# Synthetic parity fixture — documentation ranges (RFC 5737) only.
+corp.example
+198.51.100.0/24
+mixed.example
+a.b.c.d.e.f.g.h.i.example

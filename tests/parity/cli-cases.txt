@@ -614,6 +614,21 @@ ROWT_CORP_HOT=0 PARITY_SCENARIO=lanes-live escape add new.example
 # corp sync's apply is the same function: live under a router that runs the
 # rendered host.json, the restart (failure) path with the knob off.
 ROWT_LANES_HOT=0 PARITY_SCENARIO=corp-vpn-running corp sync
+# Case: DNS names are case-insensitive and the rule-sets hold every entry
+# lowercased, so add, rm and the single-lane rule compare without case (ASCII):
+# a differently-cased twin is "already present", is pulled out of the other
+# lane, and is removed by either spelling. The lanes-case scenario holds what a
+# hand edit can still leave — a case twin across lanes, a band-8 pair — which
+# the render warns about (stderr, not compared) and the sets still carry.
+escape add Example.COM
+corp add EXAMPLE.com
+escape rm EXAMPLE.COM
+escape add --domain Exact.Example
+escape add --domain EXACT.example
+PARITY_SCENARIO=lanes-case render
+PARITY_SCENARIO=lanes-case explain a.mixed.example
+PARITY_SCENARIO=lanes-case explain MIXED.example
+PARITY_SCENARIO=lanes-case escape add mixed.example
 ROWT_METRICS=off ROWT_AUTO_FOLLOW=0 PARITY_SCENARIO=router-restart-ok use auto --every 5m
 # status in auto with the router up: the pick, the interval and its source,
 # the follower, the last switch.

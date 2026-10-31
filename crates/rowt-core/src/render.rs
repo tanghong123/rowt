@@ -204,12 +204,14 @@ fn lane_lists<'a>(lists: &'a Lists, lane: &str) -> (&'a [String], &'a [String]) 
     }
 }
 
-/// The pairs band 8 ranks by lane order where inline ranked by length: an
-/// entry of more than `BANDS` labels in one lane, and a suffix of it with
-/// `BANDS` labels or more in another. Each is `(deeper entry, its lane, the
-/// shallower suffix, its lane)`; the render warns on them. Compared lowercased,
-/// as the sets hold them.
+/// The pairs band 8 gets WRONG: an entry of more than `BANDS` labels in one
+/// lane, and a suffix of it with `BANDS` labels or more in another lane whose
+/// set the router consults first — within the band the order is the bare sets
+/// and then the dot-led ones, escape / corp / block in each, where inline it
+/// was length. Each is `(deeper entry, its lane, the shallower suffix, its
+/// lane)`; the render warns on them. Compared lowercased, as the sets hold them.
 pub fn overflow_pairs(lists: &Lists) -> Vec<(String, &'static str, String, &'static str)> {
+    let rank = |s: &str, lane: &str| usize::from(s.starts_with('.')) * 3 + SET_LANES.iter().position(|l| *l == lane).unwrap_or(0);
     let deep: Vec<(String, &str)> = SET_LANES
         .iter()
         .flat_map(|l| lane_lists(lists, l).0.iter().map(move |s| (s.to_ascii_lowercase(), *l)))
@@ -218,7 +220,7 @@ pub fn overflow_pairs(lists: &Lists) -> Vec<(String, &'static str, String, &'sta
     let mut out = Vec::new();
     for (a, la) in &deep {
         for (b, lb) in &deep {
-            if la == lb || a.split('.').count() <= BANDS || a == b {
+            if la == lb || a.split('.').count() <= BANDS || a == b || rank(a, la) <= rank(b, lb) {
                 continue;
             }
             // b is a label-suffix of a: the bare form under a boundary, or the
@@ -245,10 +247,11 @@ pub fn case_twins(lists: &Lists) -> Vec<(String, &'static str, &'static str)> {
         for lb in &SET_LANES[i + 1..] {
             let (sa, ea) = lane_lists(lists, la);
             let (sb, eb) = lane_lists(lists, lb);
-            for (xa, xb) in [(sa, sb), (ea, eb)] {
+            // An exact twin is named as the lane stores it, `domain:<host>`.
+            for (xa, xb, prefix) in [(sa, sb, ""), (ea, eb, EXACT_PREFIX)] {
                 for e in xa {
                     if xb.iter().any(|f| f.eq_ignore_ascii_case(e)) {
-                        out.push((e.to_ascii_lowercase(), *la, *lb));
+                        out.push((format!("{prefix}{}", e.to_ascii_lowercase()), *la, *lb));
                     }
                 }
             }
@@ -927,14 +930,26 @@ mod tests {
     #[test]
     fn the_overflow_band_and_case_twins_are_named() {
         let lists = Lists {
-            escape_domains: vec!["a.b.c.d.e.f.g.h.i.example".into(), "Twin.Example".into()],
-            corp_domains: vec!["c.d.e.f.g.h.i.example".into(), "twin.example".into()],
+            escape_domains: vec!["c.d.e.f.g.h.i.example".into(), "Twin.Example".into()],
+            corp_domains: vec!["a.b.c.d.e.f.g.h.i.example".into(), "twin.example".into()],
             block_domains: vec!["d.e.f.g.h.i.example".into()],
+            escape_exact: vec!["Host.Example".into()],
+            block_exact: vec!["host.example".into()],
             ..Default::default()
         };
+        // corp's deeper entry sits in corp-8, which the router consults after
+        // escape-8, where its eight-label suffix is: lane order, not length.
         let pairs = overflow_pairs(&lists);
-        assert_eq!(pairs, vec![("a.b.c.d.e.f.g.h.i.example".into(), "escape", "c.d.e.f.g.h.i.example".into(), "corp")],
+        assert_eq!(pairs, vec![("a.b.c.d.e.f.g.h.i.example".into(), "corp", "c.d.e.f.g.h.i.example".into(), "escape")],
                    "only a suffix of eight labels or more shares band 8; the seven-label one ranks below it");
-        assert_eq!(case_twins(&lists), vec![("twin.example".into(), "escape", "corp")]);
+        // The other way round the band order happens to agree with length.
+        let fine = Lists {
+            escape_domains: vec!["a.b.c.d.e.f.g.h.i.example".into()],
+            corp_domains: vec!["c.d.e.f.g.h.i.example".into()],
+            ..Default::default()
+        };
+        assert!(overflow_pairs(&fine).is_empty());
+        assert_eq!(case_twins(&lists), vec![("twin.example".into(), "escape", "corp"),
+                                            ("domain:host.example".into(), "escape", "block")]);
     }
 }
