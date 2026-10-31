@@ -208,6 +208,12 @@ PARITY_SCENARIO=failover-pinned use beta --failover
 PARITY_TIMEOUT=45 PARITY_NOTRACE=1 PARITY_SCENARIO=watch-pin-dead-failover ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
 PARITY_SCENARIO=watch-pin-held-failover status
 PARITY_TIMEOUT=45 PARITY_NOTRACE=1 PARITY_SCENARIO=watch-pin-held-failover ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
+# rowt #s57: the interface is named but has no address. The shell skips its
+# probe and resets the streak; the native tick must too, and must spell the
+# network id the shell's way ("none/…"), or it records a move that never was.
+PARITY_TIMEOUT=45 PARITY_NOTRACE=1 PARITY_SCENARIO=watch-offline-probe ROWT_IFACE=en0 ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
+# …and a Wi-Fi whose name networksetup will not give: no SSID, not the sentence.
+PARITY_TIMEOUT=45 PARITY_NOTRACE=1 PARITY_SCENARIO=watch-no-ssid ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
 
 # static text and log readers, extracted from the shell at build time
 shell-init

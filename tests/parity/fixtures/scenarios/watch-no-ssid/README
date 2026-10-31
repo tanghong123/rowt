@@ -1,0 +1,11 @@
+watch-no-ssid — a Wi-Fi whose name macOS will not say (rowt #s57).
+
+`networksetup -getairportnetwork en0` answers "You are not associated with an
+AirPort network." while the interface is up with an address, as it does for
+an app without location permission. Built on watch-no-exit (router up, proxy
+pointing at it, bind_interface en0), with no health streak and watch.net
+already holding the shell's id for this machine, "192.0.2.15/192.0.2.1".
+
+Expected: no move, the same network id written back. The native tick used to
+take everything after the last ": " as the SSID; this sentence has none, so the
+whole of it became the name and every tick saw a network move.

@@ -1,0 +1,6 @@
+mode=host
+selected=auto
+proxy_intent=on
+intent=up
+boot=1700000000
+clash_secret=PARITYFIXTURESECRET00000

@@ -646,15 +646,22 @@ fn probe_payload(out: &str) -> &str {
 
 /// `net_id` — a signature for "which network am I on", so a home→hotspot move
 /// on the SAME interface still reads as a move.
+/// The shell's `net_id`, word for word: `down` with no interface, `none` for an
+/// address or router it does not have, and an SSID only where networksetup
+/// names one. A Wi-Fi with no address used to read `ParityNet /192.0.2.1`
+/// here and `ParityNet none/192.0.2.1` there, so this side saw a network move
+/// the shell did not (rowt #s57); and "You are not associated with an AirPort
+/// network." has no ": " to split on, so the whole sentence became the SSID.
 fn net_id(iface: &str) -> String {
     if iface.is_empty() {
-        return String::new();
+        return "down".into();
     }
     let addr = out("ipconfig", &["getifaddr", iface]).trim().to_string();
     let router = out("ipconfig", &["getoption", iface, "router"]).trim().to_string();
     let ssid = out("networksetup", &["-getairportnetwork", iface]);
-    let ssid = ssid.rsplit(": ").next().unwrap_or("").trim().to_string();
-    format!("{ssid} {addr}/{router}").trim().to_string()
+    let ssid = ssid.lines().find_map(|l| l.strip_prefix("Current Wi-Fi Network: ")).unwrap_or("");
+    let or_none = |s: &str| if s.is_empty() { "none".to_string() } else { s.to_string() };
+    format!("{}{}/{}", if ssid.is_empty() { String::new() } else { format!("{ssid} ") }, or_none(&addr), or_none(&router))
 }
 
 fn observe(ctx: &Ctx, cap: Option<CaptiveState>, portal: Option<String>, portal_host: Option<String>, health_ok: bool, probe_offline: bool, health_slow: bool, health_flows: u32,
