@@ -91,6 +91,8 @@ fn run() -> Result<String, String> {
         net_id: s(o, "net_id"),
         mode: s(o, "mode"),
         health_ok: b(o, "health_ok"),
+        // Absent (every bundle and fixture before 2026-10-31) means the probe ran.
+        probe_offline: b(o, "probe_offline"),
         health_slow: b(o, "health_slow"),
         // Absent in a fixture means no flow was seen, which is what every
         // case written before this field existed describes.

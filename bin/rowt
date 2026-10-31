@@ -62,7 +62,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.8.9"
+ROWT_VERSION="3.8.10"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -6438,6 +6438,7 @@ _watch_shadow() {
       --argjson pointing "${_SH2_POK:-false}" \
       --argjson bypass "${_SH2_BOK:-false}" \
       --argjson health "$([ "${_SH2_HEALTH:-ok}" = ok ] && echo true || echo false)" \
+      --argjson poff "$([ "${_SH2_HEALTH:-}" = offline ] && echo true || echo false)" \
       --argjson slow "${_SH2_SLOW:-false}" \
       --argjson flows "${_SH2_FLOWS:-0}" \
       --argjson fails "${_SH_FAILS0:-0}" \
@@ -6454,7 +6455,7 @@ _watch_shadow() {
       '{obs:{proxy_intent:"", captive:$cap, captive_check_disabled:$capoff, active_service:$svc, proxy_any_on:true,
              host_running:true, intent:"up", boot_matches:true, iface:$ifc,
              proxy_pointing_ok:$pointing, proxy_bypass_ok:$bypass,
-             bound_iface:$cur, net_id:$nid, health_ok:$health, health_slow:$slow, health_flows:$flows, now:$now, gateway_ok:$gwok,
+             bound_iface:$cur, net_id:$nid, health_ok:$health, probe_offline:$poff, health_slow:$slow, health_flows:$flows, now:$now, gateway_ok:$gwok,
              pinned:(if $pin == "" then null else $pin end), pinned_addr:$pinaddr, pinned_reach:$pinreach, hold_stamp:$holdstamp, failover:$failover,
              mode:(if $mode == "" then "host" else $mode end)},
         state:{captive_flag:false, health_fails:$fails, last_net_id:$last,

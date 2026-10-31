@@ -388,6 +388,29 @@ else
     else
       ok "watch-shadow caught a netcheck observation with no previous net_id"
     fi
+    command cp -f "$ROOT/bin/rowt" "$tmp/bin/rowt"
+  fi
+fi
+
+echo "10d. telling the planner an offline tick's probe FAILED must be caught"
+# rowt #s57, the 2026-10-20 divergence: with no address at the probe the shell
+# never probes and resets the streak, but a snapshot without probe_offline reads
+# as health_ok false — a failed probe — and the plan counts it.
+if [ ! -x "$rwatch" ]; then
+  echo "  skip — no release build"
+else
+  command cp -f "$ROOT/bin/rowt" "$tmp/bin/rowt"
+  if ! "$P" watch-shadow offline-probe >/dev/null 2>&1; then
+    bad "watch-shadow's offline-probe case already fails before the mutation"
+  else
+    sed -i.bak4 's|probe_offline:\$poff, ||' "$tmp/bin/rowt"
+    if grep -q 'probe_offline:\$poff' "$tmp/bin/rowt"; then
+      bad "could not drop probe_offline from the netcheck observation (it moved?)"
+    elif "$P" watch-shadow offline-probe >/dev/null 2>&1; then
+      bad "watch-shadow passed with an offline tick shadowed as a failed probe"
+    else
+      ok "watch-shadow caught an offline tick shadowed as a failed probe"
+    fi
     # Left pristine for step 11, whose own mutation is self-contained.
     command cp -f "$ROOT/bin/rowt" "$tmp/bin/rowt"
   fi

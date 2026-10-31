@@ -1212,12 +1212,17 @@ cmd_watch_shadow() {
     # there would be an action the planner never took), so the trace is the
     # only place it shows, and without this a shell that stopped bursting
     # would pass every gate.
-    local expect="" probes=""
+    #
+    # `last=R` likewise: the tick must have recorded result R for the escape
+    # lane in watch.last. An offline tick logs nothing either (rowt #s57), and
+    # watch.last is the only place `_watch_health` says it got that far.
+    local expect="" probes="" last=""
     case "$line" in
       *\|*) expect="$(printf '%s' "${line##*|}" | sed -e 's/^ *//' -e 's/ *$//')"
              line="$(printf '%s' "${line%|*}" | sed -e 's/ *$//')" ;;
     esac
     case "$expect" in probes=*) probes="${expect#probes=}"; expect="" ;; esac
+    case "$expect" in last=*) last="${expect#last=}"; expect="" ;; esac
     local purl="http://captive.apple.com/hotspot-detect.html"
     case "$line" in *ROWT_CAPTIVE_URL=*) purl="${line##*ROWT_CAPTIVE_URL=}"; purl="${purl%% *}" ;; esac
     local out; out="$(mktemp -d "${TMPDIR:-/tmp}/parity-shadow.XXXXXX")"
@@ -1236,6 +1241,10 @@ cmd_watch_shadow() {
       echo "    artifacts: $out"
     elif [ -n "$probes" ] && [ "$(grep -c "^curl .* $purl\$" "$out/trace" 2>/dev/null || true)" != "$probes" ]; then
       fails=$((fails + 1)); echo "[$id] identical, but the tick probed $purl $(grep -c "^curl .* $purl\$" "$out/trace" 2>/dev/null || true) time(s), not $probes"
+      echo "    artifacts: $out"
+    elif [ -n "$last" ] && ! grep -qx "result=$last" "$out/home/rowt/watch.last" 2>/dev/null; then
+      fails=$((fails + 1)); echo "[$id] identical, but watch.last does not record result=$last"
+      sed 's/^/      /' "$out/home/rowt/watch.last" 2>/dev/null || echo "      (no watch.last)"
       echo "    artifacts: $out"
     elif [ -n "$expect" ] && ! grep -qF "$expect" "$out/home/rowt/log/watch.log" 2>/dev/null; then
       fails=$((fails + 1)); echo "[$id] identical, but the tick never reached what this case is for"

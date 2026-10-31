@@ -697,6 +697,16 @@ instant it names.** If a value is read anywhere other than where the decision
 used it, it is not an observation — it is a second, later opinion, and the
 comparison it feeds is meaningless in the one direction that matters.
 
+It applies to *outcomes* as well as readings (rowt #s57, 2026-10-31). On
+2026-10-20, 37 s after a Wi-Fi came back from down, `iface` was read while the
+interface had an address, and by the probe it had none. `_watch_health` returned
+before probing and reset the streak, but the snapshot reduced its three
+outcomes to one boolean, so `offline` reached the planner as a failed probe,
+and the plan counted "1/3". The native tick had the same gap: it probed anyway
+and counted the failure. Both now carry `probe_offline`, and the native tick
+skips the probes the shell skips. `parity watch-shadow` covers it with the
+`watch-offline-probe` scenario, and selftest 10d proves the case can fail.
+
 Two lessons from getting it wrong first:
 
 * **Record the decision where it is made, not at the call site.** The first

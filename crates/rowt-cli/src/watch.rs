@@ -656,7 +656,7 @@ fn net_id(iface: &str) -> String {
     format!("{ssid} {addr}/{router}").trim().to_string()
 }
 
-fn observe(ctx: &Ctx, cap: Option<CaptiveState>, portal: Option<String>, portal_host: Option<String>, health_ok: bool, health_slow: bool, health_flows: u32,
+fn observe(ctx: &Ctx, cap: Option<CaptiveState>, portal: Option<String>, portal_host: Option<String>, health_ok: bool, probe_offline: bool, health_slow: bool, health_flows: u32,
            pinned: Option<String>, pinned_addr: String, pinned_reach: Option<bool>) -> Observation {
     let p = Mac;
     let svc = p.active_service();
@@ -678,6 +678,7 @@ fn observe(ctx: &Ctx, cap: Option<CaptiveState>, portal: Option<String>, portal_
         // shell applies the same condition, or the two would disagree about
         // the argv a tick produces.
         gateway_ok: !health_ok
+            && !probe_offline
             && cap != Some(CaptiveState::Clear)
             && iface.as_deref().and_then(|i| p.gateway(i)).map(|gw| p.gateway_alive(&gw)).unwrap_or(false),
         portal_url: portal,
@@ -694,6 +695,7 @@ fn observe(ctx: &Ctx, cap: Option<CaptiveState>, portal: Option<String>, portal_
         bound_iface: bound,
         mode: ctx.mode(),
         health_ok,
+        probe_offline,
         health_slow,
         health_flows,
         pinned,
@@ -1517,7 +1519,7 @@ fn tick(ctx: &Ctx) {
     // `Action::Journal` because that is what the shadow comparison matches
     // against; `perform` skips it below rather than running it twice.
     journal(ctx, cap);
-    let obs = observe(ctx, Some(cap), portal.clone(), portal_host.clone(), true, false, 0, None, String::new(), None);
+    let obs = observe(ctx, Some(cap), portal.clone(), portal_host.clone(), true, false, false, 0, None, String::new(), None);
     let g = guard(&obs, &st, &cfg);
     perform_planned(ctx, &g.actions);
     st = g.state;
@@ -1569,19 +1571,26 @@ fn tick(ctx: &Ctx) {
             }
         }
     }
-    let hb_delay = if ctx.mode() == "local" { None } else { health_ok(ctx) };
+    // Offline is the shell's test, `ipconfig getifaddr "$ifc"` empty
+    // (ROWT_IFACE can name an interface without an address). `_watch_health`
+    // returns before its probe then, so nothing below is asked either, and the
+    // planner is told why the probe never ran rather than that it failed.
+    let online = !ifc.is_empty() && !String::from_utf8_lossy(&Command::new("ipconfig").args(["getifaddr", &ifc])
+        .stderr(Stdio::null()).output().map(|o| o.stdout).unwrap_or_default()).trim().is_empty();
+    let offline = ctx.mode() != "local" && !online;
+    let hb_delay = if ctx.mode() == "local" || offline { None } else { health_ok(ctx) };
     let hb = ctx.mode() == "local" || hb_delay.is_some();
     // SLOW is not DEAD: only when the quick probe failed, and only when this
     // tick would cross the streak, ask once more with real patience. Recovery
     // is expensive and rare, so one slow probe is cheap insurance against
     // restarting a tunnel that was carrying traffic all along. Deliberately not
     // keyed on curl's error kind — a genuinely wedged tunnel times out too.
-    let slow_delay = if !hb && st.health_fails + 1 >= cfg.health_fails { health_ok_within(ctx, cfg.health_timeout * 3) } else { None };
+    let slow_delay = if !hb && !offline && st.health_fails + 1 >= cfg.health_fails { health_ok_within(ctx, cfg.health_timeout * 3) } else { None };
     let slow = slow_delay.is_some();
     // FLOWING is not WEDGED: only when the patient probe failed as well, ask
     // the router whether connections opened in the last two minutes are still
     // receiving bytes through the tunnel. Mirrors the shell's `_watch_fresh_flows`.
-    let flows = if !hb && st.health_fails + 1 >= cfg.health_fails && !slow { fresh_escape_flows(ctx) } else { 0 };
+    let flows = if !hb && !offline && st.health_fails + 1 >= cfg.health_fails && !slow { fresh_escape_flows(ctx) } else { 0 };
     // rowt #s36: is the pinned server ITSELF dead? One more question, asked
     // only where the answer could change the decision — the streak crossing,
     // neither the patient probe nor a fresh flow speaking for the tunnel, and
@@ -1592,14 +1601,14 @@ fn tick(ctx: &Ctx) {
     let pinned = pinned_tag(ctx);
     // Offline (`_watch_health` returns before its probe when the NIC has no
     // address) there is nothing to ask either.
-    let at_decision = !ifc.is_empty() && !hb && st.health_fails + 1 >= cfg.health_fails && !slow && flows == 0
+    let at_decision = online && !hb && st.health_fails + 1 >= cfg.health_fails && !slow && flows == 0
         && !rowt_core::watch::would_hold_for_network(env_or("ROWT_CAPTIVE_CHECK", "1") != "1", Some(cap), st.health_fails + 1, &cfg);
     let paddr = if at_decision { pinned.as_deref().and_then(|t| pinned_addr(ctx, t)) } else { None };
     let reach = paddr.as_deref().map(|a| {
         let (ip, port) = a.rsplit_once(':').unwrap_or((a, ""));
         crate::diag::tcp_reaches(&ifc, ip, port)
     });
-    let obs2 = observe(ctx, Some(cap), portal, portal_host, hb, slow, flows, pinned, paddr.unwrap_or_default(), reach);
+    let obs2 = observe(ctx, Some(cap), portal, portal_host, hb, offline, slow, flows, pinned, paddr.unwrap_or_default(), reach);
     // Where the shell enters `_watch_health` (phase two, nothing to reload for
     // the network's sake, a tunnel to probe), it also throws away a malformed
     // `watch.hold`; see `hold_file_malformed`.
@@ -1615,10 +1624,6 @@ fn tick(ctx: &Ctx) {
         // the network's sake probes nothing there), never in local mode.
         // Offline (no interface) is recorded as such.
         if !iface_moved && !proxy_wrong && obs2.mode != "local" {
-            // Offline is the shell's test, `ipconfig getifaddr "$ifc"` empty
-            // (ROWT_IFACE can name an interface without an address).
-            let online = !ifc.is_empty() && !String::from_utf8_lossy(&Command::new("ipconfig").args(["getifaddr", &ifc])
-                .stderr(Stdio::null()).output().map(|o| o.stdout).unwrap_or_default()).trim().is_empty();
             let (result, delay) = if !online { ("offline", None) }
                 else if hb { ("ok", hb_delay) }
                 else if slow { ("slow", slow_delay) }

@@ -56,6 +56,11 @@ PARITY_SCENARIO=captive-no-dns watch tick | captive portal detected — dropping
 # say what the NIC and its gateway answered, in rowt status's own words — not
 # reload, which is what this world got before.
 PARITY_SCENARIO=watch-no-exit ROWT_CAPTIVE_URL=http://127.0.0.1:9/x watch tick | nothing answers over en0, not even its gateway
+# The 2026-10-20 divergence (rowt #s57): the interface is named but has no
+# address by the time the tunnel would be probed. The shell returns before its
+# probe and resets the streak, logging nothing — so watch.last is the proof it
+# got there. The shadow used to hand the planner a FAILED probe instead.
+PARITY_SCENARIO=watch-offline-probe ROWT_IFACE=en0 ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick | last=offline
 # rowt #s36: a dead pinned server holds instead of reloading, said in full on
 # the first tick and in one line after. The alive and udp worlds (the arm NOT
 # firing) are cli-diff cases only: their 2100 recovery stamp lands on the

@@ -1,0 +1,15 @@
+watch-offline-probe — the 2026-10-20 tick: the interface had no address when the
+tunnel was about to be probed (rowt #s57).
+
+Built on watch-no-exit: the router is up (host.pid.self), the system proxy
+points at it, and bind_interface is en0. ROWT_IFACE=en0 on the case line names
+the interface without checking it, the way a real tick can read the interface a
+moment before its address goes. `ipconfig getifaddr en0` answers nothing (exit
+1), so the network id is "ParityNet none/192.0.2.1"; watch.net already holds it,
+so phase two reaches the health check instead of logging a move. watch.health
+seeds a streak of one.
+
+Expected: the shell's `_watch_health` returns before its probe, resets the
+streak and records `result=offline` in watch.last, logging nothing; the planner
+must agree. Before probe_offline existed the shadow told it `health_ok: false`,
+and it planned "escape tunnel probe failed (2/3)".

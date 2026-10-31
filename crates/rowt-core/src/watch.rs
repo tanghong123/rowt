@@ -85,6 +85,13 @@ pub struct Observation {
     pub mode: String,
     /// `_watch_probe` — is the escape tunnel answering? Only read in netcheck.
     pub health_ok: bool,
+    /// The interface had no IPv4 address when the tunnel was about to be
+    /// probed (`ipconfig getifaddr` empty), so nothing was probed: offline, the
+    /// same as `iface == None`. Separate because `iface` is read earlier in the
+    /// tick, and `ROWT_IFACE` names an interface without checking it. Shadowed
+    /// as a failed probe, a Wi-Fi coming back from down (2026-10-20) counted a
+    /// failure the shell never had.
+    pub probe_offline: bool,
     /// The quick probe failed but a far more patient one answered: the tunnel
     /// is SLOW, not wedged. A link whose round trip sits on
     /// `ROWT_HEALTH_TIMEOUT` fails every probe by a hair, and three of those
@@ -548,7 +555,7 @@ pub fn netcheck(obs: &Observation, st: &State, cfg: &Config) -> Outcome {
             if s.hold.as_ref().is_some_and(|h| obs.pinned.as_deref() != Some(h.tag.as_str())) {
                 s.hold = None;
             }
-            if obs.iface.is_none() {
+            if obs.iface.is_none() || obs.probe_offline {
                 // Offline: a restart cannot help, and a returning network fires its
                 // own tick. Reset the streak and wait.
                 s.health_fails = 0;
@@ -720,6 +727,7 @@ mod tests {
             net_id: "Net 192.0.2.5/192.0.2.1".into(),
             mode: "host".into(),
             health_ok: true,
+            probe_offline: false,
             health_slow: false,
             health_flows: 0,
             pinned: None,
@@ -1113,6 +1121,21 @@ mod tests {
         let r = guard(&o, &State::default(), &Config::default());
         assert!(!r.actions.iter().any(|a| matches!(a, Action::Recover(_))));
         assert!(logs(&r)[0].contains("OFFLINE — deferring recovery"));
+    }
+
+    /// The 2026-10-20 divergence: `iface` was read while the Wi-Fi had an
+    /// address, and by the probe it had none. The shell returns before its
+    /// probe and resets the streak; so must the plan, and say nothing.
+    #[test]
+    fn no_address_at_the_probe_resets_the_streak_like_no_interface() {
+        let mut o = running();
+        o.health_ok = false;
+        o.probe_offline = true;
+        let st = State { last_net_id: Some(o.net_id.clone()), health_fails: 2, ..Default::default() };
+        let r = netcheck(&o, &st, &Config::default());
+        assert_eq!(r.state.health_fails, 0);
+        assert!(logs(&r).is_empty(), "{:?}", logs(&r));
+        assert!(!r.actions.iter().any(|a| matches!(a, Action::Recover(_))));
     }
 
     #[test]
