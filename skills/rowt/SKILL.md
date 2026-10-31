@@ -244,8 +244,9 @@ replaced**, run `rowt fetch host` (with a working path to GitHub) or `rowt reloa
   in well under 30 s.
 - **Lane edits are live** (3.8.11+): `add`/`rm`/`import`/`clear` and `corp sync`
   reach a running router without a restart; the first edit after an upgrade
-  restarts once and says so. After editing a lane file by hand, `rowt render` is
-  enough for the lanes; servers, ports and mode still take `rowt reload`.
+  restarts once and says so. After editing a lane file by hand, run `rowt reload`:
+  a bare `rowt render` reaches the router only when it already runs the rendered
+  config, and says nothing when it does not.
 - **Never type or ask for a password**, and never kill the user's other apps. Admin
   steps go to the user's own terminal.
 - **Don't change what the user chose**: the pinned server, their lane entries, the

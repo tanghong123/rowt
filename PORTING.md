@@ -907,7 +907,7 @@ always fails. It surfaced while exercising the import flow for the agent skill,
 through a user-level path (`--path` was undocumented until this change), not
 through the gate, which had pinned the failure as behavior.
 
-#### 6.7.2 Retired: a failed restart after `use`, `use best`, a lane edit or `corp sync` exited 0
+#### 6.7.3 Retired: a failed restart after `use`, `use best`, a lane edit or `corp sync` exited 0
 
 `main` runs every mutating arm as `run_command … || _rc=$?`, which switches
 `set -e` off inside it, so `cmd_use`, `_use_best`, `edit_list` and `corp_sync`

@@ -4,5 +4,5 @@ with the router up (host.pid.self) and running the rendered host.json
 dir written `@CFG@`), so `corp sync` goes on from "updated corp lane" to the
 apply and takes the LIVE path: the corp-cidr set changes, the router is not
 restarted. With ROWT_LANES_HOT=0 it restarts instead — and the sandbox's
-sing-box exits at once, so the restart does not come back. The shell steps over
-that (`… && _lanes_apply || true`) and exits 0; rowt-rs must do the same.
+sing-box exits at once, so the restart does not come back: both sides exit 1
+(`_lanes_apply || return 1`, PORTING.md 6.7.3) and the audit records rc=1.

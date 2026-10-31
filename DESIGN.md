@@ -283,7 +283,8 @@ into:
   local sing-box rule-set under `rule-sets/` beside `host.json`, which only
   points at the files: one set per lane per label count, bare and dot-led
   entries apart, the exact entries ahead — 48 sets that keep longest-suffix-wins
-  exactly (`rowt_core::render::RULE_SETS_DIR` has the argument) — plus one set
+  for every entry of up to eight labels, lane order among deeper ones
+  (`rowt_core::render::RULE_SETS_DIR` has the argument) — plus one set
   for the corp CIDRs. sing-box watches a local rule-set file and swaps its rules
   in place when the file is replaced (written whole, by rename, and only when
   the bytes change), so a sync or an `escape add` leaves `host.json`

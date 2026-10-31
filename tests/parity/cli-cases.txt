@@ -619,7 +619,7 @@ PARITY_SCENARIO=lanes-live escape add 192.0.2.0/24
 # rendered host.json, the restart (failure) path with the knob off.
 ROWT_LANES_HOT=0 PARITY_SCENARIO=corp-vpn-running corp sync
 # On the restart path, a router that does not come back is exit 1 on both sides
-# (PORTING.md 6.7.2): the use-auto-unchanged, lanes-live (knob off) and
+# (PORTING.md 6.7.3): the use-auto-unchanged, lanes-live (knob off) and
 # corp-vpn-running (knob off) cases above pin it.
 # Case: DNS names are case-insensitive and the rule-sets hold every entry
 # lowercased, so add, rm and the single-lane rule compare without case (ASCII):

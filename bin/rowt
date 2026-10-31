@@ -62,7 +62,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.8.18"
+ROWT_VERSION="3.8.19"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -1053,7 +1053,7 @@ edit_list() {
   [ "$_hbefore" != "$_hafter" ] && _hotspot_apply || true
   # …live through the lane rule-sets when the router runs this host.json, a
   # restart only when it must (_lanes_apply) — and a restart that does not come
-  # back is this command's failure, exit 1 (PORTING.md 6.7.2).
+  # back is this command's failure, exit 1 (PORTING.md 6.7.3).
   if [ "$no_reload" -eq 0 ] && [ "$_before" != "$_after" ]; then _lanes_apply || return 1; fi
 }
 
@@ -1673,7 +1673,7 @@ corp_sync() {
   info "corp sync: updated corp lane — $nd DHCP domain(s) + $nc CIDR(s) (superset of $na live route(s))"
   # Live when it can be, a restart only when it must — and a restart that does
   # not come back is this command's failure, exit 1 (the watchdog tick runs
-  # `corp_sync --quiet || true` and goes on; PORTING.md 6.7.2).
+  # `corp_sync --quiet || true` and goes on; PORTING.md 6.7.3).
   if [ "$noreload" = 0 ]; then _lanes_apply || return 1; fi
   return 0
 }
@@ -3093,7 +3093,7 @@ cmd_use() {
     # A restart that does not come back ends the command with its status: the
     # restart has said why, the no-limbo step has turned the proxy off, and the
     # selection line below would claim a switch that did not happen. (Until
-    # 3.8.14 this arm stepped over the failure and exited 0 — PORTING.md 6.7.2.)
+    # 3.8.14 this arm stepped over the failure and exited 0 — PORTING.md 6.7.3.)
     cmd_router restart >/dev/null || return 1
     [ "$tag" = "auto" ] && info "escape -> auto (fastest live server, re-probed every $(_auto_interval))" \
                         || info "escape -> $tag"

@@ -1776,7 +1776,7 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                 // the command with exit 1 — it has reported itself (`SILENT`),
                 // and the selection line below would claim a switch that did
                 // not happen. (Stepped over, exit 0, until 3.8.14: PORTING.md
-                // 6.7.2.)
+                // 6.7.3.)
                 lifecycle::router_stop(&ctx);
                 stdout_dropped(|| lifecycle::router_up(&ctx))?;
                 if tag == "auto" {

@@ -172,7 +172,7 @@ pub fn reload_if_running(ctx: &Ctx) -> Result<String, String> {
 /// The router's no-limbo step has already turned the proxy off, so the machine
 /// is not stranded; the exit status is what lies (PORTING.md §6.7). `use`,
 /// `use best`, a lane edit and `corp sync` did this too until 3.8.14, and now
-/// exit 1 instead (PORTING.md 6.7.2). A `die` on the way — a render that
+/// exit 1 instead (PORTING.md 6.7.3). A `die` on the way — a render that
 /// failed validation, no sing-box to run — still ends the command, which is
 /// every error here that is not `SILENT`.
 pub fn stepped_over<T>(r: Result<T, String>) -> Result<Option<T>, String> {

@@ -630,7 +630,7 @@ pub fn run(ctx: &Ctx, o: &Opts) -> Result<String, String> {
     // Live through the corp rule-sets when it can be; a restart only when it must.
     if !o.no_reload {
         // `_lanes_apply || return 1`: a restart that did not come back is
-        // this command's failure, exit 1 (PORTING.md 6.7.2).
+        // this command's failure, exit 1 (PORTING.md 6.7.3).
         lifecycle::lanes_apply(ctx)?;
     }
     Ok(String::new())
