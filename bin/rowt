@@ -62,7 +62,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.8.11"
+ROWT_VERSION="3.8.12"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -1106,7 +1106,10 @@ AUTO_CORP_DOMAINS="${ROWT_AUTO_CORP_DOMAINS:-1}"
 # one set per lane per label count, a bare set and a dot-led set each, the
 # exact entries ahead; _lane_set_tags has the order and
 # rowt_core::render::RULE_SETS_DIR the argument. The corp CIDRs stay one set
-# (corp-cidr), as contributor PR #5 made them.
+# (corp-cidr), as contributor PR #5 made them. Each set has a directory of its
+# own, rule-sets/<tag>/<tag>.json: sing-box watches a set's DIRECTORY, and on
+# macOS the watcher (kqueue) holds a descriptor for every file in it — 49 sets
+# in one directory cost 49² of them (measured: 2,550; one directory each: 100).
 # ROUTER_CFG_SUM is the cksum of the host.json the running router was started
 # (or SIGHUP-reloaded) from: an edit applies live only when the fresh render is
 # that same file; anything else (an older rowt started it, a geosite: came or
@@ -1307,6 +1310,7 @@ _lane_set_bodies() { # $1=lane $2=suffixes (JSON array) $3=exact entries (JSON a
 # previous file is kept as <file>.prev until the render validates
 # (_lane_sets_restore). The caller has already found the bytes differ.
 _lane_set_put() { # $1=file  $2=body (one JSON line)
+  mkdir -p "$(dirname "$1")" || return 1
   local t; t="$(mktemp "$1.XXXXXX")" || return 1
   printf '%s\n' "$2" > "$t" || { rm -f "$t"; return 1; }
   if [ -f "$1" ]; then cp -p "$1" "$1.prev" 2>/dev/null || true; fi
@@ -1339,7 +1343,7 @@ _lane_sets_write() {
     && printf 'corp-cidr\t%s\n' "$(corp_cidrs_json | jq -c '{version:1, rules:(if length > 0 then [{ip_cidr:.}] else [] end)}')"
   } > "$all" || { rm -f "$all" "$grew" "$rest"; return 1; }
   while IFS=$'\t' read -r tag body; do
-    f="$LANE_SETS_DIR/$tag.json"
+    f="$LANE_SETS_DIR/$tag/$tag.json"
     rm -f "$f.prev"
     if [ -f "$f" ] && printf '%s\n' "$body" | cmp -s - "$f"; then continue; fi
     if [ "$(printf '%s\n' "$body" | _lane_set_count -)" -gt "$(_lane_set_count "$f")" ]; then
@@ -1350,7 +1354,7 @@ _lane_sets_write() {
   done < "$all"
   local rc=0
   while IFS=$'\t' read -r tag body; do
-    _lane_set_put "$LANE_SETS_DIR/$tag.json" "$body" || { rc=1; break; }
+    _lane_set_put "$LANE_SETS_DIR/$tag/$tag.json" "$body" || { rc=1; break; }
   done < <(cat "$grew" "$rest")
   rm -f "$all" "$grew" "$rest"
   return "$rc"
@@ -1358,13 +1362,13 @@ _lane_sets_write() {
 _lane_sets_restore() { # a render that failed validation puts the previous sets back
   local tag f
   while IFS=$'\t' read -r _ tag; do
-    f="$LANE_SETS_DIR/$tag.json"; if [ -f "$f.prev" ]; then mv -f "$f.prev" "$f"; fi
+    f="$LANE_SETS_DIR/$tag/$tag.json"; if [ -f "$f.prev" ]; then mv -f "$f.prev" "$f"; fi
   done < <(_lane_set_tags; printf 'corp\tcorp-cidr\n')
   return 0
 }
 _lane_sets_prev_clear() { # validated: the previous sets are done with
   local tag
-  while IFS=$'\t' read -r _ tag; do rm -f "$LANE_SETS_DIR/$tag.json.prev"; done < <(_lane_set_tags; printf 'corp\tcorp-cidr\n')
+  while IFS=$'\t' read -r _ tag; do rm -f "$LANE_SETS_DIR/$tag/$tag.json.prev"; done < <(_lane_set_tags; printf 'corp\tcorp-cidr\n')
   return 0
 }
 # Remember what the running router was started from (see ROUTER_CFG_SUM).
@@ -2336,8 +2340,8 @@ assemble_host() {
              + (($geo_sets + (if $ads != "" then [{type:"local", tag:"geosite-ads", format:"binary", path:$ads}] else [] end)
                  # the lane sets in route order, then the corp CIDRs — every one a
                  # source (JSON) set under LANE_SETS_DIR, written by _lane_sets_write
-                 + ($lane_sets | map({type:"local", tag:.tag, format:"source", path:($sets_dir + "/" + .tag + ".json")}))
-                 + [{type:"local", tag:"corp-cidr", format:"source", path:($sets_dir + "/corp-cidr.json")}]) as $allsets
+                 + ($lane_sets | map({type:"local", tag:.tag, format:"source", path:($sets_dir + "/" + .tag + "/" + .tag + ".json")}))
+                 + [{type:"local", tag:"corp-cidr", format:"source", path:($sets_dir + "/corp-cidr/corp-cidr.json")}]) as $allsets
                 | if ($allsets|length) > 0 then {rule_set:$allsets} else {} end))
     }
     + ( ( (if $clash=="" then {} else {clash_api:{external_controller:$clash, secret:$secret}} end)

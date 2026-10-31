@@ -98,6 +98,12 @@ pub struct HostInput {
 /// set count is fixed, or the first deeper entry would change host.json — so
 /// within it the length tie-break is lost, and the render warns on the one
 /// pair that can get wrong (`overflow_pairs`).
+///
+/// Each set has a directory of its own, `rule-sets/<tag>/<tag>.json`: sing-box
+/// watches a local set's DIRECTORY, and on macOS the watcher (kqueue) holds a
+/// descriptor for every file in it — 49 sets in one directory cost 49² of them
+/// (measured on 1.13.14: 2,550 open files on the directory; one directory per
+/// set: 100).
 pub const RULE_SETS_DIR: &str = "rule-sets";
 /// The corp lane's CIDRs, hand-added and synced alike — one set, since they
 /// were one rule (the `ip_cidr` set contributor PR #5 introduced, kept).
@@ -568,7 +574,7 @@ pub fn render_host(i: &HostInput) -> Value {
     }
     // The lane sets in route order, then the corp CIDRs — every one a `source`
     // (JSON) set under `sets_dir`, written by the render (`lanes_write`).
-    let set_path = |tag: &str| format!("{}/{tag}.json", i.sets_dir);
+    let set_path = |tag: &str| format!("{}/{tag}/{tag}.json", i.sets_dir);
     allsets.extend(lane_bands().into_iter().map(|(l, b)| {
         let tag = b.tag(l);
         json!({"type": "local", "tag": tag, "format": "source", "path": set_path(&tag)})

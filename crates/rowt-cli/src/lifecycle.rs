@@ -263,7 +263,8 @@ fn rule_set_files(ctx: &Ctx) -> Vec<(String, String)> {
     sets
 }
 
-fn set_path(ctx: &Ctx, tag: &str) -> PathBuf { ctx.cfg.join(RULE_SETS_DIR).join(format!("{tag}.json")) }
+/// `rule-sets/<tag>/<tag>.json` — a directory per set (`render::RULE_SETS_DIR`).
+fn set_path(ctx: &Ctx, tag: &str) -> PathBuf { ctx.cfg.join(RULE_SETS_DIR).join(tag).join(format!("{tag}.json")) }
 
 /// `_lane_sets_write` — the rule-set files under `rule-sets/`, from the lane
 /// files, as host.json points at them. Unchanged bytes are left alone (a
@@ -300,6 +301,9 @@ fn lanes_write(ctx: &Ctx) -> Result<(), String> {
         if entry_count(bytes.as_bytes()) > was { grew.push((p, bytes)) } else { rest.push((p, bytes)) }
     }
     for (p, bytes) in grew.into_iter().chain(rest) {
+        if let Some(d) = p.parent() {
+            fs::create_dir_all(d).map_err(|e| oops(d, e))?;
+        }
         if p.is_file() {
             let _ = fs::copy(&p, prev_of(&p));
         }

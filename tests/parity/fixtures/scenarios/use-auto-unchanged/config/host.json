@@ -455,295 +455,295 @@
         "type": "local",
         "tag": "escape-exact",
         "format": "source",
-        "path": "@CFG@/rule-sets/escape-exact.json"
+        "path": "@CFG@/rule-sets/escape-exact/escape-exact.json"
       },
       {
         "type": "local",
         "tag": "corp-exact",
         "format": "source",
-        "path": "@CFG@/rule-sets/corp-exact.json"
+        "path": "@CFG@/rule-sets/corp-exact/corp-exact.json"
       },
       {
         "type": "local",
         "tag": "block-exact",
         "format": "source",
-        "path": "@CFG@/rule-sets/block-exact.json"
+        "path": "@CFG@/rule-sets/block-exact/block-exact.json"
       },
       {
         "type": "local",
         "tag": "escape-8",
         "format": "source",
-        "path": "@CFG@/rule-sets/escape-8.json"
+        "path": "@CFG@/rule-sets/escape-8/escape-8.json"
       },
       {
         "type": "local",
         "tag": "corp-8",
         "format": "source",
-        "path": "@CFG@/rule-sets/corp-8.json"
+        "path": "@CFG@/rule-sets/corp-8/corp-8.json"
       },
       {
         "type": "local",
         "tag": "block-8",
         "format": "source",
-        "path": "@CFG@/rule-sets/block-8.json"
+        "path": "@CFG@/rule-sets/block-8/block-8.json"
       },
       {
         "type": "local",
         "tag": "escape-8-dot",
         "format": "source",
-        "path": "@CFG@/rule-sets/escape-8-dot.json"
+        "path": "@CFG@/rule-sets/escape-8-dot/escape-8-dot.json"
       },
       {
         "type": "local",
         "tag": "corp-8-dot",
         "format": "source",
-        "path": "@CFG@/rule-sets/corp-8-dot.json"
+        "path": "@CFG@/rule-sets/corp-8-dot/corp-8-dot.json"
       },
       {
         "type": "local",
         "tag": "block-8-dot",
         "format": "source",
-        "path": "@CFG@/rule-sets/block-8-dot.json"
+        "path": "@CFG@/rule-sets/block-8-dot/block-8-dot.json"
       },
       {
         "type": "local",
         "tag": "escape-7",
         "format": "source",
-        "path": "@CFG@/rule-sets/escape-7.json"
+        "path": "@CFG@/rule-sets/escape-7/escape-7.json"
       },
       {
         "type": "local",
         "tag": "corp-7",
         "format": "source",
-        "path": "@CFG@/rule-sets/corp-7.json"
+        "path": "@CFG@/rule-sets/corp-7/corp-7.json"
       },
       {
         "type": "local",
         "tag": "block-7",
         "format": "source",
-        "path": "@CFG@/rule-sets/block-7.json"
+        "path": "@CFG@/rule-sets/block-7/block-7.json"
       },
       {
         "type": "local",
         "tag": "escape-7-dot",
         "format": "source",
-        "path": "@CFG@/rule-sets/escape-7-dot.json"
+        "path": "@CFG@/rule-sets/escape-7-dot/escape-7-dot.json"
       },
       {
         "type": "local",
         "tag": "corp-7-dot",
         "format": "source",
-        "path": "@CFG@/rule-sets/corp-7-dot.json"
+        "path": "@CFG@/rule-sets/corp-7-dot/corp-7-dot.json"
       },
       {
         "type": "local",
         "tag": "block-7-dot",
         "format": "source",
-        "path": "@CFG@/rule-sets/block-7-dot.json"
+        "path": "@CFG@/rule-sets/block-7-dot/block-7-dot.json"
       },
       {
         "type": "local",
         "tag": "escape-6",
         "format": "source",
-        "path": "@CFG@/rule-sets/escape-6.json"
+        "path": "@CFG@/rule-sets/escape-6/escape-6.json"
       },
       {
         "type": "local",
         "tag": "corp-6",
         "format": "source",
-        "path": "@CFG@/rule-sets/corp-6.json"
+        "path": "@CFG@/rule-sets/corp-6/corp-6.json"
       },
       {
         "type": "local",
         "tag": "block-6",
         "format": "source",
-        "path": "@CFG@/rule-sets/block-6.json"
+        "path": "@CFG@/rule-sets/block-6/block-6.json"
       },
       {
         "type": "local",
         "tag": "escape-6-dot",
         "format": "source",
-        "path": "@CFG@/rule-sets/escape-6-dot.json"
+        "path": "@CFG@/rule-sets/escape-6-dot/escape-6-dot.json"
       },
       {
         "type": "local",
         "tag": "corp-6-dot",
         "format": "source",
-        "path": "@CFG@/rule-sets/corp-6-dot.json"
+        "path": "@CFG@/rule-sets/corp-6-dot/corp-6-dot.json"
       },
       {
         "type": "local",
         "tag": "block-6-dot",
         "format": "source",
-        "path": "@CFG@/rule-sets/block-6-dot.json"
+        "path": "@CFG@/rule-sets/block-6-dot/block-6-dot.json"
       },
       {
         "type": "local",
         "tag": "escape-5",
         "format": "source",
-        "path": "@CFG@/rule-sets/escape-5.json"
+        "path": "@CFG@/rule-sets/escape-5/escape-5.json"
       },
       {
         "type": "local",
         "tag": "corp-5",
         "format": "source",
-        "path": "@CFG@/rule-sets/corp-5.json"
+        "path": "@CFG@/rule-sets/corp-5/corp-5.json"
       },
       {
         "type": "local",
         "tag": "block-5",
         "format": "source",
-        "path": "@CFG@/rule-sets/block-5.json"
+        "path": "@CFG@/rule-sets/block-5/block-5.json"
       },
       {
         "type": "local",
         "tag": "escape-5-dot",
         "format": "source",
-        "path": "@CFG@/rule-sets/escape-5-dot.json"
+        "path": "@CFG@/rule-sets/escape-5-dot/escape-5-dot.json"
       },
       {
         "type": "local",
         "tag": "corp-5-dot",
         "format": "source",
-        "path": "@CFG@/rule-sets/corp-5-dot.json"
+        "path": "@CFG@/rule-sets/corp-5-dot/corp-5-dot.json"
       },
       {
         "type": "local",
         "tag": "block-5-dot",
         "format": "source",
-        "path": "@CFG@/rule-sets/block-5-dot.json"
+        "path": "@CFG@/rule-sets/block-5-dot/block-5-dot.json"
       },
       {
         "type": "local",
         "tag": "escape-4",
         "format": "source",
-        "path": "@CFG@/rule-sets/escape-4.json"
+        "path": "@CFG@/rule-sets/escape-4/escape-4.json"
       },
       {
         "type": "local",
         "tag": "corp-4",
         "format": "source",
-        "path": "@CFG@/rule-sets/corp-4.json"
+        "path": "@CFG@/rule-sets/corp-4/corp-4.json"
       },
       {
         "type": "local",
         "tag": "block-4",
         "format": "source",
-        "path": "@CFG@/rule-sets/block-4.json"
+        "path": "@CFG@/rule-sets/block-4/block-4.json"
       },
       {
         "type": "local",
         "tag": "escape-4-dot",
         "format": "source",
-        "path": "@CFG@/rule-sets/escape-4-dot.json"
+        "path": "@CFG@/rule-sets/escape-4-dot/escape-4-dot.json"
       },
       {
         "type": "local",
         "tag": "corp-4-dot",
         "format": "source",
-        "path": "@CFG@/rule-sets/corp-4-dot.json"
+        "path": "@CFG@/rule-sets/corp-4-dot/corp-4-dot.json"
       },
       {
         "type": "local",
         "tag": "block-4-dot",
         "format": "source",
-        "path": "@CFG@/rule-sets/block-4-dot.json"
+        "path": "@CFG@/rule-sets/block-4-dot/block-4-dot.json"
       },
       {
         "type": "local",
         "tag": "escape-3",
         "format": "source",
-        "path": "@CFG@/rule-sets/escape-3.json"
+        "path": "@CFG@/rule-sets/escape-3/escape-3.json"
       },
       {
         "type": "local",
         "tag": "corp-3",
         "format": "source",
-        "path": "@CFG@/rule-sets/corp-3.json"
+        "path": "@CFG@/rule-sets/corp-3/corp-3.json"
       },
       {
         "type": "local",
         "tag": "block-3",
         "format": "source",
-        "path": "@CFG@/rule-sets/block-3.json"
+        "path": "@CFG@/rule-sets/block-3/block-3.json"
       },
       {
         "type": "local",
         "tag": "escape-3-dot",
         "format": "source",
-        "path": "@CFG@/rule-sets/escape-3-dot.json"
+        "path": "@CFG@/rule-sets/escape-3-dot/escape-3-dot.json"
       },
       {
         "type": "local",
         "tag": "corp-3-dot",
         "format": "source",
-        "path": "@CFG@/rule-sets/corp-3-dot.json"
+        "path": "@CFG@/rule-sets/corp-3-dot/corp-3-dot.json"
       },
       {
         "type": "local",
         "tag": "block-3-dot",
         "format": "source",
-        "path": "@CFG@/rule-sets/block-3-dot.json"
+        "path": "@CFG@/rule-sets/block-3-dot/block-3-dot.json"
       },
       {
         "type": "local",
         "tag": "escape-2",
         "format": "source",
-        "path": "@CFG@/rule-sets/escape-2.json"
+        "path": "@CFG@/rule-sets/escape-2/escape-2.json"
       },
       {
         "type": "local",
         "tag": "corp-2",
         "format": "source",
-        "path": "@CFG@/rule-sets/corp-2.json"
+        "path": "@CFG@/rule-sets/corp-2/corp-2.json"
       },
       {
         "type": "local",
         "tag": "block-2",
         "format": "source",
-        "path": "@CFG@/rule-sets/block-2.json"
+        "path": "@CFG@/rule-sets/block-2/block-2.json"
       },
       {
         "type": "local",
         "tag": "escape-2-dot",
         "format": "source",
-        "path": "@CFG@/rule-sets/escape-2-dot.json"
+        "path": "@CFG@/rule-sets/escape-2-dot/escape-2-dot.json"
       },
       {
         "type": "local",
         "tag": "corp-2-dot",
         "format": "source",
-        "path": "@CFG@/rule-sets/corp-2-dot.json"
+        "path": "@CFG@/rule-sets/corp-2-dot/corp-2-dot.json"
       },
       {
         "type": "local",
         "tag": "block-2-dot",
         "format": "source",
-        "path": "@CFG@/rule-sets/block-2-dot.json"
+        "path": "@CFG@/rule-sets/block-2-dot/block-2-dot.json"
       },
       {
         "type": "local",
         "tag": "escape-1",
         "format": "source",
-        "path": "@CFG@/rule-sets/escape-1.json"
+        "path": "@CFG@/rule-sets/escape-1/escape-1.json"
       },
       {
         "type": "local",
         "tag": "corp-1",
         "format": "source",
-        "path": "@CFG@/rule-sets/corp-1.json"
+        "path": "@CFG@/rule-sets/corp-1/corp-1.json"
       },
       {
         "type": "local",
         "tag": "block-1",
         "format": "source",
-        "path": "@CFG@/rule-sets/block-1.json"
+        "path": "@CFG@/rule-sets/block-1/block-1.json"
       },
       {
         "type": "local",
         "tag": "corp-cidr",
         "format": "source",
-        "path": "@CFG@/rule-sets/corp-cidr.json"
+        "path": "@CFG@/rule-sets/corp-cidr/corp-cidr.json"
       }
     ]
   },
