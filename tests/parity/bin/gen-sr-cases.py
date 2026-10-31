@@ -91,13 +91,18 @@ TYPES = [
     "Shadowsocks",
     "Shadowsocks",
     "Shadowsocks",
+    "Hysteria2",
+    "Hysteria2",
     "Trojan",
     "",
     None,
     "vless",
 ]
 PORTS = [443, 8443, 0, "8443", " 8443 ", "abc", 1.5, True, None, -1, 65536, "8388", [1]]
-OBFS = ["none", "ws", "WebSocket", "grpc", "", None, "tls", "http", "HTTP"]
+OBFS = ["none", "ws", "WebSocket", "grpc", "", None, "tls", "http", "HTTP", "salamander", "Salamander"]
+# Hysteria2's own fields, as a names-only dump of a real store listed them:
+# alpn, allowInsecure, hpkp (a pin), udp, plugin/proto "none", the port a string.
+HY2_ALPN = ["h3", "h3", "h3,h2", "", None, 7]
 # Shadowsocks's own fields, in the shapes a real store holds them (method and
 # obfs as strings, `plugin`/`proto` "none", a `chain` as another entry's id) —
 # plus the ones sing-box or rowt must refuse.
@@ -161,6 +166,13 @@ def server_entry(rng: random.Random, objs: list) -> dict:
             )
         )
     ss = typ == "Shadowsocks"
+    hy2 = typ == "Hysteria2"
+    if rng.random() < (0.9 if hy2 else 0.1):
+        e["alpn"] = ref(rng.choice(HY2_ALPN))
+    if rng.random() < (0.7 if hy2 else 0.05):
+        e["hpkp"] = ref(rng.choice(["0123456789abcdef" * 4, "", None]))
+    if rng.random() < (0.6 if hy2 else 0.05):
+        e["udp"] = ref(rng.choice([1, 0, True, None]))
     if rng.random() < (0.9 if ss else 0.1):
         e["method"] = ref(rng.choice(SS_METHODS))
     if rng.random() < (0.5 if ss else 0.1):

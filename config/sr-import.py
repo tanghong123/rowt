@@ -6,7 +6,7 @@ Surge-style rule config, and emits a JSON summary on stdout:
 
     {
       "subscriptions": [{"url": "...", "info": "...", "title": "..."}],
-      "servers":       [ <sing-box outbound>, ... ],   # VLESS / AnyTLS / Shadowsocks
+      "servers":       [ <sing-box outbound>, ... ],   # VLESS / AnyTLS / Shadowsocks / Hysteria2
       "proxy_domains": ["google.com", ...],            # [Rule] ...,PROXY
       "skipped":       {"Trojan": 3, "Shadowsocks": 1} # not importable
     }
@@ -203,6 +203,50 @@ def _to_shadowsocks(s: dict, tag: str) -> dict | None:
         return None
 
 
+def _to_hysteria2(s: dict, tag: str) -> dict | None:
+    """Shadowrocket's Hysteria2 entry, as a colleague's names-only dump of a real
+    store showed it (2026-10-31): the auth string in `password` (`uuid` is
+    Shadowrocket's own id, as for VLESS), `alpn`, `allowInsecure`, `hpkp` — a
+    certificate pin sing-box has no field for, dropped here as `server add`
+    drops it from a link — the port a string, and `obfs`, `plugin`, `proto`,
+    `pluginParam`, `udp` whose meaning for this type the dump did not show.
+    Only `obfs` is acted on: Salamander is the one obfs hysteria2 has and takes
+    a password, which is assumed to sit where the other types keep their obfs
+    argument (`obfsParam`); without one, or with any other obfs, the entry is
+    skipped rather than guessed at. The outbound has the shape parse_hysteria2
+    builds from a link, so a store import and a link import of one node agree
+    (no uTLS: QUIC has none)."""
+    host, port, pw = s.get("host"), s.get("port"), s.get("password")
+    if not host or not pw:
+        return None
+    sni = str(s.get("peer") or host)
+    tls: dict = {
+        "enabled": True,
+        "server_name": sni,
+        "insecure": bool(s.get("allowInsecure")),
+    }
+    alpn = str(s.get("alpn") or "")
+    if alpn:
+        tls["alpn"] = [a for a in alpn.split(",") if a]
+    out: dict = {
+        "type": "hysteria2",
+        "tag": tag,
+        "server": str(host),
+        "server_port": int(port or 443),
+        "password": str(pw),
+        "tls": tls,
+    }
+    obfs = str(s.get("obfs") or "none").lower()
+    if obfs == "salamander":
+        opw = s.get("obfsParam")
+        if not opw:
+            return None
+        out["obfs"] = {"type": "salamander", "password": str(opw)}
+    elif obfs != "none":
+        return None
+    return out
+
+
 def _names_under(pattern: str) -> bool:
     """A DOMAIN-WILDCARD pattern of the one shape a lane entry can hold: `*.x`,
     with no other wildcard (`*`, `?`, or a `[...]` class) in `x`."""
@@ -285,12 +329,13 @@ def main() -> int:
                             "title": str(s.get("title") or ""),
                         }
                     )
-            elif typ in ("VLESS", "AnyTLS", "Shadowsocks"):
+            elif typ in ("VLESS", "AnyTLS", "Shadowsocks", "Hysteria2"):
                 tag = _sanitize(str(s.get("title") or s.get("host")), i, used)
                 convert = {
                     "VLESS": _to_vless,
                     "AnyTLS": _to_anytls,
                     "Shadowsocks": _to_shadowsocks,
+                    "Hysteria2": _to_hysteria2,
                 }[typ]
                 v = convert(s, tag)
                 if v:

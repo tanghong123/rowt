@@ -455,6 +455,58 @@ pub fn to_shadowsocks(s: &Entry, tag: &str) -> R<Option<Value>> {
     .ok())
 }
 
+/// `_to_hysteria2`. Shadowrocket's Hysteria2 entry, as a colleague's names-only
+/// dump of a real store showed it (2026-10-31): the auth string in `password`
+/// (`uuid` is Shadowrocket's own id, as for VLESS), `alpn`, `allowInsecure`,
+/// `hpkp` — a certificate pin sing-box has no field for, dropped here as
+/// `server add` drops it from a link — the port a string, and `obfs`,
+/// `plugin`, `proto`, `pluginParam`, `udp` whose meaning for this type the
+/// dump did not show. Only `obfs` is acted on: Salamander is the one obfs
+/// hysteria2 has and takes a password, assumed to sit where the other types
+/// keep their obfs argument (`obfsParam`); without one, or with any other
+/// obfs, the entry is skipped rather than guessed at. The outbound has the
+/// shape `sharelink::parse_hysteria2` builds from a link, so a store import
+/// and a link import of one node agree (no uTLS: QUIC has none).
+pub fn to_hysteria2(s: &Entry, tag: &str) -> R<Option<Value>> {
+    let host = get(s, "host");
+    let pw = get(s, "password");
+    if !truthy(host) || !truthy(pw) {
+        return Ok(None);
+    }
+    let host = host.unwrap();
+    let sni = py_str_top(if truthy(get(s, "peer")) { get(s, "peer").unwrap() } else { host });
+    let mut tls = Map::new();
+    tls.insert("enabled".into(), Value::Bool(true));
+    tls.insert("server_name".into(), Value::String(sni));
+    tls.insert("insecure".into(), Value::Bool(truthy(get(s, "allowInsecure"))));
+    let alpn = str_or(get(s, "alpn"), "");
+    if !alpn.is_empty() {
+        let list: Vec<Value> = alpn.split(',').filter(|a| !a.is_empty()).map(|a| Value::String(a.into())).collect();
+        tls.insert("alpn".into(), Value::Array(list));
+    }
+    let mut out = Map::new();
+    out.insert("type".into(), Value::String("hysteria2".into()));
+    out.insert("tag".into(), Value::String(tag.into()));
+    out.insert("server".into(), Value::String(py_str_top(host)));
+    out.insert("server_port".into(), Value::from(port_of(s)?));
+    out.insert("password".into(), Value::String(py_str_top(pw.unwrap())));
+    out.insert("tls".into(), Value::Object(tls));
+    let obfs = str_or(get(s, "obfs"), "none").to_lowercase();
+    if obfs == "salamander" {
+        let opw = get(s, "obfsParam");
+        if !truthy(opw) {
+            return Ok(None);
+        }
+        let mut o = Map::new();
+        o.insert("type".into(), Value::String("salamander".into()));
+        o.insert("password".into(), Value::String(py_str_top(opw.unwrap())));
+        out.insert("obfs".into(), Value::Object(o));
+    } else if obfs != "none" {
+        return Ok(None);
+    }
+    Ok(Some(Value::Object(out)))
+}
+
 /// The shared `tls` object, in the key order each caller writes it.
 fn tls_block(sni: &str, reality: Option<Map<String, Value>>, insecure: Option<bool>) -> Value {
     let mut tls = Map::new();
@@ -581,7 +633,7 @@ pub fn scan_store(root: &PlVal) -> R<Scan> {
                 e.insert("title".into(), Value::String(str_or(get(s, "title"), "")));
                 out.subscriptions.push(Value::Object(e));
             }
-        } else if typ == "VLESS" || typ == "AnyTLS" || typ == "Shadowsocks" {
+        } else if typ == "VLESS" || typ == "AnyTLS" || typ == "Shadowsocks" || typ == "Hysteria2" {
             // The tag is taken BEFORE the conversion, so a server that cannot
             // be converted still burns its name — the same coupling
             // `sharelink::parse_many` has.
@@ -590,6 +642,7 @@ pub fn scan_store(root: &PlVal) -> R<Scan> {
             let v = match typ.as_str() {
                 "VLESS" => to_vless(s, &tag)?,
                 "AnyTLS" => to_anytls(s, &tag)?,
+                "Hysteria2" => to_hysteria2(s, &tag)?,
                 _ => to_shadowsocks(s, &tag)?,
             };
             match v {
@@ -660,6 +713,54 @@ mod tests {
             }
         }
         e
+    }
+
+    /// The field layout of a Hysteria2 entry, from a colleague's names-only
+    /// dump of a real store (values are documentation ones).
+    fn hy2_entry(extra: &[(&str, PlVal)]) -> Entry {
+        let mut e = entry(&[
+            ("type", s("Hysteria2")),
+            ("host", s("198.51.100.7")),
+            ("port", s("8443")),
+            ("password", s("auth-string")),
+            ("uuid", s("shadowrockets-own-id")),
+            ("alpn", s("h3")),
+            ("allowInsecure", PlVal::Int(1)),
+            ("hpkp", s("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")),
+            ("obfs", s("none")),
+            ("plugin", s("none")),
+            ("proto", s("none")),
+            ("udp", PlVal::Int(1)),
+            ("title", s("hy2")),
+        ]);
+        for (k, v) in extra {
+            match e.iter_mut().find(|(ek, _)| matches!(ek, PlVal::Str(n) if n == k)) {
+                Some(slot) => slot.1 = v.clone(),
+                None => e.push((s(k), v.clone())),
+            }
+        }
+        e
+    }
+
+    #[test]
+    fn hysteria2_takes_the_auth_from_password_and_drops_the_pin() {
+        let o = to_hysteria2(&hy2_entry(&[]), "t").unwrap().unwrap();
+        assert_eq!(o, json!({
+            "type": "hysteria2", "tag": "t", "server": "198.51.100.7", "server_port": 8443,
+            "password": "auth-string",
+            "tls": {"enabled": true, "server_name": "198.51.100.7", "insecure": true, "alpn": ["h3"]}
+        }));
+        assert!(o.get("hpkp").is_none(), "sing-box has no field for the pin");
+        // `peer` is the SNI when set; `alpn` splits on commas; `allowInsecure` 0 is false.
+        let o = to_hysteria2(&hy2_entry(&[("peer", s("sni.example")), ("alpn", s("h3,h2")), ("allowInsecure", PlVal::Int(0))]), "t")
+            .unwrap().unwrap();
+        assert_eq!(o["tls"], json!({"enabled": true, "server_name": "sni.example", "insecure": false, "alpn": ["h3", "h2"]}));
+        // Salamander takes its password from obfsParam; without one it is skipped, as is any other obfs.
+        let o = to_hysteria2(&hy2_entry(&[("obfs", s("salamander")), ("obfsParam", s("opw"))]), "t").unwrap().unwrap();
+        assert_eq!(o["obfs"], json!({"type": "salamander", "password": "opw"}));
+        for (k, v) in [("obfs", s("salamander")), ("obfs", s("ws")), ("password", s("")), ("host", s(""))] {
+            assert_eq!(to_hysteria2(&hy2_entry(&[(k, v.clone())]), "t").unwrap(), None, "{k}={v:?}");
+        }
     }
 
     #[test]

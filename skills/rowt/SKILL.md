@@ -134,7 +134,7 @@ replaced**, run `rowt fetch host` (with a working path to GitHub) or `rowt reloa
    ```
    - `skipped` counts, by type, the client's entries the importer couldn't convert.
      Either it can't read that type from that client (the Shadowrocket importer takes
-     VLESS, AnyTLS and Shadowsocks), or the entry is an unsupported variant such as
+     VLESS, AnyTLS, Shadowsocks and Hysteria2), or the entry is an unsupported variant such as
      SSR, a plugin or a chain. If the user needs one, ask for its share link and use
      `rowt server add`.
    - `proxy_domains` are the client's own PROXY-rule domains, which `--apply` merges
