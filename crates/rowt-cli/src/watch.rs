@@ -1785,7 +1785,6 @@ mod tests {
         assert_eq!(curl_why(52), "curl exit 52");
     }
 
-    #[test]
     /// A portal that answers 200 INLINE names itself only in its body. Without
     /// this the sole address ever learned is the probe's own, which is what the
     /// 2026-09-27 lounge episode logged and opened (task #46).
