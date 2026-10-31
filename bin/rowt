@@ -62,7 +62,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.8.17"
+ROWT_VERSION="3.8.18"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -740,7 +740,7 @@ all_geosites() {
   { geosites_of "$DOMAINS"; geosites_of "$BLOCK_DOMAINS"; } | sort -u | grep -vE '^$' || true
 }
 
-domains_json()    { list_json "$DOMAINS"; }                 # escape suffixes
+domains_json()    { list_json "$DOMAINS" domain; }          # escape suffixes (a CIDR-looking line is not one, as rowt-rs reads it)
 corp_domains_json() { list_json "$CORP_DOMAINS" domain; }   # corp suffixes
 corp_cidrs_json()   { list_json "$CORP_DOMAINS" cidr; }     # corp IP ranges
 block_domains_json() { list_json "$BLOCK_DOMAINS" domain; } # block suffixes (extra, on top of the geosite set)
@@ -789,19 +789,19 @@ _lane_label() {
 # And in either CASE: DNS names are case-insensitive, and the rule-sets hold
 # every entry lowercased (_lane_set_bodies), so `Example.com` in one lane and
 # `example.com` in another would be one entry in two sets, ranked by lane order
-# — the single-lane rule has to see them as one entry too. ASCII folding, as
-# under the C locale the gates run in; mirrors rowt_core::lanes::spells.
+# — the single-lane rule has to see them as one entry too. ASCII folding only
+# (LC_ALL=C), whatever the caller's locale; mirrors rowt_core::lanes::spells.
 #
 # Is entry $2 a line of lane file $1 — as written, or as its old wildcard?
 _lane_has() { # $1=file $2=entry
-  grep -qixF -e "$2" "$1" 2>/dev/null && return 0
-  case "$2" in .?*) grep -qixF -e "*$2" "$1" 2>/dev/null ;; *) return 1 ;; esac
+  LC_ALL=C grep -qixF -e "$2" "$1" 2>/dev/null && return 0
+  case "$2" in .?*) LC_ALL=C grep -qixF -e "*$2" "$1" 2>/dev/null ;; *) return 1 ;; esac
 }
 # Lane file $1 without entry $2 (either spelling, either case), to stdout.
 _lane_without() { # $1=file $2=entry
   case "$2" in
-    .?*) grep -vixF -e "$2" -e "*$2" "$1" || true ;;
-    *)   grep -vixF -e "$2" "$1" || true ;;
+    .?*) LC_ALL=C grep -vixF -e "$2" -e "*$2" "$1" || true ;;
+    *)   LC_ALL=C grep -vixF -e "$2" "$1" || true ;;
   esac
 }
 

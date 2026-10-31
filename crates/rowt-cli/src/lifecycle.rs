@@ -308,8 +308,16 @@ fn lanes_write(ctx: &Ctx) -> Result<(), String> {
         if p.is_file() {
             let _ = fs::copy(&p, prev_of(&p));
         }
+        // Created 0600, as the shell's mktemp makes its temp file: these hold
+        // corp names, and a 0644 file chmod'ed afterwards is a window.
         let tmp = PathBuf::from(format!("{}.tmp", p.display()));
-        fs::write(&tmp, bytes).map_err(|e| oops(&p, e))?;
+        {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut f = fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600)
+                .open(&tmp).map_err(|e| oops(&p, e))?;
+            f.write_all(bytes.as_bytes()).map_err(|e| oops(&p, e))?;
+        }
         private(&tmp);
         fs::rename(&tmp, &p).map_err(|e| oops(&p, e))?;
     }

@@ -611,6 +611,10 @@ PARITY_SCENARIO=lanes-live escape add --no-reload batched.example
 PARITY_SCENARIO=lanes-live escape add present.example present.example
 ROWT_LANES_HOT=0 PARITY_SCENARIO=lanes-live escape add new.example
 ROWT_CORP_HOT=0 PARITY_SCENARIO=lanes-live escape add new.example
+# A CIDR-looking line in the escape lane is not a suffix: both renders leave it
+# out of the sets (the shell once rendered it inline as a domain_suffix that
+# matched nothing).
+PARITY_SCENARIO=lanes-live escape add 192.0.2.0/24
 # corp sync's apply is the same function: live under a router that runs the
 # rendered host.json, the restart (failure) path with the knob off.
 ROWT_LANES_HOT=0 PARITY_SCENARIO=corp-vpn-running corp sync
