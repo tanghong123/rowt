@@ -629,9 +629,9 @@ pub fn run(ctx: &Ctx, o: &Opts) -> Result<String, String> {
     eprintln!("==> corp sync: updated corp lane — {nd} DHCP domain(s) + {nc} CIDR(s) (superset of {na} live route(s))");
     // Live through the corp rule-sets when it can be; a restart only when it must.
     if !o.no_reload {
-        // `… && _corp_apply || true`: a restart that did not come back is
+        // `… && _lanes_apply || true`: a restart that did not come back is
         // stepped over; a render that died still ends the command.
-        lifecycle::stepped_over(lifecycle::corp_apply(ctx))?;
+        lifecycle::stepped_over(lifecycle::lanes_apply(ctx))?;
     }
     Ok(String::new())
 }

@@ -1,6 +1,8 @@
 corp-vpn's machine (a tunnel whose route table holds the 198.18/19 + /20 pair)
-with the router up (host.pid.self), so `corp sync` goes on from "updated corp
-lane" to the apply: with no host.running the router predates live corp updates,
-so it restarts — and the sandbox's sing-box exits at once, so the restart does
-not come back. The shell steps over that (`… && _corp_apply || true`) and exits
-0; rowt-rs must do the same.
+with the router up (host.pid.self) and running the rendered host.json
+(host.running.self; host.json committed from a render of this state, the config
+dir written `@CFG@`), so `corp sync` goes on from "updated corp lane" to the
+apply and takes the LIVE path: the corp-cidr set changes, the router is not
+restarted. With ROWT_LANES_HOT=0 it restarts instead — and the sandbox's
+sing-box exits at once, so the restart does not come back. The shell steps over
+that (`… && _lanes_apply || true`) and exits 0; rowt-rs must do the same.

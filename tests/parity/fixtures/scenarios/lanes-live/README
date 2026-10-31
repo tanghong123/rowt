@@ -1,0 +1,11 @@
+A lane edit under a router that runs the rendered host.json.
+
+use-auto-unchanged's machine (router up, auto, --every 3m saved, host.json what
+that state renders, with the config dir written `@CFG@`), plus `host.running.self`:
+make_sandbox writes host.running, the cksum of the filled-in host.json, as
+`router up` would have. So a lane edit here renders the same host.json the
+router runs and takes the LIVE path (`_lanes_apply`): the rule-set files under
+rule-sets/ change, the trace shows no sing-box run, host.running is untouched,
+and stderr says "applied live through the lane rule-sets". ROWT_LANES_HOT=0
+(or its first name ROWT_CORP_HOT=0) takes the restart path instead, which here
+is the failure path: the sandbox's sing-box exits at once.

@@ -595,6 +595,25 @@ PARITY_SCENARIO=pool-seeded-running server rm alpha
 # stay off: a collector or follower started here would outlive the case and
 # poll the clash port from outside the shims.
 ROWT_METRICS=off ROWT_AUTO_FOLLOW=0 PARITY_SCENARIO=router-restart-ok escape add new.example
+# The live path: the router runs the rendered host.json (host.running.self), so
+# a lane edit rewrites the rule-sets and leaves the router alone — no sing-box
+# run in the trace, host.running untouched, the changed set files in fsstate.
+# A lane move (block add of an escape entry) changes two sets; --no-reload still
+# touches nothing. The knob, under either name, takes the restart path, which in
+# this scenario is the failure path (the sandbox's sing-box exits at once).
+PARITY_SCENARIO=lanes-live escape add new.example
+PARITY_SCENARIO=lanes-live escape add --domain exact.example
+PARITY_SCENARIO=lanes-live escape rm example.com
+PARITY_SCENARIO=lanes-live block add example.com
+PARITY_SCENARIO=lanes-live corp add 192.0.2.0/24
+PARITY_SCENARIO=lanes-live escape clear
+PARITY_SCENARIO=lanes-live escape add --no-reload batched.example
+PARITY_SCENARIO=lanes-live escape add present.example present.example
+ROWT_LANES_HOT=0 PARITY_SCENARIO=lanes-live escape add new.example
+ROWT_CORP_HOT=0 PARITY_SCENARIO=lanes-live escape add new.example
+# corp sync's apply is the same function: live under a router that runs the
+# rendered host.json, the restart (failure) path with the knob off.
+ROWT_LANES_HOT=0 PARITY_SCENARIO=corp-vpn-running corp sync
 ROWT_METRICS=off ROWT_AUTO_FOLLOW=0 PARITY_SCENARIO=router-restart-ok use auto --every 5m
 # status in auto with the router up: the pick, the interval and its source,
 # the follower, the last switch.

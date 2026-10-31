@@ -181,6 +181,15 @@ make_sandbox() { # $1=outdir  [$2=scenario]
       sed "s#@CFG@#$cfg#g" "$f" > "$f.tmp" && mv -f "$f.tmp" "$f"
     fi
   done
+  # "The router runs this host.json" cannot be a static fixture either: the
+  # mark (`host.running`) is the cksum of a file that names the sandbox's own
+  # path. A scenario asks for it with an empty `host.running.self` marker and
+  # gets the cksum of its host.json as filled in above — so a lane edit there
+  # takes the live path (`_lanes_apply`) instead of the restart.
+  if [ -f "$cfg/host.running.self" ]; then
+    cksum < "$cfg/host.json" > "$cfg/host.running"
+    rm -f "$cfg/host.running.self"
+  fi
   # "The router is running" cannot be a static fixture: `host_running` reads a
   # pidfile and then `kill -0`s it, so any pid committed to the repo is either
   # dead or, worse, someone else's. A scenario asks for it with an empty

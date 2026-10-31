@@ -47,6 +47,7 @@
 #   44.  stop resolving unmatched names              -> render-matrix must fire
 #   45.  file the router's lookup failure as escape  -> splitter-diff must fire
 #   46.  stop auditing the watchdog's sub refresh    -> cli-diff must fire
+#   47.  stop writing one band's lane rule-sets      -> cli-diff must fire (config tree)
 #
 # Everything happens in a throwaway copy of the repo; the real tree is never
 # touched. Run it after changing the harness itself.
@@ -1321,6 +1322,29 @@ else
     bad "cli-diff passed with one side not auditing the watchdog's subscription refresh"
   else
     ok "cli-diff caught an unaudited watchdog subscription refresh"
+  fi
+  cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+fi
+
+echo "47. every band's lane rule-set must be written, and compared"
+cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+if [ ! -x "$ROOT/target/release/rowt-rs" ]; then
+  echo "  skip — no release build"
+else
+  # The lane rules are 48 rule-set files the render writes under rule-sets/,
+  # and host.json names every one. A band the shell stopped writing would leave
+  # the router with no rule for those entries (sing-box refuses the missing
+  # file) while the two renders still agreed on host.json. Stop the shell's band
+  # loop one short; cli-diff's config-tree compare must see the three missing
+  # files.
+  perl -0pi -e 's/range\(\$bands; 0; -1\) as \$n/range(\$bands; 1; -1) as \$n/' "$tmp/bin/rowt"
+  if ! grep -qF 'range($bands; 1; -1) as $n' "$tmp/bin/rowt"; then
+    bad "could not stop the band loop early (_lane_set_bodies moved?)"
+  elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" PARITY_CASES="$(only 'PARITY_SCENARIO=corp-synced render')" \
+       "$P" cli-diff >/dev/null 2>&1; then
+    bad "cli-diff passed with one side writing no band-1 rule-sets"
+  else
+    ok "cli-diff caught a lane rule-set one side did not write"
   fi
   cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
 fi

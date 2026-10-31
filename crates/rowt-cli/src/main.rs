@@ -1195,8 +1195,12 @@ fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<Str
                 if !o.is_empty() {
                     println!("{o}");
                 }
+                // `_lanes_apply`: the render rewrites the lane rule-sets the
+                // running router watches, and the router restarts only when it
+                // does not run this host.json (its ✓ line printed there).
                 let ctx = Ctx::new(cfg.to_path_buf());
-                return Ok(lifecycle::stepped_over(lifecycle::reload_if_running(&ctx))?.unwrap_or_default());
+                lifecycle::stepped_over(lifecycle::lanes_apply(&ctx))?;
+                return Ok(String::new());
             }
             Ok(out.join("\n"))
         }

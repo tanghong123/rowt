@@ -195,12 +195,16 @@ fn host_cfg_cksum(ctx: &Ctx) -> String {
     }
 }
 
-/// `_corp_apply` — a corp-lane change reaches the running router through the two
-/// rule-sets it watches (`render::CORP_SET_CIDR`), so the router restarts only
-/// when it was not started from exactly the host.json this render produced: an
-/// older rowt started it, or another change is pending. ROWT_CORP_HOT=0 restores
-/// the old always-restart.
-pub fn corp_apply(ctx: &Ctx) -> Result<(), String> {
+/// `_lanes_apply` — a lane change reaches the running router through the
+/// rule-sets it watches (`render::RULE_SETS_DIR`): render, which rewrites the
+/// sets, then nothing more when the router was started from exactly the
+/// host.json this render produced. Otherwise the restart `reload_if_running`
+/// always did, saying why: an older rowt started the router (once, after the
+/// upgrade), or host.json differs — a `geosite:` entry came or went, another
+/// change was pending. Every lane edit and corp sync end here; `config import`
+/// brings servers and keeps restarting. ROWT_LANES_HOT=0 (or ROWT_CORP_HOT=0,
+/// the knob's unreleased first name) restores the old always-restart.
+pub fn lanes_apply(ctx: &Ctx) -> Result<(), String> {
     if host_running(ctx).is_none() {
         return Ok(());
     }
@@ -208,22 +212,30 @@ pub fn corp_apply(ctx: &Ctx) -> Result<(), String> {
     let pid = read(&ctx.pidfile()).trim_end_matches('\n').to_string();
     let run = read(&router_cfg_sum(ctx)).trim_end_matches('\n').to_string();
     let now = host_cfg_cksum(ctx);
-    let hot = env_or("ROWT_CORP_HOT", "1");
+    let hot = lanes_hot();
     if hot == "1" && !run.is_empty() && run == now {
-        eprintln!("==> corp sync: applied live through the corp rule-sets — router not restarted (pid {pid}), no connection dropped");
+        eprintln!("==> applied live through the lane rule-sets — router not restarted (pid {pid}), no connection dropped");
         return Ok(());
     }
     if hot != "1" {
-        eprintln!("==> reloading router (ROWT_CORP_HOT={hot})");
+        eprintln!("==> reloading router (ROWT_LANES_HOT={hot})");
     } else if run.is_empty() {
-        eprintln!("==> reloading router (the running router predates live corp updates — once)");
+        eprintln!("==> reloading router (the running router predates live lane updates — once)");
     } else {
-        eprintln!("==> reloading router (host.json differs from the one the router runs)");
+        eprintln!("==> reloading router (host.json differs from the one the router runs — a geosite: came or went, or another change was pending)");
     }
     // `cmd_router restart`, whose `up` prints its ✓ line.
     router_stop(ctx);
     say(&router_up(ctx)?);
     Ok(())
+}
+
+/// `${ROWT_LANES_HOT:-${ROWT_CORP_HOT:-1}}`.
+fn lanes_hot() -> String {
+    match std::env::var("ROWT_LANES_HOT") {
+        Ok(v) if !v.is_empty() => v,
+        _ => env_or("ROWT_CORP_HOT", "1"),
+    }
 }
 
 /// The three lane files, parsed as the render reads them (`list_json`).

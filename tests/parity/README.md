@@ -267,7 +267,7 @@ reconcile and the watchdog's decision table. Each has a gate:
 | `sr-diff` | stdout + stderr + exit status, over Shadowrocket installs | 1,200 generated cases |
 | `watch-diff` | decisions, read back from watch.log + trace; a case file names its phase with `_phase` (`guard` unless it says `netcheck`) | 8 cases |
 | `platform-diff` | the argv the platform layer produces | 12 cases |
-| `cli-diff` | stdout, status, the config tree + rc files + LaunchAgent plist (content + mode), argv trace, audit log | 521 cases |
+| `cli-diff` | stdout, status, the config tree + rc files + LaunchAgent plist (content + mode), argv trace, audit log | 532 cases |
 
 `merge-diff` is the only gate whose primary artifact is a file written in
 place: `cmd_import` reads the accumulation straight back with jq, and a human
@@ -379,7 +379,11 @@ Three limits, stated rather than implied:
   `/version` answer gets the restart that comes back instead
   (`router-restart-ok`), with the sidecars kept off by the case's own
   `ROWT_METRICS=off ROWT_AUTO_FOLLOW=0`. The arms are still gated from a
-  router-down start too, the state whose failure path clears the proxy.
+  router-down start too, the state whose failure path clears the proxy. A
+  scenario that also ships `host.running.self` gets `host.running`, the cksum of
+  its filled-in host.json, so a lane edit or corp sync there takes the LIVE
+  path — the rule-set files under `rule-sets/` change and the router is left
+  alone (`lanes-live`, `corp-vpn-running`).
 * **A purge leaves nothing to compare, and that is agreement.** `diff -q` on
   two files that are both absent exits 2, which reads like "differs" — so the
   lane-file check asks whether either side still has the file before it

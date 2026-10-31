@@ -62,7 +62,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.8.10"
+ROWT_VERSION="3.8.11"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -1045,7 +1045,9 @@ edit_list() {
   local _after _hafter; _after="$(cat "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" 2>/dev/null)"
   _hafter="$(cat "$HOTSPOT_DOMAINS" 2>/dev/null || true)"
   [ "$_hbefore" != "$_hafter" ] && _hotspot_apply || true
-  [ "$no_reload" -eq 0 ] && [ "$_before" != "$_after" ] && reload_if_running || true
+  # …live through the lane rule-sets when the router runs this host.json, a
+  # restart only when it must (_lanes_apply).
+  [ "$no_reload" -eq 0 ] && [ "$_before" != "$_after" ] && _lanes_apply || true
 }
 
 cmd_escape() {
@@ -1108,11 +1110,12 @@ AUTO_CORP_DOMAINS="${ROWT_AUTO_CORP_DOMAINS:-1}"
 # ROUTER_CFG_SUM is the cksum of the host.json the running router was started
 # (or SIGHUP-reloaded) from: an edit applies live only when the fresh render is
 # that same file; anything else (an older rowt started it, a geosite: came or
-# went) restarts as before. ROWT_CORP_HOT=0 restores the old always-restart.
+# went) restarts as before. ROWT_LANES_HOT=0 restores the old always-restart
+# (ROWT_CORP_HOT, the knob's unreleased first name, is still read).
 LANE_SETS_DIR="$CFG/rule-sets"
 LANE_BANDS=8   # the deepest band holds this many labels or more
 ROUTER_CFG_SUM="$CFG/host.running"
-CORP_HOT="${ROWT_CORP_HOT:-1}"
+LANES_HOT="${ROWT_LANES_HOT:-${ROWT_CORP_HOT:-1}}"
 # corp sync ALSO learns the DNS zones that ONLY an overlay resolver answers — a
 # tailnet's MagicDNS zone (`ts.net`), or whatever base domain a self-hosted
 # control server was given — and puts those on the OS proxy BYPASS list.
@@ -1366,21 +1369,25 @@ _lane_sets_prev_clear() { # validated: the previous sets are done with
 }
 # Remember what the running router was started from (see ROUTER_CFG_SUM).
 _router_cfg_mark() { cksum < "$HOST_CFG" > "$ROUTER_CFG_SUM" 2>/dev/null || true; }
-# Apply a corp-lane change: render, then live when the running router was
-# started from exactly this host.json — the sets it watches carry the change —
-# else the restart reload_if_running always did.
-_corp_apply() {
+# Apply a lane change: render — which rewrites the rule-sets the running router
+# watches — then nothing more when that router was started from exactly this
+# host.json. Otherwise the restart reload_if_running always did, saying why: an
+# older rowt started the router (once, after the upgrade), or host.json differs
+# (a geosite: entry came or went, another change was pending). Every lane edit
+# (edit_list) and corp_sync end here; `config import` brings servers and keeps
+# restarting (after_import).
+_lanes_apply() {
   host_running || return 0
   cmd_render >/dev/null
   local run now pid; pid="$(cat "$(host_pidfile)" 2>/dev/null || true)"
   run="$(cat "$ROUTER_CFG_SUM" 2>/dev/null || true)"; now="$(cksum < "$HOST_CFG" 2>/dev/null || true)"
-  if [ "$CORP_HOT" = 1 ] && [ -n "$run" ] && [ "$run" = "$now" ]; then
-    info "corp sync: applied live through the corp rule-sets — router not restarted (pid $pid), no connection dropped"
+  if [ "$LANES_HOT" = 1 ] && [ -n "$run" ] && [ "$run" = "$now" ]; then
+    info "applied live through the lane rule-sets — router not restarted (pid $pid), no connection dropped"
     return 0
   fi
-  if [ "$CORP_HOT" != 1 ]; then info "reloading router (ROWT_CORP_HOT=$CORP_HOT)"
-  elif [ -z "$run" ]; then info "reloading router (the running router predates live corp updates — once)"
-  else info "reloading router (host.json differs from the one the router runs)"; fi
+  if [ "$LANES_HOT" != 1 ]; then info "reloading router (ROWT_LANES_HOT=$LANES_HOT)"
+  elif [ -z "$run" ]; then info "reloading router (the running router predates live lane updates — once)"
+  else info "reloading router (host.json differs from the one the router runs — a geosite: came or went, or another change was pending)"; fi
   cmd_router restart
 }
 
@@ -1623,7 +1630,7 @@ corp_sync() {
   # Log the reason even under --quiet: this is a real change that triggers a reload,
   # so the watchdog log should record WHY it reloaded (no-op ticks stay silent above).
   info "corp sync: updated corp lane — $nd DHCP domain(s) + $nc CIDR(s) (superset of $na live route(s))"
-  [ "$noreload" = 0 ] && _corp_apply || true   # live when it can be, a restart only when it must
+  [ "$noreload" = 0 ] && _lanes_apply || true   # live when it can be, a restart only when it must
   return 0
 }
 
@@ -7144,7 +7151,7 @@ _watch_plist_body() {
   done
   local envxml v val
   envxml="    <key>PATH</key><string>$agent_path</string>"
-  for v in XDG_CONFIG_HOME ROWT_PORT ROWT_CLASH_PORT ROWT_FINAL ROWT_IFACE ROWT_DNS_DIRECT ROWT_DNS_LOCAL ROWT_GFW_CANARIES ROWT_GFW_TIMEOUT SINGBOX_VERSION ROWT_LOG_LEVEL ROWT_WATCH_INTERVAL ROWT_HEALTH_FAILS ROWT_HEALTH_COOLDOWN ROWT_HEALTH_TIMEOUT ROWT_HEALTH_URL ROWT_CAPTIVE_CHECK ROWT_CAPTIVE_URL ROWT_CAPTIVE_TIMEOUT ROWT_CAPTIVE_RETRY ROWT_CAPTIVE_FALLBACK ROWT_WATCH_SHADOW ROWT_RENDER_SHADOW ROWT_PPROF ROWT_CPU_SPIN_PCT ROWT_CPU_SPIN_BYTES ROWT_CPU_SPIN_TICKS ROWT_CPU_HEAL_COOLDOWN ROWT_AUTO_FOLLOW ROWT_AUTO_FOLLOW_EVERY ROWT_ESCAPE_DNS_MAX_AGE ROWT_CORP_HOT \
+  for v in XDG_CONFIG_HOME ROWT_PORT ROWT_CLASH_PORT ROWT_FINAL ROWT_IFACE ROWT_DNS_DIRECT ROWT_DNS_LOCAL ROWT_GFW_CANARIES ROWT_GFW_TIMEOUT SINGBOX_VERSION ROWT_LOG_LEVEL ROWT_WATCH_INTERVAL ROWT_HEALTH_FAILS ROWT_HEALTH_COOLDOWN ROWT_HEALTH_TIMEOUT ROWT_HEALTH_URL ROWT_CAPTIVE_CHECK ROWT_CAPTIVE_URL ROWT_CAPTIVE_TIMEOUT ROWT_CAPTIVE_RETRY ROWT_CAPTIVE_FALLBACK ROWT_WATCH_SHADOW ROWT_RENDER_SHADOW ROWT_PPROF ROWT_CPU_SPIN_PCT ROWT_CPU_SPIN_BYTES ROWT_CPU_SPIN_TICKS ROWT_CPU_HEAL_COOLDOWN ROWT_AUTO_FOLLOW ROWT_AUTO_FOLLOW_EVERY ROWT_ESCAPE_DNS_MAX_AGE ROWT_LANES_HOT ROWT_CORP_HOT \
            ROWT_AUTO_INTERVAL ROWT_AUTO_TOLERANCE ROWT_AUTO_INTERRUPT; do
     val="${!v:-}"; [ -n "$val" ] && envxml="$envxml
     <key>$v</key><string>$val</string>"
@@ -8581,10 +8588,10 @@ $PROG $1 <subcommand> — edit the $1 lane$([ "$1" = escape ] && echo " (domains
                        tailnet's, served from 100.64/10) into the hotspot lane, so
                        macOS keeps them off the proxy: no lane can resolve such a
                        zone, and the OS is the only resolver that can. A change
-                       reaches a running router LIVE: the lane's CIDRs and synced
-                       DHCP domains are two rule-set files sing-box re-reads
-                       (corp-cidr.json, corp-sync-domains.json), so nothing
-                       restarts and no connection drops (ROWT_CORP_HOT=0: restart).
+                       reaches a running router LIVE, like any lane edit: the
+                       lane rules are rule-set files sing-box re-reads
+                       (~/.config/rowt/rule-sets/), so nothing restarts and no
+                       connection drops (ROWT_LANES_HOT=0: restart as before).
   suggest              list the internal DNS domains THIS network advertises
                        (DHCP search domains, which are corp-routed automatically,
                        overlay zones, which are proxy-bypassed automatically, and
