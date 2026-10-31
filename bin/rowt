@@ -62,7 +62,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.8.15"
+ROWT_VERSION="3.8.16"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -5490,7 +5490,7 @@ then quit the old VPN app and connect the corp VPN ('$PROG reload' if no watcher
   # ---- always-on reference (so this doubles as the guide) ----
   cat <<EOF
 
-Choose what goes where (edit anytime; lane 'add' auto-renders + restarts):
+Choose what goes where (edit anytime; a lane 'add' reaches a running router live):
     $PROG escape add google.com            tunnel a site
     $PROG escape add geosite:google        …or a whole maintained service (all Google domains, all ccTLDs)
     $PROG corp   add corp.example 10.0.0.0/8   into the corp VPN (domains AND CIDRs)
