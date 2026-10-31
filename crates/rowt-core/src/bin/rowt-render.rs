@@ -10,7 +10,7 @@
 //! is read exactly where the shell reads it, so the two implementations can be
 //! run against one sandbox and diffed.
 
-use rowt_core::render::{corp_split, geosites_of, group, parse_list, render_host, render_vm, Filter, Geo, HostInput, Lists};
+use rowt_core::render::{geosites_of, group, parse_list, render_host, render_vm, Filter, Geo, HostInput, Lists, RULE_SETS_DIR};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -183,7 +183,7 @@ fn run() -> Result<String, String> {
             .collect(),
         lists: Lists {
             escape_domains: parse_list(&escape_src, Filter::Domain),
-            corp_domains: parse_list(&corp_split(&corp_src).0, Filter::Domain),
+            corp_domains: parse_list(&corp_src, Filter::Domain),
             corp_cidrs: parse_list(&corp_src, Filter::Cidr),
             block_domains: parse_list(&block_src, Filter::Domain),
             escape_exact: parse_list(&escape_src, Filter::Exact),
@@ -193,8 +193,7 @@ fn run() -> Result<String, String> {
         escape_outbound: if local_mode { "direct".into() } else { "escape".into() },
         escape_hosts: cfg.join("escape-hosts").to_string_lossy().into_owned(),
         ports: rowt_core::ports::rows(&read(&cfg.join("ports.tsv"))),
-        corp_set_cidr: cfg.join(rowt_core::render::CORP_SET_CIDR).to_string_lossy().into_owned(),
-        corp_set_dom: cfg.join(rowt_core::render::CORP_SET_DOM).to_string_lossy().into_owned(),
+        sets_dir: cfg.join(RULE_SETS_DIR).to_string_lossy().into_owned(),
         geo: Geo {
             escape: lane_geo(&escape_src),
             block: lane_geo(&block_src),

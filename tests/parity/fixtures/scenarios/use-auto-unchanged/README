@@ -1,6 +1,6 @@
 `use auto` with the router up, already in auto, `--every 3m` already saved, and
 host.json/vm.json exactly what this state renders (committed from a render of
-it, with the config dir — which the corp rule-set paths name — written `@CFG@`;
+it, with the config dir — which the rule-set paths name — written `@CFG@`;
 make_sandbox fills in the sandbox's own). The render changes nothing, so the
 router is NOT restarted — `use auto --every 3m` run by a fleet play on every
 host must not drop its connections. A changed interval still restarts, since

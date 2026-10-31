@@ -1,15 +1,17 @@
-Synced DHCP domains under a broader inline suffix.
+Synced DHCP domains between hand entries, across lanes.
 
-The render puts the corp lane's synced DHCP domains in one rule-set rule
-(corp-sync-domains.json) placed after every inline suffix rule, so sing-box
-consults them only when no inline suffix matched. That changes one ranking:
-`hq.shadow.example` (synced, corp) under escape's `shadow.example` used to win
-on length and now loses — a hand entry wins, as corp sync promises. `explain`
-must rank the same way, and both implementations must agree on it:
+The corp lane's synced DHCP domains rank by depth like any hand entry: every
+suffix of the three lanes goes to the rule-set of its label count, and the
+router consults the deeper bands first (rowt_core::render::RULE_SETS_DIR has
+the argument). So a synced 3-label domain under escape's broader 2-label
+`shadow.example` wins by depth, as it did inline before contributor PR #5 —
+which had put the synced domains in one set after every inline suffix, so that
+`x.hq.shadow.example` briefly routed escape. `explain` must rank the same way,
+and both implementations must agree on it:
 
-    x.hq.shadow.example      ->  ESCAPE  (escape's shadow.example)
-    x.synced.corp.example    ->  CORP    (the inline corp.example, not the synced entry)
-    a.dot.synced.example     ->  CORP    (synced only — nothing inline covers it)
+    x.hq.shadow.example      ->  CORP    (synced hq.shadow.example, 3 labels, over escape's shadow.example, 2)
+    x.synced.corp.example    ->  CORP    (synced.corp.example over the head's corp.example: same lane, the deeper entry named)
+    a.dot.synced.example     ->  CORP    (the dot-led synced entry; nothing else covers it)
 
-The CIDR block is there so the render's corp-cidr set carries a synced CIDR
-next to the hand-added one.
+The CIDR block is there so the corp-cidr set carries a synced CIDR next to the
+hand-added one.

@@ -14,8 +14,8 @@ use serde_json::{json, Map, Value};
 #[derive(Debug, Default, Clone)]
 pub struct Lists {
     pub escape_domains: Vec<String>,
-    /// The corp suffixes OUTSIDE the DHCP block (`corp_split`'s first half).
-    /// The synced DHCP domains are the `corp-sync-dom` rule-set, not inline.
+    /// Every corp suffix, the synced DHCP domains included: they rank by depth
+    /// like a hand entry (the bands below), as they did inline before PR #5.
     pub corp_domains: Vec<String>,
     pub corp_cidrs: Vec<String>,
     pub block_domains: Vec<String>,
@@ -66,64 +66,189 @@ pub struct HostInput {
     /// Named extra ports (`ports.tsv`, in `ports::rows` order). Empty renders
     /// byte-identically to a config from before they existed.
     pub ports: Vec<crate::ports::Port>,
-    /// The two local rule-sets the corp lane's CIDRs and synced DHCP domains
-    /// live in (`CORP_SET_CIDR` / `CORP_SET_DOM`, under the config dir).
-    pub corp_set_cidr: String,
-    pub corp_set_dom: String,
+    /// The directory the lane rule-sets live in (`RULE_SETS_DIR` under the
+    /// config dir), spelled the way host.json names each set's file.
+    pub sets_dir: String,
 }
 
-/// What corp sync changes reaches the RUNNING router without a restart.
+/// Where the lane rules live, and why.
 ///
-/// The corp lane's CIDRs (hand-added and synced alike — they were one rule) and
-/// its synced DHCP search domains are rendered as two local sing-box rule-sets
-/// rather than inline lists. sing-box watches a local rule-set file and swaps
-/// the rules in place when it is replaced, so host.json stays byte-identical
-/// across a corp sync and the router keeps every connection. Every other corp
-/// domain stays inline, in the longest-suffix ordering against escape and block
-/// (which one rule-set rule cannot take part in) — so the synced domains rank
-/// after every inline suffix. `bin/rowt`: CORP_SET_CIDR and `_corp_set_put`.
-pub const CORP_SET_CIDR: &str = "corp-cidr.json";
-pub const CORP_SET_DOM: &str = "corp-sync-domains.json";
-/// Every block `corp sync` writes into corp-domains.txt starts with this.
-pub const CORP_SYNC_PREFIX: &str = "# --- rowt corp sync";
-/// The DHCP search-domain block's marker. Compared EXACTLY: the CIDR block's
-/// marker shares the prefix.
-pub const CORP_SYNC_DOM_MARKER: &str =
-    "# --- rowt corp sync: DHCP search domains (auto-managed, do not edit below) ---";
+/// sing-box builds host.json's route rules once, at start — but a LOCAL
+/// rule-set is a file it watches and swaps in place when the file is replaced.
+/// So every lane rule is a rule-set under `<config dir>/rule-sets/`, host.json
+/// only points at them, and a lane edit leaves host.json byte-identical: the
+/// running router picks the change up without a restart (`lanes_apply` in
+/// rowt-cli's lifecycle; `_lanes_apply` in bin/rowt). Before this, every
+/// `escape add` was a render plus `router restart`, which reset every
+/// connection on the machine.
+///
+/// Precedence is the catch. Inline, the render sorted every suffix of the three
+/// lanes together, most specific first — jq's `split(".")|length`, then string
+/// length — and one rule-set rule is ONE position in that order. The order is
+/// kept by splitting each lane into BANDS by split count: for a host and a
+/// label count there is exactly one candidate suffix (its last N labels;
+/// matching is on a label boundary), so two entries of one band can both match
+/// a host only when they are the same entry, and the single-lane rule keeps an
+/// entry to one lane. A dot-led `.z.example` (the names UNDER z.example) splits
+/// to 3 like the bare `x.z.example`, and both can match one host; the bare one
+/// is always the longer string, so inline it always won — hence a bare set AND
+/// a dot set per band, bare first. Exact (`domain:`) entries are whole-host
+/// equality, one match per host at most: one set per lane, ahead of every
+/// suffix, in lane order, as inline. Band 8 holds eight labels or more — the
+/// set count is fixed, or the first deeper entry would change host.json — so
+/// within it the length tie-break is lost, and the render warns on the one
+/// pair that can get wrong (`overflow_pairs`).
+pub const RULE_SETS_DIR: &str = "rule-sets";
+/// The corp lane's CIDRs, hand-added and synced alike — one set, since they
+/// were one rule (the `ip_cidr` set contributor PR #5 introduced, kept).
+pub const CORP_SET_CIDR: &str = "corp-cidr";
+/// The deepest band; it holds that many labels or more.
+pub const BANDS: usize = 8;
+/// The lanes whose rules are rule-sets, in the order their rules are emitted
+/// within a band. That order decides only a tie the single-lane rule already
+/// forbids, and it matches `classify`'s tie convention.
+pub const SET_LANES: [&str; 3] = ["escape", "corp", "block"];
 
-/// corp-domains.txt split for the render: (every line OUTSIDE the DHCP block,
-/// the lines INSIDE it). A sync marker line opens the DHCP block when it is that
-/// block's marker and closes it otherwise; the DHCP marker itself is in neither
-/// half. `_corp_inline_lines` and `_corp_block_domains` in bin/rowt — run either
-/// half through `parse_list` for what `list_json` makes of it.
-pub fn corp_split(body: &str) -> (String, String) {
-    let (mut inline, mut synced) = (String::new(), String::new());
-    let mut insync = false;
-    for l in body.lines() {
-        if l.starts_with(CORP_SYNC_PREFIX) {
-            insync = l == CORP_SYNC_DOM_MARKER;
-            if insync {
-                continue;
-            }
-        }
-        let half = if insync { &mut synced } else { &mut inline };
-        half.push_str(l);
-        half.push('\n');
-    }
-    (inline, synced)
+/// One lane set: the `domain` entries, or the `domain_suffix` entries of one
+/// split count, bare (`z.example`: the name and what is under it) or dot-led
+/// (`.z.example`: only what is under it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Band {
+    Exact,
+    Bare(usize),
+    Dot(usize),
 }
 
-/// One corp rule-set file, byte for byte what `_corp_set_put`'s `jq -c` writes:
+impl Band {
+    /// The set's tag; its file is `<tag>.json` under `RULE_SETS_DIR`.
+    pub fn tag(self, lane: &str) -> String {
+        match self {
+            Band::Exact => format!("{lane}-exact"),
+            Band::Bare(n) => format!("{lane}-{n}"),
+            Band::Dot(n) => format!("{lane}-{n}-dot"),
+        }
+    }
+
+    /// Which set a suffix entry goes to: jq's `split(".")|length`, capped at
+    /// `BANDS`, the dot-led entries apart. (A dot-led entry splits to two at
+    /// least, so `Dot(1)` never occurs.)
+    pub fn of(suffix: &str) -> Band {
+        let n = suffix.split('.').count().min(BANDS);
+        if suffix.starts_with('.') { Band::Dot(n) } else { Band::Bare(n) }
+    }
+}
+
+/// Every (lane, band) in route order: the exact sets in lane order, then for
+/// each band from the deepest down, the bare sets in lane order, then the dot
+/// sets. 48 in all — `3 + 3×8 + 3×7` — and always all present, empty or not.
+pub fn lane_bands() -> Vec<(&'static str, Band)> {
+    let mut out = Vec::with_capacity(48);
+    out.extend(SET_LANES.iter().map(|l| (*l, Band::Exact)));
+    for n in (1..=BANDS).rev() {
+        out.extend(SET_LANES.iter().map(|l| (*l, Band::Bare(n))));
+        if n >= 2 {
+            out.extend(SET_LANES.iter().map(|l| (*l, Band::Dot(n))));
+        }
+    }
+    out
+}
+
+/// One rule-set file, byte for byte what the shell's jq writes:
 /// `{"version":1,"rules":[{"<key>":[…]}]}` and a newline, with no rule at all
-/// when the list is empty (an empty `ip_cidr` would match nothing anyway, but
+/// when the list is empty (an empty list would match nothing anyway, but
 /// sing-box refuses a rule with no condition).
-pub fn corp_rule_set(key: &str, values: &[String]) -> String {
+pub fn rule_set_json(key: &str, values: &[String]) -> String {
     let rules = if values.is_empty() {
         "[]".to_string()
     } else {
         format!("[{{{}:{}}}]", Value::from(key), Value::from(values.to_vec()))
     };
     format!("{{\"version\":1,\"rules\":{rules}}}\n")
+}
+
+/// The 48 lane sets, `(tag, bytes)`, in `lane_bands` order. Entries keep the
+/// lane file's order and are ASCII-lowercased: sing-box lowercases the name it
+/// matches but not the rule, so a mixed-case entry matched nothing inline
+/// (measured on 1.13.14 with `rule-set match`), and lowercased, an entry spelled
+/// two ways in two lanes is the one entry the single-lane rule meant it to be.
+pub fn lane_sets(lists: &Lists) -> Vec<(String, String)> {
+    let lower = |v: &[String]| -> Vec<String> { v.iter().map(|s| s.to_ascii_lowercase()).collect() };
+    lane_bands()
+        .into_iter()
+        .map(|(lane, band)| {
+            let (suffixes, exacts) = lane_lists(lists, lane);
+            let body = match band {
+                Band::Exact => rule_set_json("domain", &lower(exacts)),
+                b => {
+                    let in_band: Vec<String> = lower(suffixes).into_iter().filter(|s| Band::of(s) == b).collect();
+                    rule_set_json("domain_suffix", &in_band)
+                }
+            };
+            (band.tag(lane), body)
+        })
+        .collect()
+}
+
+/// A lane's suffix and exact lists.
+fn lane_lists<'a>(lists: &'a Lists, lane: &str) -> (&'a [String], &'a [String]) {
+    match lane {
+        "escape" => (&lists.escape_domains, &lists.escape_exact),
+        "corp" => (&lists.corp_domains, &lists.corp_exact),
+        _ => (&lists.block_domains, &lists.block_exact),
+    }
+}
+
+/// The pairs band 8 ranks by lane order where inline ranked by length: an
+/// entry of more than `BANDS` labels in one lane, and a suffix of it with
+/// `BANDS` labels or more in another. Each is `(deeper entry, its lane, the
+/// shallower suffix, its lane)`; the render warns on them. Compared lowercased,
+/// as the sets hold them.
+pub fn overflow_pairs(lists: &Lists) -> Vec<(String, &'static str, String, &'static str)> {
+    let deep: Vec<(String, &str)> = SET_LANES
+        .iter()
+        .flat_map(|l| lane_lists(lists, l).0.iter().map(move |s| (s.to_ascii_lowercase(), *l)))
+        .filter(|(s, _)| s.split('.').count() >= BANDS)
+        .collect();
+    let mut out = Vec::new();
+    for (a, la) in &deep {
+        for (b, lb) in &deep {
+            if la == lb || a.split('.').count() <= BANDS || a == b {
+                continue;
+            }
+            // b is a label-suffix of a: the bare form under a boundary, or the
+            // dot-led form, which is strictly under its name.
+            let under = if let Some(bare) = b.strip_prefix('.') {
+                a.ends_with(b) && a.len() > b.len() || a == bare
+            } else {
+                a.ends_with(&format!(".{b}"))
+            };
+            if under {
+                out.push((a.clone(), *la, b.clone(), *lb));
+            }
+        }
+    }
+    out
+}
+
+/// Two lanes holding the same entry in different spellings of case: lowercased
+/// they are one entry in two sets, and lane order decides. `add` keeps this from
+/// happening; a hand-edited file can still do it. `(entry, first lane, second lane)`.
+pub fn case_twins(lists: &Lists) -> Vec<(String, &'static str, &'static str)> {
+    let mut out = Vec::new();
+    for (i, la) in SET_LANES.iter().enumerate() {
+        for lb in &SET_LANES[i + 1..] {
+            let (sa, ea) = lane_lists(lists, la);
+            let (sb, eb) = lane_lists(lists, lb);
+            for (xa, xb) in [(sa, sb), (ea, eb)] {
+                for e in xa {
+                    if xb.iter().any(|f| f.eq_ignore_ascii_case(e)) {
+                        out.push((e.to_ascii_lowercase(), *la, *lb));
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Parse one lane list exactly as `list_json` does.
@@ -346,62 +471,29 @@ pub fn group(servers: &[Value], iface: &str, selected: &str, auto: &UrlTest) -> 
     Value::Array(out)
 }
 
-/// `domain:` (exact) rules across the three hand lists.
-///
-/// These are emitted BEFORE `suffix_rules` and that ordering is a correctness
-/// requirement, not tidiness: sing-box route rules are first-match-wins, so an
-/// exact `z.com` on block would otherwise lose to a suffix `z.com` on escape.
-/// Exact is strictly the more specific statement, so it goes first.
-///
-/// Lane order escape → corp → block, plain and unsorted — no length ranking is
-/// meaningful when only one exact entry can ever match a given host, and it
-/// matches the tie-break `suffix_rules` lands on. `classify` scans in the same
-/// order, so the explainer and the router agree on which lane claims a host that
-/// (only by hand-editing — `_lane_dedupe` prevents it) sits in two.
-fn exact_rules(lists: &Lists, escape_outbound: &str) -> Vec<Value> {
-    let mut out: Vec<Value> = Vec::new();
-    for (list, outbound) in [
-        (&lists.escape_exact, escape_outbound),
-        (&lists.corp_exact, "corp"),
-        (&lists.block_exact, "block"),
-    ] {
-        if !list.is_empty() {
-            out.push(json!({"domain": list, "outbound": outbound}));
-        }
+/// Where a lane's rules point: the escape lane at `escape_outbound` ("direct"
+/// in local mode, where no tunnel exists — the rules are still emitted, since
+/// they carry precedence over broader block entries and the ad set).
+fn lane_outbound(lane: &str, escape_outbound: &str) -> String {
+    match lane {
+        "escape" => escape_outbound.to_string(),
+        other => other.to_string(),
     }
-    out
 }
 
-/// Suffix rules across the three hand lists, most-specific first.
-///
-/// jq sorts by `[label count, string length]` ascending and then reverses the
-/// WHOLE array. jq's sort is stable, so equal keys keep block/corp/escape order
-/// — and the reverse then flips that to escape/corp/block. Rust's `sort_by` is
-/// stable too, so the same two steps reproduce it exactly, ties included.
-fn suffix_rules(lists: &Lists, escape_outbound: &str) -> Vec<Value> {
-    let mut pairs: Vec<(&str, &str)> = Vec::new();
-    pairs.extend(lists.block_domains.iter().map(|s| (s.as_str(), "block")));
-    pairs.extend(lists.corp_domains.iter().map(|s| (s.as_str(), "corp")));
-    pairs.extend(lists.escape_domains.iter().map(|s| (s.as_str(), escape_outbound)));
-
-    // jq's `length` on a string counts codepoints, not bytes.
-    pairs.sort_by_key(|(s, _)| (s.split('.').count(), s.chars().count()));
-    pairs.reverse();
-
-    pairs
+/// The lane rules: one rule-set rule per (lane, band), in `lane_bands` order —
+/// first match wins, so that order IS the precedence (see `RULE_SETS_DIR`).
+fn lane_rules(escape_outbound: &str) -> Vec<Value> {
+    lane_bands()
         .into_iter()
-        .map(|(s, o)| json!({"domain_suffix": [s], "outbound": o}))
+        .map(|(lane, band)| json!({"rule_set": [band.tag(lane)], "outbound": lane_outbound(lane, escape_outbound)}))
         .collect()
 }
 
 /// The host configuration — what lands in `host.json`.
 pub fn render_host(i: &HostInput) -> Value {
     let mut rules: Vec<Value> = vec![json!({"action": "sniff"})];
-    rules.extend(exact_rules(&i.lists, &i.escape_outbound));
-    rules.extend(suffix_rules(&i.lists, &i.escape_outbound));
-    // The synced DHCP domains, after every inline suffix: a hand entry in escape
-    // or block still wins, as corp sync already promised.
-    rules.push(json!({"rule_set": ["corp-sync-dom"], "outbound": "corp"}));
+    rules.extend(lane_rules(&i.escape_outbound));
     rules.extend(
         i.geo.escape.iter()
             .map(|n| json!({"rule_set": [format!("geosite-{n}")], "outbound": i.escape_outbound})),
@@ -423,7 +515,7 @@ pub fn render_host(i: &HostInput) -> Value {
     // Always there: the set carries the CIDRs, none or many, so a corp sync that
     // changes them leaves this file alone. (The resolve rule above still keys on
     // whether there are any — the one shape change a corp sync can cause.)
-    rules.push(json!({"rule_set": ["corp-cidr"], "outbound": "corp"}));
+    rules.push(json!({"rule_set": [CORP_SET_CIDR], "outbound": "corp"}));
     if i.private_default == "corp" {
         rules.push(json!({"ip_cidr": i.private_cidrs, "outbound": "corp"}));
     }
@@ -439,19 +531,12 @@ pub fn render_host(i: &HostInput) -> Value {
         }
     }
     // Corp names must resolve through the corp resolver or they answer with a
-    // public IP and leave the tunnel — so an EXACT corp entry needs this rule
-    // just as much as a suffix one. `domain` sits first, mirroring the route
-    // rules, and each half is omitted when empty so a suffix-only config renders
-    // byte-identically to before this flag existed.
-    let mut dns_rules: Vec<Value> = Vec::new();
-    if !i.lists.corp_exact.is_empty() {
-        dns_rules.push(json!({"domain": i.lists.corp_exact, "server": "local"}));
-    }
-    if !i.lists.corp_domains.is_empty() {
-        dns_rules.push(json!({"domain_suffix": i.lists.corp_domains, "server": "local"}));
-    }
-    // The synced DHCP domains resolve locally too.
-    dns_rules.push(json!({"rule_set": ["corp-sync-dom"], "server": "local"}));
+    // public IP and leave the tunnel — so every corp set, exact and suffix,
+    // names the local server: one rule over the lane's sixteen sets (a list of
+    // sets matches on any of them), always present since the sets always are.
+    let corp_sets: Vec<String> =
+        lane_bands().into_iter().filter(|(l, _)| *l == "corp").map(|(l, b)| b.tag(l)).collect();
+    let dns_rules = vec![json!({"rule_set": corp_sets, "server": "local"})];
 
     let mut outbounds = i.escapes.as_array().cloned().unwrap_or_default();
     outbounds.push(json!({
@@ -481,8 +566,14 @@ pub fn render_host(i: &HostInput) -> Value {
             "format": "binary", "path": i.geo.ads_path
         }));
     }
-    allsets.push(json!({"type": "local", "tag": "corp-cidr", "format": "source", "path": i.corp_set_cidr}));
-    allsets.push(json!({"type": "local", "tag": "corp-sync-dom", "format": "source", "path": i.corp_set_dom}));
+    // The lane sets in route order, then the corp CIDRs — every one a `source`
+    // (JSON) set under `sets_dir`, written by the render (`lanes_write`).
+    let set_path = |tag: &str| format!("{}/{tag}.json", i.sets_dir);
+    allsets.extend(lane_bands().into_iter().map(|(l, b)| {
+        let tag = b.tag(l);
+        json!({"type": "local", "tag": tag, "format": "source", "path": set_path(&tag)})
+    }));
+    allsets.push(json!({"type": "local", "tag": CORP_SET_CIDR, "format": "source", "path": set_path(CORP_SET_CIDR)}));
     route.insert("rule_set".into(), json!(allsets));
 
     let mut root = Map::new();
@@ -531,7 +622,7 @@ fn port_rules(rules: Vec<Value>, i: &HostInput) -> Vec<Value> {
         Some(ri) => {
             let mut out = rules[..ri].to_vec();
             for p in tun {
-                out.push(json!({"inbound": inbound(&p.name), "rule_set": ["corp-cidr"], "outbound": "corp"}));
+                out.push(json!({"inbound": inbound(&p.name), "rule_set": [CORP_SET_CIDR], "outbound": "corp"}));
                 if i.private_default == "corp" {
                     out.push(json!({"inbound": inbound(&p.name), "ip_cidr": i.private_cidrs, "outbound": "corp"}));
                 }
@@ -672,52 +763,6 @@ mod tests {
     }
 
     #[test]
-    fn suffix_rules_are_most_specific_first() {
-        let lists = Lists {
-            escape_domains: vec!["api.foo.com".into(), "z.com".into()],
-            block_domains: vec!["foo.com".into()],
-            ..Default::default()
-        };
-        let got: Vec<String> = suffix_rules(&lists, "escape")
-            .iter()
-            .map(|r| r["domain_suffix"][0].as_str().unwrap().to_string())
-            .collect();
-        assert_eq!(got, vec!["api.foo.com", "foo.com", "z.com"]);
-    }
-
-    #[test]
-    fn ties_resolve_escape_then_corp_then_block() {
-        // Same label count and length in all three lanes: jq sorts stably and
-        // then reverses the whole array, which flips the lane order.
-        let lists = Lists {
-            escape_domains: vec!["aaa.com".into()],
-            corp_domains: vec!["bbb.com".into()],
-            block_domains: vec!["ccc.com".into()],
-            ..Default::default()
-        };
-        let got: Vec<String> = suffix_rules(&lists, "escape")
-            .iter()
-            .map(|r| r["outbound"].as_str().unwrap().to_string())
-            .collect();
-        assert_eq!(got, vec!["escape", "corp", "block"]);
-    }
-
-    #[test]
-    fn local_mode_retargets_escape_but_keeps_precedence() {
-        // The rule for api.foo.com must still come first — dropping it would let
-        // block's foo.com swallow the domain instead of sending it direct.
-        let lists = Lists {
-            escape_domains: vec!["api.foo.com".into()],
-            block_domains: vec!["foo.com".into()],
-            ..Default::default()
-        };
-        let r = suffix_rules(&lists, "direct");
-        assert_eq!(r[0]["domain_suffix"][0], json!("api.foo.com"));
-        assert_eq!(r[0]["outbound"], json!("direct"));
-        assert_eq!(r[1]["outbound"], json!("block"));
-    }
-
-    #[test]
     fn selector_falls_back_when_the_selection_is_unknown() {
         let servers = vec![json!({"tag": "alpha"}), json!({"tag": "beta"})];
         let g = group(&servers, "en0", "ghost", &auto("20m"));
@@ -750,45 +795,140 @@ mod tests {
     }
 
     #[test]
-    fn exact_rules_are_emitted_before_every_suffix_rule() {
-        let lists = Lists {
-            escape_domains: vec!["z.com".into()],
-            block_exact: vec!["z.com".into()],
-            ..Default::default()
-        };
-        let r = [exact_rules(&lists, "escape"), suffix_rules(&lists, "escape")].concat();
-        // First-match-wins: without this order the block exact would lose to the
-        // escape suffix and `--domain` would silently do nothing.
-        assert_eq!(r[0], json!({"domain": ["z.com"], "outbound": "block"}));
-        assert_eq!(r[1], json!({"domain_suffix": ["z.com"], "outbound": "escape"}));
-    }
-
-    #[test]
-    fn the_corp_lane_splits_at_the_dhcp_block_only() {
-        let body = "corp.example\n10.1.0.0/16\n\n\
-                    # --- rowt corp sync: DHCP search domains (auto-managed, do not edit below) ---\n\
-                    hq.corp.example\n\n\
-                    # --- rowt corp sync (auto-managed; superset of live tunnel routes — do not edit below) ---\n\
-                    203.0.113.0/24\nstray.example\n";
-        let (inline, synced) = corp_split(body);
-        assert_eq!(parse_list(&inline, Filter::Domain), ["corp.example", "stray.example"]);
-        assert_eq!(parse_list(&synced, Filter::Domain), ["hq.corp.example"]);
-        // Every CIDR is the rule-set's, wherever it sits: read from the whole file.
-        assert_eq!(parse_list(body, Filter::Cidr), ["10.1.0.0/16", "203.0.113.0/24"]);
-    }
-
-    #[test]
-    fn a_corp_rule_set_is_what_jq_c_writes() {
-        assert_eq!(corp_rule_set("ip_cidr", &[]), "{\"version\":1,\"rules\":[]}\n");
-        assert_eq!(corp_rule_set("domain_suffix", &["a.example".into(), "b.example".into()]),
+    fn a_rule_set_file_is_what_jq_writes() {
+        assert_eq!(rule_set_json("ip_cidr", &[]), "{\"version\":1,\"rules\":[]}\n");
+        assert_eq!(rule_set_json("domain_suffix", &["a.example".into(), "b.example".into()]),
                    "{\"version\":1,\"rules\":[{\"domain_suffix\":[\"a.example\",\"b.example\"]}]}\n");
     }
 
     #[test]
-    fn a_suffix_only_config_renders_exactly_as_before() {
-        // The feature must be inert when unused — no empty `domain` rule, no
-        // second dns rule — or every existing render diffs.
-        let lists = Lists { corp_domains: vec!["corp.example".into()], ..Default::default() };
-        assert!(exact_rules(&lists, "escape").is_empty());
+    fn bands_follow_jq_split_count_with_dot_led_entries_apart() {
+        assert_eq!(Band::of("com"), Band::Bare(1));
+        assert_eq!(Band::of("z.example"), Band::Bare(2));
+        assert_eq!(Band::of(".z.example"), Band::Dot(3), "a leading dot splits to one more");
+        assert_eq!(Band::of("x.z.example"), Band::Bare(3));
+        assert_eq!(Band::of("a.b.c.d.e.f.g.example"), Band::Bare(8));
+        assert_eq!(Band::of("a.b.c.d.e.f.g.h.i.example"), Band::Bare(8), "eight or more");
+        assert_eq!(Band::of(".a.b.c.d.e.f.g.h.example"), Band::Dot(8));
+        assert_eq!(Band::Exact.tag("corp"), "corp-exact");
+        assert_eq!(Band::Bare(3).tag("escape"), "escape-3");
+        assert_eq!(Band::Dot(3).tag("block"), "block-3-dot");
+    }
+
+    #[test]
+    fn the_bands_are_emitted_deepest_first_bare_before_dot_exact_ahead() {
+        let b = lane_bands();
+        assert_eq!(b.len(), 48);
+        let tags: Vec<String> = b.iter().map(|(l, band)| band.tag(l)).collect();
+        assert_eq!(&tags[..6], ["escape-exact", "corp-exact", "block-exact", "escape-8", "corp-8", "block-8"]);
+        assert_eq!(&tags[6..9], ["escape-8-dot", "corp-8-dot", "block-8-dot"]);
+        assert_eq!(&tags[45..], ["escape-1", "corp-1", "block-1"], "no dot set for one label");
+        let mut seen = std::collections::BTreeSet::new();
+        assert!(tags.iter().all(|t| seen.insert(t.clone())), "every tag once");
+    }
+
+    /// How the former inline render ordered the three lanes' suffixes, kept
+    /// here as the oracle: jq sorted by `[split count, length]` and reversed,
+    /// stable over block, corp, escape — so escape, corp, block on a tie — with
+    /// the exact entries first in lane order. First match wins.
+    fn inline_lane(host: &str, lists: &Lists) -> Option<&'static str> {
+        for lane in SET_LANES {
+            if lane_lists(lists, lane).1.iter().any(|e| e == host) {
+                return Some(lane);
+            }
+        }
+        let mut pairs: Vec<(&str, &'static str)> = Vec::new();
+        for lane in ["block", "corp", "escape"] {
+            pairs.extend(lane_lists(lists, lane).0.iter().map(|s| (s.as_str(), lane)));
+        }
+        pairs.sort_by_key(|(s, _)| (s.split('.').count(), s.chars().count()));
+        pairs.reverse();
+        pairs.into_iter().find(|(s, _)| suffix_hit(host, s)).map(|(_, l)| l)
+    }
+
+    /// sing-box's `domain_suffix`: on a label boundary; a dot-led entry only
+    /// below its name (the measured table in `classify::suffix_matches`).
+    fn suffix_hit(host: &str, e: &str) -> bool {
+        if e.starts_with('.') { host.ends_with(e) && host.len() > e.len() } else { host == e || host.ends_with(&format!(".{e}")) }
+    }
+
+    /// The lane the SETS route a host to: walk `lane_bands` in order, read each
+    /// set's body back, first set with a match wins.
+    fn set_lane(host: &str, lists: &Lists) -> Option<&'static str> {
+        let sets = lane_sets(lists);
+        for ((lane, band), (tag, body)) in lane_bands().into_iter().zip(sets) {
+            assert_eq!(band.tag(lane), tag);
+            let v: Value = serde_json::from_str(&body).unwrap();
+            let hit = v["rules"].as_array().unwrap().iter().any(|r| match band {
+                Band::Exact => r["domain"].as_array().unwrap().iter().any(|d| d == host),
+                _ => r["domain_suffix"].as_array().unwrap().iter().any(|d| suffix_hit(host, d.as_str().unwrap())),
+            });
+            if hit {
+                return Some(lane);
+            }
+        }
+        None
+    }
+
+    /// The claim the whole design rests on: for every host, the sets route
+    /// where the inline order did. The lists hold every shape that can cross
+    /// lanes — a bare entry under another lane's apex, a dot-led entry against
+    /// a bare one of the same split count, an exact against a suffix, a
+    /// synced-looking corp domain between hand entries, a tie on length.
+    #[test]
+    fn the_sets_route_every_host_where_the_inline_order_did() {
+        let lists = Lists {
+            escape_domains: vec!["x.z.example".into(), "api.foo.example".into(), "aaa.example".into(), "deep.q.x.z.example".into()],
+            corp_domains: vec![".z.example".into(), "foo.example".into(), "bbb.example".into(), "hq.corp.example".into(), "corp.example".into()],
+            block_domains: vec!["z.example".into(), "a.example".into(), ".q.x.z.example".into(), "ccc.example".into(), "ads.hq.corp.example".into()],
+            escape_exact: vec!["only.a.example".into()],
+            corp_exact: vec!["foo.example".into()],
+            block_exact: vec!["x.z.example".into()],
+            ..Default::default()
+        };
+        let hosts = ["x.z.example", "a.x.z.example", "z.example", "www.z.example", "q.x.z.example", "t.q.x.z.example",
+                     "deep.q.x.z.example", "m.deep.q.x.z.example", "foo.example", "b.foo.example", "api.foo.example",
+                     "v2.api.foo.example", "a.example", "only.a.example", "x.only.a.example", "aaa.example", "bbb.example",
+                     "ccc.example", "corp.example", "hq.corp.example", "w.hq.corp.example", "ads.hq.corp.example",
+                     "pixel.ads.hq.corp.example", "unlisted.example", "example", "xz.example"];
+        for h in hosts {
+            assert_eq!(set_lane(h, &lists), inline_lane(h, &lists), "{h}");
+        }
+        // And the two shapes that make the dot sets necessary, named: the bare
+        // 3-label entry beats the dot-led 2-label one of another lane (length),
+        // and the dot-led one beats the bare 2-label apex of a third (depth).
+        assert_eq!(set_lane("x.z.example", &lists), Some("block"), "exact beats both suffixes");
+        assert_eq!(set_lane("a.x.z.example", &lists), Some("escape"));
+        assert_eq!(set_lane("www.z.example", &lists), Some("corp"));
+        assert_eq!(set_lane("z.example", &lists), Some("block"));
+    }
+
+    #[test]
+    fn the_sets_hold_each_lane_lowercased_in_file_order() {
+        let lists = Lists {
+            escape_domains: vec!["B.Example".into(), "a.example".into(), ".Sub.Example".into()],
+            escape_exact: vec!["Host.Example".into()],
+            ..Default::default()
+        };
+        let sets: std::collections::BTreeMap<String, String> = lane_sets(&lists).into_iter().collect();
+        assert_eq!(sets["escape-2"], "{\"version\":1,\"rules\":[{\"domain_suffix\":[\"b.example\",\"a.example\"]}]}\n");
+        assert_eq!(sets["escape-3-dot"], "{\"version\":1,\"rules\":[{\"domain_suffix\":[\".sub.example\"]}]}\n");
+        assert_eq!(sets["escape-exact"], "{\"version\":1,\"rules\":[{\"domain\":[\"host.example\"]}]}\n");
+        assert_eq!(sets["corp-2"], "{\"version\":1,\"rules\":[]}\n", "an empty set is still a file");
+        assert_eq!(sets.len(), 48);
+    }
+
+    #[test]
+    fn the_overflow_band_and_case_twins_are_named() {
+        let lists = Lists {
+            escape_domains: vec!["a.b.c.d.e.f.g.h.i.example".into(), "Twin.Example".into()],
+            corp_domains: vec!["c.d.e.f.g.h.i.example".into(), "twin.example".into()],
+            block_domains: vec!["d.e.f.g.h.i.example".into()],
+            ..Default::default()
+        };
+        let pairs = overflow_pairs(&lists);
+        assert_eq!(pairs, vec![("a.b.c.d.e.f.g.h.i.example".into(), "escape", "c.d.e.f.g.h.i.example".into(), "corp")],
+                   "only a suffix of eight labels or more shares band 8; the seven-label one ranks below it");
+        assert_eq!(case_twins(&lists), vec![("twin.example".into(), "escape", "corp")]);
     }
 }

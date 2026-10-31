@@ -1093,24 +1093,24 @@ CORP_SYNC_MARKER="# --- rowt corp sync (auto-managed; superset of live tunnel ro
 # with ROWT_AUTO_CORP_DOMAINS=0.
 CORP_SYNC_DOM_MARKER="# --- rowt corp sync: DHCP search domains (auto-managed, do not edit below) ---"
 AUTO_CORP_DOMAINS="${ROWT_AUTO_CORP_DOMAINS:-1}"
-# What corp sync changes reaches the RUNNING router without a restart.
-# The corp lane's CIDRs (hand-added and synced alike — they were one rule) and
-# its synced DHCP search domains are rendered as two local sing-box rule-sets,
-# not inline lists. sing-box watches a local rule-set file (fswatch on its
-# directory, 1.13 route/rule/rule_set_local.go) and swaps the rules in place
-# when it is replaced, so host.json stays byte-identical across a corp sync and
-# the router — and every escape / direct connection on it — keeps running.
-# Every other corp DOMAIN stays inline: those take part in the longest-suffix
-# ordering against escape and block, which one rule-set rule cannot. So the
-# synced DHCP domains now rank after every inline suffix — a hand entry in
-# escape or block that is BROADER than a synced domain wins, which is what corp
-# sync already promised ("your rule wins"); `explain` ranks them the same way.
+# Where the lane rules live. sing-box builds host.json's route rules once, at
+# start — but a LOCAL rule-set is a file it watches (1.13
+# route/rule/rule_set_local.go) and swaps in place when the file is replaced.
+# So every lane rule is a rule-set under LANE_SETS_DIR, host.json only points
+# at them, and a lane edit leaves host.json byte-identical: the running router
+# picks the change up with no restart (_lanes_apply), where every edit used to
+# be a render plus `router restart` that reset every connection on the Mac.
+# Precedence — longest suffix wins across the three lanes — is kept by BANDS:
+# one set per lane per label count, a bare set and a dot-led set each, the
+# exact entries ahead; _lane_set_tags has the order and
+# rowt_core::render::RULE_SETS_DIR the argument. The corp CIDRs stay one set
+# (corp-cidr), as contributor PR #5 made them.
 # ROUTER_CFG_SUM is the cksum of the host.json the running router was started
-# (or SIGHUP-reloaded) from: corp sync applies live only when the fresh render
-# is that same file; anything else (an older rowt started it, a hand change is
-# pending) restarts as before. ROWT_CORP_HOT=0 restores the old always-restart.
-CORP_SET_CIDR="$CFG/corp-cidr.json"
-CORP_SET_DOM="$CFG/corp-sync-domains.json"
+# (or SIGHUP-reloaded) from: an edit applies live only when the fresh render is
+# that same file; anything else (an older rowt started it, a geosite: came or
+# went) restarts as before. ROWT_CORP_HOT=0 restores the old always-restart.
+LANE_SETS_DIR="$CFG/rule-sets"
+LANE_BANDS=8   # the deepest band holds this many labels or more
 ROUTER_CFG_SUM="$CFG/host.running"
 CORP_HOT="${ROWT_CORP_HOT:-1}"
 # corp sync ALSO learns the DNS zones that ONLY an overlay resolver answers — a
@@ -1256,45 +1256,113 @@ _corp_block_domains() {
   ' "$CORP_DOMAINS"
 }
 
-# The corp lane split for the render. Every line outside the DHCP block (the
-# hand-kept head, and anything a hand put under another marker) stays inline;
-# the synced DHCP domains and every corp CIDR go to the two rule-set files (see
-# CORP_SET_CIDR).
-_corp_inline_lines() {
-  [ -f "$CORP_DOMAINS" ] || return 0
-  awk -v m="$CORP_SYNC_DOM_MARKER" 'index($0,"# --- rowt corp sync")==1 { inblk=($0==m) } !inblk' "$CORP_DOMAINS"
+# The lane sets as "lane<TAB>tag" lines in ROUTE order: the exact sets in lane
+# order escape/corp/block, then for each band from the deepest down the bare
+# sets in lane order, then the dot-led sets. 48 lines. Why this order keeps
+# longest-suffix-wins: for a host and a label count there is exactly one
+# candidate suffix (its last N labels — matching is on a label boundary), so two
+# entries of one band can both match a host only when they are the same entry,
+# which the single-lane rule keeps to one lane. A dot-led `.z.example` splits to
+# 3 like the bare `x.z.example`, and both can match one host; the bare one is
+# the longer string, so inline it always won — hence bare before dot in each
+# band. Mirrors rowt_core::render::lane_bands.
+_lane_set_tags() {
+  local l n
+  for l in escape corp block; do printf '%s\t%s-exact\n' "$l" "$l"; done
+  n=$LANE_BANDS
+  while [ "$n" -ge 1 ]; do
+    for l in escape corp block; do printf '%s\t%s-%s\n' "$l" "$l" "$n"; done
+    if [ "$n" -ge 2 ]; then for l in escape corp block; do printf '%s\t%s-%s-dot\n' "$l" "$l" "$n"; done; fi
+    n=$((n - 1))
+  done
 }
-_corp_inline_domains_json() {
-  local t; t="$(mktemp)"; _corp_inline_lines > "$t"; list_json "$t" domain; rm -f "$t"
+_lane_set_tags_json() {
+  _lane_set_tags | jq -R -s -c 'split("\n") | map(select(length > 0) | split("\t") | {lane: .[0], tag: .[1]})'
 }
-_corp_sync_domains_json() {
-  local t; t="$(mktemp)"; _corp_block_domains > "$t"; list_json "$t" domain; rm -f "$t"
+# One lane's sixteen set bodies, "tag<TAB>json" per line: the exact entries to
+# <lane>-exact, each suffix to the band of its split count (jq's
+# split(".")|length, capped at LANE_BANDS), a dot-led entry to the band's -dot
+# set. ASCII-lowercased: sing-box lowercases the name it matches but not the
+# rule, so a mixed-case entry matched nothing inline (measured on 1.13.14 with
+# `rule-set match`). The body is what `jq -c` would print, and a newline.
+_lane_set_bodies() { # $1=lane $2=suffixes (JSON array) $3=exact entries (JSON array)
+  jq -r -n --arg lane "$1" --argjson suf "$2" --argjson ex "$3" --argjson bands "$LANE_BANDS" '
+    def body($k; $vs): ({version:1, rules:(if ($vs|length) > 0 then [{($k):$vs}] else [] end)} | tojson);
+    def band($s): ($s|split(".")|length) as $n | (if $n > $bands then $bands else $n end) as $b
+                  | (if ($s|startswith(".")) then "\($b)-dot" else "\($b)" end);
+    ($suf | map(ascii_downcase)) as $suf | ($ex | map(ascii_downcase)) as $ex
+    | "\($lane)-exact\t\(body("domain"; $ex))",
+      ( range($bands; 0; -1) as $n
+        | "\($lane)-\($n)\t\(body("domain_suffix"; [$suf[] | select(band(.) == "\($n)")]))",
+          (if $n >= 2 then "\($lane)-\($n)-dot\t\(body("domain_suffix"; [$suf[] | select(band(.) == "\($n)-dot")]))"
+           else empty end) )'
 }
-# Write one rule-set file: unchanged bytes are left alone (a rewrite would make
-# sing-box reload it for nothing); a change goes to a temp file in the same
-# directory and is renamed over it, so the watcher only ever reads a whole file.
-# Measured with sing-box 1.13.14 on Linux (inotify) and macOS 26 / APFS (kqueue):
-# the new rules are in use within a second, same process. (On a VM shared
-# folder — VirtioFS — no file event arrives at all; ~/.config is never one.)
-# The previous file is kept as <file>.prev until the render validates.
-_corp_set_put() { # $1=file  $2=JSON array  $3=rule key (ip_cidr | domain_suffix)
-  local t; t="$(mktemp "$1.XXXXXX")"
-  printf '%s' "$2" | jq -c --arg k "$3" '{version:1, rules:(if length > 0 then [{($k):.}] else [] end)}' > "$t" \
-    || { rm -f "$t"; return 1; }
-  if cmp -s "$t" "$1" 2>/dev/null; then rm -f "$t"; return 0; fi
+# Write one rule-set file: a temp file in the same directory, renamed over it,
+# so the watcher only ever reads a whole file (measured with sing-box 1.13.14 on
+# APFS/kqueue and Linux/inotify: in use within a second, same process; a
+# VirtioFS share delivers no event at all — ~/.config is never one). The
+# previous file is kept as <file>.prev until the render validates
+# (_lane_sets_restore). The caller has already found the bytes differ.
+_lane_set_put() { # $1=file  $2=body (one JSON line)
+  local t; t="$(mktemp "$1.XXXXXX")" || return 1
+  printf '%s\n' "$2" > "$t" || { rm -f "$t"; return 1; }
   if [ -f "$1" ]; then cp -p "$1" "$1.prev" 2>/dev/null || true; fi
   chmod 600 "$t" 2>/dev/null || true
   mv -f "$t" "$1"
 }
-_corp_sets_write() {
-  rm -f "$CORP_SET_CIDR.prev" "$CORP_SET_DOM.prev"
-  _corp_set_put "$CORP_SET_CIDR" "$(corp_cidrs_json)" ip_cidr \
-    && _corp_set_put "$CORP_SET_DOM" "$(_corp_sync_domains_json)" domain_suffix
+# How many entries a set file holds: its rules' lists, summed. 0 for a file
+# that is missing or does not parse (which then counts as having lost everything).
+_lane_set_count() { # $1=file, or - for stdin
+  if [ "$1" = - ]; then jq '[.rules[]? | .[] | length] | add // 0' 2>/dev/null || echo 0
+  else jq '[.rules[]? | .[] | length] | add // 0' "$1" 2>/dev/null || echo 0; fi
 }
-_corp_sets_restore() { # a render that failed validation puts the previous sets back
-  local f; for f in "$CORP_SET_CIDR" "$CORP_SET_DOM"; do
-    if [ -f "$f.prev" ]; then mv -f "$f.prev" "$f"; fi
-  done; return 0
+# Every rule-set file under LANE_SETS_DIR, from the lane files: the 48 lane
+# sets and the corp CIDR set. Unchanged bytes are left alone (a rewrite would
+# make sing-box reload the set for nothing). Sets that GAINED entries are
+# written before sets that lost them: a lane move touches two files, sing-box
+# watches each on its own, and between the two renames both lanes hold the
+# entry — the band's lane order decides for that instant — rather than neither,
+# which would send it down the default route for the same instant.
+_lane_sets_write() {
+  mkdir -p "$LANE_SETS_DIR" || return 1
+  # The two files contributor PR #5 kept beside host.json (never released) are
+  # gone with the move under rule-sets/.
+  rm -f "$CFG/corp-cidr.json" "$CFG/corp-cidr.json.prev" "$CFG/corp-sync-domains.json" "$CFG/corp-sync-domains.json.prev"
+  local all grew rest tag body f
+  all="$(mktemp)"; grew="$(mktemp)"; rest="$(mktemp)"
+  { _lane_set_bodies escape "$(domains_json)" "$(escape_exact_json)" \
+    && _lane_set_bodies corp "$(corp_domains_json)" "$(corp_exact_json)" \
+    && _lane_set_bodies block "$(block_domains_json)" "$(block_exact_json)" \
+    && printf 'corp-cidr\t%s\n' "$(corp_cidrs_json | jq -c '{version:1, rules:(if length > 0 then [{ip_cidr:.}] else [] end)}')"
+  } > "$all" || { rm -f "$all" "$grew" "$rest"; return 1; }
+  while IFS=$'\t' read -r tag body; do
+    f="$LANE_SETS_DIR/$tag.json"
+    rm -f "$f.prev"
+    if [ -f "$f" ] && printf '%s\n' "$body" | cmp -s - "$f"; then continue; fi
+    if [ "$(printf '%s\n' "$body" | _lane_set_count -)" -gt "$(_lane_set_count "$f")" ]; then
+      printf '%s\t%s\n' "$tag" "$body" >> "$grew"
+    else
+      printf '%s\t%s\n' "$tag" "$body" >> "$rest"
+    fi
+  done < "$all"
+  local rc=0
+  while IFS=$'\t' read -r tag body; do
+    _lane_set_put "$LANE_SETS_DIR/$tag.json" "$body" || { rc=1; break; }
+  done < <(cat "$grew" "$rest")
+  rm -f "$all" "$grew" "$rest"
+  return "$rc"
+}
+_lane_sets_restore() { # a render that failed validation puts the previous sets back
+  local tag f
+  while IFS=$'\t' read -r _ tag; do
+    f="$LANE_SETS_DIR/$tag.json"; if [ -f "$f.prev" ]; then mv -f "$f.prev" "$f"; fi
+  done < <(_lane_set_tags; printf 'corp\tcorp-cidr\n')
+  return 0
+}
+_lane_sets_prev_clear() { # validated: the previous sets are done with
+  local tag
+  while IFS=$'\t' read -r _ tag; do rm -f "$LANE_SETS_DIR/$tag.json.prev"; done < <(_lane_set_tags; printf 'corp\tcorp-cidr\n')
+  return 0
 }
 # Remember what the running router was started from (see ROUTER_CFG_SUM).
 _router_cfg_mark() { cksum < "$HOST_CFG" > "$ROUTER_CFG_SUM" 2>/dev/null || true; }
@@ -2119,11 +2187,11 @@ assemble_host() {
   esc_geo="$(_lane_geo_json "$DOMAINS")"
   block_geo="$(_lane_geo_json "$BLOCK_DOMAINS")"
   geo_sets="$(_geo_sets_json)"
-  # corp_dom is the corp suffixes outside the DHCP block; the synced DHCP
-  # domains and every corp CIDR are the rule-sets corp-sync-dom / corp-cidr.
-  _corp_sets_write || die "could not write the corp rule-sets ($CORP_SET_CIDR, $CORP_SET_DOM)"
+  # The lane rules are rule-set files under LANE_SETS_DIR, written here as a
+  # side effect of the render, the way host.json is (see LANE_SETS_DIR).
+  _lane_sets_write || die "could not write the lane rule-sets ($LANE_SETS_DIR)"
   jq -n \
-    --arg corp_set_cidr "$CORP_SET_CIDR" --arg corp_set_dom "$CORP_SET_DOM" \
+    --arg sets_dir "$LANE_SETS_DIR" --argjson lane_sets "$(_lane_set_tags_json)" \
     --argjson esc_geo "$esc_geo" \
     --argjson block_geo "$block_geo" \
     --argjson geo_sets "$geo_sets" \
@@ -2139,39 +2207,20 @@ assemble_host() {
     --arg dns_direct "$dns_srv" \
     --arg esc_out "$esc_out" \
     --arg escape_hosts "$CFG/escape-hosts" \
-    --argjson esc_dom "$(domains_json)" \
-    --argjson corp_dom "$(_corp_inline_domains_json)" \
     --argjson corp_cidr "$(corp_cidrs_json)" \
-    --argjson block_dom "$(block_domains_json)" \
-    --argjson esc_exact "$(escape_exact_json)" \
-    --argjson corp_exact "$(corp_exact_json)" \
-    --argjson block_exact "$(block_exact_json)" \
     --arg priv_default "$PRIVATE_DEFAULT" \
     --argjson private_cidrs "$PRIVATE_CIDRS" \
     --argjson ports "$(_ports_json)" \
     '
     # route rules, first match wins. sniff first so domain rules see host names.
     #
-    # Longest-suffix-wins across the three hand lists: flatten them into (suffix,
-    # lane) pairs and emit ONE rule per suffix, ordered most-specific-first (more
-    # labels, then longer string). Because sing-box takes the first matching rule,
-    # a more-specific suffix is consulted first — so an explicit api.foo.com in
-    # escape beats a foo.com in block, instead of block always winning by lane
-    # order. A suffix lives in at most one lane (rowt enforces that), so no ties.
-    (( ($block_dom | map({s:., o:"block"}))
-     + ($corp_dom  | map({s:., o:"corp"}))
-     + ($esc_dom   | map({s:., o:$esc_out})) )
-     | sort_by([(.s|split(".")|length), (.s|length)]) | reverse
-     | map({domain_suffix:[.s], outbound:.o})) as $suffix_rules
-    |
-    # `--domain` entries: sing-box `domain` (whole-host equality). These come
-    # BEFORE every suffix rule, and that ordering is correctness, not tidiness —
-    # first match wins, so an exact z.com on block would otherwise lose to a
-    # suffix z.com on escape. Lane order escape/corp/block, unsorted: only one
-    # exact entry can match a given host, so length ranking says nothing.
-    ([ if ($esc_exact|length)   > 0 then {domain:$esc_exact,   outbound:$esc_out} else empty end,
-       if ($corp_exact|length)  > 0 then {domain:$corp_exact,  outbound:"corp"}   else empty end,
-       if ($block_exact|length) > 0 then {domain:$block_exact, outbound:"block"}  else empty end ]) as $exact_rules
+    # The lane rules: one rule-set rule per (lane, band), in the order
+    # _lane_set_tags emits them — the exact sets first (whole-host equality
+    # beats every suffix), then the bands from the deepest down, bare before
+    # dot-led. First match wins, so that order IS longest-suffix-wins across
+    # the three lanes: an explicit api.foo.com in escape still beats a foo.com
+    # in block. The escape lane rules point at $esc_out (direct in local mode).
+    ($lane_sets | map({rule_set:[.tag], outbound:(if .lane == "escape" then $esc_out else .lane end)})) as $lane_rules
     |
     # Per-lane `geosite:<name>` rule-sets (e.g. `geosite:google` in escape) sit after
     # the hand suffixes (an explicit entry still wins) and before the broad ad set.
@@ -2204,11 +2253,7 @@ assemble_host() {
     # that under the direct lane, where the failure of the outbound used to land.
     ($corp_cidr|length) as $n_corp
     | ([ {action:"sniff"} ]
-     + $exact_rules
-     + $suffix_rules
-     # The synced DHCP domains, after every hand suffix (a hand entry
-     # in escape or block still wins, as corp sync already promised).
-     + [ {rule_set:["corp-sync-dom"], outbound:"corp"} ]
+     + $lane_rules
      + $geo_rules
      + [ if $ads != ""                   then {rule_set:["geosite-ads"], outbound:"block"} else empty end,
          if $final == "direct" and ($n_corp > 0 or $priv_default == "corp")
@@ -2255,11 +2300,10 @@ assemble_host() {
         then [{type:"hosts", tag:"dns-escape", path:[$escape_hosts]}] else [] end)) as $dns_servers
     |
     # Corp names must resolve through the corp resolver or they answer with a
-    # public IP and leave the tunnel — so an EXACT corp entry needs this rule
-    # just as much as a suffix one. `domain` first, mirroring the route rules.
-    ([ if ($corp_exact|length) > 0 then {domain:$corp_exact, server:"local"} else empty end,
-       if ($corp_dom|length)   > 0 then {domain_suffix:$corp_dom, server:"local"} else empty end,
-       {rule_set:["corp-sync-dom"], server:"local"} ]) as $dns_rules   # the synced DHCP domains resolve locally too
+    # public IP and leave the tunnel — so every corp set, exact and suffix,
+    # names the local server: one rule over the sixteen corp sets (a list of
+    # sets matches on any of them), always there since the sets always are.
+    ([ {rule_set:($lane_sets | map(select(.lane == "corp") | .tag)), server:"local"} ]) as $dns_rules
     |
     {
       log:{level:$lvl, timestamp:true},
@@ -2283,8 +2327,10 @@ assemble_host() {
       route:(({rules:$rules, final:$final, auto_detect_interface:false,
                default_domain_resolver:{server:"dns-direct", strategy:"prefer_ipv4"}})
              + (($geo_sets + (if $ads != "" then [{type:"local", tag:"geosite-ads", format:"binary", path:$ads}] else [] end)
-                 + [{type:"local", tag:"corp-cidr", format:"source", path:$corp_set_cidr},   # the corp lane (see CORP_SET_CIDR)
-                    {type:"local", tag:"corp-sync-dom", format:"source", path:$corp_set_dom}]) as $allsets
+                 # the lane sets in route order, then the corp CIDRs — every one a
+                 # source (JSON) set under LANE_SETS_DIR, written by _lane_sets_write
+                 + ($lane_sets | map({type:"local", tag:.tag, format:"source", path:($sets_dir + "/" + .tag + ".json")}))
+                 + [{type:"local", tag:"corp-cidr", format:"source", path:($sets_dir + "/corp-cidr.json")}]) as $allsets
                 | if ($allsets|length) > 0 then {rule_set:$allsets} else {} end))
     }
     + ( ( (if $clash=="" then {} else {clash_api:{external_controller:$clash, secret:$secret}} end)
@@ -2360,11 +2406,11 @@ cmd_render() {
   fi
   # VM guest config (used only in mode vm): selector + clash API bound to the LAN
   assemble_vm "$(build_escape_outbounds vm-guest)" "0.0.0.0" "0.0.0.0:$VM_CLASH" > "$tv"
-  "$SB" check -c "$th" || { rm -f "$th" "$tv"; _corp_sets_restore; die "generated host config failed validation"; }   # and the corp sets as they were
+  "$SB" check -c "$th" || { rm -f "$th" "$tv"; _lane_sets_restore; die "generated host config failed validation"; }   # and the lane sets as they were
   "$SB" check -c "$tv" || { rm -f "$th" "$tv"; die "generated vm config failed validation"; }
   mv -f "$th" "$HOST_CFG"
   mv -f "$tv" "$VM_CFG"
-  rm -f "$CORP_SET_CIDR.prev" "$CORP_SET_DOM.prev"   # validated: the previous corp sets are done with
+  _lane_sets_prev_clear   # validated: the previous lane sets are done with
   [ "${ROWT_RENDER_SHADOW:-$(sget shadow_render)}" = 1 ] && _render_shadow "$mode" || true
   echo "  host: $HOST_CFG"
   echo "  vm:   $VM_CFG"
@@ -5684,20 +5730,17 @@ _list_hit() {
 # -> "<lane> <exact|suffix> <entry>". An EXACT (`domain:`) hit beats every suffix
 # at any length, because the render emits the `domain` rules first and sing-box
 # is first-match-wins; among exacts the first lane seen wins, matching that same
-# emission order (escape -> corp -> block). The corp lane's synced DHCP domains
-# are one rule-set rule placed after every inline suffix (assemble_host), so they
-# are ranked only among themselves, and only when no inline suffix matched.
+# emission order (escape -> corp -> block). Entries are compared ASCII-lowercased,
+# as the rule-sets hold them: sing-box lowercases the name it matches, so a
+# mixed-case entry reaches the router lowercased or not at all, and explain
+# lowercases the name it is asked (cmd_explain).
 _longest_domain_hit() { # $1=domain
-  local val="$1" best_e="" best_lane="" ex_e="" ex_lane="" sy_e="" insync e lane f pair ent
+  local val="$1" best_e="" best_lane="" ex_e="" ex_lane="" e lane f pair ent
   for pair in "escape:$DOMAINS" "corp:$CORP_DOMAINS" "block:$BLOCK_DOMAINS"; do
     lane="${pair%%:*}"; f="${pair#*:}"
     [ -f "$f" ] || continue
-    insync=0
     while IFS= read -r e; do
-      if [ "$lane" = corp ]; then
-        case "$e" in "# --- rowt corp sync"*) [ "$e" = "$CORP_SYNC_DOM_MARKER" ] && insync=1 || insync=0; continue ;; esac
-      fi
-      e="$(printf '%s' "$e" | sed 's/[[:space:]]//g')"; case "$e" in ''|\#*) continue ;; esac
+      e="$(printf '%s' "$e" | sed 's/[[:space:]]//g' | tr 'A-Z' 'a-z')"; case "$e" in ''|\#*) continue ;; esac
       case "$e" in '*.'?*) e="${e#\*}" ;; esac   # `*.z.com` is `.z.com` (_lane_has)
       case "$e" in
         domain:*)
@@ -5706,13 +5749,6 @@ _longest_domain_hit() { # $1=domain
           continue ;;
       esac
       case "$e" in */[0-9]*) continue ;; esac   # skip corp CIDR entries
-      if [ "$insync" = 1 ]; then
-        case "$e" in
-          .*) case "$val" in *"$e") [ "${#e}" -gt "${#sy_e}" ] && sy_e="$e" ;; esac ;;
-          *)  case "$val" in "$e"|*".$e") [ "${#e}" -gt "${#sy_e}" ] && sy_e="$e" ;; esac ;;
-        esac
-        continue
-      fi
       # sing-box matches domain_suffix on a LABEL BOUNDARY — measured with
       # `sing-box rule-set match` on 1.13.14:
       #     z.com  -> z.com Y  a.z.com Y  xz.com .    com .
@@ -5729,7 +5765,6 @@ _longest_domain_hit() { # $1=domain
     done < "$f"
   done
   [ -n "$ex_e" ] && { printf '%s exact %s\n' "$ex_lane" "$ex_e"; return 0; }
-  [ -z "$best_e" ] && [ -n "$sy_e" ] && { best_e="$sy_e"; best_lane=corp; }
   [ -n "$best_e" ] || return 1
   printf '%s suffix %s\n' "$best_lane" "$best_e"
 }

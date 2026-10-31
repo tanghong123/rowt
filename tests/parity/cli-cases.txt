@@ -78,10 +78,10 @@ PARITY_SCENARIO=corp-synced corp add new.corp.example
 PARITY_SCENARIO=corp-synced corp add 192.0.2.0/24
 PARITY_SCENARIO=corp-synced corp add new.corp.example second.corp.example
 PARITY_SCENARIO=corp-synced escape add new.example
-# The corp lane's CIDRs and synced DHCP domains render as two rule-set files
-# beside host.json (corp-cidr.json, corp-sync-domains.json), which fsstate
-# compares byte for byte. The synced domains rank after every inline suffix, in
-# the router and in explain alike (see the corp-sync-shadowed README).
+# Every lane rule renders as a rule-set file under rule-sets/ (48 banded lane
+# sets and corp-cidr.json), which fsstate compares byte for byte, modes too.
+# The synced DHCP domains rank by depth with the hand entries, in the router
+# and in explain alike (see the corp-sync-shadowed README).
 PARITY_SCENARIO=corp-synced render
 PARITY_SCENARIO=corp-sync-shadowed render
 PARITY_SCENARIO=corp-sync-shadowed explain x.hq.shadow.example
