@@ -13,6 +13,10 @@ release is cut; everything under Unreleased ships with the next one.
   - `<lane> import` with no file aborts, and the audit records it as aborted;
   - `rm` or `clear` on a lane file that doesn't exist says the list is empty;
   - an `add` creates the lane file even when no entry goes in.
+- `rowt doctor` runs natively in rowt-rs (`ROWT_IMPL=rust`), row for row and
+  FLAG for FLAG with the shell, compared by cli-diff over six scenarios of the
+  Mac around rowt. The `apps` row lists the clients it finds in a fixed order;
+  it used to follow awk's hash order.
 
 ## 3.8.28 — 2026-11-01
 

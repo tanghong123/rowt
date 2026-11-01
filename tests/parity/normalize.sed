@@ -13,6 +13,11 @@
 s/[0-9]\{4\}-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9] [+-][0-9]\{4\}/<TS>/g
 s/[0-9]\{4\}-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9]/<TS>/g
 
+# `rowt doctor` stamps its header to the MINUTE — the one stamp in the matrix
+# without seconds, so the rule above misses it, and two runs that straddle a
+# minute boundary would differ on nothing else. Anchored to that header.
+s/^\(rowt doctor (read-only) — \)[0-9]\{4\}-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]$/\1<TS>/
+
 # Process identity: pids move every run, and the audit context embeds them.
 s/pid=[0-9][0-9]*/pid=<PID>/g
 s/ppid=[0-9][0-9]*/ppid=<PID>/g

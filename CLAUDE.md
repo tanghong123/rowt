@@ -35,7 +35,7 @@ skill** in `skills/rowt/`. Don't duplicate that here.
   release + `brew upgrade`. Keep it in sync with `rowt help` / `rowt onboard`
   when commands change. `SKILL.md` is the agent's onboarding playbook (knack's
   budget is 24 KB — bulk goes in `references/`). The diagnosis it runs first is
-  `rowt doctor` (`cmd_doctor`, a legacy arm rowt-rs hands to the shell), whose
+  `rowt doctor` (`cmd_doctor` in the shell, `doctor.rs` in rowt-rs), whose
   FLAG names SKILL.md's table maps to actions — rename one and change the table
   in the same pass.
 - **`share/knack/rowt.toml`** — the knack foreign-owner recipe, printed by

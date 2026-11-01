@@ -1013,6 +1013,39 @@ onboard
 PARITY_SCENARIO=router-up onboard
 PARITY_SCENARIO=lanes-empty onboard
 
+# `doctor` — the Mac AROUND rowt, ending in FLAGS the skill acts on (rowt #s72).
+# The FLAG names are the contract (skills/rowt/SKILL.md maps each to an action),
+# so every row and flag is compared byte for byte; selftest 52 misspells one in
+# the shell and requires the firewalled case to differ. The seven curl probes run
+# concurrently on both sides, hence PARITY_UNORDERED. What the sandbox decides:
+# curl is a shim (no canned answer = `fail(0)` = NET_DOWN), lsof/ps/nc read the
+# real machine on both sides, `brew` is always a shim (so NO_BREW, INTEL_MAC and
+# ROWT_OUTDATED cannot be reached here — the version compare has unit tests),
+# sudo's listing is empty (NO_SUDO_RULE every time). The scenarios answer the
+# probes: online (OPEN_INTERNET), firewalled (GITHUB_BLOCKED, the API refused
+# over the NIC but served by the default route: AGENT_API_NEEDS_TUNNEL plus
+# AGENT_VIA_VPN, or AGENT_VIA_PROXY_ENV when the case sets HTTPS_PROXY — rowt's
+# port, and another port with a password to mask), pac (another system proxy, a
+# PAC and WPAD), vpn-default (a utun carrying the default route, a connected VPN
+# service, an overlay), offline (no interface up), clash-verge (an import source
+# that needs yq). corp-health-fresh, corp-vpn and ports-status reuse theirs.
+PARITY_UNORDERED=1 doctor
+PARITY_UNORDERED=1 doctor api.example.com
+PARITY_UNORDERED=1 doctor https://api.example.com/v1/messages
+doctor --nope
+PARITY_UNORDERED=1 ROWT_IFACE=en5 doctor api.example.com
+PARITY_UNORDERED=1 PARITY_SCENARIO=doctor-online doctor api.example.com
+PARITY_UNORDERED=1 PARITY_SCENARIO=doctor-firewalled doctor api.example.com
+PARITY_UNORDERED=1 PARITY_SCENARIO=doctor-firewalled HTTPS_PROXY=http://127.0.0.1:7890 doctor api.example.com
+PARITY_UNORDERED=1 PARITY_SCENARIO=doctor-firewalled HTTPS_PROXY=http://me:secret@127.0.0.1:7891 doctor api.example.com
+PARITY_UNORDERED=1 PARITY_SCENARIO=doctor-pac doctor api.example.com
+PARITY_UNORDERED=1 PARITY_SCENARIO=doctor-vpn-default doctor api.example.com
+PARITY_UNORDERED=1 PARITY_SCENARIO=doctor-offline doctor api.example.com
+PARITY_UNORDERED=1 PARITY_SCENARIO=doctor-clash-verge doctor api.example.com
+PARITY_UNORDERED=1 PARITY_SCENARIO=corp-health-fresh doctor api.example.com
+PARITY_UNORDERED=1 PARITY_SCENARIO=corp-vpn doctor api.example.com
+PARITY_UNORDERED=1 PARITY_SCENARIO=ports-status doctor api.example.com
+
 # `uninstall` — it was claimed native and gated by nothing, which the ledger
 # has been saying all along. It is a COMPOSITION of arms already gated here
 # (revert, proxy off, watch uninstall) plus the rc-file edit, so what these add

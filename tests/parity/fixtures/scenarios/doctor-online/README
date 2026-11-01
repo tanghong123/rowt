@@ -1,0 +1,5 @@
+A Mac on an open network, for `doctor`: every probe answers over the NIC (Google
+204, GitHub and Baidu 200, the API 200), and through rowt's port too — so the
+only reachability flag is OPEN_INTERNET. The answers are keyed by curl's whole
+argv (the recorder's most specific key), because the same URL is asked over the
+NIC and through the proxy and the two must be answerable apart.

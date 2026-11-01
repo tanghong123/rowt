@@ -49,6 +49,8 @@
 #   46.  stop auditing the watchdog's sub refresh    -> cli-diff must fire
 #   47.  stop writing one band's lane rule-sets      -> cli-diff must fire (config tree)
 #   48.  let a live-path fixture go stale             -> live-fixtures must fire
+#   51.  hand hotspot to the shell again             -> cli-diff must fire (hotspot answered by rowt-rs)
+#   52.  misspell a doctor FLAG in the shell          -> cli-diff must fire (doctor)
 #
 # Everything happens in a throwaway copy of the repo; the real tree is never
 # touched. Run it after changing the harness itself.
@@ -1432,6 +1434,27 @@ else
     bad "cli-diff passed with the shell's hotspot mutated — rowt-rs handed the arm to the shell"
   else
     ok "rowt-rs answered hotspot itself"
+  fi
+  cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+fi
+
+echo "52. a doctor FLAG renamed on one side must be caught"
+cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+if [ ! -x "$ROOT/target/release/rowt-rs" ]; then
+  echo "  skip — no release build"
+else
+  # rowt #s72. The FLAG names are what skills/rowt/SKILL.md keys its actions on,
+  # so the port's claim is that they are byte-identical to the shell's. Misspell
+  # one the firewalled scenario raises; the case must differ on stdout.
+  perl -0pi -e 's/_dr_flag GITHUB_BLOCKED /_dr_flag GITHUB_BLOCKD /' "$tmp/bin/rowt"
+  if ! grep -qF '_dr_flag GITHUB_BLOCKD ' "$tmp/bin/rowt"; then
+    bad "could not misspell GITHUB_BLOCKED (cmd_doctor moved?)"
+  elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" \
+       PARITY_CASES="$(only 'PARITY_UNORDERED=1 PARITY_SCENARIO=doctor-firewalled doctor api.example.com')" \
+       "$P" cli-diff >/dev/null 2>&1; then
+    bad "cli-diff passed with a doctor FLAG misspelled on the shell side"
+  else
+    ok "cli-diff caught a doctor FLAG the two sides spell differently"
   fi
   cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
 fi

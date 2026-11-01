@@ -15,6 +15,7 @@
 
 mod corp;
 mod diag;
+mod doctor;
 mod escape_dns;
 mod fetch;
 mod help;
@@ -213,7 +214,8 @@ fn native(cmd: &str, sub: &str) -> bool {
         "proxy" => matches!(sub, "" | "status" | "check" | "env" | "on" | "off"),
         "server" => matches!(sub, "" | "list" | "dump" | "add" | "rm" | "remove" | "clear" | "import"),
         "sub" => matches!(sub, "" | "list" | "dump" | "add" | "rm" | "remove" | "update" | "clear" | "import"),
-        "use" | "ping" | "run" | "skill" | "report" | "uninstall" | "fetch" | "probe" | "vm" | "watch" | "onboard" => true,
+        "use" | "ping" | "run" | "skill" | "report" | "uninstall" | "fetch" | "probe" | "vm" | "watch" | "onboard"
+        | "doctor" => true,
         // `import` is NOT native: it delegates to the shell (its merge re-runs
         // `<lane> import` for each lane through bin/rowt; #s74), and it must delegate HERE, before the
         // audit BEGIN, or the shell would open a SECOND BEGIN/END pair. `list`
@@ -556,8 +558,8 @@ fn geosite_hint(cfg: &Path, label: &str, domain: &str, have: &[String]) -> Vec<S
     }
 }
 
-/// `_corp_view` — the `corp lane` line's text, for status (doctor is the shell's).
-fn corp_view() -> String {
+/// `_corp_view` — the `corp lane` line's text, for status and doctor.
+pub(crate) fn corp_view() -> String {
     let path = env_or("ROWT_CORP_HEALTH", "/Library/Application Support/corp-route/corp-health");
     let p = Path::new(&path);
     // `[ -e … ]` then `head -n 1`: an existing but unreadable file reads as empty.
@@ -1298,6 +1300,7 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
             }
         }
         "onboard" => Ok(onboard::run(&Ctx::new(cfg.clone()), &here_dir())),
+        "doctor" => doctor::run(&Ctx::new(cfg.clone()), &here_dir(), &rest),
         "watch" => {
             let ctx = Ctx::new(cfg.clone());
             // The agent names the FRONT DOOR, never this binary — see watch_self.

@@ -1,0 +1,6 @@
+   route to: default
+destination: default
+       mask: default
+    gateway: 10.8.0.1
+  interface: utun3
+      flags: <UP,GATEWAY,DONE,STATIC,PRCLONING,GLOBAL>

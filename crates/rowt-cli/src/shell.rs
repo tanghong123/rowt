@@ -77,7 +77,7 @@ pub fn is_readonly(cmd: &str, arg: &str) -> bool {
     let sub = |d: &'static str| if arg.is_empty() { d } else { arg };
     match cmd {
         "status" | "report" | "explain" | "route" | "connections" | "conns" | "monitor" | "mon"
-        | "ping" | "probe" | "version" | "run" | "onboard" | "shell-init" | "completion"
+        | "ping" | "probe" | "version" | "run" | "onboard" | "doctor" | "shell-init" | "completion"
         | "_complete" | "help" | "audit" | "metrics" | "-h" | "--help" | "--version" | "-V" => true,
         "proxy" => !matches!(sub("status"), "on" | "off"),
         "router" => !matches!(sub("status"), "up" | "down" | "restart"),
@@ -368,7 +368,7 @@ mod tests {
         for (cmd, arg) in [
             ("status", ""), ("report", ""), ("explain", "x"), ("connections", ""),
             ("monitor", ""), ("ping", ""), ("version", ""), ("run", "ls"),
-            ("onboard", ""), ("audit", "clear"), ("metrics", "top"), ("help", ""),
+            ("onboard", ""), ("doctor", ""), ("audit", "clear"), ("metrics", "top"), ("help", ""),
         ] {
             assert!(is_readonly(cmd, arg), "{cmd} {arg} should be read-only");
         }

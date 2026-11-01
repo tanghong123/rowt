@@ -1401,6 +1401,11 @@ cmd_cli_diff() {
         # sides: the watchdog's probe target and retry schedule are chosen by
         # environment, not argv, and a tick is otherwise unreachable from here.
         ROWT_*=*)          cenv+=("${cmdline%% *}"); cmdline="${cmdline#* }" ;;
+        # …and a proxy variable, for the one arm that reads the caller's: `doctor`
+        # says where this shell's own API calls go (AGENT_VIA_PROXY_ENV), and the
+        # case can set it on both sides no other way. Upper-case only — the token
+        # rule is a leading `[A-Z_]+=` everywhere the matrix is read.
+        HTTPS_PROXY=*|HTTP_PROXY=*|ALL_PROXY=*) cenv+=("${cmdline%% *}"); cmdline="${cmdline#* }" ;;
         *) break ;;
       esac
     done

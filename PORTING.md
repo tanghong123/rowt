@@ -251,16 +251,17 @@ revertible and gated.
 
 #### What still reaches for bash, and the order it comes back in
 
-**Five paths do (2026-11-01), all newer than the port.** The 37 arms ported
+**Four paths do (2026-11-01), all newer than the port.** The 37 arms ported
 here still answer natively, but four commands landed in the shell afterwards.
-`hotspot` came back first (#s71). rowt-rs still hands `doctor`, `port` and
-`speed` to `bin/rowt` whole (CLI-LEDGER.md: 38 of 41). Two `config` paths are the shell's too:
+`hotspot` came back first (#s71), `doctor` next (#s72, with 16 cli-diff cases
+over six scenarios of the machine around rowt). rowt-rs still hands `port` and
+`speed` to `bin/rowt` whole (CLI-LEDGER.md: 39 of 41). Two `config` paths are the shell's too:
 `config import`, which went back once its default became a merge that edits
 the lane lists, hotspot's among them; and `config export --to` any client
 other than rowt (`_export_shadowrocket`). The §6.6 fallthrough is what runs
-all five, and `help::is_registered` still tells them from a typo; `selftest` 23
-asserts the two agree. Porting them is rowt #s72 (doctor), #s73 (port,
-speed) and #s74 (the two `config` paths). Until they land, a
+all four, and `help::is_registered` still tells them from a typo; `selftest` 23
+asserts the two agree. Porting them is rowt #s73 (port, speed) and #s74 (the
+two `config` paths); #s71 (hotspot) and #s72 (doctor) are done. Until they land, a
 machine on `ROWT_IMPL=rust` runs the shell for these, which is one reason the
 shell stays installed.
 

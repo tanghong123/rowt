@@ -1,0 +1,4 @@
+`scutil --proxy` on a Mac whose corp VPN client set everything: a system proxy
+at another address (SYSTEM_PROXY_OTHER), a PAC URL and WPAD (PAC_ON twice).
+Documentation ranges and `corp.example` only. `doctor` reads this one command for
+its proxy row; `proxy check` reads networksetup's getters (pac-enabled).

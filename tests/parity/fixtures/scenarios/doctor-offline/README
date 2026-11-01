@@ -1,0 +1,6 @@
+No interface is up, for `doctor`: `route -n get default` says nothing and
+`ipconfig getifaddr en0` answers nothing and exits 1 (as it does with no
+address; an empty answer with exit 0 is one the real tool never gives, and the
+two implementations read it differently), so detect_iface finds no physical NIC —
+NO_PHYSICAL_NETWORK, the reach row reads "over the NIC" with every NIC probe
+"-", and only the default-route probe runs (and fails, nothing cans it).

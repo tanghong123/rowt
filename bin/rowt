@@ -62,7 +62,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.8.29"
+ROWT_VERSION="3.8.30"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -5754,8 +5754,16 @@ cmd_doctor() {
     n ~ /^wireguard/                    { c["WireGuard"] = 1 }
     n ~ /^(tailscale|ipnextension)/     { o["Tailscale"] = 1 }
     n ~ /^zerotier/                     { o["ZeroTier"] = 1 }
-    function list(a,   k, s) { s = ""; for (k in a) s = s (s == "" ? "" : ", ") k; return s == "" ? "none" : s }
-    END { print list(p); print list(c); print list(o) }' > "$t/apps" || true
+    # In the order the rules above stand, not `for (k in a)`: awk walks a hash
+    # there, so two clients could print in either order from one run to the
+    # next, and rowt-rs could never print the same row (cli-diff, rowt #s72).
+    function list(a, names, n,   i, s) { s = ""; for (i = 1; i <= n; i++) if (names[i] in a) s = s (s == "" ? "" : ", ") names[i]; return s == "" ? "none" : s }
+    BEGIN {
+      np = split("Shadowrocket|Clash|FlClash|V2Box|V2Ray/Xray|Surge/Stash/Quantumult|Hiddify/NekoRay|another sing-box", P, "|")
+      nc = split("Cisco Secure Client|GlobalProtect|Zscaler|FortiClient|Ivanti/Pulse|OpenVPN|WireGuard", C, "|")
+      no = split("Tailscale|ZeroTier", O, "|")
+    }
+    END { print list(p, P, np); print list(c, C, nc); print list(o, O, no) }' > "$t/apps" || true
   local vpn_up
   vpn_up="$(scutil --nc list 2>/dev/null | awk -F'"' '/\(Connected\)/ { s = s (s == "" ? "" : ", ") $2 } END { print s }' || true)"
   # Tunnels that are up, overlays aside — vendor-neutral, so a VPN that runs a raw

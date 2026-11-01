@@ -1,0 +1,8 @@
+A Mac behind the firewall rowt exists for, for `doctor`: over the NIC Google
+times out (curl 28), GitHub fails the handshake (curl 35), Baidu answers, and the
+API answers 403 — refused by region, which `_dr_served` counts as NOT served;
+over the default route (the old VPN) the API answers 200. So: GITHUB_BLOCKED,
+AGENT_API_NEEDS_TUNNEL, and then one of two: AGENT_VIA_VPN when the shell has no
+proxy variable, AGENT_VIA_PROXY_ENV when the case sets HTTPS_PROXY (rowt's own
+port follows rowt; another port stops with its app, and its `user:pass@` is
+masked). The cli-diff token for that variable exists for this scenario.

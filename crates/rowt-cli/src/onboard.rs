@@ -34,7 +34,7 @@ fn have(cmd: &str) -> bool {
 /// Time-boxed at 6s each, and that is not a nicety: these scan client config
 /// directories including iCloud paths, which can stall for a long time on a
 /// dataless volume. `onboard` must never hang.
-fn detect_import_sources(here: &Path) -> Vec<String> {
+pub(crate) fn detect_import_sources(here: &Path) -> Vec<String> {
     let mut out = Vec::new();
     for script in ["config/sr-import.py", "config/foreign-import.py"] {
         let p = here.join(script);

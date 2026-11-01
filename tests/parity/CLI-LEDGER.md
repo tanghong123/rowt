@@ -23,7 +23,7 @@ is not 'does it work' but 'whose code ran, and what proves it'.
 | `conns` | **native** | cli-diff |
 | `corp` | **native** | cli-diff |
 | `direct` | **native** | cli-diff |
-| `doctor` | legacy | — |
+| `doctor` | **native** | cli-diff |
 | `down` | **native** | cli-diff + boot-test |
 | `escape` | **native** | cli-diff |
 | `explain` | **native** | cli-diff |
@@ -56,7 +56,7 @@ is not 'does it work' but 'whose code ran, and what proves it'.
 | `vm` | **native** | cli-diff |
 | `watch` | **native** | cli-diff |
 
-**38 of 41 command arms answered natively**; the other 3 run in the shell.
+**39 of 41 command arms answered natively**; the other 2 run in the shell.
 
 Partial arms — native for some sub-commands, legacy for the rest.
 `native()` in crates/rowt-cli/src/main.rs is the authority:
@@ -73,7 +73,8 @@ Partial arms — native for some sub-commands, legacy for the rest.
             "proxy" => matches!(sub, "" | "status" | "check" | "env" | "on" | "off"),
             "server" => matches!(sub, "" | "list" | "dump" | "add" | "rm" | "remove" | "clear" | "import"),
             "sub" => matches!(sub, "" | "list" | "dump" | "add" | "rm" | "remove" | "update" | "clear" | "import"),
-            "use" | "ping" | "run" | "skill" | "report" | "uninstall" | "fetch" | "probe" | "vm" | "watch" | "onboard" => true,
+            "use" | "ping" | "run" | "skill" | "report" | "uninstall" | "fetch" | "probe" | "vm" | "watch" | "onboard"
+            | "doctor" => true,
             // `import` is NOT native: it delegates to the shell (its merge re-runs
             // `<lane> import` for each lane through bin/rowt; #s74), and it must delegate HERE, before the
             // audit BEGIN, or the shell would open a SECOND BEGIN/END pair. `list`

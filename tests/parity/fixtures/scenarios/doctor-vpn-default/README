@@ -1,0 +1,9 @@
+A VPN holds the default route, for `doctor`: `route -n get default` names utun3,
+the bare `ifconfig` shows utun3 with a private address (a tunnel up) beside utun4
+in 100.64/10 (an overlay, not a tunnel), and `scutil --nc list` has one service
+connected. Expect VPN_HOLDS_DEFAULT, "tunnels up: utun3", "100.64/10 overlay on
+utun4", "connected VPN services: Corp VPN", and — on a Mac running none of the
+recognised VPN clients — "VPN clients: no known client; a tunnel is up (utun3)".
+detect_iface skips the utun and finds en0 from the hardware ports, so the probes
+still bind to en0. The base `ifconfig -l` and no routes keep the corp row at
+"no corp tunnel seen".

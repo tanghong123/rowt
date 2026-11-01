@@ -1,0 +1,5 @@
+A Clash Verge install, as foreign-import's detect recognises one: the config
+directory under HOME with a profiles.yaml in it (empty here — detect reads only
+its presence). `doctor` then lists clash-verge as an import source, and with no
+yq on the sandbox PATH flags YQ_MISSING. The overlay goes under home/, beside
+the config tree, which is where the client keeps it.

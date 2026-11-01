@@ -138,6 +138,11 @@ running router alone. `sudo` is recorded and then delegates to the shim for the
 command it wraps, so an unshimmed effectful command fails loudly instead of
 running for real.
 
+A case may also set `HTTPS_PROXY`, `HTTP_PROXY` or `ALL_PROXY` for both sides:
+`doctor` reports where this shell's own API calls go (AGENT_VIA_PROXY_ENV),
+and nothing but the environment can say so. Every other `[A-Z_]+=` token is
+`PARITY_*` or `ROWT_*`.
+
 A case token `ROWT_PARITY_SUDO=no-tty` makes that `sudo` refuse instead, in
 sudo's own words — "a terminal is required to read the password", or "a
 password is required" under `-n` — which is what a shell with no terminal and no

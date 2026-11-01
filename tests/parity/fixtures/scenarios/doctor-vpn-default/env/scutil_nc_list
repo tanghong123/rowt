@@ -1,0 +1,3 @@
+Available network connection services in the current set (*=enabled):
+* (Connected)     1A2B3C4D-0000-4000-8000-000000000001 PPP --> "Corp VPN" [PPP:L2TP]
+* (Disconnected)  1A2B3C4D-0000-4000-8000-000000000002 VPN --> "Home" [VPN:IKEv2]
