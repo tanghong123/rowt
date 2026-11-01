@@ -1414,28 +1414,39 @@ else
   fi
 fi
 
-echo "51. hotspot must be answered by rowt-rs, not handed to the shell"
-cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+echo "51. arms rowt-rs claims must be answered by it, not handed to the shell"
 if [ ! -x "$ROOT/target/release/rowt-rs" ]; then
   echo "  skip — no release build"
 else
-  # Until #s71, cli-diff's hotspot cases compared the shell with itself: rowt-rs
-  # handed the arm to bin/rowt and every case passed by construction. Mutate the
-  # shell copy's editor and point rowt-rs's fallthrough (ROWT_LEGACY) at that
+  # Until an arm is ported, its cli-diff cases compare the shell with itself:
+  # rowt-rs hands the arm to bin/rowt and every case passes by construction.
+  # Mutate the shell copy and point rowt-rs's fallthrough (ROWT_LEGACY) at that
   # SAME copy: a delegated arm then prints the mutation on both sides and
   # compares clean, so only an arm rowt-rs answers itself can differ. On STDOUT:
-  # cli-diff does not compare stderr, and `hotspot errors` is read-only, so its
-  # die writes no audit line either — a mutation there could not fail this.
-  perl -0pi -e 's/echo "  added: \$e"/echo "  ADDED for selftest: \$e"/' "$tmp/bin/rowt"
-  if ! grep -qF 'ADDED for selftest' "$tmp/bin/rowt"; then
-    bad "could not alter the editor's added line (edit_list moved?)"
-  elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" PARITY_CASES="$(only "ROWT_LEGACY=$tmp/bin/rowt hotspot add portal.example")" \
-       "$P" cli-diff >/dev/null 2>&1; then
-    bad "cli-diff passed with the shell's hotspot mutated — rowt-rs handed the arm to the shell"
-  else
-    ok "rowt-rs answered hotspot itself"
-  fi
-  cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+  # cli-diff does not compare stderr, and a read-only arm's die writes no audit
+  # line either — a mutation there could not fail this. One row per arm ported
+  # since the 37 (#s71 hotspot, #s72 doctor, #s73 speed and port).
+  _native_check() { # $1=arm  $2=perl substitution  $3=its marker  $4=the case
+    cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+    perl -0pi -e "$2" "$tmp/bin/rowt"
+    if ! grep -qF "$3" "$tmp/bin/rowt"; then
+      bad "could not alter the shell's $1 (the line moved?)"
+    elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" PARITY_CASES="$(only "ROWT_LEGACY=$tmp/bin/rowt $4")" \
+         "$P" cli-diff >/dev/null 2>&1; then
+      bad "cli-diff passed with the shell's $1 mutated — rowt-rs handed the arm to the shell"
+    else
+      ok "rowt-rs answered $1 itself"
+    fi
+    cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+  }
+  _native_check hotspot 's/echo "  added: \$e"/echo "  ADDED for selftest: \$e"/' 'ADDED for selftest' \
+    'hotspot add portal.example'
+  _native_check speed 's/and it never changes the exit status\./and it never changes the exit status (MUTATED for selftest)./' \
+    'MUTATED for selftest' 'PARITY_SCENARIO=speed-samples speed'
+  _native_check port 's/\(the system proxy port\)/(the system proxy port, MUTATED for selftest)/' \
+    'MUTATED for selftest' 'port list'
+  _native_check doctor 's/_dr_row system "macOS /_dr_row system "MUTATED for selftest macOS /' \
+    'MUTATED for selftest' 'PARITY_UNORDERED=1 doctor'
 fi
 
 echo "52. a doctor FLAG renamed on one side must be caught"

@@ -17,6 +17,12 @@ release is cut; everything under Unreleased ships with the next one.
   FLAG for FLAG with the shell, compared by cli-diff over six scenarios of the
   Mac around rowt. The `apps` row lists the clients it finds in a fixed order;
   it used to follow awk's hash order.
+- **`rowt speed` and `rowt port` run on the Rust version** too, so all 41
+  commands do; only `config import` and `config export --to shadowrocket`
+  still hand over to the shell. Behaviour is unchanged. 46 cases compare the
+  two with the shell, `speed` over a fixed set of throughput samples (every
+  cell, median and verdict) and `port` down to the undo when a running router
+  will not take the change.
 
 ## 3.8.28 — 2026-11-01
 

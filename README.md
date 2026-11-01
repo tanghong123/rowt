@@ -509,8 +509,8 @@ rowt status          # the shell
 rowt-rust status     # the port, same config, same output
 ```
 
-38 of the 41 command arms answer natively (the other three still run in the
-shell), and every one is compared against the shell — stdout, exit status, the
+All 41 command arms answer natively (two `config` sub-commands still run in
+the shell), and every one is compared against the shell — stdout, exit status, the
 config tree with file modes, the argv trace and the audit log — over 500 cases
 (`tests/parity/`). What is NOT yet proven is time
 on real networks, which is what the preview is for. If the two ever disagree on

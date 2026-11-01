@@ -859,6 +859,47 @@ PARITY_SCENARIO=render-ports explain example.com
 PARITY_SCENARIO=render-ports ROWT_FINAL=escape explain pub.example
 PARITY_SCENARIO=render-ports-local explain pub.example
 PARITY_SCENARIO=render-ports port list
+# `port` itself, answered by rowt-rs since #s73. Every refusal is a `die`, so
+# its words reach the audit log; `list` is read-only and writes none. A new
+# port cannot be added here: lsof and the connect see this machine, and the
+# sandbox's engine exits before it binds, so the last check refuses — which
+# pins that refusal. What CAN be reached is everything around it: the same row
+# again (no write, the apply still renders), a removal (the table rewritten
+# without its broken rows), and with a router up the whole fallback chain.
+port
+port list extra
+port nosucharm
+port add
+port add 7895
+port add 7895 guest --final
+port add 7895 guest --bogus
+port add 7895 guest --final block
+port add 78x5 guest
+port add 0 guest
+port add 70000 guest
+port add 0080 guest
+port add 7895 main
+port add 7895 escape
+port add 7895 Guest
+port add 7895 a_b
+port add 7890 guest
+port add 9091 guest
+ROWT_PORT=7990 port add 7991 guest
+port add 7895 guest --final=corp
+port rm
+port rm a b
+port rm main
+port rm nosuch
+PARITY_SCENARIO=render-ports port add 7892 guest --final escape
+PARITY_SCENARIO=render-ports port add 7899 guest
+PARITY_SCENARIO=render-ports port add 7893 other
+PARITY_SCENARIO=render-ports port add 07893 other
+PARITY_SCENARIO=render-ports port rm lab
+PARITY_SCENARIO=render-ports-local port list
+PARITY_SCENARIO=ports-status port list
+PARITY_SCENARIO=ports-router-up port list
+PARITY_TIMEOUT=60 PARITY_SCENARIO=ports-router-up port rm guest
+PARITY_TIMEOUT=60 PARITY_SCENARIO=ports-router-up port add 7892 guest --final escape
 # The watchdog's six-hour subscription refresh (PR #3), due and not due. Only a
 # FAILED fetch is reachable here (a reload with the router up would stop the
 # harness); success and the reload's audit pair are in tests/test_subscriptions.py.
@@ -886,6 +927,20 @@ skill recipe
 # blank in this case, so nothing time-varying reaches the diff.
 help speed
 PARITY_SCENARIO=router-up speed
+# rowt-rs answers `speed` itself (#s73), so the measurement is compared too:
+# speed-samples replays a fixed sequence of curl answers (its README), which
+# makes every cell, median, ratio and roll-up line reproducible. Three default
+# URLs on one lane; three lanes with failed samples and a ratio of exactly 50%;
+# one URL with a port, after `--`; the env knobs, which reach curl's argv.
+speed
+PARITY_SCENARIO=speed-samples speed
+PARITY_SCENARIO=speed-samples speed --repeat 3 https://example.com/big https://corp.example/file https://other.test/x
+PARITY_SCENARIO=speed-samples speed --repeat=2 -- https://intranet.corp.example:8443/a
+PARITY_SCENARIO=speed-samples ROWT_SPEED_URL=https://Sub.Example.NET:443/f ROWT_SPEED_BYTES=500000 ROWT_SPEED_TIMEOUT=3 speed
+PARITY_SCENARIO=speed-samples speed --repeat
+PARITY_SCENARIO=speed-samples speed --repeat x
+PARITY_SCENARIO=speed-samples speed --repeat 0
+PARITY_SCENARIO=speed-samples speed -z
 report
 PARITY_SCENARIO=router-up report
 # The usage lines a die() emits reach the AUDIT log via ABORT, so a message that

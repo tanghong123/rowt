@@ -1,0 +1,15 @@
+render-ports' table with a running router (host.pid.self), for port's apply
+(rowt #s73). The stand-in router is a `sleep`, which a SIGHUP ends where sing-box
+would reload in place. So on both sides the in-place reload does not take, the
+full restart cannot start (the fake engine exits at once), the change is undone
+and the router does not come back either: the whole fallback chain, compared
+end to end. Slow by nature (two readiness waits), hence the cases' PARITY_TIMEOUT.
+
+  port rm guest            guest leaves the table and stays gone — undoing a
+                           removal writes the table WITHOUT the name, which is
+                           what rm already wrote
+  port add 7892 guest --final escape
+                           the same row again: nothing to write, but the apply
+                           runs, its port never opens, and the undo drops the
+                           row (a row that is not served must not stay)
+  port list                running, so every row says "not answering"

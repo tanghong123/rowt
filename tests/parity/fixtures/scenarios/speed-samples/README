@@ -1,0 +1,13 @@
+A running router (host.pid.self) and canned throughput samples for `rowt speed`
+(rowt #s73). The recorder answers curl by its first two arguments, which is
+exactly what tells the two fetches apart: `-sS -x …` goes through rowt,
+`-sS --noproxy …` is the bypassed control. Each file is a SEQUENCE, one line per
+call in the order speed makes them (every URL's proxied samples, then its
+bypassed ones), and an empty line or `0 0 000` is a sample that did not
+complete. Lines are "<bytes> <B/s> <HTTP code>", as curl's -w prints them.
+
+What the lines are for:
+  - a failed sample in each column, so a cell's median excludes it and the row
+    says "completed 2/3";
+  - a ratio of exactly 50%, which is on the "not rowt" side of the line;
+  - B/s, KB/s and MB/s cells, and a fractional B/s that the shell truncates.

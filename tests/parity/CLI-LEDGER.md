@@ -34,7 +34,7 @@ is not 'does it work' but 'whose code ran, and what proves it'.
 | `monitor` | **native** | — |
 | `onboard` | **native** | cli-diff |
 | `ping` | **native** | cli-diff |
-| `port` | legacy | cli-diff (passthrough) |
+| `port` | **native** | cli-diff |
 | `probe` | **native** | cli-diff |
 | `proxy` | **native** | cli-diff |
 | `reload` | **native** | cli-diff + boot-test |
@@ -47,7 +47,7 @@ is not 'does it work' but 'whose code ran, and what proves it'.
 | `server` | **native** | cli-diff |
 | `shell-init` | **native** | cli-diff |
 | `skill` | **native** | cli-diff |
-| `speed` | legacy | cli-diff (passthrough) |
+| `speed` | **native** | cli-diff |
 | `status` | **native** | cli-diff |
 | `sub` | **native** | cli-diff |
 | `uninstall` | **native** | cli-diff |
@@ -56,7 +56,7 @@ is not 'does it work' but 'whose code ran, and what proves it'.
 | `vm` | **native** | cli-diff |
 | `watch` | **native** | cli-diff |
 
-**39 of 41 command arms answered natively**; the other 2 run in the shell.
+**41 of 41 command arms answered natively**; the other 0 run in the shell.
 
 Partial arms — native for some sub-commands, legacy for the rest.
 `native()` in crates/rowt-cli/src/main.rs is the authority:
@@ -70,6 +70,7 @@ Partial arms — native for some sub-commands, legacy for the rest.
             // Every sub-command, an unknown one included: `cmd_hotspot` sends all
             // but errors|stats|log to `edit_list`, whose own usage line is the answer.
             "hotspot" => true,
+            "speed" | "port" => true,
             "proxy" => matches!(sub, "" | "status" | "check" | "env" | "on" | "off"),
             "server" => matches!(sub, "" | "list" | "dump" | "add" | "rm" | "remove" | "clear" | "import"),
             "sub" => matches!(sub, "" | "list" | "dump" | "add" | "rm" | "remove" | "update" | "clear" | "import"),

@@ -84,6 +84,9 @@ pub fn is_readonly(cmd: &str, arg: &str) -> bool {
         "vm" => !matches!(sub("status"), "up" | "down" | "restart" | "delete"),
         "watch" => !matches!(sub("status"), "install" | "uninstall" | "refresh"),
         "config" => sub("list") != "import",
+        // Unread until rowt-rs answered `port` itself (#s73): `port list` writes
+        // no audit line in the shell, and must not here.
+        "port" => !matches!(sub("list"), "add" | "rm" | "remove"),
         "escape" | "corp" | "block" | "hotspot" | "direct" => {
             matches!(arg, "" | "errors" | "stats" | "list" | "log")
         }

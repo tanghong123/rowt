@@ -197,7 +197,7 @@ pub fn router_cfg_sum(ctx: &Ctx) -> PathBuf { ctx.cfg.join("host.running") }
 
 /// `cksum < host.json` — "<crc> <bytes>", empty when there is no file (the
 /// shell's `|| true`).
-fn host_cfg_cksum(ctx: &Ctx) -> String {
+pub(crate) fn host_cfg_cksum(ctx: &Ctx) -> String {
     match fs::read(ctx.host_cfg()) {
         Ok(b) => format!("{} {}", rowt_core::cksum::posix(&b), b.len()),
         Err(_) => String::new(),
@@ -834,7 +834,7 @@ pub fn clash_curl(ctx: &Ctx, method: &str, path: &str, body: Option<&str>) -> Op
     o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
 }
 
-fn clash_ok(ctx: &Ctx) -> bool {
+pub(crate) fn clash_ok(ctx: &Ctx) -> bool {
     let secret = clash_secret(ctx);
     Command::new("curl")
         .args(["--noproxy", "*", "-sS", "-m", "2", "-H", &format!("Authorization: Bearer {secret}"),

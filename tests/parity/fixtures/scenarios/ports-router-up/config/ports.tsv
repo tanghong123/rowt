@@ -1,0 +1,7 @@
+# rowt: named extra ports (name, port, catch-all) — 'rowt port add <N> <name> [--final escape|direct|corp]', 'port rm <name>', 'port list'
+vm	7894	direct
+lab	7893	corp
+guest	7892	escape
+broken	not-a-port	escape
+aa-late	7894	corp
+weird	7897	block

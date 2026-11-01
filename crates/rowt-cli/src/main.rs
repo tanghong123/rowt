@@ -28,7 +28,9 @@ mod pins;
 mod pool;
 mod shell;
 mod skill;
+mod port;
 mod sources;
+mod speed;
 mod vm;
 mod watch;
 mod status;
@@ -132,6 +134,14 @@ pub const SILENT: &str = "\u{0}already-reported";
 
 /// `die` — the error, an ABORT line if a mutation was in flight, exit 1.
 pub fn die(cfg: &Path, msg: &str) -> ! {
+    die_in_subshell(cfg, msg);
+    std::process::exit(1);
+}
+
+/// `die` inside a `( … )` subshell: the error and the ABORT line, and then the
+/// caller carries on, as the shell's `if ! ( cmd_render >/dev/null ); then` does
+/// — `port`'s rollback runs after a render that died.
+pub fn die_in_subshell(cfg: &Path, msg: &str) {
     eprintln!("error: {msg}");
     let op = AUDIT_OP.lock().map(|g| g.clone()).unwrap_or_default();
     if !op.is_empty() {
@@ -139,7 +149,6 @@ pub fn die(cfg: &Path, msg: &str) -> ! {
         lanelog::end(cfg, "");
         shell::audit(cfg, &format!("ABORT {op}: {msg}"));
     }
-    std::process::exit(1);
 }
 
 /// `config export` asked for a format other than rowt's own bundle: `--to X` or
@@ -211,6 +220,7 @@ fn native(cmd: &str, sub: &str) -> bool {
         // Every sub-command, an unknown one included: `cmd_hotspot` sends all
         // but errors|stats|log to `edit_list`, whose own usage line is the answer.
         "hotspot" => true,
+        "speed" | "port" => true,
         "proxy" => matches!(sub, "" | "status" | "check" | "env" | "on" | "off"),
         "server" => matches!(sub, "" | "list" | "dump" | "add" | "rm" | "remove" | "clear" | "import"),
         "sub" => matches!(sub, "" | "list" | "dump" | "add" | "rm" | "remove" | "update" | "clear" | "import"),
@@ -1288,6 +1298,8 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                 _ => cmd_lane(&cfg, Target::Lane(lane), &action, args),
             }
         }
+        "speed" => speed::cmd_speed(&Ctx::new(cfg.clone()), &rest),
+        "port" => port::cmd_port(&Ctx::new(cfg.clone()), &rest),
         // `cmd_hotspot`: the lane editor, aimed at a lane nothing routes.
         "hotspot" => {
             let action = rest.first().cloned().unwrap_or_else(|| "list".into());
@@ -2659,6 +2671,10 @@ mod tests {
         assert!(native("hotspot", ""));
         assert!(native("hotspot", "add"));
         assert!(native("hotspot", "nosucharm"));
+        // #s73: both whole commands, their usage errors included.
+        assert!(native("speed", ""));
+        assert!(native("port", "add"));
+        assert!(native("port", "nosucharm"));
         assert!(!native("config", "nosucharm"));
         assert!(native("corp", "sync"));      // corp-only, not escape/block
         assert!(!native("escape", "sync"));
