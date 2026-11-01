@@ -281,6 +281,10 @@ def outbound(r: random.Random) -> dict:
         # Unknown keys must survive a round trip in their original order.
         o["tls"] = {"enabled": True, "server_name": "s.example"}
         o["_source"] = "shadowrocket"
+    if r.random() < 0.2:
+        # A pin no fetch consumed: combine strips it with a note, and no link
+        # carries it back (to_link refuses the outbound).
+        o["_pin_sha256"] = r.choice(["0123456789abcdef" * 4, "", "AB:CD"])
     return o
 
 

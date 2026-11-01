@@ -612,34 +612,16 @@ pub fn parse_hysteria2(link: &str, tag: &str) -> Result<Value, String> {
     } else if !obfs.is_empty() && obfs != "none" {
         return Err(format!("hysteria2 link has an obfs rowt cannot use: {obfs}"));
     }
+    // Last, after every error: the pin rides along raw, as `_pin_sha256`, for
+    // `server add` and `server import --apply` (rowt-cli's `pins`), which fetch
+    // the server's certificate, check it against the pin and record sing-box's
+    // public-key pin — or refuse the server. Not a sing-box field: `combine`,
+    // which every pool goes through, strips what no fetch consumed.
+    let pin = first(&qs, "pinSHA256", "");
+    if !pin.is_empty() {
+        out.insert("_pin_sha256".into(), pin.into());
+    }
     Ok(out.into())
-}
-
-/// The note `parse_hysteria2` prints in the Python, as the LAST thing it does,
-/// when the link carries `pinSHA256`: a pinned certificate sing-box cannot
-/// keep (it pins a public key — `tls.certificate_public_key_sha256` — and
-/// has no field for a certificate hash, and one cannot be made from the
-/// other without the certificate). Here the parser stays a pure function and
-/// the caller asks for the note after a successful parse — `parse_many` for
-/// every link, the single-link entry point for its one — which is the same
-/// moment, since the Python prints it after its last raise. A link of any
-/// other scheme, or with no pin, has none.
-pub fn pin_note(link: &str, tag: &str) -> Option<String> {
-    if !(link.starts_with("hysteria2://") || link.starts_with("hy2://")) {
-        return None;
-    }
-    let u = urlsplit(link).ok()?;
-    let qs = parse_qs(&u.query);
-    if first(&qs, "pinSHA256", "").is_empty() {
-        return None;
-    }
-    let insecure = matches!(first(&qs, "insecure", "0").as_str(), "1" | "true" | "True");
-    let left = if insecure {
-        "with insecure=1, nothing now checks the server's identity"
-    } else {
-        "the certificate is still checked against the system roots"
-    };
-    Some(format!("note: '{tag}': the link's certificate pin (pinSHA256) is dropped — sing-box pins a public key, not a certificate; {left}"))
 }
 
 pub fn parse_vmess(link: &str, tag: &str) -> Result<Value, String> {
@@ -1095,11 +1077,8 @@ pub fn parse_many(links: &[String]) -> Result<Batch, (Batch, String)> {
         // is reserved by the time `parse_link` runs, so a link that parses
         // badly has still taken its name — but a link whose URI will not split
         // at all fails inside `tag_for` and takes nothing.
-        match tag_for(link, index, &mut used).and_then(|tag| parse_link(link, &tag).map(|o| (o, tag))) {
-            Ok((o, tag)) => {
-                b.warnings.extend(pin_note(link, &tag));
-                b.outbounds.push(o);
-            }
+        match tag_for(link, index, &mut used).and_then(|tag| parse_link(link, &tag)) {
+            Ok(o) => b.outbounds.push(o),
             Err(e) => b.warnings.push(format!("warning: skipping a link ({e})")),
         }
     }
@@ -1162,6 +1141,12 @@ pub fn combine(outbounds: &[Value]) -> Batch {
         let mut o = o.clone();
         if let Some(m) = o.as_object_mut() {
             m.insert("tag".into(), tag.clone().into());
+            // A pin no fetch consumed — a subscription's link, a hand-edited
+            // pool. Not a sing-box field, so it must not reach the router; and
+            // not silently: the pin asked for a check this server will not get.
+            if m.remove("_pin_sha256").is_some() {
+                b.warnings.push(format!("note: '{tag}': certificate pin not kept — only 'server add' and 'server import' fetch a server's certificate to check its pin; a subscription's is not fetched"));
+            }
         }
         kept.push((key, tag));
         b.outbounds.push(o);
@@ -1588,31 +1573,27 @@ mod tests {
     }
 
     #[test]
-    fn a_pinned_certificate_is_announced_as_dropped() {
-        let head = "note: 'P': the link's certificate pin (pinSHA256) is dropped — sing-box pins a public key, not a certificate; ";
+    fn a_pinned_certificate_rides_along_and_combine_strips_what_no_fetch_took() {
         let pin = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        // With insecure=1 the pin was the only check; without it the roots still are.
         let b = parse_many(&[
             format!("hysteria2://pw@h1.example:443?insecure=1&pinSHA256={pin}#P"),
-            format!("hy2://pw@h2.example:443?pinSHA256={pin}#Q"),
-            "hysteria2://pw@h3.example:443?insecure=1#R".into(),
-            format!("hysteria2://pw@h4.example:443?insecure=1&pinSHA256={pin}&obfs=xor#S"),
+            "hy2://pw@h2.example:443?insecure=1#Q".into(),
         ])
         .unwrap();
-        assert_eq!(b.outbounds.len(), 3);
-        assert!(b.outbounds.iter().all(|o| o.get("tls").and_then(|t| t.get("certificate_public_key_sha256")).is_none()));
-        assert_eq!(
-            b.warnings,
-            [
-                format!("{head}with insecure=1, nothing now checks the server's identity"),
-                format!("note: 'Q': the link's certificate pin (pinSHA256) is dropped — sing-box pins a public key, not a certificate; the certificate is still checked against the system roots"),
-                // A link that is skipped says nothing about its pin.
-                "warning: skipping a link (hysteria2 link has an obfs rowt cannot use: xor)".to_string(),
-            ]
-        );
-        // An empty pin is no pin (parse_qs drops a blank value), and no other scheme has one.
-        assert_eq!(pin_note("hysteria2://pw@h.example:443?pinSHA256=&insecure=1", "t"), None);
-        assert_eq!(pin_note(&format!("trojan://pw@h.example:443?pinSHA256={pin}"), "t"), None);
+        // The parser says nothing: the add step fetches, checks and speaks.
+        assert!(b.warnings.is_empty(), "{:?}", b.warnings);
+        assert_eq!(b.outbounds[0]["_pin_sha256"], pin);
+        assert!(b.outbounds[1].get("_pin_sha256").is_none());
+        // Raw, and last — after obfs — so the JSON matches the Python's byte for byte.
+        let o = one(&format!("hysteria2://pw@h.example:443?obfs=salamander&obfs-password=x&pinSHA256=AB%3ACD"), "t");
+        assert_eq!(o["_pin_sha256"], "AB:CD");
+        assert_eq!(o.as_object().unwrap().keys().last().map(String::as_str), Some("_pin_sha256"));
+        // An empty pin is no pin (parse_qs drops a blank value).
+        assert!(one("hysteria2://pw@h.example:443?pinSHA256=&insecure=1", "t").get("_pin_sha256").is_none());
+        // combine strips a pin no fetch consumed, and says so once per server.
+        let c = combine(&b.outbounds);
+        assert!(c.outbounds.iter().all(|o| o.get("_pin_sha256").is_none()));
+        assert_eq!(c.warnings, ["note: 'P': certificate pin not kept — only 'server add' and 'server import' fetch a server's certificate to check its pin; a subscription's is not fetched"]);
     }
 
     #[test]

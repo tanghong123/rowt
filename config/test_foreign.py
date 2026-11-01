@@ -175,9 +175,8 @@ def test_hysteria2_fingerprint_rides_the_link_as_its_pin():
     with contextlib.redirect_stderr(err):
         o = vp.parse_link(link, "H")
     assert "certificate_public_key_sha256" not in o["tls"], o
-    assert err.getvalue().startswith(
-        "note: 'H': the link's certificate pin (pinSHA256) is dropped"
-    ), err.getvalue()
+    eq(o["_pin_sha256"], "AB:CD:EF", "the pin rides along raw for the apply step")
+    eq(err.getvalue(), "", "the parser says nothing")
     proxy["fingerprint"] = ""
     assert "pinSHA256" not in fi.clash_proxy_to_link(proxy)
 

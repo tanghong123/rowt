@@ -288,10 +288,8 @@ pub fn main(argv: &[String]) -> ExitCode {
         // every separator Python recognises beyond `\n`.
         sharelink::splitlines(&stdin_string())
     } else if let Some(l) = link {
-        let l = sharelink::strip(&l);
-        match sharelink::parse_link(l, &tag) {
-            // The pin note the Python's parse_hysteria2 prints on its way out.
-            Ok(v) => emit(Batch { outbounds: Vec::new(), warnings: sharelink::pin_note(l, &tag).into_iter().collect() }, v),
+        match sharelink::parse_link(sharelink::strip(&l), &tag) {
+            Ok(v) => emit(Batch::default(), v),
             Err(e) => fail(&Batch::default(), &e),
         }
     } else {

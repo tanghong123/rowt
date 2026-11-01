@@ -1120,10 +1120,11 @@ mod tests {
         let h = link(json!({"type": "hysteria2", "server": "h", "port": 1, "password": "p",
                             "skip-cert-verify": true, "fingerprint": "AB:CD:EF"}));
         assert!(h.contains("pinSHA256=AB%3ACD%3AEF"), "{h}");
-        // Parsed, the pin is not in the outbound — the parser's note says so.
+        // Parsed, the pin rides along raw for the add step to check; nothing
+        // is in sing-box's own field until the certificate has been fetched.
         let o = sharelink::parse_link(&h, "H").unwrap();
         assert!(o["tls"].get("certificate_public_key_sha256").is_none());
-        assert!(sharelink::pin_note(&h, "H").is_some_and(|n| n.ends_with("nothing now checks the server's identity")));
+        assert_eq!(o["_pin_sha256"], "AB:CD:EF");
         let h = link(json!({"type": "hysteria2", "server": "h", "port": 1, "password": "p", "fingerprint": ""}));
         assert!(!h.contains("pinSHA256"), "{h}");
     }

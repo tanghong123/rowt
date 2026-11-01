@@ -472,11 +472,12 @@ def parse_hysteria2(link: str, tag: str = "escape") -> dict:
     hysteria2 is QUIC-based, so TLS is always on. The auth string lives in the
     URI userinfo. Port-hopping (mport) is intentionally not handled. A pinned
     certificate (pinSHA256, the URI scheme's own parameter, which the official
-    client recommends beside insecure=1 for a self-signed server) cannot be
-    kept: sing-box pins a server's PUBLIC KEY (tls.certificate_public_key_sha256)
-    and has no field for a certificate hash, and one cannot be made from the
-    other without the certificate. It is dropped, and a note on stderr says so
-    — silently, the link "worked" while the check it carried was gone.
+    client recommends beside insecure=1 for a self-signed server) rides along
+    as `_pin_sha256`: sing-box pins a server's PUBLIC KEY
+    (tls.certificate_public_key_sha256) and has no field for a certificate
+    hash, so `server add` fetches the certificate, checks it against the pin
+    and records the public-key hash — or refuses the server. Never silently
+    gone.
     """
     u = urlsplit(link)
     password = unquote(u.username or "")
@@ -521,17 +522,14 @@ def parse_hysteria2(link: str, tag: str = "escape") -> dict:
     elif obfs and obfs != "none":
         raise ValueError(f"hysteria2 link has an obfs rowt cannot use: {obfs}")
 
-    # Last, after every raise: a link that is skipped says nothing about its pin.
-    if _first(qs, "pinSHA256"):
-        left = (
-            "with insecure=1, nothing now checks the server's identity"
-            if insecure
-            else "the certificate is still checked against the system roots"
-        )
-        print(
-            f"note: '{tag}': the link's certificate pin (pinSHA256) is dropped — sing-box pins a public key, not a certificate; {left}",
-            file=sys.stderr,
-        )
+    # Last, after every raise: the pin rides along raw, as `_pin_sha256`, for
+    # `server add` and `server import --apply`, which fetch the server's
+    # certificate, check it against the pin and record sing-box's public-key
+    # pin — or refuse the server. Not a sing-box field: `combine`, which every
+    # pool goes through, strips what no fetch consumed.
+    pin = _first(qs, "pinSHA256")
+    if pin:
+        out["_pin_sha256"] = pin
     return out
 
 
@@ -896,6 +894,15 @@ def combine(outbounds: list[dict]) -> list[dict]:
         used.add(tag)
         o["tag"] = tag
         kept[key] = tag
+        if "_pin_sha256" in o:
+            # A pin no fetch consumed — a subscription's link, a hand-edited
+            # pool. Not a sing-box field, so it must not reach the router; and
+            # not silently: the pin asked for a check this server will not get.
+            print(
+                f"note: '{tag}': certificate pin not kept — only 'server add' and 'server import' fetch a server's certificate to check its pin; a subscription's is not fetched",
+                file=sys.stderr,
+            )
+            del o["_pin_sha256"]
         result.append(o)
     return result
 

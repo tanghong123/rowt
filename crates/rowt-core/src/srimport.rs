@@ -468,14 +468,13 @@ pub fn to_shadowsocks(s: &Entry, tag: &str) -> R<Option<Value>> {
 /// or with any other obfs, the entry is skipped rather than guessed at. So is
 /// one with a plugin or a proto other than none, as a Shadowsocks entry is: a
 /// shape no store has shown. `udp` is not read, as for every other type. The
-/// pin is dropped — sing-box pins a public key, not a certificate, and one
-/// hash cannot be made from the other — as `server add` drops it from a link.
-/// Both are said in `notes`, which the scan prints to stderr where the Python
-/// prints them: the dropped pin, with what that leaves checking the server's
-/// identity (with allowInsecure set, nothing), and settings in `pluginParam`,
-/// which are not read. The outbound has the shape
-/// `sharelink::parse_hysteria2` builds from a link, so a store import and a
-/// link import of one node agree (no uTLS: QUIC has none).
+/// pin rides along raw as `_pin_sha256` — sing-box pins a public key, not a
+/// certificate, so `server import --apply` fetches the certificate and checks
+/// the pin before recording the public-key hash, or refuses the server.
+/// Settings in `pluginParam` are not read; a note says so, pushed to `notes`,
+/// which the scan prints to stderr where the Python prints it. The outbound
+/// has the shape `sharelink::parse_hysteria2` builds from a link, so a store
+/// import and a link import of one node agree (no uTLS: QUIC has none).
 pub fn to_hysteria2(s: &Entry, tag: &str, notes: &mut Vec<String>) -> R<Option<Value>> {
     let host = get(s, "host");
     let pw = get(s, "password");
@@ -519,18 +518,15 @@ pub fn to_hysteria2(s: &Entry, tag: &str, notes: &mut Vec<String>) -> R<Option<V
     } else if obfs != "none" {
         return Ok(None);
     }
-    // Only for an entry that converts: the Python prints these after its last
-    // `return None`, so a skipped entry says nothing. The pin first: sing-box
-    // 1.13 takes tls.certificate_public_key_sha256 and no certificate hash,
-    // and Shadowrocket's hpkp is the latter (Hysteria 2's pinSHA256), so it
-    // cannot be carried over.
+    // Only for an entry that converts: the Python does these after its last
+    // `return None`, so a skipped entry carries and says nothing. The pin
+    // (hpkp, Hysteria 2's pinSHA256: a certificate hash) rides along raw as
+    // `_pin_sha256` for `server import --apply`, which fetches the server's
+    // certificate, checks it against the pin and records sing-box's public-key
+    // pin — or refuses the server. Not a sing-box field; `combine` strips what
+    // no fetch consumed.
     if truthy(get(s, "hpkp")) {
-        let left = if truthy(get(s, "allowInsecure")) {
-            "with allowInsecure set, nothing now checks the server's identity"
-        } else {
-            "the certificate is still checked against the system roots"
-        };
-        notes.push(format!("note: '{tag}': the certificate pin (hpkp) is dropped — sing-box pins a public key, not a certificate; {left}"));
+        out.insert("_pin_sha256".into(), Value::String(py_str_top(get(s, "hpkp").unwrap())));
     }
     // An archived dictionary holds settings when its `NS.keys` is truthy; any
     // other shape when it is.
@@ -806,16 +802,17 @@ mod tests {
     }
 
     #[test]
-    fn hysteria2_takes_the_auth_from_password_and_drops_the_pin() {
+    fn hysteria2_takes_the_auth_from_password_and_carries_the_pin() {
         let (o, notes) = hy2(&[]);
         let o = o.unwrap();
         assert_eq!(o, json!({
             "type": "hysteria2", "tag": "t", "server": "198.51.100.7", "server_port": 8443,
             "password": "auth-string",
-            "tls": {"enabled": true, "server_name": "198.51.100.7", "insecure": true, "alpn": ["h3"]}
+            "tls": {"enabled": true, "server_name": "198.51.100.7", "insecure": true, "alpn": ["h3"]},
+            "_pin_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         }));
-        assert!(o.get("hpkp").is_none(), "no sing-box field takes a certificate pin");
-        assert_eq!(notes, ["note: 't': the certificate pin (hpkp) is dropped — sing-box pins a public key, not a certificate; with allowInsecure set, nothing now checks the server's identity"]);
+        assert!(o.get("hpkp").is_none(), "the pin travels under rowt's own key, not Shadowrocket's");
+        assert!(notes.is_empty(), "{notes:?}");
         // `peer` is the SNI when set; `alpn` splits on commas; `allowInsecure` 0 is false.
         let (o, _) = hy2(&[("peer", s("sni.example")), ("alpn", s("h3,h2")), ("allowInsecure", PlVal::Int(0))]);
         assert_eq!(o.unwrap()["tls"], json!({"enabled": true, "server_name": "sni.example", "insecure": false, "alpn": ["h3", "h2"]}));
@@ -836,22 +833,20 @@ mod tests {
     }
 
     #[test]
-    fn hysteria2_announces_a_dropped_pin_and_what_is_left_checking() {
-        let head = "note: 't': the certificate pin (hpkp) is dropped — sing-box pins a public key, not a certificate; ";
-        // With allowInsecure set the pin was the only check; without it the roots still are.
-        assert_eq!(hy2(&[]).1, [format!("{head}with allowInsecure set, nothing now checks the server's identity")]);
-        assert_eq!(hy2(&[("allowInsecure", PlVal::Int(0))]).1, [format!("{head}the certificate is still checked against the system roots")]);
-        assert_eq!(hy2(&[("allowInsecure", PlVal::None)]).1, [format!("{head}the certificate is still checked against the system roots")]);
-        // No pin, nothing to say; a pin on a skipped entry, nothing either.
+    fn hysteria2_carries_the_pin_raw_and_last_for_apply_to_check() {
+        // Raw — colons, case and all — and the last key, after obfs, as the Python writes it.
+        let (o, _) = hy2(&[("hpkp", s("AB:CD:EF")), ("obfs", s("salamander")), ("obfsParam", s("opw"))]);
+        let o = o.unwrap();
+        assert_eq!(o["_pin_sha256"], "AB:CD:EF");
+        assert_eq!(o.as_object().unwrap().keys().last().map(String::as_str), Some("_pin_sha256"));
+        // No pin, no key.
         for v in [s(""), PlVal::None] {
-            assert!(hy2(&[("hpkp", v.clone())]).1.is_empty(), "{v:?}");
+            assert!(hy2(&[("hpkp", v.clone())]).0.unwrap().get("_pin_sha256").is_none(), "{v:?}");
         }
-        let (o, notes) = hy2(&[("obfs", s("ws"))]);
-        assert!(o.is_none() && notes.is_empty(), "{notes:?}");
-        // Pin note, then the pluginParam note.
+        // The pluginParam note is the only note, pin or no pin.
         let notes = hy2(&[("pluginParam", s("/plugin"))]).1;
-        assert_eq!(notes.len(), 2, "{notes:?}");
-        assert!(notes[0].starts_with(head) && notes[1].starts_with("note: 't': settings"), "{notes:?}");
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].starts_with("note: 't': settings"), "{notes:?}");
     }
 
     #[test]
