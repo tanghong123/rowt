@@ -2,7 +2,7 @@
 
 *Investigation and design, 2026-08-08. Status as of 2026-11-01: phases 0, 2, 4
 and 6 done — the repo has no Python on any runtime path, and `ROWT_IMPL=rust`
-runs every command, and only two `config` paths still go to the shell (§5, "What
+runs every command in Rust, the shell kept only for typos (§5, "What
 still reaches for bash"); aries-black has run it as its everyday rowt since
 2026-10-31, watchdog included since 2026-11-01. 1 and 3 are code-complete and gated, waiting on their
 cutovers and on the shadow window's fourteen days; phase 5 (Linux) not started.
