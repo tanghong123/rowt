@@ -5,6 +5,9 @@ release is cut; everything under Unreleased ships with the next one.
 
 ## Unreleased
 
+- `rowt config export --to shadowrocket` no longer stops, silently and with
+  no file, when one of your lanes has no entries. This one is a fix for
+  everyone, not only for the Rust version.
 - **`rowt hotspot` runs on the Rust version** (`ROWT_IMPL=rust`) instead of
   being handed to the shell. 38 of the 41 commands now are. Nothing changes
   in what it does: 31 cases compare it with the shell — output, exit status,
