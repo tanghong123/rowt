@@ -1,8 +1,10 @@
 # Porting rowt: bash → Rust, macOS → macOS + Linux
 
-*Investigation and design, 2026-08-08. Status as of 2026-08-11: phases 0, 2, 4
-and 6 done — the repo has no Python on any runtime path and `ROWT_IMPL=rust`
-runs the whole CLI; 1 and 3 are code-complete and gated, waiting on their
+*Investigation and design, 2026-08-08. Status as of 2026-11-01: phases 0, 2, 4
+and 6 done — the repo has no Python on any runtime path, and `ROWT_IMPL=rust`
+runs the CLI except six newer paths that still go to the shell (§5, "What
+still reaches for bash"); aries-black has run it as its everyday rowt since
+2026-10-31, watchdog included since 2026-11-01. 1 and 3 are code-complete and gated, waiting on their
 cutovers and on the shadow window's fourteen days; phase 5 (Linux) not started.
 The per-phase table in §5 is the authority — this line is a summary and will
 drift first.*
@@ -249,12 +251,18 @@ revertible and gated.
 
 #### What still reaches for bash, and the order it comes back in
 
-**Nothing does.** Every one of the 37 command arms answers natively, and the
-last sub-arm that did not — `config import`, which prompts on `/dev/tty` — now
-does too. The §6.6 fallthrough remains, but only for a command `bin/rowt`
-documents that this binary has no arm for: there are none today, so what the
-fallthrough catches now is typos, and `help::is_registered` is what tells a typo
-from an escape hatch. `selftest` 23 asserts the two still agree about that.
+**Six paths do (2026-11-01), all newer than the port.** The 37 arms ported
+here still answer natively, but four commands landed in the shell afterwards
+and rowt-rs hands them to `bin/rowt` whole: `doctor`, `hotspot`, `port` and
+`speed` (CLI-LEDGER.md: 37 of 41). Two `config` paths are the shell's too:
+`config import`, which went back once its default became a merge that edits
+the lane lists, hotspot's among them; and `config export --to` any client
+other than rowt (`_export_shadowrocket`). The §6.6 fallthrough is what runs
+all six, and `help::is_registered` still tells them from a typo; `selftest` 23
+asserts the two agree. Porting them is rowt #s71 (hotspot), #s72 (doctor),
+#s73 (port, speed) and #s74 (the two `config` paths). Until they land, a
+machine on `ROWT_IMPL=rust` runs the shell for these, which is one reason the
+shell stays installed.
 
 The order this came back in, kept because the reasoning is the reusable part:
 
@@ -273,7 +281,8 @@ The order this came back in, kept because the reasoning is the reusable part:
    extractors, `--apply`, and the two dump restores. The I/O the extractors
    need moved out of the gate binaries into `rowt-core::{foreignio,srio}`
    first, so the product calls a library rather than exec'ing a gate artifact.
-4. ~~**`config import`.**~~ Done. It looked like the odd one out because it
+4. ~~**`config import`.**~~ Done, then handed back to the shell when import
+   began merging lane lists (see above; #s74). It looked like the odd one out because it
    prompts on `/dev/tty` — but that is precisely what makes it gateable: a
    process with no controlling terminal cannot open one, and the shell reads
    that failure as "no". The harness now runs every case in its own session,
