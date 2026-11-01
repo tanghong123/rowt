@@ -242,9 +242,16 @@ run_in() {       # $1=outdir (sandbox already built)  rest=rowt args — stdout 
   # a status case would read this machine's live verdict — and its age, which
   # moves between the two runs. Inside the sandbox it exists only when the
   # scenario ships env/corp-health. Before ENVS, so a case can still override.
+  # ROWT_IMPL: this is the SHELL side, so it runs the shell unless asked. It
+  # used to inherit the caller's ROWT_IMPL, and a terminal with
+  # `export ROWT_IMPL=rust` (the everyday-rowt trial, README) then put rowt-rs
+  # on both sides of every gate built on this function — passing whatever
+  # rowt-rs did. PARITY_BASH_IMPL is the deliberate way in, as for cli-diff;
+  # a case's own ROWT_IMPL= still wins, being in ENVS after it. selftest 50.
   env -i \
     ROWT_CAPTIVE_RETRY= \
     ROWT_CORP_HEALTH="$out/env/corp-health" \
+    ROWT_IMPL="${PARITY_BASH_IMPL:-bash}" \
     ${ENVS[@]+"${ENVS[@]}"} \
     HOME="$out/home" \
     XDG_CONFIG_HOME="$out/home" \
@@ -252,7 +259,6 @@ run_in() {       # $1=outdir (sandbox already built)  rest=rowt args — stdout 
     TERM=dumb LC_ALL=C TZ=UTC \
     PARITY_TRACE="$out/trace" \
     PARITY_ENV="$out/env" \
-    ROWT_IMPL="${ROWT_IMPL:-bash}" \
     perl -e "$TMO" "$TIMEOUT" \
     bash "$ROWT" "$@" 2>/dev/null || true
 }
@@ -273,9 +279,11 @@ run_one() {      # $1=outdir  rest=rowt args
   # a status case would read this machine's live verdict — and its age, which
   # moves between the two runs. Inside the sandbox it exists only when the
   # scenario ships env/corp-health. Before ENVS, so a case can still override.
+  # ROWT_IMPL: the shell unless asked, never the caller's — see run_in.
   env -i \
     ROWT_CAPTIVE_RETRY= \
     ROWT_CORP_HEALTH="$out/env/corp-health" \
+    ROWT_IMPL="${PARITY_BASH_IMPL:-bash}" \
     ${ENVS[@]+"${ENVS[@]}"} \
     HOME="$out/home" \
     XDG_CONFIG_HOME="$out/home" \
@@ -283,7 +291,6 @@ run_one() {      # $1=outdir  rest=rowt args
     TERM=dumb LC_ALL=C TZ=UTC \
     PARITY_TRACE="$out/trace" \
     PARITY_ENV="$out/env" \
-    ROWT_IMPL="${ROWT_IMPL:-bash}" \
     perl -e "$TMO" "$TIMEOUT" \
     bash "$ROWT" "$@" >"$out/stdout" 2>"$out/stderr" || rc=$?
   echo "$rc" > "$out/rc"

@@ -36,6 +36,12 @@ tests/parity/bin/parity cli-diff         # whole commands, rowt-rs vs the shell
 tests/parity/bin/selftest                # break each gate; every one must fire
 ```
 
+The shell side of every gate runs the shell, whatever `ROWT_IMPL` the calling
+terminal exports — a terminal on the everyday-rowt trial would otherwise put
+rowt-rs on both sides and every gate would pass. To run the shell side through
+the rowt-rs front door on purpose, say so: `PARITY_BASH_IMPL=rust parity …`
+for the whole run, or `parity run -- ROWT_IMPL=rust <args>` for one command.
+
 **Do not run `cargo` while a gate is running.** Every cross-implementation gate
 execs `target/release/rowt-rs`, and `cargo test` removes that binary while it
 builds its own test harness — so a `cargo test` in another terminal turns the

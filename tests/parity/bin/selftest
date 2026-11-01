@@ -1387,6 +1387,31 @@ else
   cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
 fi
 
+echo "50. a caller's ROWT_IMPL=rust must not reach the shell side of the gates"
+if [ ! -x "$ROOT/target/release/rowt-rs" ]; then
+  echo "  skip — no release build"
+else
+  # run_in and run_one used to pass the caller's ROWT_IMPL through, so from a
+  # terminal on the everyday-rowt trial every gate built on them ran rowt-rs on
+  # its shell side too, and passed whatever rowt-rs did. `watch install` is the
+  # oracle because it writes the implementation that ran it into state (#s65):
+  # the shell side must say bash with rust exported, and a case's own
+  # ROWT_IMPL=rust must still get through — or the check could not tell.
+  out="$(ROWT_IMPL=rust "$P" run -- ROWT_PARITY_SUDO=no-tty watch install 2>/dev/null || true)"
+  out="${out%%$'\n'*}"
+  case_out="$("$P" run -- ROWT_PARITY_SUDO=no-tty ROWT_IMPL=rust watch install 2>/dev/null || true)"
+  case_out="${case_out%%$'\n'*}"
+  got="$(sed -n 's/^watch_impl=//p' "$out/home/rowt/state" 2>/dev/null)"
+  case_got="$(sed -n 's/^watch_impl=//p' "$case_out/home/rowt/state" 2>/dev/null)"
+  if [ "$case_got" != rust ]; then
+    bad "a case's own ROWT_IMPL=rust did not reach the sandbox (watch_impl=${case_got:-none})"
+  elif [ "$got" != bash ]; then
+    bad "an exported ROWT_IMPL=rust reached the shell side (watch_impl=${got:-none})"
+  else
+    ok "the shell side ran the shell with ROWT_IMPL=rust exported"
+  fi
+fi
+
 echo
 echo "selftest: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
