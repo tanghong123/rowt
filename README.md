@@ -633,8 +633,13 @@ entry with a plugin or an SSR-style proto set are not imported: the line after
 the import's summary names them by protocol (`not imported: Trojan (1)`), and
 the review file counts them under `skipped`. For one you need, export its share
 link from the app and `rowt server add` it. A Hysteria2 entry's `pluginParam`
-is not read; when it holds settings, a `note:` on stderr says so. `PROXY`-rule
-domains are merged into your escape list.
+is not read; when it holds settings, a `note:` on stderr says so. Its
+certificate pin (`hpkp`) rides in the review file as `_pin_sha256`, which
+`--apply` consumes the way `server add` consumes a link's `pinSHA256`: it
+fetches the server's certificate, checks it against the pin and records the
+public key, or refuses that server with the reason (see the pin paragraph
+above). Like `_source`, the key never reaches sing-box. `PROXY`-rule domains
+are merged into your escape list.
 
 ### Removing servers / subscriptions
 

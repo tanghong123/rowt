@@ -140,6 +140,10 @@ replaced**, run `rowt fetch host` (with a working path to GitHub) or `rowt reloa
    - `proxy_domains` are the client's own PROXY-rule domains, which `--apply` merges
      into the escape lane. Ask the user; `.proxy_domains = []` keeps rowt's defaults
      instead.
+   - `_pin_sha256` on a hysteria2 server is its certificate pin from the client
+     (Shadowrocket's `hpkp`). Leave it: `--apply` fetches the server's certificate,
+     checks it against the pin and records the public key, or refuses that server
+     with the reason (it needs Homebrew's `openssl@3`; macOS's own cannot speak QUIC).
    - Drop what the user rejects by index, and edit the file only this way:
      ```sh
      jq 'del(.servers[3,5]) | del(.subscriptions[0])' "$F" >| "$F.new" && mv "$F.new" "$F" && chmod 600 "$F"
