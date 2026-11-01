@@ -36,7 +36,7 @@ mod seeds {
 }
 use lifecycle::Ctx;
 use rowt_core::classify::{classify, ClassifyInput, Lane};
-use rowt_core::lanes::{apply, dump, Lanes, Op};
+use rowt_core::lanes::{apply_to, dump, Lanes, Op, Target};
 use rowt_platform::{Mac, Platform};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -207,12 +207,15 @@ fn native(cmd: &str, sub: &str) -> bool {
                 | "errors" | "stats" | "log"
         ) || (cmd == "corp" && matches!(sub, "sync" | "suggest")),
         "direct" | "connections" | "conns" | "_complete" => true,
+        // Every sub-command, an unknown one included: `cmd_hotspot` sends all
+        // but errors|stats|log to `edit_list`, whose own usage line is the answer.
+        "hotspot" => true,
         "proxy" => matches!(sub, "" | "status" | "check" | "env" | "on" | "off"),
         "server" => matches!(sub, "" | "list" | "dump" | "add" | "rm" | "remove" | "clear" | "import"),
         "sub" => matches!(sub, "" | "list" | "dump" | "add" | "rm" | "remove" | "update" | "clear" | "import"),
         "use" | "ping" | "run" | "skill" | "report" | "uninstall" | "fetch" | "probe" | "vm" | "watch" | "onboard" => true,
-        // `import` is NOT native: it delegates to the shell (lane editing —
-        // hotspot — is the shell's job), and it must delegate HERE, before the
+        // `import` is NOT native: it delegates to the shell (its merge re-runs
+        // `<lane> import` for each lane through bin/rowt; #s74), and it must delegate HERE, before the
         // audit BEGIN, or the shell would open a SECOND BEGIN/END pair. `list`
         // and `export` stay native.
         "config" => matches!(sub, "" | "list" | "export"),
@@ -493,9 +496,21 @@ fn lane_file(cfg: &Path, l: Lane) -> PathBuf {
 
 /// The hotspot lane's file. Not a `Lane`: nothing in it is routed — it is
 /// handed to the OS as proxy bypass entries (`hotspot_bypass`) so a venue's
-/// login page loads with the proxy on. Its own editor is still the shell's.
+/// login page loads with the proxy on. Edited as `Target::Hotspot`.
 fn hotspot_file(cfg: &Path) -> PathBuf {
     cfg.join("hotspot-domains.txt")
+}
+
+fn target_file(cfg: &Path, t: Target) -> PathBuf {
+    match t {
+        Target::Lane(l) => lane_file(cfg, l),
+        Target::Hotspot => hotspot_file(cfg),
+    }
+}
+
+/// `touch "$file"` — the file exists afterwards, contents and mode untouched.
+fn touch(p: &Path) {
+    let _ = std::fs::OpenOptions::new().create(true).append(true).open(p);
 }
 
 /// `_hotspot_bypass_entries` — the lane shaped for `networksetup`.
@@ -986,8 +1001,9 @@ fn cmd_lane_log(cfg: &Path, lane: &str) -> Result<String, String> {
     Err(std::process::Command::new("tail").arg("-f").arg(&f).exec_replace())
 }
 
-fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<String, String> {
-    let label = lane.as_str();
+fn cmd_lane(cfg: &Path, target: Target, action: &str, args: &[String]) -> Result<String, String> {
+    let label = target.as_str();
+    let file = target_file(cfg, target);
     // `edit_list` sifts `--no-reload` out of the argument list before it looks
     // at anything else, from ANY position — it is what the TUI passes for a
     // batched edit. Without this it reaches the entry list and gets added as a
@@ -1009,9 +1025,10 @@ fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<Str
     // `dump` take a path, which must not be rewritten.
     let mark = |entries: &[String]| rowt_core::lanes::mark_entries(entries, exact);
     let lanes = load_lanes(cfg);
-    let body = match lane {
-        Lane::Escape => &lanes.escape,
-        Lane::Corp => &lanes.corp,
+    let body = match target {
+        Target::Lane(Lane::Escape) => &lanes.escape,
+        Target::Lane(Lane::Corp) => &lanes.corp,
+        Target::Hotspot => &lanes.hotspot,
         _ => &lanes.block,
     }
     .clone();
@@ -1056,12 +1073,24 @@ fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<Str
                 // audit log is part of what cli-diff compares, so the two paths
                 // are not interchangeable.
                 "add" if args.is_empty() => die(cfg, &format!("usage: {PROG} {label} add <entry>...")),
-                "add" => Op::Add { entries: mark(args), force },
+                // `touch "$file"` before the loop: the lane exists after an
+                // add even when every entry was declined. Routing lanes always
+                // exist; the hotspot file is often the one that does not.
+                "add" => {
+                    touch(&file);
+                    Op::Add { entries: mark(args), force }
+                }
+                "clear" if !file.is_file() => die(cfg, &format!("{label} list is already empty")),
                 "clear" => Op::Clear,
                 "import" => {
-                    let f = args.first().ok_or(format!(
-                        "usage: {PROG} {label} import <file>   (one domain per line)"
-                    ))?;
+                    // `die`, not `Err`: the shell's usage check is a `die`, and
+                    // the audit's ABORT line is part of what cli-diff compares.
+                    let Some(f) = args.first() else {
+                        die(cfg, &format!("usage: {PROG} {label} import <file>   (one domain per line)"))
+                    };
+                    // The lane is touched before `_list_add_file` looks at the
+                    // source, so it exists even when the import then dies.
+                    touch(&file);
                     // `_list_add_file` dies before reading. `read` on a missing
                     // path returns an empty string, and an empty import is a
                     // perfectly valid "0 new" — so a typo in the filename was
@@ -1076,13 +1105,12 @@ fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<Str
                     }
                 }
                 // Same for `rm` — but bash checks the file first, so a missing
-                // lane still reports "list is empty" rather than usage.
-                _ if args.is_empty() && lane_file(cfg, lane).exists() => {
-                    die(cfg, &format!("usage: {PROG} {label} rm <entry>..."))
-                }
+                // lane reports "list is empty" rather than usage.
+                _ if !file.is_file() => die(cfg, &format!("{label} list is empty")),
+                _ if args.is_empty() => die(cfg, &format!("usage: {PROG} {label} rm <entry>...")),
                 _ => Op::Rm(mark(args)),
             };
-            let e = apply(&lanes, lane, &op);
+            let e = apply_to(&lanes, target, &op);
             // `edit_list`'s snapshot of the three routing lanes, the way it
             // takes it — `$(cat "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS")`,
             // one string, trailing newlines gone — so the router is reloaded
@@ -1131,10 +1159,10 @@ fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<Str
             // the other two lanes.
             let mut out = e.messages.clone();
             if let Op::Add { entries, .. } = &op {
-                // `geosite:` is escape/block only — corp routes internal names —
-                // and on those two lanes an add splits two ways, exactly as the
-                // shell's `case "$e"` does.
-                if lane != Lane::Corp {
+                // `geosite:` is escape/block only — corp routes internal names,
+                // hotspot is handed to the OS — and on those two lanes an add
+                // splits two ways, exactly as the shell's `case "$e"` does.
+                if let Target::Lane(lane @ (Lane::Escape | Lane::Block)) = target {
                     let after = match lane {
                         Lane::Escape => &e.lanes.escape,
                         _ => &e.lanes.block,
@@ -1208,7 +1236,9 @@ fn cmd_lane(cfg: &Path, lane: Lane, action: &str, args: &[String]) -> Result<Str
             }
             Ok(out.join("\n"))
         }
-        _ => Err(format!(
+        // `die`, for the shell's ABORT line. Only hotspot reaches this: the
+        // routing lanes hand an unknown sub-command to the shell (`native`).
+        _ => die(cfg, &format!(
             "usage: {PROG} {label} [list | add [--domain] [--force] <e>… | rm [--domain] <e>… | import <file> | clear | dump [file]]"
         )),
     }
@@ -1253,7 +1283,18 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                     corp::run(&ctx, &o)
                 }
                 "suggest" if cmd == "corp" => corp::suggest(&Ctx::new(cfg.clone())),
-                _ => cmd_lane(&cfg, lane, &action, args),
+                _ => cmd_lane(&cfg, Target::Lane(lane), &action, args),
+            }
+        }
+        // `cmd_hotspot`: the lane editor, aimed at a lane nothing routes.
+        "hotspot" => {
+            let action = rest.first().cloned().unwrap_or_else(|| "list".into());
+            let args = &rest[1.min(rest.len())..];
+            match action.as_str() {
+                "errors" | "stats" | "log" => die(&cfg, &format!(
+                    "hotspot is not a routing lane — nothing is logged for it. '{PROG} proxy status' shows the live bypass list"
+                )),
+                _ => cmd_lane(&cfg, Target::Hotspot, &action, args),
             }
         }
         "onboard" => Ok(onboard::run(&Ctx::new(cfg.clone()), &here_dir())),
@@ -2607,9 +2648,14 @@ mod tests {
         assert!(!native("router", "nosucharm"));
         assert!(native("config", "export"));  // native: filters the pool files
         // `config import` delegates entirely to bash — its merge path recursively
-        // re-runs `<lane> import` and touches the hotspot lane, which the pure
-        // engine never owns as a target — so it is handed through, NOT claimed.
+        // re-runs `<lane> import` for every lane through bin/rowt — so it is
+        // handed through, NOT claimed (#s74).
         assert!(!native("config", "import"));
+        // hotspot claims every sub-command, a typo included: edit_list's usage
+        // line is the answer to an unknown one, and it is answered here.
+        assert!(native("hotspot", ""));
+        assert!(native("hotspot", "add"));
+        assert!(native("hotspot", "nosucharm"));
         assert!(!native("config", "nosucharm"));
         assert!(native("corp", "sync"));      // corp-only, not escape/block
         assert!(!native("escape", "sync"));

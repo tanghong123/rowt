@@ -17,10 +17,10 @@ pub struct Lanes {
     pub escape: String,
     pub corp: String,
     pub block: String,
-    /// Never a TARGET here — the shell edits it through the same `edit_list`,
-    /// but rowt-rs hands `hotspot` to the shell — yet `_lane_dedupe` walks it
-    /// last, so an entry added to a routing lane is pulled out of it like out
-    /// of any other (its OS-level bypass would make the routing entry dead).
+    /// Not a `Lane` — nothing in it is routed — but edited through the same
+    /// `edit_list` (`Target::Hotspot`), and `_lane_dedupe` walks it last, so an
+    /// entry added to a routing lane is pulled out of it like out of any other
+    /// (its OS-level bypass would make the routing entry dead).
     pub hotspot: String,
 }
 
@@ -44,6 +44,39 @@ impl Lanes {
     /// Editable lanes, in the order `_lane_dedupe` walks them.
     fn editable() -> [Lane; 3] {
         [Lane::Escape, Lane::Corp, Lane::Block]
+    }
+    fn body(&self, t: Target) -> &str {
+        match t {
+            Target::Lane(l) => self.get(l),
+            Target::Hotspot => &self.hotspot,
+        }
+    }
+    fn set_body(&mut self, t: Target, v: String) {
+        match t {
+            Target::Lane(l) => self.set(l, v),
+            Target::Hotspot => self.hotspot = v,
+        }
+    }
+}
+
+/// What an edit is aimed at: a routing lane, or the hotspot lane.
+///
+/// The hotspot lane goes to macOS as proxy bypass entries rather than to the
+/// router, and `edit_list` treats it as a lane with two exceptions, both kept
+/// here: a `*` is not declined (the OS bypass list reads it), and `geosite:` is
+/// declined as it is for corp (a bypass list cannot hold a rule-set).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    Lane(Lane),
+    Hotspot,
+}
+
+impl Target {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Target::Lane(l) => l.as_str(),
+            Target::Hotspot => "hotspot",
+        }
     }
 }
 
@@ -268,6 +301,11 @@ pub struct Edit {
 
 /// Apply one operation to one lane.
 pub fn apply(lanes: &Lanes, target: Lane, op: &Op) -> Edit {
+    apply_to(lanes, Target::Lane(target), op)
+}
+
+/// `apply` for any target, the hotspot lane included.
+pub fn apply_to(lanes: &Lanes, target: Target, op: &Op) -> Edit {
     let mut out = lanes.clone();
     let mut msgs = Vec::new();
     let mut tightened: Vec<Lane> = Vec::new();
@@ -304,28 +342,33 @@ pub fn apply(lanes: &Lanes, target: Lane, op: &Op) -> Edit {
                         continue;
                     }
                 }
-                // A `*` that survived `unwildcard` matches nothing (see
-                // `wildcard_message`). `import` is left alone, as above.
-                if !importing && e.contains('*') {
+                // A `*` that survived `unwildcard` matches nothing in a routing
+                // lane (see `wildcard_message`). `import` is left alone, as
+                // above, and so is the hotspot lane: macOS reads the `*`.
+                if !importing && target != Target::Hotspot && e.contains('*') {
                     msgs.push(wildcard_message(&e));
                     continue;
                 }
                 // `geosite:` is escape/block only — corp routes internal
-                // domains and CIDRs, and a rule-set cannot express those.
-                if !importing && target == Lane::Corp && e.starts_with("geosite:") {
+                // domains and CIDRs, and neither they nor the OS bypass list
+                // can hold a rule-set.
+                if !importing
+                    && matches!(target, Target::Lane(Lane::Corp) | Target::Hotspot)
+                    && e.starts_with("geosite:")
+                {
                     msgs.push(format!(
                         "  skipped {e} — geosite: is only for the escape and block lanes"
                     ));
                     continue;
                 }
-                let body = out.get(target).to_string();
+                let body = out.body(target).to_string();
                 if has_line(&body, &e) {
                     already += 1;
                     if !importing {
                         msgs.push(format!("  already present: {e}"));
                     }
                 } else {
-                    out.set(target, append_line(&body, &e));
+                    out.set_body(target, append_line(&body, &e));
                     added += 1;
                     if !importing {
                         msgs.push(format!("  added: {e}"));
@@ -333,7 +376,7 @@ pub fn apply(lanes: &Lanes, target: Lane, op: &Op) -> Edit {
                 }
                 // single-lane invariant
                 for lane in Lanes::editable() {
-                    if lane == target {
+                    if target == Target::Lane(lane) {
                         continue;
                     }
                     let other = out.get(lane).to_string();
@@ -344,7 +387,7 @@ pub fn apply(lanes: &Lanes, target: Lane, op: &Op) -> Edit {
                     }
                 }
                 // …and out of the hotspot lane, which the shell walks last.
-                if has_line(&out.hotspot, &e) {
+                if target != Target::Hotspot && has_line(&out.hotspot, &e) {
                     out.hotspot = drop_line(&out.hotspot, &e);
                     hotspot_tightened = true;
                     msgs.push(format!("  moved out of hotspot lane: {e}"));
@@ -364,10 +407,13 @@ pub fn apply(lanes: &Lanes, target: Lane, op: &Op) -> Edit {
         Op::Rm(entries) => {
             for raw in entries {
                 let e = unwildcard(&normalize_entry(raw));
-                let body = out.get(target).to_string();
+                let body = out.body(target).to_string();
                 if has_line(&body, &e) {
-                    out.set(target, drop_line(&body, &e));
-                    tighten!(target);
+                    out.set_body(target, drop_line(&body, &e));
+                    match target {
+                        Target::Lane(l) => tighten!(l),
+                        Target::Hotspot => hotspot_tightened = true,
+                    }
                     msgs.push(format!("  removed: {e}"));
                 } else {
                     msgs.push(format!("  not found: {e}"));
@@ -377,7 +423,7 @@ pub fn apply(lanes: &Lanes, target: Lane, op: &Op) -> Edit {
         Op::Clear => {
             // Keep the header: comment and blank lines survive, entries go.
             let kept: Vec<&str> = out
-                .get(target)
+                .body(target)
                 .lines()
                 .filter(|l| {
                     let t = l.trim_start();
@@ -390,7 +436,7 @@ pub fn apply(lanes: &Lanes, target: Lane, op: &Op) -> Edit {
             // comments survive — and an all-entries file clears to a single
             // empty line rather than to nothing.
             let body = kept.join("\n");
-            out.set(target, format!("{}\n", body.trim_end_matches('\n')));
+            out.set_body(target, format!("{}\n", body.trim_end_matches('\n')));
             msgs.push(format!("  {} list cleared (comments kept)", target.as_str()));
         }
     }
@@ -428,6 +474,34 @@ mod tests {
         assert!(!e.lanes.hotspot.contains("portal.example"));
         assert!(e.hotspot_tightened);
         assert_eq!(e.messages, vec!["  added: portal.example", "  moved out of hotspot lane: portal.example"]);
+    }
+
+    #[test]
+    fn the_hotspot_lane_is_a_target_with_the_shells_two_exceptions() {
+        let add = |es: &[&str]| {
+            apply_to(&lanes(), Target::Hotspot, &Op::Add { entries: es.iter().map(|s| s.to_string()).collect(), force: false })
+        };
+        // A `*` is kept — macOS's bypass list reads it — where a routing lane
+        // would decline it; `geosite:` is declined, as for corp.
+        let e = add(&["login*.venue.example", "geosite:ads"]);
+        assert!(e.lanes.hotspot.contains("login*.venue.example"));
+        assert_eq!(e.messages, vec![
+            "  added: login*.venue.example",
+            "  skipped geosite:ads — geosite: is only for the escape and block lanes",
+        ]);
+        // An entry in a routing lane moves INTO hotspot: pulled out (mv, so
+        // 0600) of escape, and the hotspot lane itself is only appended to.
+        let e = add(&["example.com"]);
+        assert!(e.lanes.hotspot.contains("example.com") && !e.lanes.escape.contains("example.com"));
+        assert_eq!(e.tightened, vec![Lane::Escape]);
+        assert!(!e.hotspot_tightened);
+        assert_eq!(e.messages, vec!["  added: example.com", "  moved out of escape lane: example.com"]);
+        // A removal is `mktemp` + `mv` on the hotspot file too.
+        let e = apply_to(&lanes(), Target::Hotspot, &Op::Rm(vec!["portal.example".into()]));
+        assert!(!e.lanes.hotspot.contains("portal.example") && e.hotspot_tightened);
+        let e = apply_to(&lanes(), Target::Hotspot, &Op::Clear);
+        assert_eq!(e.lanes.hotspot, "# hdr\n");
+        assert_eq!(e.messages, vec!["  hotspot list cleared (comments kept)"]);
     }
 
     #[test]

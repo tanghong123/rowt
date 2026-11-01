@@ -953,12 +953,12 @@ watch status
 
 # The hotspot lane: captive-portal hosts on the OS proxy bypass list. Not
 # routed — an edit refreshes the bypass list where rowt owns the proxy, never
-# reloads. rowt-rs hands the arm itself to the shell; what it owns and has to
-# agree on is everything that READS the lane: proxy on/check/env, the pull-out
-# a routing-lane add performs (and the bypass refresh that follows it), corp
-# sync's subtraction, and the bundle list. The scenario's proxy already points
-# at rowt, so every refresh is a `-setproxybypassdomains` in the argv trace —
-# whose ORDER pins the lowercased, byte-sorted shaping of the entries.
+# reloads. rowt-rs answers the arm itself (#s71), and everything that READS the
+# lane too: proxy on/check/env, the pull-out a routing-lane add performs (and
+# the bypass refresh that follows it), corp sync's subtraction, and the bundle
+# list. The scenario's proxy already points at rowt, so every refresh is a
+# `-setproxybypassdomains` in the argv trace — whose ORDER pins the lowercased,
+# byte-sorted shaping of the entries.
 hotspot
 hotspot list
 PARITY_SCENARIO=hotspot-lane hotspot list
@@ -971,7 +971,30 @@ PARITY_SCENARIO=hotspot-lane hotspot rm portal.example absent.example
 PARITY_SCENARIO=hotspot-lane hotspot clear
 hotspot rm portal.example
 hotspot errors
+hotspot stats
+hotspot log
 hotspot nosucharm
+# The editor's own shapes, aimed at the hotspot file. With no file: `clear`
+# and `rm` die before reading, `add` and `import` create it first — even when
+# nothing then goes in, and even when the import source is missing. A `*` is
+# kept (macOS reads it); `geosite:` is declined as for corp; a whole namespace
+# needs --force. An entry that sits in a routing lane moves INTO hotspot, and
+# that pull-out is a routing change: the router reloads unless --no-reload.
+hotspot clear
+hotspot add com
+hotspot add --force com
+hotspot add *.venue.example login*.venue.example
+hotspot import tests/parity/fixtures/import-list.txt
+hotspot import tests/parity/fixtures/import-wildcards.txt
+hotspot import
+escape import
+hotspot import tests/parity/fixtures/no-such-list.txt
+PARITY_SCENARIO=hotspot-lane hotspot import tests/parity/fixtures/import-list.txt
+PARITY_SCENARIO=hotspot-lane hotspot add PORTAL.example intranet.corp.example
+PARITY_SCENARIO=hotspot-lane hotspot add example.com
+PARITY_SCENARIO=hotspot-lane hotspot add --no-reload example.com
+PARITY_SCENARIO=hotspot-lane hotspot rm --domain login.hotspot.example
+PARITY_SCENARIO=hotspot-lane hotspot rm
 PARITY_SCENARIO=hotspot-lane escape add portal.example
 # --no-reload spares the router bounce only: the bypass refresh that a pull-out
 # (or a hotspot edit) owes still happens — the TUI's batched reload would not.

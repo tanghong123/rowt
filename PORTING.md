@@ -2,7 +2,7 @@
 
 *Investigation and design, 2026-08-08. Status as of 2026-11-01: phases 0, 2, 4
 and 6 done — the repo has no Python on any runtime path, and `ROWT_IMPL=rust`
-runs the CLI except six newer paths that still go to the shell (§5, "What
+runs the CLI except five newer paths that still go to the shell (§5, "What
 still reaches for bash"); aries-black has run it as its everyday rowt since
 2026-10-31, watchdog included since 2026-11-01. 1 and 3 are code-complete and gated, waiting on their
 cutovers and on the shadow window's fourteen days; phase 5 (Linux) not started.
@@ -251,16 +251,16 @@ revertible and gated.
 
 #### What still reaches for bash, and the order it comes back in
 
-**Six paths do (2026-11-01), all newer than the port.** The 37 arms ported
-here still answer natively, but four commands landed in the shell afterwards
-and rowt-rs hands them to `bin/rowt` whole: `doctor`, `hotspot`, `port` and
-`speed` (CLI-LEDGER.md: 37 of 41). Two `config` paths are the shell's too:
+**Five paths do (2026-11-01), all newer than the port.** The 37 arms ported
+here still answer natively, but four commands landed in the shell afterwards.
+`hotspot` came back first (#s71). rowt-rs still hands `doctor`, `port` and
+`speed` to `bin/rowt` whole (CLI-LEDGER.md: 38 of 41). Two `config` paths are the shell's too:
 `config import`, which went back once its default became a merge that edits
 the lane lists, hotspot's among them; and `config export --to` any client
 other than rowt (`_export_shadowrocket`). The §6.6 fallthrough is what runs
-all six, and `help::is_registered` still tells them from a typo; `selftest` 23
-asserts the two agree. Porting them is rowt #s71 (hotspot), #s72 (doctor),
-#s73 (port, speed) and #s74 (the two `config` paths). Until they land, a
+all five, and `help::is_registered` still tells them from a typo; `selftest` 23
+asserts the two agree. Porting them is rowt #s72 (doctor), #s73 (port,
+speed) and #s74 (the two `config` paths). Until they land, a
 machine on `ROWT_IMPL=rust` runs the shell for these, which is one reason the
 shell stays installed.
 

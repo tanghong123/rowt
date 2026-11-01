@@ -5,6 +5,15 @@ release is cut; everything under Unreleased ships with the next one.
 
 ## Unreleased
 
+- **`rowt hotspot` runs on the Rust version** (`ROWT_IMPL=rust`) instead of
+  being handed to the shell. 38 of the 41 commands now are. Nothing changes
+  in what it does: 31 cases compare it with the shell — output, exit status,
+  files, the proxy calls it makes and the audit log. Three smaller fixes come
+  with it, for the Rust version only, each matching the shell:
+  - `<lane> import` with no file aborts, and the audit records it as aborted;
+  - `rm` or `clear` on a lane file that doesn't exist says the list is empty;
+  - an `add` creates the lane file even when no entry goes in.
+
 ## 3.8.28 — 2026-11-01
 
 - A hysteria2 **certificate pin is kept** — `pinSHA256` in a link given to

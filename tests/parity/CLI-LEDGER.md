@@ -28,7 +28,7 @@ is not 'does it work' but 'whose code ran, and what proves it'.
 | `escape` | **native** | cli-diff |
 | `explain` | **native** | cli-diff |
 | `fetch` | **native** | cli-diff |
-| `hotspot` | legacy | cli-diff (passthrough) |
+| `hotspot` | **native** | cli-diff |
 | `metrics` | **native** | cli-diff |
 | `mon` | **native** | — |
 | `monitor` | **native** | — |
@@ -56,7 +56,7 @@ is not 'does it work' but 'whose code ran, and what proves it'.
 | `vm` | **native** | cli-diff |
 | `watch` | **native** | cli-diff |
 
-**37 of 41 command arms answered natively**; the other 4 run in the shell.
+**38 of 41 command arms answered natively**; the other 3 run in the shell.
 
 Partial arms — native for some sub-commands, legacy for the rest.
 `native()` in crates/rowt-cli/src/main.rs is the authority:
@@ -67,12 +67,15 @@ Partial arms — native for some sub-commands, legacy for the rest.
                     | "errors" | "stats" | "log"
             ) || (cmd == "corp" && matches!(sub, "sync" | "suggest")),
             "direct" | "connections" | "conns" | "_complete" => true,
+            // Every sub-command, an unknown one included: `cmd_hotspot` sends all
+            // but errors|stats|log to `edit_list`, whose own usage line is the answer.
+            "hotspot" => true,
             "proxy" => matches!(sub, "" | "status" | "check" | "env" | "on" | "off"),
             "server" => matches!(sub, "" | "list" | "dump" | "add" | "rm" | "remove" | "clear" | "import"),
             "sub" => matches!(sub, "" | "list" | "dump" | "add" | "rm" | "remove" | "update" | "clear" | "import"),
             "use" | "ping" | "run" | "skill" | "report" | "uninstall" | "fetch" | "probe" | "vm" | "watch" | "onboard" => true,
-            // `import` is NOT native: it delegates to the shell (lane editing —
-            // hotspot — is the shell's job), and it must delegate HERE, before the
+            // `import` is NOT native: it delegates to the shell (its merge re-runs
+            // `<lane> import` for each lane through bin/rowt; #s74), and it must delegate HERE, before the
             // audit BEGIN, or the shell would open a SECOND BEGIN/END pair. `list`
             // and `export` stay native.
             "config" => matches!(sub, "" | "list" | "export"),
