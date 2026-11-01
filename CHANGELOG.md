@@ -5,16 +5,17 @@ release is cut; everything under Unreleased ships with the next one.
 
 ## Unreleased
 
-- A hysteria2 **certificate pin is announced when it is dropped** — `pinSHA256`
-  in a link given to `server add`, `hpkp` in a Shadowrocket entry, a Clash
-  proxy's `fingerprint` — with a `note:` on stderr naming the server and what
-  is left checking its identity (with `insecure=1`, nothing). It was dropped
-  silently: the server connected, and the one check a self-signed server had
-  was gone. A subscription fetch still discards every per-link warning, this
-  note included, as it always has. sing-box pins a public key
-  (`tls.certificate_public_key_sha256`, present in 1.13.14) and has no field
-  for a certificate hash; one cannot be made from the other without the
-  certificate. Keeping the pin is a pending decision.
+- A hysteria2 **certificate pin is kept** — `pinSHA256` in a link given to
+  `server add`, `hpkp` in a Shadowrocket entry, a Clash proxy's `fingerprint`.
+  sing-box pins a public key (`tls.certificate_public_key_sha256`) and has no
+  field for a certificate hash, so the add fetches the server's certificate once
+  over QUIC, refuses the server if its SHA-256 differs from the pin, and records
+  the public-key hash, which sing-box checks on every connection. A certificate
+  it cannot fetch refuses too, with the reason: no QUIC-capable `openssl`
+  (Homebrew's `openssl@3`, now a dependency of the formula), an unreachable
+  server, Salamander obfs. The pin used to be dropped in silence: the server
+  connected, and the one check a self-signed server had was gone. A pinned
+  link inside a subscription is not fetched; a `note:` says so.
 - `server import` from Shadowrocket converts Hysteria2 entries (auth string,
   ALPN, allow-insecure, Salamander obfs with its password in the obfs
   argument). They were counted under `skipped`. An entry with a plugin or an

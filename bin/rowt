@@ -62,7 +62,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.8.26"
+ROWT_VERSION="3.8.27"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -2519,10 +2519,136 @@ after_import() {
   reload_if_running
 }
 
+# ---- certificate pins on hysteria2 servers ----------------------------------
+# A hysteria2 link can pin the server's certificate (pinSHA256, the SHA-256 of
+# the whole certificate; Hysteria 2's own docs recommend it beside insecure=1
+# for a self-signed server; Shadowrocket keeps it as hpkp, Clash as
+# fingerprint). sing-box pins a PUBLIC KEY (tls.certificate_public_key_sha256)
+# and, at 1.13, has no field for a certificate hash — and one hash cannot be
+# made from the other without the certificate. So at add time rowt fetches the
+# certificate once over QUIC, checks it against the pin, and records the
+# public-key hash; a mismatch, or a certificate it cannot fetch, refuses the
+# server (Hong, rowt #s64). The parsers carry the pin as `_pin_sha256`, a key
+# no sing-box config may hold: `_pins_resolve` consumes it on `server add` and
+# `server import --apply`, and `combine` strips whatever no fetch consumed.
+#
+# The QUIC handshake goes through the one openssl that can speak it
+# (_pin_openssl); the hashes through /usr/bin/openssl — macOS's own LibreSSL,
+# which has no QUIC but every x509/pkey/dgst this needs — by absolute path, so
+# the parity sandbox's shim only ever has to answer `s_client`.
+PIN_TIMEOUT="${ROWT_PIN_TIMEOUT:-10}"   # seconds a QUIC handshake may take
+
+# The QUIC-capable openssl: ROWT_OPENSSL alone when set (a wrong path fails
+# clearly rather than falling back), else `openssl` on PATH, else Homebrew's.
+# Each candidate is asked `s_client -help` and taken when the text names -quic:
+# macOS's LibreSSL does not, OpenSSL 3.2+ does. PATH before Homebrew on purpose:
+# the parity sandbox puts its shim on PATH, and the real Homebrew binary would
+# otherwise be reached from inside a gate.
+_pin_openssl() {
+  local c
+  if [ -n "${ROWT_OPENSSL:-}" ]; then set -- "$ROWT_OPENSSL"
+  else set -- openssl /opt/homebrew/opt/openssl@3/bin/openssl /opt/homebrew/bin/openssl /usr/local/opt/openssl@3/bin/openssl; fi
+  for c in "$@"; do
+    case "$c" in */*) [ -x "$c" ] || continue ;; *) have "$c" || continue ;; esac
+    if "$c" s_client -help 2>&1 | LC_ALL=C grep -q -- '-quic'; then printf '%s' "$c"; return 0; fi
+  done
+  return 1
+}
+# The pin with colons out and lowercased, when it is 64 hex digits.
+_pin_hex() {
+  local p; p="$(printf '%s' "$1" | tr -d ':' | tr 'A-F' 'a-f')"
+  case "$p" in ''|*[!0-9a-f]*) return 1 ;; esac
+  [ "${#p}" -eq 64 ] || return 1
+  printf '%s' "$p"
+}
+# One QUIC handshake, under the timeout, and the leaf — the first certificate —
+# out of its transcript. `-connect` LAST, because the parity recorder keys a
+# canned answer by a command's last argument; a bare IPv6 address is bracketed.
+_pin_leaf_pem() {   # $1 openssl  $2 host  $3 port  $4 sni  $5 alpn
+  local host="$2"; case "$host" in *:*) host="[$host]" ;; esac
+  _tmo "$PIN_TIMEOUT" "$1" s_client -quic -alpn "$5" -servername "$4" -showcerts -connect "$host:$3" </dev/null 2>/dev/null \
+    | LC_ALL=C sed -n '/^-----BEGIN CERTIFICATE-----$/,/^-----END CERTIFICATE-----$/p' \
+    | LC_ALL=C awk '{print} /^-----END CERTIFICATE-----$/{exit}' || true
+}
+# stdin: the leaf PEM. The certificate's SHA-256 over its DER, lowercase hex —
+# the form pinSHA256 takes (`awk '{print $NF}'`: LibreSSL writes
+# `SHA256(stdin)= <hex>`).
+_pin_cert_sha256() {
+  /usr/bin/openssl x509 -outform der 2>/dev/null | /usr/bin/openssl dgst -sha256 -hex 2>/dev/null | awk '{print $NF}'
+}
+# stdin: the leaf PEM. The SHA-256 of its DER SubjectPublicKeyInfo, base64 —
+# what tls.certificate_public_key_sha256 holds and what sing-box computes.
+_pin_spki_b64() {
+  /usr/bin/openssl x509 -pubkey -noout 2>/dev/null | /usr/bin/openssl pkey -pubin -outform der 2>/dev/null \
+    | /usr/bin/openssl dgst -sha256 -binary 2>/dev/null | base64
+}
+# stdin: a JSON array; stdout: the same array with every element whose outbound
+# carries `_pin_sha256` checked — the pin consumed and the public-key hash
+# recorded — and the refused ones dropped. $1 is the jq path of the outbound
+# inside an element: `.` for a plain array of outbounds, `.o` for import pairs.
+# Each outcome is said on stderr. The openssl is looked for once, and only when
+# something carries a pin, so a pool with none leaves no trace of the probe.
+_pins_resolve() {
+  local at="${1:-.}" arr n i e o tag pin hex host port sni alpn pem got spki ossl=""
+  arr="$(cat)"
+  # Presence of the key, not truth of its value: a null pin is still a pin to
+  # refuse, as the Rust's `.get()` sees it.
+  n="$(jq -r '[ .[] | select('"$at"' | (type == "object" and has("_pin_sha256"))) ] | length' <<<"$arr" 2>/dev/null || echo 0)"
+  [ "$n" -gt 0 ] 2>/dev/null || { printf '%s' "$arr"; return 0; }
+  ossl="$(_pin_openssl)" || ossl=""
+  local keep='[]' len; len="$(jq length <<<"$arr")"
+  i=0
+  while [ "$i" -lt "$len" ]; do
+    e="$(jq -c ".[$i]" <<<"$arr")"; i=$((i + 1))
+    o="$(jq -c "$at" <<<"$e")"
+    if ! jq -e 'type == "object" and has("_pin_sha256")' <<<"$o" >/dev/null 2>&1; then
+      keep="$(jq -c --argjson e "$e" '. + [$e]' <<<"$keep")"; continue
+    fi
+    pin="$(jq -r '._pin_sha256 // "" | tostring' <<<"$o")"
+    tag="$(jq -r 'if (.tag // "") != "" then .tag else "?" end' <<<"$o")"
+    if ! hex="$(_pin_hex "$pin")"; then
+      echo "refused: '$tag' — its certificate pin is not a SHA-256 ($pin); not added" >&2; continue
+    fi
+    if [ -z "$ossl" ]; then
+      echo "refused: '$tag' — no QUIC-capable openssl to check its certificate pin with (brew install openssl@3, or set ROWT_OPENSSL); not added" >&2; continue
+    fi
+    if jq -e '.obfs != null' <<<"$o" >/dev/null 2>&1; then
+      echo "refused: '$tag' — its certificate pin cannot be checked through Salamander obfs (a plain QUIC client cannot reach the server's certificate); not added" >&2; continue
+    fi
+    host="$(jq -r '.server // "" | tostring' <<<"$o")"; port="$(jq -r '.server_port // "" | tostring' <<<"$o")"
+    sni="$(jq -r --arg h "$host" 'if (.tls.server_name // "") != "" then .tls.server_name else $h end' <<<"$o")"
+    alpn="$(jq -r '((.tls.alpn // []) | map(strings) | join(",")) | if . == "" then "h3" else . end' <<<"$o")"
+    pem="$(_pin_leaf_pem "$ossl" "$host" "$port" "$sni" "$alpn")"
+    if [ -z "$pem" ]; then
+      echo "refused: '$tag' — could not fetch the server's certificate over QUIC from $host:$port within $PIN_TIMEOUT s; its pin cannot be checked, so it is not added — retry when the server is reachable" >&2; continue
+    fi
+    got="$(printf '%s\n' "$pem" | _pin_cert_sha256)"
+    if [ -z "$got" ]; then
+      echo "refused: '$tag' — could not read the certificate the server sent; not added" >&2; continue
+    fi
+    if [ "$got" != "$hex" ]; then
+      echo "refused: '$tag' — the server's certificate does not match its pin (certificate SHA-256 $got, pinned $hex); not added" >&2; continue
+    fi
+    spki="$(printf '%s\n' "$pem" | _pin_spki_b64)"
+    if [ -z "$spki" ]; then
+      echo "refused: '$tag' — could not read the server's public key from its certificate; not added" >&2; continue
+    fi
+    o="$(jq -c --arg k "$spki" 'del(._pin_sha256) | .tls = ((.tls // {}) + {certificate_public_key_sha256: [$k]})' <<<"$o")"
+    e="$(jq -c --argjson v "$o" "$at = \$v" <<<"$e")"
+    echo "pinned: '$tag' — the server's certificate matches its pin; its public key is recorded, and sing-box checks it on every connection" >&2
+    keep="$(jq -c --argjson e "$e" '. + [$e]' <<<"$keep")"
+  done
+  printf '%s' "$keep"
+}
+
 cmd_import() {
   [ "$#" -ge 1 ] || die "usage: $PROG server add '<vless://|vmess://|anytls://|hysteria2://|ss://|trojan://|tuic://...>' [more...]"
   _py_ok || die "python3 not found"
   local new; new="$(printf '%s\n' "$@" | "${PY_VLESS[@]}" --multi)" || exit 1
+  # A pinned hysteria2 server has its certificate fetched and checked here, or
+  # is refused; with every link refused there is nothing to add.
+  new="$(_pins_resolve <<<"$new")"
+  [ "$(jq length <<<"$new")" -gt 0 ] || { err "no server added — every link was refused"; exit 1; }
   # append to the manual set and dedupe it in place (so re-importing the same
   # link is idempotent, not just deduped in the final servers.json)
   [ -s "$MANUAL" ] || echo '[]' > "$MANUAL"
@@ -2937,6 +3063,10 @@ apply_import() {
                     | if . == "sr" then "shadowrocket" elif . == "clashverge" or . == "verge" then "clash-verge" else . end),
                 o: del(._source)}
           else {s: "review", o: .} end ]' "$j" > "$pairs" 2>/dev/null || echo '[]' > "$pairs"
+  # A review entry carrying a certificate pin (`_pin_sha256`, from the
+  # Shadowrocket dumper's hpkp) has its certificate fetched and checked here,
+  # or is refused and left out.
+  _pins_resolve .o < "$pairs" > "$pairs.n" && mv "$pairs.n" "$pairs"
   _manual_import "$pairs" "$replace"
   rm -f "$pairs"
   jq -r '.subscriptions[]?.url // empty' "$j" >> "$SUBS_FILE"

@@ -429,6 +429,39 @@ server add vless://00000000-0000-4000-8000-000000000009@203.0.113.20:443#d1 vles
 # with its reason rather than saved.
 server add ss://YWVzLTI1Ni1nY206cHctMQ==@203.0.113.21:8388/?plugin=obfs-local%3Bobfs%3Dhttp%3Bobfs-host%3Dcdn.example#ss1 trojan://pw-2@203.0.113.22:443?sni=trojan.example&type=ws&path=%2Fws#tr1 tuic://00000000-0000-4000-8000-000000000010:pw-3@203.0.113.23:443?congestion_control=bbr#tu1
 server add ss://cmM0OnB3@203.0.113.24:8388#ss-rc4
+# A hysteria2 link's certificate pin (pinSHA256, the SHA-256 of the whole
+# certificate). sing-box pins a public key, so `server add` fetches the
+# certificate once over QUIC — the `openssl` shim answers `s_client` from the
+# pinned-hy2 scenario's env, keyed by host:port; the hashes go through
+# /usr/bin/openssl, real on both sides — and records
+# tls.certificate_public_key_sha256 when it matches. Pinned: a match on
+# 203.0.113.9, and on a bracketed IPv6 host with the pin spelled with colons.
+# Refused, pool untouched, each with its reason: a mismatch, a host the shim has
+# no answer for (203.0.113.10, nothing within the timeout), one whose handshake
+# fails (203.0.113.11, rc 1), a server behind Salamander obfs (no fetch at all),
+# a pin that is not a SHA-256, and no QUIC-capable openssl (ROWT_OPENSSL names a
+# path that is not there). One good link beside a refused one still adds; every
+# link refused ends 1 with nothing added.
+PARITY_SCENARIO=pinned-hy2 server add hysteria2://pw-9@203.0.113.9:443?insecure=1&sni=hy2.example&pinSHA256=98897fecbe07a01d537f3ecc63e465d0e1c376fe62bafdf0e5660039492e9b41#pinned
+PARITY_SCENARIO=pinned-hy2 server add hysteria2://pw-9@[2001:db8::9]:443?insecure=1&sni=hy2.example&alpn=h3&pinSHA256=98:89:7F:EC:BE:07:A0:1D:53:7F:3E:CC:63:E4:65:D0:E1:C3:76:FE:62:BA:FD:F0:E5:66:00:39:49:2E:9B:41#pinned6
+PARITY_SCENARIO=pinned-hy2 server add hysteria2://pw-9@203.0.113.9:443?insecure=1&sni=hy2.example&pinSHA256=98897fecbe07a01d537f3ecc63e465d0e1c376fe62bafdf0e5660039492e9b40#wrongpin
+PARITY_SCENARIO=pinned-hy2 server add hysteria2://pw-10@203.0.113.10:443?insecure=1&pinSHA256=98897fecbe07a01d537f3ecc63e465d0e1c376fe62bafdf0e5660039492e9b41#noanswer
+PARITY_SCENARIO=pinned-hy2 server add hysteria2://pw-11@203.0.113.11:443?insecure=1&pinSHA256=98897fecbe07a01d537f3ecc63e465d0e1c376fe62bafdf0e5660039492e9b41#handshakefailed
+PARITY_SCENARIO=pinned-hy2 server add hysteria2://pw-9@203.0.113.9:443?insecure=1&obfs=salamander&obfs-password=x&pinSHA256=98897fecbe07a01d537f3ecc63e465d0e1c376fe62bafdf0e5660039492e9b41#obfs
+PARITY_SCENARIO=pinned-hy2 server add hysteria2://pw-9@203.0.113.9:443?insecure=1&pinSHA256=nothex#badpin
+ROWT_OPENSSL=/nonexistent/openssl PARITY_SCENARIO=pinned-hy2 server add hysteria2://pw-9@203.0.113.9:443?insecure=1&pinSHA256=98897fecbe07a01d537f3ecc63e465d0e1c376fe62bafdf0e5660039492e9b41#noopenssl
+PARITY_SCENARIO=pinned-hy2 server add hysteria2://pw-9@203.0.113.9:443?insecure=1&sni=hy2.example&pinSHA256=98897fecbe07a01d537f3ecc63e465d0e1c376fe62bafdf0e5660039492e9b41#pinned hysteria2://pw-9@203.0.113.9:443?pinSHA256=nothex#badpin
+# The review file's hysteria2 entries carry `_pin_sha256` the way the
+# Shadowrocket dumper writes an hpkp: --apply fetches and checks each, refusing
+# the one whose pin does not match and applying the rest.
+PARITY_SCENARIO=pinned-hy2 server import --apply
+# A pin no fetch consumed — the scenario's manual.json has a hand-edited entry
+# still carrying `_pin_sha256` — is stripped by combine with a note on the way
+# to servers.json; the already-pinned server's certificate_public_key_sha256
+# renders into host.json untouched.
+PARITY_SCENARIO=pinned-hy2 sub update
+PARITY_SCENARIO=pinned-hy2 render
+PARITY_SCENARIO=pinned-hy2 server list
 # Re-importing something the manual set already has must be idempotent on disk,
 # not merely deduped again in servers.json on the next rebuild.
 PARITY_SCENARIO=pool-seeded server add vless://00000000-0000-4000-8000-000000000001@203.0.113.10:443#alpha-again

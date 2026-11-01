@@ -163,6 +163,9 @@ pub fn apply(ctx: &Ctx, file: &Path, replace: bool) -> Result<String, String> {
             pairs.push((src, s));
         }
     }
+    // `_pins_resolve .o`: a review entry carrying a certificate pin has its
+    // certificate fetched and checked here, or is refused and left out.
+    let pairs = crate::pins::resolve_pairs(pairs);
     crate::sources::manual_import(ctx, &pairs, replace)?;
 
     // `jq -r '.subscriptions[]?.url // empty' >> subs.txt`, then `sort -u`.

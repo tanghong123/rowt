@@ -1,0 +1,28 @@
+[
+  {
+    "type": "vless",
+    "tag": "plain",
+    "server": "203.0.113.30",
+    "server_port": 443,
+    "uuid": "00000000-0000-4000-8000-000000000030",
+    "packet_encoding": "xudp",
+    "tls": { "enabled": true, "server_name": "plain.example", "utls": { "enabled": true, "fingerprint": "chrome" } }
+  },
+  {
+    "type": "hysteria2",
+    "tag": "already",
+    "server": "203.0.113.31",
+    "server_port": 443,
+    "password": "PARITYFIXTUREPASSWORD",
+    "tls": { "enabled": true, "server_name": "already.example", "insecure": true, "alpn": ["h3"], "certificate_public_key_sha256": ["s64lWhnDpjsjTh8QS04Byf6xk2p+8ZeG4M6xonj7juE="] }
+  },
+  {
+    "type": "hysteria2",
+    "tag": "handpin",
+    "server": "203.0.113.32",
+    "server_port": 443,
+    "password": "PARITYFIXTUREPASSWORD",
+    "tls": { "enabled": true, "server_name": "handpin.example", "insecure": true },
+    "_pin_sha256": "98897fecbe07a01d537f3ecc63e465d0e1c376fe62bafdf0e5660039492e9b41"
+  }
+]

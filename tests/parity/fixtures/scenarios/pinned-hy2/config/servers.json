@@ -1,0 +1,19 @@
+[
+  {
+    "type": "vless",
+    "tag": "plain",
+    "server": "203.0.113.30",
+    "server_port": 443,
+    "uuid": "00000000-0000-4000-8000-000000000030",
+    "packet_encoding": "xudp",
+    "tls": { "enabled": true, "server_name": "plain.example", "utls": { "enabled": true, "fingerprint": "chrome" } }
+  },
+  {
+    "type": "hysteria2",
+    "tag": "already",
+    "server": "203.0.113.31",
+    "server_port": 443,
+    "password": "PARITYFIXTUREPASSWORD",
+    "tls": { "enabled": true, "server_name": "already.example", "insecure": true, "alpn": ["h3"], "certificate_public_key_sha256": ["s64lWhnDpjsjTh8QS04Byf6xk2p+8ZeG4M6xonj7juE="] }
+  }
+]

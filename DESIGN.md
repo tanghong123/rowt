@@ -539,6 +539,18 @@ as the only VPN, "direct" just meant "off my tunnel". escape splits that
 `DIRECT` pile in two — **corp** (intranet, must traverse the corp VPN) vs
 **direct** (physical NIC) — which is the whole point of the three-way design.
 
+A hysteria2 node's **certificate pin** (`hpkp` in the store, `pinSHA256` in a
+link) survives the move, but not as itself: sing-box pins a public key
+(`tls.certificate_public_key_sha256`), not a certificate hash, and one cannot be
+made from the other without the certificate. So `server add` / `--apply` fetch
+the certificate once over QUIC (a QUIC-capable `openssl`), refuse the server if
+its SHA-256 differs from the pin, and record the public-key hash, which
+sing-box checks on every connection whether `insecure` is set or not. What
+cannot be checked — no QUIC-capable openssl, an unreachable server, Salamander
+obfs — refuses rather than adds unpinned; a pin that reaches a pool without a
+fetch (a subscription's link) is stripped with a note, since it is no sing-box
+field and would fail the whole config.
+
 ## 10. Failure modes
 
 - **Escape tunnel down.** Escape-listed sites use the `escape` outbound only;

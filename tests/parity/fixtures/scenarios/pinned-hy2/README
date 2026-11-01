@@ -1,0 +1,24 @@
+The pool with hysteria2 certificate pins in every state the add step can meet.
+
+config/manual.json: `plain` (a VLESS server), `already` (a hysteria2 server whose
+public key is already recorded under tls.certificate_public_key_sha256 — a
+render must carry it into host.json untouched), and `handpin` (a hand-edited
+entry still carrying `_pin_sha256`, which no fetch consumed: combine strips it
+with a note on the way to servers.json). servers.json is the last rebuild: the
+first two.
+
+config/import-review.json: two hysteria2 entries carrying `_pin_sha256` the way
+the Shadowrocket dumper writes an hpkp (one matching the shim's certificate,
+one not) and a plain VLESS one; `server import --apply` fetches and checks each.
+
+env/: what the `openssl` shim answers. `openssl_203_0_113_9_443` and the IPv6
+twin `openssl_2001_db8_9_443` are an `s_client -quic -showcerts` transcript
+carrying a self-signed certificate for the documentation name hy2.example
+(generated once with `openssl req -x509 -newkey ec`; not a real server's).
+Its SHA-256 is 98897fec…2e9b41, the pin the matching cases carry; its
+public-key SHA-256 is s64lWhnDpjsjTh8QS04Byf6xk2p+8ZeG4M6xonj7juE=, what a
+pinned outbound records. `openssl_203_0_113_11_443` is empty with rc 1 (the
+handshake failed); 203.0.113.10 has no file at all (no answer within the
+timeout). The `-help` probe is answered by fixtures/env/openssl_s_client_help,
+which names `-quic`. The hashes themselves run through /usr/bin/openssl, real
+on both sides.

@@ -113,13 +113,21 @@ server; some servers fail it while carrying real traffic. Verify with
 - Fix with a lane `add`. A running router picks it up live (3.8.11+; earlier
   versions restart, so run it in the foreground there).
 
-**`note: '<tag>': the … certificate pin (pinSHA256 / hpkp) is dropped` when a server
-is added or imported.** A hysteria2 link pinned the server's certificate; sing-box pins
-a public key and has no field for a certificate hash, so rowt uses the server without
-the pin and says so. The rest of the line says what still checks the server: with
-`insecure=1` (self-signed servers, the common case for this pin), nothing — tell the
-user it connects exactly as an unpinned insecure link would, and that keeping the pin
-is a pending rowt decision, not something to set. Nothing to fix on the Mac.
+**`pinned: '<tag>' …` or `refused: '<tag>' — … pin …` when a server is added or
+imported.** A hysteria2 link pinned the server's certificate (`pinSHA256`;
+Shadowrocket's `hpkp`). sing-box pins a public key, so rowt fetches the certificate
+once over QUIC, checks it against the pin and records the public-key hash:
+`pinned:` means exactly that, and sing-box checks it on every connection. `refused:`
+names why the server was NOT added — *no QUIC-capable openssl*: `brew install
+openssl@3` (macOS's own openssl cannot speak QUIC; `ROWT_OPENSSL=/path` points at one
+by hand), then add the link again. *Could not fetch … within 10 s*: the server is
+unreachable from here (or the host/port is wrong); retry when it is. *Does not match
+its pin*: the link's pin and the server's certificate disagree — do not work around
+it; the user asks the server's operator. *Cannot be checked through Salamander
+obfs*: a plain QUIC client cannot reach the certificate; the server is not added.
+A `note: '<tag>': certificate pin not kept` on a subscription refresh means the
+pinned link came from a subscription, which is not fetched; only `server add` and
+`server import` check pins.
 
 **Escape lane: many timeouts or resets.**
 

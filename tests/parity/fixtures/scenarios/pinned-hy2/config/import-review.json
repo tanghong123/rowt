@@ -1,0 +1,36 @@
+{
+  "servers": [
+    {
+      "type": "hysteria2",
+      "tag": "hy2-pinned",
+      "server": "203.0.113.9",
+      "server_port": 443,
+      "password": "PARITYFIXTUREPASSWORD",
+      "tls": { "enabled": true, "server_name": "hy2.example", "insecure": true, "alpn": ["h3"] },
+      "_pin_sha256": "98897FECBE07A01D537F3ECC63E465D0E1C376FE62BAFDF0E5660039492E9B41",
+      "_source": "shadowrocket"
+    },
+    {
+      "type": "hysteria2",
+      "tag": "hy2-wrong",
+      "server": "203.0.113.9",
+      "server_port": 443,
+      "password": "PARITYFIXTUREPASSWORD2",
+      "tls": { "enabled": true, "server_name": "hy2.example", "insecure": true, "alpn": ["h3"] },
+      "_pin_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "_source": "shadowrocket"
+    },
+    {
+      "type": "vless",
+      "tag": "epsilon",
+      "server": "203.0.113.40",
+      "server_port": 443,
+      "uuid": "00000000-0000-4000-8000-000000000005",
+      "tls": { "enabled": true, "server_name": "epsilon.example" },
+      "_source": "clash-verge"
+    }
+  ],
+  "subscriptions": [],
+  "proxy_domains": [],
+  "skipped": {}
+}

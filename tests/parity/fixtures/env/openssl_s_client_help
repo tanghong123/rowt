@@ -1,0 +1,9 @@
+Usage: s_client [options] [host:port]
+
+General options:
+ -help              Display this summary
+ -connect val       TCP/IP where to connect
+ -servername val    Set TLS extension servername (SNI) in ClientHello (default)
+ -alpn val          Enable ALPN extension, considering named protocols supported (comma-separated list)
+ -quic              Connect using QUIC
+ -showcerts         Show all certificates sent by the server

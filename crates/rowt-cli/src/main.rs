@@ -23,6 +23,7 @@ mod best;
 mod importer;
 mod lanelog;
 mod onboard;
+mod pins;
 mod pool;
 mod shell;
 mod skill;

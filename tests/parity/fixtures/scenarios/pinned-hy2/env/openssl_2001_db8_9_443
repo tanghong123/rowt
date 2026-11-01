@@ -1,0 +1,37 @@
+CONNECTED(00000006)
+depth=0 CN = hy2.example
+verify error:num=18:self-signed certificate
+verify return:1
+---
+Certificate chain
+ 0 s:CN = hy2.example
+   i:CN = hy2.example
+-----BEGIN CERTIFICATE-----
+MIICEDCCAbYCCQCfMtQxsuO1GTAKBggqhkjOPQQDAjAWMRQwEgYDVQQDDAtoeTIu
+ZXhhbXBsZTAeFw0yNjExMDEwMDEwMjNaFw0zNjEwMjkwMDEwMjNaMBYxFDASBgNV
+BAMMC2h5Mi5leGFtcGxlMIIBSzCCAQMGByqGSM49AgEwgfcCAQEwLAYHKoZIzj0B
+AQIhAP////8AAAABAAAAAAAAAAAAAAAA////////////////MFsEIP////8AAAAB
+AAAAAAAAAAAAAAAA///////////////8BCBaxjXYqjqT57PrvVV2mIa8ZR0GsMxT
+sPY7zjw+J9JgSwMVAMSdNgiG5wSTamZ44ROdJreBn36QBEEEaxfR8uEsQkf4vObl
+Y6RA8ncDfYEt6zOg9KE5RdiYwpZP40Li/hp/m47n60p8D54WK84zV2sxXs7LtkBo
+N79R9QIhAP////8AAAAA//////////+85vqtpxeehPO5ysL8YyVRAgEBA0IABCLG
+W8Kjh1S8j2cEZcyhEjbNSPvwfXI7raoKRq+3jo0fBP5dbesmhgfDPXbejcgv7g9v
+dl8COiDjWnPJcgbM4IMwCgYIKoZIzj0EAwIDSAAwRQIhAMpx7kwIGejrXUtJJtsL
+xKwt1Oid4O9Rbi35MdhQ41dVAiA15jqJ6KdaHRAZGxhWu1ibs43upNmeV3yok+vt
+lcXRBA==
+-----END CERTIFICATE-----
+---
+Server certificate
+subject=CN = hy2.example
+issuer=CN = hy2.example
+---
+No client certificate CA names sent
+---
+SSL handshake has read 0 bytes and written 0 bytes
+Verification error: self-signed certificate
+---
+New, TLSv1.3, Cipher is TLS_AES_128_GCM_SHA256
+Protocol: QUICv1
+ALPN protocol: h3
+---
+DONE

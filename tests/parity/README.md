@@ -98,7 +98,11 @@ handed a malformed command and rejecting it in the same way.
 Every run gets a scratch tree with `HOME` and `XDG_CONFIG_HOME` pointed into
 it, seeded from `fixtures/config`, and a shim directory first on `PATH`. The
 shims (`shims/_recorder`, symlinked under each name) record their argv and
-return canned responses from `fixtures/env`.
+return canned responses from `fixtures/env`. `openssl` is among them for the
+one call that leaves the machine — the QUIC handshake a certificate pin needs
+(`s_client … -connect host:port`, answered per host by the pinned-hy2
+scenario) — while the hashes run through `/usr/bin/openssl` by absolute path
+on both sides, which no shim touches.
 
 A response is normally static: the same call always gets the same answer. A
 `<key>.seq` file is a sequence instead — each call gets its next line, and an
@@ -267,7 +271,7 @@ reconcile and the watchdog's decision table. Each has a gate:
 | `sr-diff` | stdout + stderr + exit status, over Shadowrocket installs | 1,200 generated cases |
 | `watch-diff` | decisions, read back from watch.log + trace; a case file names its phase with `_phase` (`guard` unless it says `netcheck`) | 8 cases |
 | `platform-diff` | the argv the platform layer produces | 12 cases |
-| `cli-diff` | stdout, status, the config tree + rc files + LaunchAgent plist (content + mode), argv trace, audit log | 546 cases |
+| `cli-diff` | stdout, status, the config tree + rc files + LaunchAgent plist (content + mode), argv trace, audit log | 561 cases |
 | `live-fixtures` | each scenario whose committed host.json spells `@CFG@` is still a render of that scenario, byte for byte (vm.json too) | 4 scenarios |
 
 `merge-diff` is the only gate whose primary artifact is a file written in

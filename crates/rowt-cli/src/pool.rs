@@ -351,6 +351,14 @@ pub fn add(ctx: &Ctx, links: &[String]) -> Result<String, String> {
             std::process::exit(1);
         }
     };
+    // `_pins_resolve`: a pinned hysteria2 server has its certificate fetched
+    // and checked here, or is refused; with every link refused there is
+    // nothing to add, and the shell `exit 1`s the same way as above.
+    let parsed = crate::pins::resolve(parsed);
+    if parsed.is_empty() {
+        eprintln!("error: no server added — every link was refused");
+        std::process::exit(1);
+    }
 
     let manual = manual_file(cfg);
     if !non_empty(&manual) {

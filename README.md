@@ -571,14 +571,20 @@ parameters (TLS unless `security=none`), and `tuic://` is v5
 
 A `hysteria2://` link's **certificate pin** (`pinSHA256`, which Hysteria 2's own
 docs recommend beside `insecure=1` for a self-signed server; Shadowrocket keeps
-it as `hpkp`, Clash as `fingerprint`) **is dropped, and a `note:` on stderr
-says so.** sing-box pins a server's public key
-(`tls.certificate_public_key_sha256`; checked against 1.13.14 with `sing-box
-check`) and has no field for a certificate hash, and one cannot be made from
-the other without the certificate. The note says what is left checking the
-server's identity: with `insecure=1`, nothing — the server then connects
-exactly as an unpinned insecure link would. Keeping the pin is a pending
-decision, not a setting.
+it as `hpkp`, Clash as `fingerprint`) **is kept.** sing-box pins a server's
+public key (`tls.certificate_public_key_sha256`) and has no field for a
+certificate hash, so `server add` and `server import --apply` fetch the
+server's certificate once over QUIC, **refuse the server if its SHA-256 differs
+from the pin**, and record the public-key hash — which sing-box then checks on
+every connection, `insecure` or not. The fetch needs a QUIC-capable `openssl`:
+Homebrew's `openssl@3` (the formula depends on it; macOS's own LibreSSL cannot
+speak QUIC; `ROWT_OPENSSL=/path` names one by hand). Without one, or when the
+server cannot be reached within `ROWT_PIN_TIMEOUT` seconds (10), or when it
+sits behind Salamander obfs, the server is **refused with the reason** rather
+than added unpinned — retry when it is reachable. A pinned link inside a
+subscription is not fetched (a `note:` says so and the pin is not kept), and
+`config export` reports a pinned server as not exported, since no share link
+carries a public-key pin.
 
 A server the pinned sing-box would refuse is **skipped with a warning when it
 is added**, not saved: an unknown cipher, a 2022 key of the wrong length, another
