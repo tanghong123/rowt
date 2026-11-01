@@ -5,6 +5,8 @@ release is cut; everything under Unreleased ships with the next one.
 
 ## Unreleased
 
+## 3.8.28 — 2026-11-01
+
 - A hysteria2 **certificate pin is kept** — `pinSHA256` in a link given to
   `server add`, `hpkp` in a Shadowrocket entry, a Clash proxy's `fingerprint`.
   sing-box pins a public key (`tls.certificate_public_key_sha256`) and has no
@@ -21,6 +23,12 @@ release is cut; everything under Unreleased ships with the next one.
   argument). They were counted under `skipped`. An entry with a plugin or an
   SSR-style proto set is skipped, as a Shadowsocks one is; settings in
   `pluginParam` are not read, and a note says so.
+- **The watchdog can run rowt-rs, and remembers it across upgrades.**
+  `ROWT_IMPL=rust rowt watch install|refresh` records the choice in state as
+  `watch_impl`, and the LaunchAgent plist carries `ROWT_IMPL=rust` only when
+  state says so; a plist nobody switched is unchanged. The way back is
+  `ROWT_IMPL=bash rowt watch refresh`. A watchdog on rowt-rs ends the tick
+  shadow on that machine.
 - `use <tag>`, `use best`, a lane edit and `corp sync` exit 1 when the router
   does not come back from the restart after them. They exited 0 before, with
   their own "escape -> …" or "added:" line, over a router that was down (the
@@ -41,6 +49,15 @@ release is cut; everything under Unreleased ships with the next one.
 - `rowt render` alone can change a running router's lane rules at once: it
   writes the rule-sets the router watches — when the router runs the rendered
   `host.json`; otherwise, as before, only `reload` reaches it.
+- A lane file with a byte that is not UTF-8 no longer renders as an empty lane
+  in rowt-rs (3.8.21). One invalid byte emptied the whole file on the Rust
+  side, and with live rule-sets the empty lane reached the running router on
+  the next render; the shell kept the entries. Every reader now decodes
+  lossily, so both sides render the same set.
+- The monitor's batched lane edits go live too: the render after a batch of
+  TUI lane edits already reaches the router, so the monitor no longer restarts
+  it afterwards (which dropped every connection on the Mac for nothing); it
+  restarts only when the router does not run what was rendered.
 - Lane entries compare without case in `add`, `rm` and the single-lane rule,
   and the rule-sets hold them lowercased — a mixed-case entry, which matched
   nothing before, now matches. The render warns on a case twin across lanes and
