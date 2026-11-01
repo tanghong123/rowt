@@ -31,6 +31,7 @@ pub mod pyurl;
 pub mod reconcile;
 pub mod render;
 pub mod sharelink;
+pub mod srexport;
 pub mod srimport;
 pub mod srio;
 pub mod status;

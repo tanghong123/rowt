@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "rules": [
+    {
+      "domain": ["google.example", "accounts.google.example"],
+      "domain_suffix": [".googleapis.example", "gstatic.example"],
+      "domain_keyword": "google",
+      "domain_regex": ["^youtube[0-9]+\\.example$"]
+    },
+    {
+      "domain_suffix": ".youtube.example"
+    }
+  ]
+}

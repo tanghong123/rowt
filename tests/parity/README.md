@@ -108,7 +108,12 @@ return canned responses from `fixtures/env`. `openssl` is among them for the
 one call that leaves the machine — the QUIC handshake a certificate pin needs
 (`s_client … -connect host:port`, answered per host by the pinned-hy2
 scenario) — while the hashes run through `/usr/bin/openssl` by absolute path
-on both sides, which no shim touches.
+on both sides, which no shim touches. The sing-box both sides run is
+`fixtures/bin/sing-box`, a stub: it answers `version`, accepts `check`, exits
+at once on `run` unless the scenario says otherwise, and decompiles a rule-set
+only from a canned `env/decompile-<set>.json` — exit 1 without one, as the
+real tool fails on a file it cannot read — which is what a `geosite:` lane
+entry becomes in `config export --to shadowrocket`.
 
 A response is normally static: the same call always gets the same answer. A
 `<key>.seq` file is a sequence instead — each call gets its next line, and an
@@ -167,14 +172,17 @@ dies with the case instead of outliving the run.
 
 ### The bundle fixtures
 
-Three `.tgz` files under `fixtures/` are what `config import` is pointed at:
+Five `.tgz` files under `fixtures/` are what `config import` is pointed at:
 `config-bundle.tgz` (a well-formed bundle, every file stored 0644 so the 0600
 the import applies to the four secret-bearing ones — and to manual-sources.tsv —
 is visible in `fsstate`; it also carries an `escape-dns.txt`, in documentation
 ranges),
 `not-a-bundle.tgz` (a readable archive carrying neither `servers.json` nor
-`escape-domains.txt`), and `bundle-no-servers.tgz` (`servers.json` is `[]`,
-which still renders — see PORTING.md §6.7). They are binary and committed, so
+`escape-domains.txt`), `bundle-no-servers.tgz` (`servers.json` is `[]`,
+which still renders — see PORTING.md §6.7), `conflict-bundle.tgz` (lanes that
+cross the base seed, for the merge's conflict prompt) and `hotspot-bundle.tgz`
+(a hotspot lane beside an escape one, for the fold that must leave the system
+proxy alone). They are binary and committed, so
 the regeneration is written down: stage the files, `chmod 644`, `touch -t
 202608100000`, then
 

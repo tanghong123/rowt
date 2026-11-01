@@ -18,11 +18,15 @@ release is cut; everything under Unreleased ships with the next one.
   Mac around rowt. The `apps` row lists the clients it finds in a fixed order;
   it used to follow awk's hash order.
 - **`rowt speed` and `rowt port` run on the Rust version** too, so all 41
-  commands do; only `config import` and `config export --to shadowrocket`
-  still hand over to the shell. Behaviour is unchanged. 46 cases compare the
+  commands do. Behaviour is unchanged. 46 cases compare the
   two with the shell, `speed` over a fixed set of throughput samples (every
   cell, median and verdict) and `port` down to the undo when a running router
   will not take the change.
+- `rowt config import` and `rowt config export --to shadowrocket` run natively
+  in rowt-rs too, the last two `config` paths that went to the shell. The merge
+  folds each lane through rowt-rs itself against a staging copy, as before
+  through the shell; the Shadowrocket export writes the same rules. Nothing
+  rowt-rs answers reaches for the shell any more.
 
 ## 3.8.28 — 2026-11-01
 

@@ -251,19 +251,18 @@ revertible and gated.
 
 #### What still reaches for bash, and the order it comes back in
 
-**Two paths do (2026-11-01), both newer than the port.** The 37 arms ported
+**None do (2026-11-01).** The 37 arms ported
 here answer natively, and so do the four commands that landed in the shell
 afterwards: `hotspot` (#s71), `doctor` (#s72, with 16 cli-diff cases over six
 scenarios of the machine around rowt), `speed` and `port` (#s73). CLI-LEDGER.md
-reads 41 of 41. What is still the shell's is two `config` paths: `config
-import`, which went back once its default became a merge that edits the lane
-lists, hotspot's among them; and `config export --to` any client other than
-rowt (`_export_shadowrocket`). The §6.6 fallthrough is what runs them, and
-`help::is_registered` still tells a delegated command from a typo; `selftest`
-23 asserts the two agree, and `selftest` 51 that each arm ported since the 37
-is answered by rowt-rs and not handed back. Porting the two is rowt #s74.
-Until it lands, a machine on `ROWT_IMPL=rust` runs the shell for these, which
-is one reason the shell stays installed.
+reads 41 of 41. The two `config` paths that were the shell's came back last
+(#s74): `config import`, whose merge re-invokes rowt-rs per lane against a
+staging config as the shell re-invoked its own script, and `config export --to
+shadowrocket`, built in `rowt-core::srexport` and compared over the geosite,
+exact-host, hotspot and synced-corp scenarios. The §6.6 fallthrough now runs
+nothing a registered command names; `help::is_registered` still tells a typo
+from a command, `selftest` 23 asserts the two agree, and `selftest` 51 that
+each arm ported since the 37 is answered by rowt-rs and not handed back.
 
 The order this came back in, kept because the reasoning is the reusable part:
 
@@ -282,8 +281,8 @@ The order this came back in, kept because the reasoning is the reusable part:
    extractors, `--apply`, and the two dump restores. The I/O the extractors
    need moved out of the gate binaries into `rowt-core::{foreignio,srio}`
    first, so the product calls a library rather than exec'ing a gate artifact.
-4. ~~**`config import`.**~~ Done, then handed back to the shell when import
-   began merging lane lists (see above; #s74). It looked like the odd one out because it
+4. ~~**`config import`.**~~ Done, handed back to the shell when import began
+   merging lane lists, and native again since #s74 (see above). It looked like the odd one out because it
    prompts on `/dev/tty` — but that is precisely what makes it gateable: a
    process with no controlling terminal cannot open one, and the shell reads
    that failure as "no". The harness now runs every case in its own session,

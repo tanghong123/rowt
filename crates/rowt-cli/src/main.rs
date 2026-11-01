@@ -14,6 +14,7 @@
 //! and a help format that does not match the shell's.
 
 mod corp;
+mod bundle;
 mod diag;
 mod doctor;
 mod escape_dns;
@@ -133,6 +134,19 @@ pub fn stdout_dropped<T>(f: impl FnOnce() -> T) -> T {
 pub const SILENT: &str = "\u{0}already-reported";
 
 /// `die` — the error, an ABORT line if a mutation was in flight, exit 1.
+/// What `die` records before it exits — the lane audit closed, then an ABORT
+/// line under the running op — for a failure that is CONTAINED instead: the
+/// shell's `( cmd_render )` subshell in `config import` dies and the parent
+/// carries on, and the die in that subshell still wrote its ABORT into the
+/// audit log.
+pub fn audit_abort(cfg: &Path, msg: &str) {
+    let op = AUDIT_OP.lock().map(|g| g.clone()).unwrap_or_default();
+    if !op.is_empty() {
+        lanelog::end(cfg, "");
+        shell::audit(cfg, &format!("ABORT {op}: {msg}"));
+    }
+}
+
 pub fn die(cfg: &Path, msg: &str) -> ! {
     die_in_subshell(cfg, msg);
     std::process::exit(1);
@@ -151,48 +165,47 @@ pub fn die_in_subshell(cfg: &Path, msg: &str) {
     }
 }
 
-/// `config export` asked for a format other than rowt's own bundle: `--to X` or
-/// `--to=X` with X anything but `rowt`, a missing value included, so the shell
-/// prints the usage. The last `--to` wins, as it does in the shell's loop.
-fn foreign_export(rest: &[String]) -> bool {
-    let mut to: Option<Option<&str>> = None;
-    let mut it = rest.iter();
-    while let Some(a) = it.next() {
-        if a == "--to" {
-            to = Some(it.next().map(String::as_str));
-        } else if let Some(v) = a.strip_prefix("--to=") {
-            to = Some(Some(v));
-        }
-    }
-    matches!(to, Some(t) if t != Some("rowt"))
+/// `config export`'s operands, parsed as the shell's loop does: `--no-servers`
+/// (or `--routes-only`), `--to <target>` / `--to=<target>` (the last wins), `-`
+/// (stdout — the Shadowrocket target's alone, so `dash` is remembered and the
+/// bundle refuses it once `to` is known), any other flag refused, and the
+/// first non-flag as the file, as the shell's `$1` was. `Err` is the message
+/// to die with.
+#[derive(Debug, PartialEq, Eq)]
+struct ExportArgs {
+    no_servers: bool,
+    out: Option<String>,
+    dash: bool,
+    to: String,
 }
 
-/// `config export`'s operands for rowt's own bundle: whether to leave the
-/// server pool out (`--no-servers`, or its alias `--routes-only`), and the
-/// file — the first non-flag, as the shell's `$1` was. `Err` is the flag it
-/// refuses, `-` included: stdout is the Shadowrocket target's alone. Any
-/// `--to` here says `rowt`, since every other target was handed to the shell
-/// before dispatch (foreign_export).
-fn export_args(rest: &[String]) -> Result<(bool, Option<String>), String> {
-    let mut no_servers = false;
-    let mut out: Option<String> = None;
+fn export_args(rest: &[String]) -> Result<ExportArgs, String> {
+    let usage = format!("usage: {PROG} config export [--to rowt|shadowrocket] [file] [--routes-only]");
+    let mut a = ExportArgs { no_servers: false, out: None, dash: false, to: "rowt".into() };
     let mut it = rest.iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--no-servers" | "--routes-only" => no_servers = true,
-            "--to" => {
-                it.next();
+    while let Some(x) = it.next() {
+        match x.as_str() {
+            "--no-servers" | "--routes-only" => a.no_servers = true,
+            "--to" => match it.next() {
+                Some(v) => a.to = v.clone(),
+                None => return Err(usage),
+            },
+            f if f.starts_with("--to=") => a.to = f["--to=".len()..].to_string(),
+            "-" => {
+                a.dash = true;
+                if a.out.is_none() {
+                    a.out = Some("-".into());
+                }
             }
-            f if f.starts_with("--to=") => {}
-            f if f.starts_with('-') => return Err(f.to_string()),
+            f if f.starts_with('-') => return Err(format!("unknown flag: {f}  ({usage})")),
             f => {
-                if out.is_none() {
-                    out = Some(f.to_string());
+                if a.out.is_none() {
+                    a.out = Some(f.to_string());
                 }
             }
         }
     }
-    Ok((no_servers, out))
+    Ok(a)
 }
 
 /// Which arms rowt-rs answers itself.
@@ -226,11 +239,10 @@ fn native(cmd: &str, sub: &str) -> bool {
         "sub" => matches!(sub, "" | "list" | "dump" | "add" | "rm" | "remove" | "update" | "clear" | "import"),
         "use" | "ping" | "run" | "skill" | "report" | "uninstall" | "fetch" | "probe" | "vm" | "watch" | "onboard"
         | "doctor" => true,
-        // `import` is NOT native: it delegates to the shell (its merge re-runs
-        // `<lane> import` for each lane through bin/rowt; #s74), and it must delegate HERE, before the
-        // audit BEGIN, or the shell would open a SECOND BEGIN/END pair. `list`
-        // and `export` stay native.
-        "config" => matches!(sub, "" | "list" | "export"),
+        // Every sub-command, the usage error for an unknown one included:
+        // `import` (its merge re-invokes THIS binary per lane, #s74) and
+        // `export --to shadowrocket` were the last two to come back from the shell.
+        "config" => true,
         "metrics" => true,
         "router" => matches!(sub, "" | "up" | "down" | "restart" | "status" | "log"),
         // A name none of the above claims is one of two things, and they want
@@ -1877,10 +1889,23 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                     const POOL: [&str; 7] =
                         ["servers.json", "manual.json", "import-review.json", "subs.txt", "outbound.json",
                          "escape-dns.txt", "manual-sources.tsv"];
-                    let (no_servers, out) = export_args(&rest[1..]).unwrap_or_else(|f| die(
-                        &cfg,
-                        &format!("unknown flag: {f}  (usage: {PROG} config export [--to rowt|shadowrocket] [file] [--routes-only])"),
-                    ));
+                    let a = export_args(&rest[1..]).unwrap_or_else(|m| die(&cfg, &m));
+                    // --to picks the format: rowt (this bundle) or shadowrocket
+                    // (the lanes as a Shadowrocket config; `-` there is stdout,
+                    // which the bundle refuses wherever it stands).
+                    match a.to.as_str() {
+                        "rowt" => {
+                            if a.dash {
+                                die(&cfg, &format!("unknown flag: -  (usage: {PROG} config export [--to rowt|shadowrocket] [file] [--routes-only])"));
+                            }
+                        }
+                        "shadowrocket" => {
+                            return bundle::export_shadowrocket(
+                                &Ctx::new(cfg.clone()), a.out.as_deref().unwrap_or("rowt-shadowrocket.conf"), a.no_servers);
+                        }
+                        other => die(&cfg, &format!("unknown export target: {other}  (supported: rowt, shadowrocket)")),
+                    }
+                    let (no_servers, out) = (a.no_servers, a.out);
                     let names: Vec<&str> = src.iter().copied()
                         .filter(|f| cfg.join(f).is_file())
                         .filter(|f| !(no_servers && POOL.contains(f)))
@@ -1904,18 +1929,11 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                     };
                     Ok(format!("wrote {out}  ({})\n  packed: {}{tail}", du_h(Path::new(&out)), names.join(" ")))
                 }
-                // The other direction: unpack a bundle here, tighten what it
-                // brought, and re-render. Overwrites matching files, so it asks
-                // first — on /dev/tty, not stdin, because the answer must come
+                // The other direction: a bundle merged into (or, with
+                // --replace, restored over) this config, then re-rendered. It
+                // asks on /dev/tty, not stdin, because the answer must come
                 // from a person even when the command was handed a pipe.
-                // `config import` (default MERGE, and everything but the
-                // trivial --replace) edits the LANE lists, and lane editing —
-                // hotspot especially — is the shell's job in rowt-rs (see
-                // `rowt_core::lanes`, where hotspot is "never a target"). So the
-                // whole subcommand delegates: one implementation of the merge,
-                // the staging/atomic swap and the conflict prompt, with no way
-                // for the two to drift. `config export`/`list` stay native.
-                "import" => delegate(&std::env::args().skip(1).collect::<Vec<String>>()),
+                "import" => bundle::import(&Ctx::new(cfg.clone()), &rest[1..]),
                 _ => die(&cfg, &format!("usage: {PROG} config [ list | export [--to rowt|shadowrocket] [file] [--routes-only] | import <file> [-y] [--replace] ]")),
             }
         }
@@ -2615,11 +2633,6 @@ fn main() -> ExitCode {
             if !wants_help && !native(cmd, &sub) {
                 delegate(&args);
             }
-            // `config export --to <client>`: other clients' formats are the
-            // shell's (_export_shadowrocket); this binary packs rowt's own bundle.
-            if !wants_help && cmd == "config" && sub == "export" && foreign_export(&args[2..]) {
-                delegate(&args);
-            }
         }
     }
     match shell::dispatch(&cfg, &args, |cmd, rest| run(&cfg, cmd, rest)) {
@@ -2662,10 +2675,9 @@ mod tests {
         assert!(native("router", "status"));
         assert!(!native("router", "nosucharm"));
         assert!(native("config", "export"));  // native: filters the pool files
-        // `config import` delegates entirely to bash — its merge path recursively
-        // re-runs `<lane> import` for every lane through bin/rowt — so it is
-        // handed through, NOT claimed (#s74).
-        assert!(!native("config", "import"));
+        // `config import` is native too since #s74: its merge re-invokes this
+        // binary per lane against a staging config, as the shell did its script.
+        assert!(native("config", "import"));
         // hotspot claims every sub-command, a typo included: edit_list's usage
         // line is the answer to an unknown one, and it is answered here.
         assert!(native("hotspot", ""));
@@ -2675,29 +2687,15 @@ mod tests {
         assert!(native("speed", ""));
         assert!(native("port", "add"));
         assert!(native("port", "nosucharm"));
-        assert!(!native("config", "nosucharm"));
+        // …and its usage error for an unknown sub-arm is rowt-rs's own too (the
+        // `config nosucharm` case compares it with the shell's die).
+        assert!(native("config", "nosucharm"));
         assert!(native("corp", "sync"));      // corp-only, not escape/block
         assert!(!native("escape", "sync"));
         assert!(native("escape", "add"));
         // An empty sub-command is the arm's own default, and it is claimed.
         assert!(native("router", ""));
         assert!(native("proxy", ""));
-    }
-
-    #[test]
-    fn config_export_hands_other_clients_formats_to_the_shell() {
-        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert!(!foreign_export(&v(&[])));
-        assert!(!foreign_export(&v(&["--no-servers", "x.tgz"])));
-        assert!(!foreign_export(&v(&["--to", "rowt"])));
-        assert!(!foreign_export(&v(&["--to=rowt", "x.tgz"])));
-        assert!(foreign_export(&v(&["--to", "shadowrocket", "-"])));
-        assert!(foreign_export(&v(&["x.conf", "--to=shadowrocket"])));
-        // A missing value goes to the shell too, which prints the usage.
-        assert!(foreign_export(&v(&["--to"])));
-        // The last --to wins, as in the shell's loop.
-        assert!(foreign_export(&v(&["--to", "rowt", "--to", "shadowrocket"])));
-        assert!(!foreign_export(&v(&["--to=shadowrocket", "--to", "rowt"])));
     }
 
     /// cli-diff cannot reach the native bundle export — every form of it that
@@ -2707,12 +2705,23 @@ mod tests {
     #[test]
     fn config_export_routes_only_is_no_servers() {
         let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(export_args(&v(&["--routes-only"])), Ok((true, None)));
-        assert_eq!(export_args(&v(&["x.tgz", "--no-servers"])), Ok((true, Some("x.tgz".into()))));
-        assert_eq!(export_args(&v(&["--to", "rowt", "a.tgz", "b.tgz"])), Ok((false, Some("a.tgz".into()))));
-        assert_eq!(export_args(&v(&["--to=rowt", "--routes-only", "a.tgz"])), Ok((true, Some("a.tgz".into()))));
-        assert_eq!(export_args(&v(&["a.tgz", "-"])), Err("-".into()));
-        assert_eq!(export_args(&v(&["--bogus"])), Err("--bogus".into()));
+        let ea = |no_servers: bool, out: Option<&str>, dash: bool, to: &str| ExportArgs {
+            no_servers, out: out.map(String::from), dash, to: to.into(),
+        };
+        assert_eq!(export_args(&v(&["--routes-only"])), Ok(ea(true, None, false, "rowt")));
+        assert_eq!(export_args(&v(&["x.tgz", "--no-servers"])), Ok(ea(true, Some("x.tgz"), false, "rowt")));
+        assert_eq!(export_args(&v(&["--to", "rowt", "a.tgz", "b.tgz"])), Ok(ea(false, Some("a.tgz"), false, "rowt")));
+        assert_eq!(export_args(&v(&["--to=rowt", "--routes-only", "a.tgz"])), Ok(ea(true, Some("a.tgz"), false, "rowt")));
+        // `-` is remembered for the bundle to refuse, and is the file only when
+        // nothing else was named first.
+        assert_eq!(export_args(&v(&["a.tgz", "-"])), Ok(ea(false, Some("a.tgz"), true, "rowt")));
+        assert_eq!(export_args(&v(&["--to", "shadowrocket", "-"])), Ok(ea(false, Some("-"), true, "shadowrocket")));
+        // The last --to wins, as in the shell's loop; a missing value is the usage.
+        assert_eq!(export_args(&v(&["--to", "rowt", "--to", "shadowrocket"])).map(|a| a.to), Ok("shadowrocket".into()));
+        assert_eq!(export_args(&v(&["--to=shadowrocket", "--to", "rowt"])).map(|a| a.to), Ok("rowt".into()));
+        assert!(export_args(&v(&["--to"])).unwrap_err().starts_with("usage: rowt config export"));
+        assert_eq!(export_args(&v(&["--bogus"])).unwrap_err(),
+                   "unknown flag: --bogus  (usage: rowt config export [--to rowt|shadowrocket] [file] [--routes-only])");
     }
 
     /// The Rust implementation does not transcribe shell-init separately:

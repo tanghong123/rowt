@@ -27,5 +27,28 @@ case "${1:-}" in
     [ -f "$pass" ] || exit 0
     addr="$(jq -r --arg t "$tag" '.outbounds[] | select(.tag == $t) | .server' "$cfg" 2>/dev/null)"
     grep -qxF "$addr" "$pass" ;;
+  rule-set)
+    # `rule-set decompile <set>.srs -o <out>.json` — what `config export --to
+    # shadowrocket` expands a geosite category with, and what the lane-add hint
+    # loads a category through. The real tool writes the JSON and exits 0, or
+    # exits 1 with nothing written; this one does the same, from a canned
+    # answer the scenario ships as $PARITY_ENV/decompile-<set>.json. Without
+    # one it FAILS (exit 1), as the real tool does on a file it cannot read —
+    # it used to exit 0 and write nothing, which no real sing-box does, and the
+    # shell's export then died on an arithmetic error instead of saying the
+    # category could not be decompiled. Both lookups (geosite.rs, the Python)
+    # treat a failed decompile and a missing JSON alike, so nothing else moves.
+    shift
+    [ "${1:-}" = decompile ] || exit 0
+    shift
+    srs="" outp=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in -o) outp="${2:-}"; shift ;; *) srs="$1" ;; esac
+      shift
+    done
+    name="$(basename "$srs" .srs)"
+    canned="${PARITY_ENV:-}/decompile-$name.json"
+    [ -f "$canned" ] && [ -n "$outp" ] || exit 1
+    cp "$canned" "$outp" ;;
   *) exit 0 ;;
 esac

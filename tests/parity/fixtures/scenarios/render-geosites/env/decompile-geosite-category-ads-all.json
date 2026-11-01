@@ -1,0 +1,9 @@
+{
+  "version": 2,
+  "rules": [
+    {
+      "domain_suffix": [".ads.example", "tracker.example.net", ".doubleclick.example"],
+      "domain_keyword": ["adserver", "telemetry"]
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+
+env/decompile-geosite-*.json are what the sandbox's sing-box stub hands back
+for `rule-set decompile` of each cached set here (documentation domains; one
+bare-string listable field, dotted and plain suffixes, regex entries) — the
+`config export --to shadowrocket` case expands the lanes' categories from them.

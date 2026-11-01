@@ -76,11 +76,10 @@ Partial arms — native for some sub-commands, legacy for the rest.
             "sub" => matches!(sub, "" | "list" | "dump" | "add" | "rm" | "remove" | "update" | "clear" | "import"),
             "use" | "ping" | "run" | "skill" | "report" | "uninstall" | "fetch" | "probe" | "vm" | "watch" | "onboard"
             | "doctor" => true,
-            // `import` is NOT native: it delegates to the shell (its merge re-runs
-            // `<lane> import` for each lane through bin/rowt; #s74), and it must delegate HERE, before the
-            // audit BEGIN, or the shell would open a SECOND BEGIN/END pair. `list`
-            // and `export` stay native.
-            "config" => matches!(sub, "" | "list" | "export"),
+            // Every sub-command, the usage error for an unknown one included:
+            // `import` (its merge re-invokes THIS binary per lane, #s74) and
+            // `export --to shadowrocket` were the last two to come back from the shell.
+            "config" => true,
             "metrics" => true,
             "router" => matches!(sub, "" | "up" | "down" | "restart" | "status" | "log"),
             // A name none of the above claims is one of two things, and they want

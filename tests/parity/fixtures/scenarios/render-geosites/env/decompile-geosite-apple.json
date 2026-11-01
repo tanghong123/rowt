@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "rules": [
+    {
+      "domain": "apple.example",
+      "domain_suffix": [".icloud.example", "Mzstatic.Example"],
+      "domain_regex": "^is[0-9]-ssl\\.mzstatic\\.example$"
+    }
+  ]
+}

@@ -734,10 +734,30 @@ config nosucharm
 # file, rule order included. The sandbox's sing-box cannot decompile, so its
 # geosite categories come out as skipped comments. Without --routes-only, stdout
 # is refused: the servers go to a file of their own.
+# `config export --to shadowrocket` is native since #s74 (rowt-core::srexport
+# builds the rules, rowt-cli::bundle does the IO). Only the stdout form (`-`,
+# routes only) is comparable here: a file form writes into the working
+# directory, which no sandbox path can name. The file and its servers file are
+# diffed live, both implementations against one config (#s74's record).
 config export --to shadowrocket --routes-only -
 config export --to shadowrocket -
 config export --to clash
 config export --to
+config export --to shadowrocket --routes-only --nope -
+config export --to=shadowrocket --routes-only -
+# exact hosts and a corp CIDR; a hotspot lane; synced corp entries; nothing.
+PARITY_SCENARIO=exact-lane config export --to shadowrocket --routes-only -
+PARITY_SCENARIO=hotspot-lane config export --to shadowrocket --routes-only -
+PARITY_SCENARIO=corp-synced config export --to shadowrocket --routes-only -
+PARITY_SCENARIO=lanes-empty config export --to shadowrocket --routes-only -
+# The geosite categories a lane names: expanded from the cached set through
+# `sing-box rule-set decompile` (the sandbox's stub copies a canned
+# env/decompile-<set>.json, and fails like the real tool when there is none),
+# regex entries counted and left out, the ad set appended as REJECT. The base
+# scenario has no cache, so its `geosite:google` reads "not cached".
+PARITY_SCENARIO=render-geosites config export --to shadowrocket --routes-only -
+PARITY_SCENARIO=render-ads config export --to shadowrocket --routes-only -
+ROWT_PRIVATE_DEFAULT=direct config export --to shadowrocket --routes-only -
 
 # `config import` — unpack a bundle over the config directory. Every refusal
 # comes before the prompt, which is why they are cases at all:
@@ -768,24 +788,27 @@ PARITY_SCENARIO=lanes-empty config import tests/parity/fixtures/config-bundle.tg
 # import reports ✓ rather than the fresh-box advice. Bug-for-bug, PORTING.md
 # §6.7, and the reason there is now a `render` case for the same fixture below.
 config import tests/parity/fixtures/bundle-no-servers.tgz -y
-# import MERGES by default now: each lane list unions into the sandbox's own
+# import MERGES by default: each lane list unions into the sandbox's own
 # (single-lane, deduped, conflicts listed), the server pool is left as-is. The
-# bare `-y` cases above exercise that path. rowt-rs delegates the whole
-# subcommand to the shell (lane editing — hotspot — is the shell's job), so the
-# two are the same bytes by construction; cli-diff still compares the config
-# tree the merge leaves. --replace is the old wholesale overwrite.
+# bare `-y` cases above exercise that path. Native on both sides since #s74:
+# rowt-rs folds each lane by re-invoking itself against the staging config, as
+# the shell re-invokes its own script, so the tallies, the staging audit and
+# the final swap are compared for real. --replace is the wholesale overwrite;
+# without -y it asks on /dev/tty, which the sandbox cannot open: "aborted.".
 config import tests/parity/fixtures/config-bundle.tgz -y --replace
 config import --replace tests/parity/fixtures/config-bundle.tgz -y
 config import tests/parity/fixtures/bundle-no-servers.tgz -y --replace
+config import tests/parity/fixtures/config-bundle.tgz --replace
+# A bundle with a hotspot lane: the fold runs under ROWT_NO_SYSPROXY, so the
+# staging config's hotspot edit touches no system proxy on either side; over
+# the base (no hotspot lane yet) and over one that has entries.
+config import tests/parity/fixtures/hotspot-bundle.tgz -y
+PARITY_SCENARIO=hotspot-lane config import tests/parity/fixtures/hotspot-bundle.tgz -y
 # A bundle whose lanes CROSS the sandbox's seed exercises the conflict path:
 # escape carries ads.example (seeded in block) and corp carries example.com
 # (seeded in escape), so folding each pulls the entry out of its old lane. With
 # -y the moves are listed and applied; without it the no-tty read is "no", so the
 # conflicts are listed, nothing is swapped, and it exits 1 with the tree intact.
-# (Both sides are the same shell — rowt-rs delegates the whole subcommand — so
-# this pins that the delegation keeps handing it through, not the merge logic
-# itself: the union/dedup/single-lane semantics are the shell's, exercised
-# directly rather than differentially.)
 config import tests/parity/fixtures/conflict-bundle.tgz -y
 config import tests/parity/fixtures/conflict-bundle.tgz
 metrics

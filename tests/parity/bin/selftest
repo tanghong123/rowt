@@ -1425,7 +1425,8 @@ else
   # compares clean, so only an arm rowt-rs answers itself can differ. On STDOUT:
   # cli-diff does not compare stderr, and a read-only arm's die writes no audit
   # line either — a mutation there could not fail this. One row per arm ported
-  # since the 37 (#s71 hotspot, #s72 doctor, #s73 speed and port).
+  # since the 37 (#s71 hotspot, #s72 doctor, #s73 speed and port, #s74 the two
+  # config paths).
   _native_check() { # $1=arm  $2=perl substitution  $3=its marker  $4=the case
     cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
     perl -0pi -e "$2" "$tmp/bin/rowt"
@@ -1447,6 +1448,12 @@ else
     'MUTATED for selftest' 'port list'
   _native_check doctor 's/_dr_row system "macOS /_dr_row system "MUTATED for selftest macOS /' \
     'MUTATED for selftest' 'PARITY_UNORDERED=1 doctor'
+  # The merge re-invokes rowt-rs per lane, so the mutated shell is not in the
+  # path at all; the line that moves is the re-render's.
+  _native_check 'config import' 's/echo "  ✓ regenerated host\.json"/echo "  ✓ regenerated host.json (MUTATED for selftest)"/' \
+    'MUTATED for selftest' 'config import tests/parity/fixtures/bundle-no-servers.tgz -y'
+  _native_check 'config export' 's/echo "FINAL,DIRECT" >> "\$t\/rules"/echo "FINAL,DIRECT # MUTATED for selftest" >> "\$t\/rules"/' \
+    'MUTATED for selftest' 'config export --to shadowrocket --routes-only -'
 fi
 
 echo "52. a doctor FLAG renamed on one side must be caught"
