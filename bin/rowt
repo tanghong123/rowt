@@ -62,7 +62,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.8.31"
+ROWT_VERSION="3.8.32"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -722,7 +722,11 @@ list_json() {
   # byte that is not valid UTF-8 ("illegal byte sequence") and every entry from
   # that line on is lost; as bytes, the line goes through and `jq -R` turns the
   # bad byte into U+FFFD — which is what rowt-rs makes of it too (lifecycle::read).
-  LC_ALL=C grep -vE '^[[:space:]]*(#|$)' "$f" | LC_ALL=C sed -e 's/[[:space:]]//g' -e 's/^\*\.\(.\)/.\1/' | LC_ALL=C grep -vE '^geosite:' \
+  # `|| true` on both greps: with no entry at all (a lane of comments) each
+  # exits 1, and under pipefail that was this function's status — harmless in
+  # a `$(…)`, fatal in a pipeline under `set -e`: `config export --to
+  # shadowrocket` died with no message on an empty lane (rowt #s74).
+  { LC_ALL=C grep -vE '^[[:space:]]*(#|$)' "$f" || true; } | LC_ALL=C sed -e 's/[[:space:]]//g' -e 's/^\*\.\(.\)/.\1/' | { LC_ALL=C grep -vE '^geosite:' || true; } \
     | case "$filt" in
         exact)  { LC_ALL=C grep -E '^domain:' | LC_ALL=C sed 's/^domain://'; } || true ;;
         cidr)   { LC_ALL=C grep -vE '^domain:' | LC_ALL=C grep -E '/[0-9]+$'; } || true ;;
