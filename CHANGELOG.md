@@ -5,6 +5,8 @@ release is cut; everything under Unreleased ships with the next one.
 
 ## Unreleased
 
+## 3.8.33 — 2026-11-01
+
 - `rowt config export --to shadowrocket` no longer stops, silently and with
   no file, when one of your lanes has no entries. This one is a fix for
   everyone, not only for the Rust version.
