@@ -264,6 +264,15 @@ nothing a registered command names; `help::is_registered` still tells a typo
 from a command, `selftest` 23 asserts the two agree, and `selftest` 51 that
 each arm ported since the 37 is answered by rowt-rs and not handed back.
 
+**From 2026-11-02 the direction is reversed** (Hong: "from now on, all
+features need to be first implemented in rust and then port to bash"). A new
+feature is written in rowt-rs first, with the cli-diff cases that specify it,
+and then ported to `bin/rowt` until those cases are identical. Both land in one
+push (CLAUDE.md, "Rust first"). The harness needs no change: cli-diff is
+symmetric, so it gates a shell port of a Rust feature as it gated the reverse.
+What changes is which side is the specification for new behaviour. §6.7 still
+holds for behaviour that already exists.
+
 The order this came back in, kept because the reasoning is the reusable part:
 
 1. ~~**the import pipeline -> Rust.**~~ Done: `vless-parse.py`

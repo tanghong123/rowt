@@ -16,10 +16,13 @@ skill** in `skills/rowt/`. Don't duplicate that here.
 - **`bin/rowt`** — the whole CLI, one bash script (~5.3k lines).
   `ROWT_VERSION="X.Y.Z"` at line ~56. Runs under **bash**; the interactive shell
   here is zsh with `noclobber`, so use `>|` (or the file tools) for redirection,
-  and prefer `bash bin/rowt …` when testing.
+  and prefer `bash bin/rowt …` when testing. It is still what runs for anyone
+  who has not set `ROWT_IMPL=rust`, but it now FOLLOWS rowt-rs (see "Rust
+  first" below).
 - **`crates/`** — the Rust workspace: `rowt-core` (pure), `rowt-platform` (the OS
-  seam), `rowt-cli` (`rowt-rs`). The strangler port of `bin/rowt`; see
-  **PORTING.md** for the phase plan and what is / isn't cut over.
+  seam), `rowt-cli` (`rowt-rs`). Began as the strangler port of `bin/rowt`; it
+  now answers all 41 commands and is where new work starts. **PORTING.md** has
+  the phase plan and what is cut over.
 - **`rowt-monitor/`** — a *separate* workspace (own `Cargo.lock`, own goldens),
   two bins: the ratatui TUI (`rowt-monitor`) and the metrics `collector`
   sidecar. Absolute-cell rendering matched **byte-for-byte** against golden
@@ -63,6 +66,26 @@ skill** in `skills/rowt/`. Don't duplicate that here.
   merge written on GitHub (`gh pr merge --body`) gets checked: write that body
   without the lines. Commits on `main` from before the gate keep theirs (Hong,
   2026-10-17: no history rewrite).
+
+## Rust first
+
+Hong, 2026-11-02: "from now on, all features need to be first implemented in
+rust and then port to bash." Until then the shell came first and rowt-rs
+reproduced it. Now the order is reversed:
+
+1. Write the feature in `crates/`, with its unit tests and the
+   `tests/parity/cli-cases.txt` cases that pin what it prints, exits with and
+   writes. rowt-rs is the specification.
+2. Port it to `bin/rowt` until `parity cli-diff` is green on those cases.
+3. Land both halves in the same push. Then `main` never has the two
+   disagreeing, and colleagues on the default shell get the feature too.
+
+The gates are the same as before. Only which side you write first, and which
+side defines the behaviour, changed. The shell keeps its old behaviour
+everywhere this rule does not reach: "Bash bugs are behavior" (PORTING.md §6.7)
+still covers what already exists. Hong's words are "all features", so a fix to
+existing behaviour is not covered by the letter of the rule. Write it in Rust
+first anyway, so the reference stays one place.
 
 ## Gates
 
