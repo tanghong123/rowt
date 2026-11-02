@@ -5,6 +5,13 @@ release is cut; everything under Unreleased ships with the next one.
 
 ## Unreleased
 
+- **The metrics collector runs again on the Rust version** (`ROWT_IMPL=rust`).
+  It looked for the collector in the wrong folder of a Homebrew install, so
+  from the first reload on the Rust version it stopped the running collector
+  and never started a new one: `rowt monitor` and `rowt metrics` had no fresh
+  data. It now looks where the shell version does: next to rowt, in a local
+  build, then on your PATH. The shell version was never affected.
+
 ## 3.8.33 — 2026-11-01
 
 - `rowt config export --to shadowrocket` no longer stops, silently and with

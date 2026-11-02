@@ -346,7 +346,12 @@ fn strip_rc_files() {
 /// shell derives it from its own path; this binary lives one level deeper in a
 /// checkout (target/release) and beside it once installed, so both are tried.
 pub fn here_dir() -> PathBuf {
-    let exe = std::env::current_exe().unwrap_or_default();
+    here_from(&std::env::current_exe().unwrap_or_default())
+}
+
+/// `here_dir` for a given executable path — split out so the brew layout
+/// (`Cellar/rowt/X/libexec/bin/rowt-rs`, the shell beside it) can be tested.
+pub(crate) fn here_from(exe: &Path) -> PathBuf {
     let d = exe.parent().unwrap_or(Path::new("."));
     for up in ["..", "../.."] {
         let c = d.join(up);

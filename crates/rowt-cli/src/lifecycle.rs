@@ -859,23 +859,33 @@ pub fn router_ready(ctx: &Ctx, tries: u32, child: &mut std::process::Child) -> b
 /// The metrics collector is located the way the monitor is: next to the shell,
 /// or in a local cargo build. Its lifetime is tied to the router's — a collector
 /// left polling a clash API that is gone spins on connection refusals.
+///
+/// `_collector_bin` in the shell: `$HERE/bin`, the two cargo builds, then PATH.
+/// `$HERE` is `crate::here_dir()`. Until 3.8.34 this used the executable's
+/// grandparent instead, which is the checkout for a cargo build but
+/// `Cellar/rowt/X` for brew. That folder's `bin/` holds only the three links,
+/// so a brew install on ROWT_IMPL=rust never found the collector: each reload
+/// stopped the running one and started none. The parity sandbox runs from the
+/// checkout, where both answers agree, so it could not see this.
 pub fn collector_bin(ctx: &Ctx) -> Option<PathBuf> {
-    let here = repo_root();
+    collector_in(&crate::here_dir(), &ctx.cfg, std::env::var("PATH").ok().as_deref())
+}
+
+pub(crate) fn collector_in(here: &Path, cfg: &Path, path: Option<&str>) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
     let mut cands: Vec<PathBuf> = vec![
         here.join("bin/rowt-collector"),
         here.join("rowt-monitor/target/release/rowt-collector"),
         here.join("rowt-monitor/target/debug/rowt-collector"),
     ];
-    cands.push(ctx.cfg.join("bin/rowt-collector"));
-    cands.into_iter().find(|c| c.is_file())
-}
-
-/// `$HERE` — the directory bin/rowt lives beside, i.e. the repo or brew prefix.
-fn repo_root() -> PathBuf {
-    std::env::current_exe().ok()
-        .and_then(|e| e.parent().map(|d| d.join("../..")))
-        .and_then(|d| d.canonicalize().ok())
-        .unwrap_or_default()
+    // `command -v rowt-collector`.
+    if let Some(p) = path {
+        cands.extend(p.split(':').filter(|d| !d.is_empty()).map(|d| Path::new(d).join("rowt-collector")));
+    }
+    // rowt-rs only, kept from before: a collector copied into the config tree.
+    cands.push(cfg.join("bin/rowt-collector"));
+    // `[ -x … ]`, as the shell tests each one.
+    cands.into_iter().find(|c| fs::metadata(c).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false))
 }
 
 fn collector_running(ctx: &Ctx) -> bool {
@@ -1693,5 +1703,58 @@ mod tests {
         assert_eq!(pgid, pid, "child's pgid is its own pid (a new session), got {text:?}");
         let ours = unsafe { libc::getpgrp() }.to_string();
         assert_ne!(pgid, ours, "child must not share this process's group");
+    }
+
+    /// The collector is found in a brew install, where the shell and rowt-rs
+    /// both live in `libexec/bin` and `Cellar/rowt/X/bin` holds only links, and
+    /// in a checkout, where rowt-rs is two levels under the tree. The brew half
+    /// failed until 3.8.34; the parity sandbox runs from a checkout only.
+    #[test]
+    fn the_collector_is_found_in_a_brew_install_and_in_a_checkout() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("rowt-collector-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let exe = |p: &Path| {
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, "#!/bin/sh\n").unwrap();
+            fs::set_permissions(p, fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let cfg = root.join("cfg");
+        fs::create_dir_all(&cfg).unwrap();
+
+        // brew: Cellar/rowt/X/{bin/<links>, libexec/bin/{rowt, rowt-rs, rowt-collector}}
+        let keg = root.join("Cellar/rowt/9.9.9");
+        let lx = keg.join("libexec");
+        for n in ["rowt", "rowt-rs", "rowt-collector"] {
+            exe(&lx.join("bin").join(n));
+        }
+        fs::create_dir_all(keg.join("bin")).unwrap();
+        let here = crate::here_from(&lx.join("bin/rowt-rs"));
+        assert_eq!(here, lx.canonicalize().unwrap());
+        assert_eq!(collector_in(&here, &cfg, None), Some(here.join("bin/rowt-collector")));
+        // The old lookup's folder: the keg, whose bin/ has no collector.
+        assert_eq!(collector_in(&keg, &cfg, None), None);
+
+        // checkout: <repo>/{skills/rowt, target/release/rowt-rs, rowt-monitor/target/release/rowt-collector}
+        let repo = root.join("repo");
+        fs::create_dir_all(repo.join("skills/rowt")).unwrap();
+        exe(&repo.join("target/release/rowt-rs"));
+        exe(&repo.join("rowt-monitor/target/release/rowt-collector"));
+        let here = crate::here_from(&repo.join("target/release/rowt-rs"));
+        assert_eq!(here, repo.canonicalize().unwrap());
+        assert_eq!(collector_in(&here, &cfg, None), Some(here.join("rowt-monitor/target/release/rowt-collector")));
+
+        // Nothing beside the shell: PATH, as `command -v`; a file that is not
+        // executable does not count, as `[ -x ]` would not count it.
+        let bare = root.join("bare");
+        fs::create_dir_all(bare.join("bin")).unwrap();
+        fs::write(bare.join("bin/rowt-collector"), "").unwrap();
+        let onpath = root.join("onpath");
+        exe(&onpath.join("rowt-collector"));
+        let path = format!("/nonexistent:{}", onpath.display());
+        assert_eq!(collector_in(&bare, &cfg, Some(&path)), Some(onpath.join("rowt-collector")));
+        assert_eq!(collector_in(&bare, &cfg, None), None);
+
+        let _ = fs::remove_dir_all(&root);
     }
 }
