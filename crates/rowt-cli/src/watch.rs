@@ -33,11 +33,11 @@ pub const SUDOERS: &str = "/etc/sudoers.d/rowt";
 /// The `watchdog:` line of `rowt status` — the shell's, word for word. Loaded
 /// is the floor and the plist's generation the second word; a status that
 /// said nothing here looked healthy through an hour with no agent at all
-/// (2026-09-21). The `launchctl list` is the caller's LAST effectful call so it
+/// (2026-09-21). The `launchctl print` is the caller's LAST effectful call so it
 /// sits at the same point in both implementations' argv.
 pub fn status_line() -> String {
     let plist = plist_path();
-    if quiet("launchctl", &["list", LABEL]) {
+    if loaded() {
         if plist.is_file() && plist_stale(&plist) {
             format!("watchdog:     loaded \u{2014} plist from an older rowt; a tick re-syncs it ({PROG} watch status)")
         } else {
@@ -264,6 +264,24 @@ fn sudoers_for(user: &str) -> String {
 
 fn uid() -> String {
     out("id", &["-u"]).trim().to_string()
+}
+
+/// Where launchd keeps the agent: `rowt watch install` bootstraps it into the
+/// user's gui domain, so that is the domain to ask about it.
+pub(crate) fn agent_target(uid: &str) -> String {
+    format!("gui/{uid}/{LABEL}")
+}
+
+/// Is the agent loaded? Asked of the gui domain by name, `launchctl print
+/// gui/<uid>/<label>`, which answers from any session. `launchctl list <label>`
+/// answers for the caller's own session only: over SSH the login is not in the
+/// gui domain where the agent lives, so a box checked remotely read "NOT
+/// loaded" while launchd was running its ticks, and the fix it printed invited
+/// a needless refresh (rowt #s77, 2026-11-03). Exit 0 when the domain holds
+/// the label, 113 when it does not, and a failure when there is no gui session
+/// at all, which is when the agent cannot run either.
+pub(crate) fn loaded() -> bool {
+    quiet("launchctl", &["print", &agent_target(&uid())])
 }
 
 // ------------------------------------------------------------------ observing
@@ -1421,7 +1439,7 @@ pub fn cmd(ctx: &Ctx, self_bin: &Path, action: &str) -> Result<String, String> {
         }
         "status" => {
             let mut o = Vec::new();
-            o.push(if quiet("launchctl", &["list", LABEL]) {
+            o.push(if loaded() {
                 format!("watch: LOADED ({LABEL})")
             } else if plist.is_file() {
                 format!("watch: installed but NOT loaded — '{PROG} watch install' to (re)load")
@@ -1959,6 +1977,13 @@ mod tests {
         assert!(!rule.contains("networksetup *"), "a bare wildcard would grant everything");
         // And it says how to remove itself, since it outlives the process.
         assert!(body.contains("rowt watch uninstall"));
+    }
+
+    /// The loaded check names the gui domain, the one `watch install`
+    /// bootstraps into, so the answer is the same from a terminal and over SSH.
+    #[test]
+    fn the_loaded_check_asks_the_gui_domain_by_uid() {
+        assert_eq!(agent_target("502"), "gui/502/club.annaslife.rowt.watch");
     }
 
     /// The LaunchAgent. `AbandonProcessGroup` is the load-bearing key: without

@@ -264,8 +264,7 @@ pub fn json(ctx: &Ctx, probe: bool) -> String {
     let sb = ctx.sb();
     let sbv = crate::fetch::sb_version(&sb);
     let plist = crate::watch::plist_path();
-    let loaded = std::process::Command::new("launchctl").args(["list", crate::watch::LABEL])
-        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false);
+    let loaded = crate::watch::loaded();
     let esc = read(&cfg.join("escape-domains.txt"));
     let corp = read(&cfg.join("corp-domains.txt"));
     let blk = read(&cfg.join("block-domains.txt"));

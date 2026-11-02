@@ -232,6 +232,15 @@ audit
 audit path
 audit all
 status
+# the `watchdog:` line asks launchd's gui domain by name (rowt #s77), so it
+# answers the same over SSH. The recorder's default answer is loaded (exit 0);
+# the scenarios say NOT loaded, not installed, and loaded from an older plist.
+PARITY_SCENARIO=watch-not-loaded status
+PARITY_SCENARIO=watch-not-installed status
+PARITY_SCENARIO=watch-plist-stale status
+PARITY_SCENARIO=watch-not-loaded watch status
+PARITY_SCENARIO=watch-not-installed watch status
+PARITY_SCENARIO=watch-plist-stale watch status
 PARITY_SCENARIO=render-local status
 # …and in vm mode, where the clash API is NOT on 127.0.0.1. It lives on the
 # guest's bridged IP at CLASH_PORT+1, because that is the machine sing-box is

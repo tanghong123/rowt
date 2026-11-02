@@ -1,0 +1,7 @@
+No watchdog at all: no agent plist, and `launchctl print gui/<uid>/<label>`
+says there is no such service (exit 113, keyed by the first argument since the
+uid differs per box). Both implementations must read "not installed" and point
+at `watch install`.
+
+  status                          the watchdog: line
+  watch status                    the long form

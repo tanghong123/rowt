@@ -62,7 +62,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.8.34"
+ROWT_VERSION="3.8.35"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -3662,7 +3662,7 @@ _escape_sel() {
 # Say when `best` cannot keep itself current: the pick is re-checked by the
 # watchdog alone, and without one it is made once and never again.
 _best_watch_note() {
-  launchctl list "$WATCH_LABEL" >/dev/null 2>&1 \
+  _watch_loaded \
     || warn "the watchdog is not running, so this pick will not be re-checked — '$PROG watch install'"
 }
 
@@ -6311,7 +6311,7 @@ cmd_status() {
   # a status that said nothing here looked healthy through an hour with no agent
   # at all (2026-09-21). Last, so the launchctl call sits at the same point in
   # both implementations' argv.
-  if launchctl list "$WATCH_LABEL" >/dev/null 2>&1; then
+  if _watch_loaded; then
     if _watch_plist_stale; then
       echo "watchdog:     loaded — plist from an older rowt; a tick re-syncs it ($PROG watch status)"
     else
@@ -7455,7 +7455,7 @@ _watch_selfheal_plist() {
       sleep 0.5
     done
     out="$(launchctl bootstrap "gui/$uid" "$plist" 2>&1)"; rc=$?
-    if launchctl list "$label" >/dev/null 2>&1; then
+    if launchctl print "gui/$uid/$label" >/dev/null 2>&1; then
       say "self-heal: agent re-bootstrapped for rowt $ver — loaded"
     else
       say "self-heal FAILED: bootstrap rc=$rc${out:+ ($out)} — WATCHDOG NOT LOADED. Fix: rowt watch refresh"
@@ -7471,6 +7471,15 @@ _watch_plist_stale() {
   grep -q "$WATCH_PLIST_MARK" "$WATCH_PLIST" 2>/dev/null && return 1
   return 0
 }
+# Is the agent loaded? Asked of the gui domain by name: `watch install`
+# bootstraps the agent into gui/<uid>, and `launchctl print gui/<uid>/<label>`
+# answers from any session. `launchctl list <label>` answers for the caller's
+# own session only — over SSH the login is not in the gui domain where the
+# agent lives, so a box checked remotely read "NOT loaded" while launchd was
+# running its ticks, and the fix it printed invited a needless refresh (rowt
+# #s77, 2026-11-03). It fails with no gui session at all, which is when the
+# agent cannot run either.
+_watch_loaded() { launchctl print "gui/$(id -u)/$WATCH_LABEL" >/dev/null 2>&1; }
 
 cmd_watch() {
   local action="${1:-status}"; [ "$#" -gt 0 ] && shift || true
@@ -7543,7 +7552,7 @@ cmd_watch() {
       info "watch uninstalled."
       ;;
     status)
-      if launchctl list "$WATCH_LABEL" >/dev/null 2>&1; then echo "watch: LOADED ($WATCH_LABEL)"
+      if _watch_loaded; then echo "watch: LOADED ($WATCH_LABEL)"
       elif [ -f "$WATCH_PLIST" ]; then echo "watch: installed but NOT loaded — '$PROG watch install' to (re)load"
       else echo "watch: not installed — '$PROG watch install' to enable auto-reload"; fi
       echo "  agent:   $([ -f "$WATCH_PLIST" ] && echo "$WATCH_PLIST" || echo "(none)")"

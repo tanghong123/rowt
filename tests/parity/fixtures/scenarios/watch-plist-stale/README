@@ -1,0 +1,7 @@
+An agent an older rowt installed and launchd is running it: the plist on disk
+carries the v2 marker, not this rowt's, and `launchctl print gui/<uid>/<label>`
+is left unkeyed, so the recorder answers exit 0 (loaded). Both implementations
+must read loaded and say the plist is from an older rowt, which a tick re-syncs.
+
+  status                          the watchdog: line
+  watch status                    the long form, with the STALE row

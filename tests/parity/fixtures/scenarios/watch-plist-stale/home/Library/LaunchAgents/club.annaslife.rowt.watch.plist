@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!-- rowt-watch-plist v2 — an agent an older rowt installed; a tick re-syncs it. -->
+<dict>
+  <key>Label</key><string>club.annaslife.rowt.watch</string>
+</dict>
+</plist>

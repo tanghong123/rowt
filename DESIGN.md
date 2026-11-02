@@ -683,8 +683,8 @@ field and would fail the whole config.
 
   Every tick that **finishes** stamps `~/.config/rowt/watch.tick` on its way
   out (the shell's EXIT trap; the Rust tick's one `finish_tick`). That mtime is
-  the only liveness signal the agent has: `launchctl list` says a job is
-  *registered*, not that ticks complete; a quiet, healthy tick deliberately logs
+  the only liveness signal the agent has: `launchctl print gui/<uid>/<label>`
+  says a job is *registered*, not that ticks complete; a quiet, healthy tick deliberately logs
   nothing to `watch.log`; and `watch.lock` exists only while a tick runs. `rowt
   monitor` reads it for the header's `watch` cell — `on · 1m`, or `stalled ·
   14m` once no tick has completed in twice the `StartInterval`. Stamped at exit
@@ -697,11 +697,14 @@ field and would fail the whole config.
   tick's own process group. The child waits for the old job to be *gone*
   before it bootstraps (`bootout` is asynchronous; a bootstrap over a job still
   tearing down fails), gives up after 10 s rather than bootstrap over a job
-  that will not leave, verifies with `launchctl list`, and writes the real
-  outcome to `watch.log` itself — the tick that spawned it is dead by then.
-  `rowt status` carries a `watchdog:` line (loaded / NOT loaded / not
-  installed, plus whether the plist is from an older rowt), since a status that
-  said nothing about the agent read as healthy through that hour.
+  that will not leave, verifies with `launchctl print gui/<uid>/<label>`, and
+  writes the real outcome to `watch.log` itself — the tick that spawned it is
+  dead by then. `rowt status` carries a `watchdog:` line (loaded / NOT loaded /
+  not installed, plus whether the plist is from an older rowt), since a status
+  that said nothing about the agent read as healthy through that hour. Every
+  "is it loaded" question names the gui domain, the one `watch install`
+  bootstraps into: `launchctl list <label>` answers for the caller's own
+  session, so over SSH a running watchdog read as NOT loaded (rowt #s77).
 - **Captive portals (hotel/airport Wi-Fi).** Pre-login walled gardens make the
   login popup vanish and the portal page unloadable while the proxy is on. rowt
   handles this automatically — probe hosts on the proxy bypass so the popup

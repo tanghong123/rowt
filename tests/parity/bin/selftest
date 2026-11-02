@@ -1477,6 +1477,30 @@ else
   cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
 fi
 
+echo "53. the watch-not-loaded scenario must reach the NOT loaded branch"
+cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+if [ ! -x "$ROOT/target/release/rowt-rs" ]; then
+  echo "  skip — no release build"
+else
+  # rowt #s77. The loaded check asks launchd's gui domain by name, and the
+  # scenario answers that call (keyed `launchctl_print`, uid-free) with exit
+  # 113. Were the call's argv to drift from the key, the recorder would answer
+  # 0, both sides would read loaded, and cli-diff would stay green with the NOT
+  # loaded branch never run. Reword the shell's NOT loaded line: the case can
+  # only differ on stdout by reaching it.
+  perl -0pi -e 's/echo "watchdog:     NOT loaded /echo "watchdog:     NOT loaded (MUTATED for selftest) /' "$tmp/bin/rowt"
+  if ! grep -qF 'NOT loaded (MUTATED for selftest)' "$tmp/bin/rowt"; then
+    bad "could not reword the shell's NOT loaded line (cmd_status moved?)"
+  elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" \
+       PARITY_CASES="$(only 'PARITY_SCENARIO=watch-not-loaded status')" \
+       "$P" cli-diff >/dev/null 2>&1; then
+    bad "cli-diff passed with the shell's NOT loaded line reworded — the scenario never reached it"
+  else
+    ok "the scenario reaches the NOT loaded branch, so the key still matches the call"
+  fi
+  cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+fi
+
 echo
 echo "selftest: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

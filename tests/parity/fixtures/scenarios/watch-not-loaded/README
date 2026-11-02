@@ -1,0 +1,10 @@
+The watchdog is installed but launchd is not running it: an agent plist is on
+disk, and `launchctl print gui/<uid>/<label>` says there is no such service
+(exit 113). Keyed by the first argument, `launchctl_print`, because the uid in
+the target differs per box. Both implementations must read "NOT loaded" and
+point at `watch refresh` (rowt #s77: the question used to be `launchctl list
+<label>`, which answers for the caller's own session, so a box checked over SSH
+read this way while launchd was running its ticks).
+
+  status                          the watchdog: line
+  watch status                    the long form

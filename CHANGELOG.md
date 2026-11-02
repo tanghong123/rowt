@@ -5,6 +5,14 @@ release is cut; everything under Unreleased ships with the next one.
 
 ## Unreleased
 
+- `rowt status` and `rowt watch status` no longer report the watchdog as
+  "NOT loaded" when run over SSH while launchd is running it. The check now
+  asks launchd's gui domain for the agent by name (`launchctl print
+  gui/<uid>/<label>`, the domain `watch install` bootstraps into) instead of
+  `launchctl list`, which only answers for the caller's own session. The
+  same question now backs `status --json`'s watchdog field, the `use best`
+  warning and the tick's self-heal verify. A box checked remotely used to
+  read as broken and be told to run a needless `watch refresh`.
 - **The metrics collector runs again on the Rust version** (`ROWT_IMPL=rust`).
   It looked for the collector in the wrong folder of a Homebrew install, so
   from the first reload on the Rust version it stopped the running collector

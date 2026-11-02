@@ -135,9 +135,7 @@ fn choose(ctx: &Ctx, current: &str) -> Option<String> {
 
 /// `_best_watch_note`.
 fn watch_note() {
-    let loaded = std::process::Command::new("launchctl").args(["list", crate::watch::LABEL])
-        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
-        .status().map(|s| s.success()).unwrap_or(false);
+    let loaded = crate::watch::loaded();
     if !loaded {
         eprintln!("warning: the watchdog is not running, so this pick will not be re-checked — '{PROG} watch install'");
     }
