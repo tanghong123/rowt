@@ -13,6 +13,9 @@ release is cut; everything under Unreleased ships with the next one.
   same question now backs `status --json`'s watchdog field, the `use best`
   warning and the tick's self-heal verify. A box checked remotely used to
   read as broken and be told to run a needless `watch refresh`.
+
+## 3.8.34 — 2026-11-03
+
 - **The metrics collector runs again on the Rust version** (`ROWT_IMPL=rust`).
   It looked for the collector in the wrong folder of a Homebrew install, so
   from the first reload on the Rust version it stopped the running collector
