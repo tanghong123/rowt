@@ -55,10 +55,10 @@ The one key a fleet check needs is `.escape.state`: alert on `down` and
     "last_ok_at": "2026-10-30 07:20:05",// the lane last seen ok, by anyone
     "last_switch": {"at": "2026-10-30 06:02:11", "from": "tokyo-1", "to": "osaka-2", "by": "failover"},  // by: failover | auto; or null
     "hold": null,                       // {"since": "...", "tag": "..."} while the watchdog holds
-    "servers": [                        // servers.json order, each as the clash API last tested it
+    "servers": [                        // servers.json order, each as last tested: the clash API's history, else the watchdog's latency table
       {"tag": "tokyo-1", "type": "vless", "alive": false, "last_delay_ms": null, "last_test_at": "2026-10-30 07:19:25"},
       {"tag": "osaka-2", "type": "vless", "alive": true,  "last_delay_ms": 83,   "last_test_at": "2026-10-30 07:19:25"}
-    ]                                   // alive null: never tested; empty when the router is down
+    ]                                   // alive false: its last test got no answer; alive null: never tested; empty when the router is down
   },
   "lanes": {"escape": 212, "corp": 48, "block": 9, "ads": true, "geosites": ["google"], "final": "direct"},
   "ports": [{"name": "vm", "port": 7891, "unmatched": "direct", "rendered": true}]

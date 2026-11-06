@@ -5,6 +5,13 @@ release is cut; everything under Unreleased ships with the next one.
 
 ## Unreleased
 
+- `rowt status` says `no answer at HH:MM:SS` of an escape server whose last
+  delay test failed, and `untested` only of one never tested. sing-box's
+  clash API forgets a server's delay history when a test fails, so a server
+  that had just stopped answering read as "untested" next to members with
+  numbers, as if it had never been tried; status now reads the watchdog's
+  latency table where the API has nothing. `status --json` fills `alive`,
+  `last_delay_ms` and `last_test_at` the same way; the schema is unchanged.
 - `rowt server import --from shadowrocket` converts Trojan, VMess and TUIC
   entries too, with their TLS settings and, for Trojan and VMess, a WebSocket
   or gRPC transport; a TUIC entry's UDP relay mode (native or quic) comes

@@ -24,11 +24,13 @@ use crate::{env_or, read, PROG};
 /// a new value for an enum only with a new number.
 pub const SCHEMA: u32 = 1;
 
-/// One escape server as the clash API last saw it.
+/// One escape server as it was last tested: by the clash API's delay history
+/// when it has one, else by the watchdog's latency table.
 pub struct Member {
     pub tag: String,
     pub kind: String,
-    /// What its last test said: answered, failed, or never tested.
+    /// What its last test said: answered (`Some(true)`), failed
+    /// (`Some(false)`), or never tested that rowt knows of (`None`).
     pub alive: Option<bool>,
     pub last_delay_ms: Option<u32>,
     pub last_test_at: Option<String>,
@@ -83,24 +85,60 @@ fn hold_of(ctx: &Ctx) -> Option<(String, String)> {
     (!tag.is_empty() && ctx.sget("selected") == tag).then(|| (since.to_string(), tag.to_string()))
 }
 
-/// `GET /proxies`: every outbound with its delay history, in servers.json order.
+/// `GET /proxies`: every outbound with its delay history, in servers.json
+/// order — and, for one the API has no history of, the watchdog's latency
+/// table (`latency.tsv`). sing-box's clash API DELETES a server's delay
+/// history when the server fails a test (Clash Meta records a 0 ms entry
+/// instead), so from the API alone a server that stopped answering reads
+/// exactly like one never tested: on 2026-11-06 the selected server failed
+/// the watchdog's probe for five minutes and this line said "untested" of it,
+/// next to members with numbers (#s86). The table the watchdog writes every
+/// round keeps a no-answer row (an empty median) with the round's time, so it
+/// answers where the API has forgotten. The API's own entry wins where it has
+/// one: both come from the same round, and the API's is the later writer.
 fn members(ctx: &Ctx) -> Vec<Member> {
     let servers: Vec<Value> = serde_json::from_str(&read(&ctx.cfg.join("servers.json"))).unwrap_or_default();
     let Some(body) = lifecycle::clash_curl(ctx, "GET", "/proxies", None) else { return Vec::new() };
     let Some(all) = serde_json::from_str::<Value>(&body).ok().and_then(|v| v.get("proxies").cloned()) else { return Vec::new() };
+    let table = rowt_core::latency::table_parse(&read(&crate::best::table_path(ctx)));
     servers.iter().filter_map(|s| {
         let tag = s.get("tag")?.as_str()?.to_string();
         let kind = s.get("type").and_then(|t| t.as_str()).unwrap_or("").to_string();
         let last = all.get(&tag).and_then(|p| p.get("history")).and_then(|h| h.as_array()).and_then(|h| h.last().cloned());
-        let delay = last.as_ref().and_then(|e| e.get("delay")).and_then(|d| d.as_u64()).map(|d| d as u32);
-        let at = last.as_ref().and_then(|e| e.get("time")).and_then(|t| t.as_str()).and_then(st::rfc3339_to_stamp);
-        Some(Member {
-            tag, kind,
-            alive: delay.map(|d| d > 0),
-            last_delay_ms: delay.filter(|d| *d > 0),
-            last_test_at: at,
-        })
+        let row = table.iter().find(|r| r.tag == tag);
+        Some(member_of(tag, kind, last.as_ref(), row))
     }).collect()
+}
+
+/// A member from the API's last history entry when there is one, else from
+/// its latency-table row, else untested.
+fn member_of(tag: String, kind: String, last: Option<&Value>, row: Option<&rowt_core::latency::Row>) -> Member {
+    if let Some(e) = last {
+        let delay = e.get("delay").and_then(|d| d.as_u64()).map(|d| d as u32);
+        let at = e.get("time").and_then(|t| t.as_str()).and_then(st::rfc3339_to_stamp);
+        return Member { tag, kind, alive: delay.map(|d| d > 0), last_delay_ms: delay.filter(|d| *d > 0), last_test_at: at };
+    }
+    match row {
+        // An empty median is the table's "no answer"; `at` is the round's
+        // UTC stamp, in the same form the API's time is converted to.
+        Some(r) => Member {
+            tag, kind,
+            alive: Some(r.median.is_some()),
+            last_delay_ms: r.median.map(|m| m.min(u32::MAX as u64) as u32),
+            last_test_at: Some(r.at.clone()),
+        },
+        None => Member { tag, kind, alive: None, last_delay_ms: None, last_test_at: None },
+    }
+}
+
+/// One member on the `members:` line.
+fn member_text(m: &Member) -> String {
+    let at = m.last_test_at.as_deref().map(|s| s.get(11..19).unwrap_or(s).to_string()).unwrap_or_default();
+    match (m.alive, m.last_delay_ms) {
+        (Some(true), Some(d)) => format!("{} {d} ms at {at}", m.tag),
+        (Some(_), _) => format!("{} no answer at {at}", m.tag),
+        (None, _) => format!("{} untested", m.tag),
+    }
 }
 
 pub fn gather(ctx: &Ctx, force_probe: bool) -> Health {
@@ -235,14 +273,7 @@ pub fn rows(ctx: &Ctx, probe: bool) -> Vec<String> {
         }));
     }
     if !h.members.is_empty() {
-        let parts: Vec<String> = h.members.iter().map(|m| {
-            let at = m.last_test_at.as_deref().map(|s| s.get(11..19).unwrap_or(s).to_string()).unwrap_or_default();
-            match (m.alive, m.last_delay_ms) {
-                (Some(true), Some(d)) => format!("{} {d} ms at {at}", m.tag),
-                (Some(_), _) => format!("{} no answer at {at}", m.tag),
-                (None, _) => format!("{} untested", m.tag),
-            }
-        }).collect();
+        let parts: Vec<String> = h.members.iter().map(member_text).collect();
         o.push(format!("{:<14}{}", "members:", parts.join(", ")));
     }
     o
@@ -381,4 +412,44 @@ pub fn helper(args: &[String]) -> i32 {
         }
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rowt_core::latency::Row;
+
+    fn row(median: Option<u64>) -> Row {
+        Row { tag: "alpha".into(), median, ok: if median.is_some() { 3 } else { 0 }, at: "2100-01-01 00:05:00".into() }
+    }
+
+    fn m(last: Option<&Value>, row: Option<&Row>) -> Member {
+        member_of("alpha".into(), "vless".into(), last, row)
+    }
+
+    #[test]
+    fn a_member_is_read_from_the_api_history_first_then_the_latency_table() {
+        let hist = json!({"time": "2100-01-01T00:00:00Z", "delay": 120});
+        let x = m(Some(&hist), Some(&row(None)));
+        assert_eq!((x.alive, x.last_delay_ms, x.last_test_at.as_deref()), (Some(true), Some(120), Some("2100-01-01 00:00:00")));
+        assert_eq!(member_text(&x), "alpha 120 ms at 00:00:00");
+        // sing-box dropped the history after a failed test: the table's empty
+        // median says the server answered nothing, and when (#s86).
+        let x = m(None, Some(&row(None)));
+        assert_eq!((x.alive, x.last_delay_ms, x.last_test_at.as_deref()), (Some(false), None, Some("2100-01-01 00:05:00")));
+        assert_eq!(member_text(&x), "alpha no answer at 00:05:00");
+        let x = m(None, Some(&row(Some(83))));
+        assert_eq!((x.alive, x.last_delay_ms), (Some(true), Some(83)));
+        assert_eq!(member_text(&x), "alpha 83 ms at 00:05:00");
+        // Nothing anywhere: untested, as before.
+        let x = member_of("gamma".into(), "vless".into(), None, None);
+        assert_eq!((x.alive, x.last_delay_ms, x.last_test_at.as_deref()), (None, None, None));
+        assert_eq!(member_text(&x), "gamma untested");
+        // A Clash Meta style failure entry (delay 0) still reads as no answer,
+        // and a history entry without a delay still reads as untested.
+        let fail = json!({"time": "2100-01-01T00:00:00Z", "delay": 0});
+        assert_eq!(member_text(&m(Some(&fail), Some(&row(Some(83))))), "alpha no answer at 00:00:00");
+        let odd = json!({"time": "2100-01-01T00:00:00Z"});
+        assert_eq!(member_text(&m(Some(&odd), None)), "alpha untested");
+    }
 }

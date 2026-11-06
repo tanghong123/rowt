@@ -391,6 +391,12 @@ PARITY_SCENARIO=status-auto-observed status
 PARITY_SCENARIO=status-auto-observed status --json
 PARITY_SCENARIO=status-captive status
 PARITY_SCENARIO=status-captive status --json
+# sing-box's clash API drops a server's delay history when its test fails, so
+# `members:` reads the watchdog's latency table where the API has nothing:
+# alpha failed (no answer at the table's time), beta from the API's entry,
+# gamma never tested (#s86). The --json carries the same under .escape.servers.
+PARITY_SCENARIO=status-members-table status
+PARITY_SCENARIO=status-members-table status --json
 PARITY_SCENARIO=router-up explain example.com
 PARITY_SCENARIO=router-up router status
 

@@ -14,7 +14,8 @@
      offline, the router stopped, a captive portal), with since when and the last ok.
      `probed now:` means nothing fresh was observed, so status made one try of the
      watchdog's delay test itself. `members:`
-     is each server's last delay test. The same as JSON: `rowt status --json`
+     is each server's last delay test: `83 ms at HH:MM:SS`, `no answer at HH:MM:SS`
+     (it failed its last test), or `untested` (never tested). The same as JSON: `rowt status --json`
      (`status-json.md`), `.escape.state` and `.escape.reason`;
    - `via proxy:` (with `--probe`) a real fetch through the escape lane, 8 s budget.
      `HTTP 000 … no answer within 8s` is a slow link or a dead tunnel (check

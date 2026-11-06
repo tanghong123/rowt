@@ -790,7 +790,10 @@ When nothing fresh was observed â€” no watchdog, a box just up, a stale record â
 so (`probed now:`); the answer is reported, never recorded. `rowt status --probe` makes
 that probe regardless and brings back the live `via proxy:` fetch through the
 proxy and, when it fails, the `uplink:` verdict. `members:` lists each server's
-last delay test as the clash API remembers it.
+last delay test: `83 ms at HH:MM:SS` as the clash API remembers it, `no answer
+at HH:MM:SS` for a server that failed its last test (sing-box's API forgets a
+server's history when a test fails, so this comes from the watchdog's latency
+table), and `untested` only for a server never tested.
 
 `rowt status --json` prints the same facts as one JSON object with a stable,
 versioned schema (`"schema": 1`, additive changes only, never the clash secret,

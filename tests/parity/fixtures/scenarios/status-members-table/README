@@ -1,0 +1,10 @@
+status-members-table — alpha pinned and failing (the watchdog's record says 2 of 3, as in
+status-observed-degraded), with three servers and the two places `members:` reads from disagreeing
+the way they do on a real sing-box: its clash API DELETES a server's delay history when the server
+fails a test, so alpha has none; beta's history holds 120 ms; gamma has never been tested and has
+neither history nor a table row. The watchdog's latency table (latency.tsv) remembers what the API
+forgot: alpha answered nothing at 00:05:00, beta 200 ms (the API's entry wins where it has one).
+Expected: `alpha no answer at 00:05:00, beta 120 ms at 00:00:00, gamma untested` — before #s86 the
+line read alpha as `untested`, the same word as gamma. The --json case carries the same under
+.escape.servers (alive false with last_test_at for alpha, alive null for gamma). Stamps in 2100 so the
+record is fresh whenever the gate runs; neither side probes.
