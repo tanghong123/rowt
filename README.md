@@ -616,7 +616,10 @@ VMess / AnyTLS / hysteria2 / Shadowsocks / Trojan / TUIC; others are counted as
 skipped) and, where it has them, its **subscription URLs** (added to `subs.txt` so they stay auto-updating — e.g. a
 Clash Verge *remote* profile). Clash sources need [`yq`](https://github.com/mikefarah/yq)
 (`brew install yq`); V2Box is read from its local database. The apps don't need to be
-running — rowt reads their on-disk config.
+running — rowt reads their on-disk config. Shadowrocket is read from the server store in
+its app container or, when that one can't be opened, from the copy it keeps in iCloud
+Drive; an older and a newer version of the app write these in two layouts, and both are
+read.
 
 Anything you **already have is skipped** and reported: servers are matched by
 *identity* (address / port / credentials — **not** name), so importing the same node

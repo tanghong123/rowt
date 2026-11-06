@@ -313,7 +313,9 @@ directory.
 `sr-diff` is the one that reads a binary format. Its corpus writes real
 NSKeyedArchiver plists with `plistlib`, then truncates and byte-flips a fifth
 of them — so the gate is as much about agreeing on which damaged stores are
-still READABLE as about what a readable one yields. It also carries the two
+still READABLE as about what a readable one yields. Its server entries come in
+both shapes real stores write, flat dicts and archived `NS.keys`/`NS.objects`
+dictionaries, mixed within one store. It also carries the two
 places the Rust is deliberately narrower than the Python, both named in
 `rowt-core::bplist`: XML plists are not read, only `bplist00`, which is what
 Shadowrocket writes and all `bin/rowt` can produce; and an integer wider than

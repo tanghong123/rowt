@@ -17,6 +17,12 @@ What it goes after:
     and `host` present or missing, `CF$UID` values that point at strings, at
     `NSString` wrappers, at other dicts (which stay dicts, since the
     dereference is ONE level), and off the end of the array;
+  * the two shapes a real store writes an entry in — a flat dict (the app
+    container's ServerManager) and an archived NSMutableDictionary whose
+    `NS.keys` and `NS.objects` lists are zipped into one (the copy in iCloud
+    Drive) — with the corners of the zip: a repeated key, a key that is not a
+    string, lists of unequal length, a key UID off the end, an `NS.keys` that
+    is not a list, and archived dicts that are not servers at all;
   * the coercions on the way out: `int(port or 443)` over ints, floats,
     numeric strings, junk strings, bools and `None`; `str()` over bytes, reals,
     dates and UIDs; `bool("0")`, which is True;
@@ -158,6 +164,57 @@ def archived_dict(objs: list, items: list[tuple[str, str]]) -> UID:
     return UID(len(objs) - 1)
 
 
+def archived_entry(rng: random.Random, objs: list, e: dict) -> dict:
+    """The entry as the copy in iCloud Drive (shadowrocket.v2.model) stores it:
+    an NSMutableDictionary whose keys and values sit in two parallel lists, the
+    keys mostly UIDs into $objects. Now and then the shapes a reader has to
+    settle the same way on both sides: a key through an NSString wrapper; a key
+    that is not a string (str() of it names the field); a repeated key (the
+    last value wins, in the first one's place); lists of unequal length (the
+    pairing stops at the shorter); a key UID off the end (an IndexError, where
+    the flat shape, tested before any dereference, would have been skipped);
+    and an NS.keys that is not a list (then the dict is read flat, a server
+    only if it also carries type and host as literal keys)."""
+    keys: list = []
+    vals: list = []
+    for k, v in e.items():
+        r = rng.random()
+        if r < 0.7:
+            objs.append(k)
+            keys.append(UID(len(objs) - 1))
+        elif r < 0.85:
+            objs.append({"NS.string": k})
+            keys.append(UID(len(objs) - 1))
+        else:
+            keys.append(k)
+        vals.append(v)
+    if rng.random() < 0.12:
+        objs.append(rng.choice(list(e)))
+        keys.append(UID(len(objs) - 1))
+        vals.append(rng.choice(["later", "", None, 7]))
+    if rng.random() < 0.06:
+        keys.append(rng.choice([5, 1.5, True, datetime.datetime(2026, 8, 9, 12, 0, 0)]))
+        vals.append("odd-key")
+    r = rng.random()
+    if r < 0.06:
+        vals.pop()
+    elif r < 0.1:
+        keys.append(UID(len(objs) + 500))
+        vals.append("x")
+    objs.append(
+        {
+            "$classname": "NSMutableDictionary",
+            "$classes": ["NSMutableDictionary", "NSDictionary", "NSObject"],
+        }
+    )
+    out = {"NS.keys": keys, "NS.objects": vals, "$class": UID(len(objs) - 1)}
+    if rng.random() < 0.05:
+        out["NS.keys"] = "type"
+        if rng.random() < 0.5:
+            out["type"], out["host"] = "VLESS", "h.example.com"
+    return out
+
+
 def server_entry(rng: random.Random, objs: list) -> dict:
     """One `$objects` entry with a `type` and a `host`, whose values are a mix of
     literals and UIDs into the array being built."""
@@ -252,9 +309,27 @@ def store_bytes(rng: random.Random) -> bytes:
     objs: list = [None]
     shape = rng.random()
     entries = [server_entry(rng, objs) for _ in range(rng.randint(1, 6))]
+    # A share of them in the iCloud copy's archived shape; a real store is all
+    # one or all the other, but a mixed one exercises both readers in one walk.
+    entries = [archived_entry(rng, objs, e) if rng.random() < 0.35 else e for e in entries]
     if rng.random() < 0.3:
-        # Non-server noise in the array, which the walk must skip.
-        objs.append(rng.choice(["$null", 5, {"only": "type"}, {"host": "h"}, [1, 2]]))
+        # Non-server noise in the array, which the walk must skip — including
+        # the archived shapes that are not servers: a dictionary without a type
+        # or host among its pairs, and the root NSMutableArray of an iCloud
+        # store, which has NS.objects but no NS.keys.
+        objs.append(
+            rng.choice(
+                [
+                    "$null",
+                    5,
+                    {"only": "type"},
+                    {"host": "h"},
+                    [1, 2],
+                    {"NS.keys": ["title"], "NS.objects": ["Node"], "$class": UID(0)},
+                    {"NS.objects": [UID(1), UID(2)], "$class": UID(0)},
+                ]
+            )
+        )
     objs.extend(entries)
 
     if shape < 0.06:

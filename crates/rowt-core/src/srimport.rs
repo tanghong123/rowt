@@ -4,7 +4,11 @@
 //! a Surge-style `.conf`. Neither is documented; both are read the way the
 //! Python reads them, which is to walk `$objects` looking for any dict that has
 //! both a `type` and a `host` and to dereference each value ONE level through
-//! its `CF$UID`.
+//! its `CF$UID`. Real stores write that dict in two shapes — flat, with the
+//! field names as its keys (the app container's `ServerManager`), or as an
+//! archived `NSMutableDictionary` whose keys and values sit in two parallel
+//! lists (the copy in iCloud Drive, `shadowrocket.v2.model`) — and
+//! [`load_servers`] reads both.
 //!
 //! One thing worth keeping in view while reading: the real VLESS id lives in
 //! Shadowrocket's generic `password` slot, the same one AnyTLS and Shadowsocks
@@ -232,12 +236,40 @@ pub fn sanitize(name: &str, index: usize, used: &mut Vec<String>) -> String {
 
 /// `_load_servers` — every dict in `$objects` that has both a `type` and a
 /// `host`, with its values dereferenced.
+///
+/// Two shapes, both seen in real stores. A flat dict carries the field names
+/// as its keys: the app container's `ServerManager`, as an older Shadowrocket
+/// wrote it. An archived `NSMutableDictionary` carries them in an `NS.keys`
+/// list beside an `NS.objects` list: the copy a newer Shadowrocket keeps in
+/// iCloud Drive (`shadowrocket.v2.model`), which is the only store a Mac has
+/// when it cannot open the app's container. The archived one is zipped into a
+/// flat entry first, the way the Python's dict comprehension does it: each key
+/// through `str()`, so a key that is not a string still has a place; a repeated
+/// key keeps its first place and takes its last value; the pairing stops at the
+/// shorter list. And since the flat shape is tested for `type`/`host` before
+/// any value is dereferenced while the archived one can only be tested after,
+/// a UID off the end raises in the second where the first would have skipped.
 pub fn load_servers(root: &PlVal) -> R<Vec<Entry>> {
     let objs = index_str(root, "$objects")?;
     let items = iterate(&objs)?;
     let mut out = Vec::new();
     for o in &items {
         let PlVal::Dict(d) = o else { continue };
+        if let (Some(PlVal::Array(ks)), Some(PlVal::Array(vs))) = (get(d, "NS.keys"), get(d, "NS.objects")) {
+            let mut e: Entry = Vec::new();
+            for (k, v) in ks.iter().zip(vs.iter()) {
+                let key = PlVal::Str(py_str_top(&deref(&objs, k)?));
+                let val = deref(&objs, v)?;
+                match e.iter_mut().find(|(ek, _)| *ek == key) {
+                    Some(slot) => slot.1 = val,
+                    None => e.push((key, val)),
+                }
+            }
+            if get(&e, "type").is_some() && get(&e, "host").is_some() {
+                out.push(e);
+            }
+            continue;
+        }
         let has = |k: &str| d.iter().any(|(ek, _)| matches!(ek, PlVal::Str(n) if n == k));
         if !has("type") || !has("host") {
             continue;
@@ -1054,6 +1086,106 @@ mod tests {
             ])]),
         )]);
         assert_eq!(load_servers(&root).unwrap_err().name, "IndexError");
+    }
+
+    #[test]
+    fn load_servers_zips_an_archived_dictionary_entry() {
+        // The iCloud copy's shape: the entry is an NSMutableDictionary whose
+        // keys and values sit in NS.keys and NS.objects side by side, the keys
+        // UIDs into the array (one through an NSString wrapper). Plus the
+        // hand-built corners the two sides must settle alike: a repeated key
+        // takes the last value in the first one's place, a key that is not a
+        // string is `str()`'d, and the pairing stops at the shorter list.
+        let root = PlVal::Dict(vec![(
+            s("$objects"),
+            PlVal::Array(vec![
+                PlVal::None,                                                     // 0
+                s("type"),                                                       // 1
+                PlVal::Dict(vec![(s("NS.string"), s("host"))]),                  // 2
+                s("VLESS"),                                                      // 3
+                s("h.example.com"),                                              // 4
+                s("title"),                                                      // 5
+                PlVal::Dict(vec![(s("$classname"), s("NSMutableDictionary"))]), // 6
+                PlVal::Dict(vec![
+                    (
+                        s("NS.keys"),
+                        PlVal::Array(vec![
+                            PlVal::Uid(1),
+                            PlVal::Uid(2),
+                            PlVal::Uid(5),
+                            PlVal::Int(7),
+                            PlVal::Uid(5),
+                            s("unpaired"),
+                        ]),
+                    ),
+                    (
+                        s("NS.objects"),
+                        PlVal::Array(vec![
+                            PlVal::Uid(3),
+                            PlVal::Uid(4),
+                            s("first"),
+                            s("int-keyed"),
+                            s("last"),
+                        ]),
+                    ),
+                    (s("$class"), PlVal::Uid(6)),
+                ]),
+            ]),
+        )]);
+        let got = load_servers(&root).unwrap();
+        assert_eq!(got.len(), 1);
+        let e = &got[0];
+        assert_eq!(get(e, "type"), Some(&s("VLESS")));
+        assert_eq!(get(e, "host"), Some(&s("h.example.com")));
+        assert_eq!(get(e, "title"), Some(&s("last")));
+        assert_eq!(e.iter().position(|(k, _)| k == &s("title")), Some(2));
+        assert_eq!(get(e, "7"), Some(&s("int-keyed")));
+        // `$class` is not a pair, and "unpaired" had no value to pair with.
+        assert_eq!(e.len(), 4);
+    }
+
+    #[test]
+    fn an_archived_entry_needs_type_and_host_and_only_two_lists_are_zipped() {
+        // No host among the pairs: not a server. NS.keys that is not a list:
+        // the dict is read flat, so it is a server only through literal keys.
+        let root = PlVal::Dict(vec![(
+            s("$objects"),
+            PlVal::Array(vec![
+                PlVal::Dict(vec![
+                    (s("NS.keys"), PlVal::Array(vec![s("type"), s("title")])),
+                    (s("NS.objects"), PlVal::Array(vec![s("VLESS"), s("Node")])),
+                ]),
+                PlVal::Dict(vec![
+                    (s("NS.keys"), s("type")),
+                    (s("NS.objects"), PlVal::Array(vec![s("VLESS")])),
+                    (s("type"), s("AnyTLS")),
+                    (s("host"), s("h")),
+                ]),
+            ]),
+        )]);
+        let got = load_servers(&root).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(get(&got[0], "type"), Some(&s("AnyTLS")));
+        assert_eq!(get(&got[0], "NS.keys"), Some(&s("type")));
+    }
+
+    #[test]
+    fn an_archived_entry_dereferences_before_it_can_be_judged() {
+        // A flat dict without a host is skipped before its UIDs are followed; an
+        // archived one has to be zipped first, so the same bad UID raises.
+        let flat = PlVal::Dict(vec![(
+            s("$objects"),
+            PlVal::Array(vec![PlVal::Dict(vec![(s("type"), PlVal::Uid(900))])]),
+        )]);
+        assert_eq!(load_servers(&flat).unwrap().len(), 0);
+        let archived = PlVal::Dict(vec![(
+            s("$objects"),
+            PlVal::Array(vec![PlVal::Dict(vec![
+                (s("NS.keys"), PlVal::Array(vec![s("type")])),
+                (s("NS.objects"), PlVal::Array(vec![PlVal::Uid(900)])),
+            ])]),
+        )]);
+        assert_eq!(load_servers(&archived).unwrap_err().name, "IndexError");
     }
 
     #[test]

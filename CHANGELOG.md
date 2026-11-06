@@ -5,6 +5,11 @@ release is cut; everything under Unreleased ships with the next one.
 
 ## Unreleased
 
+- `rowt server import --from shadowrocket` now reads the copy of the server
+  store that Shadowrocket keeps in iCloud Drive. A newer Shadowrocket writes
+  its entries there as archived dictionaries, a layout the importer did not
+  read, so on a Mac that could not open the app's own container the import
+  found no servers and said nothing. Both the shell and the Rust version.
 - `rowt status` and `rowt watch status` no longer report the watchdog as
   "NOT loaded" when run over SSH while launchd is running it. The check now
   asks launchd's gui domain for the agent by name (`launchctl print

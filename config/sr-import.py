@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Extract servers, subscriptions and proxy rules from a Shadowrocket install.
 
-Reads Shadowrocket's binary server store (NSKeyedArchiver plist) and its
-Surge-style rule config, and emits a JSON summary on stdout:
+Reads Shadowrocket's binary server store (NSKeyedArchiver plist: the app
+container's ServerManager, or the copy in iCloud Drive, whose entries an older
+and a newer Shadowrocket write in two layouts) and its Surge-style rule config,
+and emits a JSON summary on stdout:
 
     {
       "subscriptions": [{"url": "...", "info": "...", "title": "..."}],
@@ -83,6 +85,13 @@ def _sanitize(name: str, index: int, used: set[str]) -> str:
 
 
 def _load_servers(store: str) -> list[dict]:
+    """Every dict in `$objects` with both a `type` and a `host`, its values
+    dereferenced one level. Two shapes, both seen in real stores: a flat dict
+    with the field names as its keys (the app container's ServerManager, from
+    an older Shadowrocket), and an archived NSMutableDictionary with an NS.keys
+    list beside an NS.objects list (the copy a newer Shadowrocket keeps in
+    iCloud Drive, the only store a Mac has when it cannot open the app's
+    container), zipped into a flat dict here with its keys through str()."""
     objs = plistlib.load(open(store, "rb"))["$objects"]
 
     def d(x):  # dereference a CF$UID, unwrapping NSString/NSMutableString objects
@@ -93,7 +102,14 @@ def _load_servers(store: str) -> list[dict]:
 
     out = []
     for o in objs:
-        if isinstance(o, dict) and "type" in o and "host" in o:
+        if not isinstance(o, dict):
+            continue
+        ks, vs = o.get("NS.keys"), o.get("NS.objects")
+        if isinstance(ks, list) and isinstance(vs, list):
+            e = {str(d(k)): d(v) for k, v in zip(ks, vs)}
+            if "type" in e and "host" in e:
+                out.append(e)
+        elif "type" in o and "host" in o:
             out.append({k: d(v) for k, v in o.items()})
     return out
 
