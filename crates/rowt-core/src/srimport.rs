@@ -386,6 +386,9 @@ pub fn to_vless(s: &Entry, tag: &str) -> R<Option<Value>> {
     if !truthy(host) || !truthy(vid) {
         return Ok(None);
     }
+    // Read before `int(port)`, as in `_to_vless`: an entry skipped for its
+    // transport raises nothing for its port.
+    let Ok(transport) = vless_transport(s) else { return Ok(None) };
     let host = host.unwrap();
     let mut out = Map::new();
     out.insert("type".into(), Value::String("vless".into()));
@@ -407,22 +410,46 @@ pub fn to_vless(s: &Entry, tag: &str) -> R<Option<Value>> {
     } else if truthy(get(s, "tls")) {
         out.insert("tls".into(), tls_block(&sni, None, None));
     }
-    let obfs = str_or(get(s, "obfs"), "none").to_lowercase();
-    if obfs == "ws" || obfs == "websocket" {
-        let mut t = Map::new();
-        t.insert("type".into(), Value::String("ws".into()));
-        t.insert(
-            "path".into(),
-            Value::String(str_or(or2(get(s, "obfsParam"), get(s, "pluginParam")), "/")),
-        );
-        out.insert("transport".into(), Value::Object(t));
-    } else if obfs == "grpc" {
-        let mut t = Map::new();
-        t.insert("type".into(), Value::String("grpc".into()));
-        t.insert("service_name".into(), Value::String(str_or(get(s, "obfsParam"), "")));
-        out.insert("transport".into(), Value::Object(t));
+    if let Some(t) = transport {
+        out.insert("transport".into(), t);
     }
     Ok(Some(Value::Object(out)))
+}
+
+/// `_vless_transport`. The newer record — the one with a `path` key, which
+/// the archived iCloud store writes — keeps a VLESS entry's transport in the
+/// slots [`obfs_transport`] reads, as a real ws entry made from rowt's own
+/// link showed on 2026-11-06: the Host in `obfsParam`, the path in `path`.
+/// Through 3.8.37 the converter read `obfsParam` as the path, so a ws VLESS
+/// imported with its Host as its path and no Host header. The older flat
+/// record has no `path` key at all, and no real ws or grpc entry of that
+/// shape has been seen, so it keeps the reading it has had since 1.0.0 — the
+/// path from `obfsParam`, then `pluginParam`; a service name from
+/// `obfsParam` — unpinned, and unchanged. An obfs the importer does not know
+/// skips the entry on either record, as it does a Trojan or VMess one.
+fn vless_transport(s: &Entry) -> Result<Option<Value>, ()> {
+    if get(s, "path").is_some() {
+        return obfs_transport(s);
+    }
+    match str_or(get(s, "obfs"), "none").to_lowercase().as_str() {
+        "none" => Ok(None),
+        "ws" | "websocket" => {
+            let mut t = Map::new();
+            t.insert("type".into(), Value::String("ws".into()));
+            t.insert(
+                "path".into(),
+                Value::String(str_or(or2(get(s, "obfsParam"), get(s, "pluginParam")), "/")),
+            );
+            Ok(Some(Value::Object(t)))
+        }
+        "grpc" => {
+            let mut t = Map::new();
+            t.insert("type".into(), Value::String("grpc".into()));
+            t.insert("service_name".into(), Value::String(str_or(get(s, "obfsParam"), "")));
+            Ok(Some(Value::Object(t)))
+        }
+        _ => Err(()),
+    }
 }
 
 /// `_to_anytls`.
@@ -585,14 +612,20 @@ fn alpn_list(alpn: &str) -> Value {
     Value::Array(alpn.split(',').filter(|a| !a.is_empty()).map(|a| Value::String(a.into())).collect())
 }
 
-/// The transport a Trojan or VMess entry carries, in the shape
+/// The transport a Trojan, VMess or VLESS entry carries, in the shape
 /// `sharelink::transport` builds from a link's `type=`. Shadowrocket keeps the
-/// kind in `obfs` ("websocket" for ws), the path in its own `path` key and the
-/// Host header in `obfsParam` (and again under `obfsParams["Host"]`, which is
-/// not read) — as real entries made from rowt's own links showed on
-/// 2026-11-06. "none", or unset, is no transport. Anything else is `Err(())`,
-/// and the caller skips the entry rather than import a server that would
-/// never connect with its transport dropped.
+/// kind in `obfs` ("websocket" for ws, "grpc"), the path — or the gRPC service
+/// name — in its own `path` key and the ws Host header in `obfsParam` (and
+/// again under `obfsParams["Host"]`, which is not read); the slots are the
+/// same for all three types, as real entries made from rowt's own links
+/// showed on 2026-11-06. "none", or unset, is no transport. Anything else is
+/// `Err(())`, and the caller skips the entry rather than import a server that
+/// would never connect with its transport dropped. What is not here is not
+/// pinned: a Trojan entry Shadowrocket made from an h2 link (`type=http`)
+/// came out with `obfs` none, the path and Host kept in their slots and no h2
+/// flag set, so Shadowrocket keeps no h2 transport for a Trojan and the entry
+/// imports as it holds it, plain TLS; what "h2" or "http" in `obfs` would
+/// mean has not been seen.
 fn obfs_transport(s: &Entry) -> Result<Option<Value>, ()> {
     match str_or(get(s, "obfs"), "none").to_lowercase().as_str() {
         "none" => Ok(None),
@@ -606,6 +639,12 @@ fn obfs_transport(s: &Entry) -> Result<Option<Value>, ()> {
                 h.insert("Host".into(), Value::String(host));
                 t.insert("headers".into(), Value::Object(h));
             }
+            Ok(Some(Value::Object(t)))
+        }
+        "grpc" => {
+            let mut t = Map::new();
+            t.insert("type".into(), Value::String("grpc".into()));
+            t.insert("service_name".into(), Value::String(str_or(get(s, "path"), "")));
             Ok(Some(Value::Object(t)))
         }
         _ => Err(()),
@@ -711,8 +750,9 @@ pub fn to_vmess(s: &Entry, tag: &str) -> R<Option<Value>> {
 /// Shadowrocket's own id), the password in `password`, the SNI in `peer`,
 /// `allowInsecure` an int, `alpn` a comma list (h3 when unset, as the link
 /// parser offers it), the congestion control in `proto` ("bbr"), and the UDP
-/// relay mode in `udp` as a number: 2 is `quic`. Any other value leaves
-/// sing-box's default. A uuid sing-box would refuse skips the entry, as the
+/// relay mode in `udp` as a number: 1 is `native`, 2 is `quic` (entries made
+/// from links naming each, 2026-11-06). Any other value leaves sing-box's
+/// default. A uuid sing-box would refuse skips the entry, as the
 /// link parser refuses the link. The shape is `sharelink::parse_tuic`'s.
 pub fn to_tuic(s: &Entry, tag: &str) -> R<Option<Value>> {
     let host = get(s, "host");
@@ -743,8 +783,13 @@ pub fn to_tuic(s: &Entry, tag: &str) -> R<Option<Value>> {
     if matches!(cc.as_str(), "cubic" | "new_reno" | "bbr") {
         out.insert("congestion_control".into(), Value::String(cc));
     }
-    if str_of(get(s, "udp")) == "2" {
-        out.insert("udp_relay_mode".into(), Value::String("quic".into()));
+    let relay = match str_of(get(s, "udp")).as_str() {
+        "1" => Some("native"),
+        "2" => Some("quic"),
+        _ => None,
+    };
+    if let Some(r) = relay {
+        out.insert("udp_relay_mode".into(), Value::String(r.into()));
     }
     out.insert("tls".into(), Value::Object(tls));
     Ok(Some(Value::Object(out)))
@@ -1209,6 +1254,106 @@ mod tests {
         );
     }
 
+    /// The round-two entries (2026-11-06, made-up values), as the real store
+    /// holds them: a grpc Trojan, the Trojan an h2 link became, a native-mode
+    /// TUIC and a plain-TCP VMess.
+    #[test]
+    fn a_grpc_trojan_entry_converts_to_what_its_link_parses_to() {
+        // The service name sits in `path`; `obfsParam` is empty.
+        let e = entry(&[
+            ("type", s("Trojan")),
+            ("host", s("trojan2.example.com")),
+            ("port", s("8444")),
+            ("password", s("TrojanPass2")),
+            ("peer", s("sni-trojan2.example.com")),
+            ("obfs", s("grpc")),
+            ("path", s("grpc-svc-example")),
+            ("proto", s("none")),
+            ("udp", PlVal::Int(1)),
+            ("title", s("Doc2-Trojan-grpc")),
+            ("uuid", s("B855FD19-94F4-4022-86AD-9E710E34E462")),
+        ]);
+        let link = "trojan://TrojanPass2@trojan2.example.com:8444?security=tls&sni=sni-trojan2.example.com&fp=chrome&type=grpc&serviceName=grpc-svc-example#Doc2-Trojan-grpc";
+        assert_eq!(
+            to_trojan(&e, "Doc2-Trojan-grpc").unwrap().unwrap(),
+            sharelink::parse_trojan(link, "Doc2-Trojan-grpc").unwrap()
+        );
+    }
+
+    #[test]
+    fn a_trojan_entry_made_from_an_h2_link_imports_as_shadowrocket_holds_it_plain_tls() {
+        // Shadowrocket stored rowt's h2 Trojan link with `obfs` none, the path
+        // and Host kept in their slots and no h2 flag: it keeps no h2 transport
+        // for a Trojan, so the import follows its store. The transport is what
+        // the link loses on Shadowrocket's side, not here.
+        let e = entry(&[
+            ("type", s("Trojan")),
+            ("host", s("trojan3.example.com")),
+            ("port", s("8447")),
+            ("password", s("TrojanPass3")),
+            ("peer", s("sni-trojan3.example.com")),
+            ("obfs", s("none")),
+            ("obfsParam", s("h2-host.example.com")),
+            ("path", s("/h2-path")),
+            ("proto", s("none")),
+            ("udp", PlVal::Int(1)),
+            ("title", s("Doc2-Trojan-h2")),
+            ("uuid", s("F51CF09C-6BB4-4E5F-904F-0C415D625E6B")),
+        ]);
+        let plain = "trojan://TrojanPass3@trojan3.example.com:8447?security=tls&sni=sni-trojan3.example.com&fp=chrome#Doc2-Trojan-h2";
+        let h2 = "trojan://TrojanPass3@trojan3.example.com:8447?security=tls&sni=sni-trojan3.example.com&fp=chrome&type=http&path=%2Fh2-path&host=h2-host.example.com#Doc2-Trojan-h2";
+        assert_eq!(
+            to_trojan(&e, "Doc2-Trojan-h2").unwrap().unwrap(),
+            sharelink::parse_trojan(plain, "Doc2-Trojan-h2").unwrap()
+        );
+        assert_eq!(sharelink::parse_trojan(h2, "Doc2-Trojan-h2").unwrap()["transport"]["type"], "http");
+    }
+
+    #[test]
+    fn a_native_tuic_entry_converts_to_what_its_link_parses_to() {
+        let e = entry(&[
+            ("type", s("TUIC")),
+            ("host", s("tuic2.example.com")),
+            ("port", s("9444")),
+            ("user", s("77777777-8888-9999-aaaa-bbbbbbbbbbbb")),
+            ("password", s("TuicPass2")),
+            ("peer", s("sni-tuic2.example.com")),
+            ("alpn", s("h3")),
+            ("obfs", s("none")),
+            ("proto", s("cubic")),
+            ("udp", PlVal::Int(1)),
+            ("title", s("Doc2-TUIC-native")),
+            ("uuid", s("6732E90B-3D82-435A-8053-8765F6FD5BF1")),
+        ]);
+        let link = "tuic://77777777-8888-9999-aaaa-bbbbbbbbbbbb:TuicPass2@tuic2.example.com:9444?sni=sni-tuic2.example.com&alpn=h3&congestion_control=cubic&udp_relay_mode=native#Doc2-TUIC-native";
+        assert_eq!(
+            to_tuic(&e, "Doc2-TUIC-native").unwrap().unwrap(),
+            sharelink::parse_tuic(link, "Doc2-TUIC-native").unwrap()
+        );
+    }
+
+    #[test]
+    fn a_plain_tcp_vmess_entry_converts_to_what_its_link_parses_to() {
+        let e = entry(&[
+            ("type", s("Vmess")),
+            ("host", s("vmess2.example.com")),
+            ("port", s("8446")),
+            ("password", s("33333333-4444-5555-6666-777777777777")),
+            ("alterId", s("0")),
+            ("method", s("auto")),
+            ("obfs", s("none")),
+            ("proto", s("none")),
+            ("udp", PlVal::Int(1)),
+            ("title", s("Doc2-VMess-tcp")),
+            ("uuid", s("589E7BD8-67D9-43A0-8C6F-4F52B6D6C579")),
+        ]);
+        let link = "vmess://eyJ2IjogIjIiLCAicHMiOiAiRG9jMi1WTWVzcy10Y3AiLCAiYWRkIjogInZtZXNzMi5leGFtcGxlLmNvbSIsICJwb3J0IjogIjg0NDYiLCAiaWQiOiAiMzMzMzMzMzMtNDQ0NC01NTU1LTY2NjYtNzc3Nzc3Nzc3Nzc3IiwgImFpZCI6ICIwIiwgInNjeSI6ICJhdXRvIiwgIm5ldCI6ICJ0Y3AiLCAidHlwZSI6ICJub25lIiwgImhvc3QiOiAiIiwgInBhdGgiOiAiIiwgInRscyI6ICIiLCAic25pIjogIiIsICJhbHBuIjogIiIsICJmcCI6ICIifQ==";
+        assert_eq!(
+            to_vmess(&e, "Doc2-VMess-tcp").unwrap().unwrap(),
+            sharelink::parse_vmess(link, "Doc2-VMess-tcp").unwrap()
+        );
+    }
+
     #[test]
     fn a_transport_the_importer_does_not_know_skips_the_entry_and_none_is_no_transport() {
         let mut e = trojan_entry();
@@ -1236,11 +1381,18 @@ mod tests {
         assert_eq!(to_tuic(&e, "t").unwrap(), None);
         let mut e = tuic_entry();
         set(&mut e, "proto", s("new-reno"));
-        set(&mut e, "udp", PlVal::Int(1));
+        set(&mut e, "udp", PlVal::Int(3));
         set(&mut e, "alpn", s(""));
         let v = to_tuic(&e, "t").unwrap().unwrap();
         assert_eq!(v["congestion_control"], "new_reno");
         assert!(v.get("udp_relay_mode").is_none());
+        // The relay mode is a number, 1 native and 2 quic, read through
+        // `str()`: a bool is "True", which is neither.
+        for (u, mode) in [(s("1"), Some("native")), (PlVal::Int(2), Some("quic")), (PlVal::Bool(true), None), (PlVal::Int(0), None)] {
+            set(&mut e, "udp", u);
+            let v = to_tuic(&e, "t").unwrap().unwrap();
+            assert_eq!(v.get("udp_relay_mode").and_then(|m| m.as_str()), mode);
+        }
         assert_eq!(v["tls"]["alpn"], json!(["h3"]));
         let mut e = vmess_entry();
         set(&mut e, "alterId", s("x"));
@@ -1333,7 +1485,10 @@ mod tests {
     }
 
     #[test]
-    fn the_websocket_path_falls_back_through_two_fields() {
+    fn an_older_record_without_a_path_key_keeps_the_reading_it_had() {
+        // The flat store an older Shadowrocket writes has no `path` key, and
+        // no real ws or grpc entry of that shape has been seen, so the 1.0.0
+        // reading stands there: the path from obfsParam, then pluginParam.
         let e = entry(&[
             ("host", s("h")),
             ("password", s("p")),
@@ -1342,11 +1497,61 @@ mod tests {
         ]);
         let o = to_vless(&e, "T").unwrap().unwrap();
         assert_eq!(o["transport"], json!({"type": "ws", "path": "/plugin"}));
-        let e = entry(&[("host", s("h")), ("password", s("p")), ("obfs", s("grpc"))]);
+        let e = entry(&[("host", s("h")), ("password", s("p")), ("obfs", s("grpc")), ("obfsParam", s("svc"))]);
         assert_eq!(
             to_vless(&e, "T").unwrap().unwrap()["transport"],
-            json!({"type": "grpc", "service_name": ""})
+            json!({"type": "grpc", "service_name": "svc"})
         );
+        // An obfs the importer does not know skips the entry on either
+        // record, as it does a Trojan or VMess one; "none" is no transport.
+        let e = entry(&[("host", s("h")), ("password", s("p")), ("obfs", s("http"))]);
+        assert_eq!(to_vless(&e, "T").unwrap(), None);
+        let e = entry(&[("host", s("h")), ("password", s("p")), ("obfs", s("none")), ("obfsParam", s("/x"))]);
+        assert!(to_vless(&e, "T").unwrap().unwrap().get("transport").is_none());
+    }
+
+    /// A VLESS entry as the newer store holds one made from rowt's own link
+    /// (2026-11-06, made-up values): the record that has a `path` key.
+    fn vless_ws_entry() -> Entry {
+        entry(&[
+            ("type", s("VLESS")),
+            ("host", s("vless2.example.com")),
+            ("port", s("8445")),
+            ("password", s("22222222-3333-4444-5555-666666666666")),
+            ("method", s("none")),
+            ("peer", s("sni-vless2.example.com")),
+            ("tls", PlVal::Bool(true)),
+            ("obfs", s("websocket")),
+            ("obfsParam", s("ws-host2.example.com")),
+            ("path", s("/vless-path")),
+            ("proto", s("none")),
+            ("udp", PlVal::Int(1)),
+            ("title", s("Doc2-VLESS-ws")),
+            ("uuid", s("BE36B7AA-CCFE-4613-99A0-650EB619AD53")),
+        ])
+    }
+
+    #[test]
+    fn a_vless_ws_entry_converts_to_what_its_link_parses_to() {
+        let link = "vless://22222222-3333-4444-5555-666666666666@vless2.example.com:8445?encryption=none&security=tls&sni=sni-vless2.example.com&fp=chrome&type=ws&path=%2Fvless-path&host=ws-host2.example.com#Doc2-VLESS-ws";
+        assert_eq!(
+            to_vless(&vless_ws_entry(), "Doc2-VLESS-ws").unwrap().unwrap(),
+            sharelink::parse_vless(link, "Doc2-VLESS-ws").unwrap()
+        );
+        // Through 3.8.37 the Host was read as the path. Without one, the path
+        // defaults as a link's does and there are no headers.
+        let mut e = vless_ws_entry();
+        set(&mut e, "obfsParam", s(""));
+        set(&mut e, "path", s(""));
+        assert_eq!(to_vless(&e, "T").unwrap().unwrap()["transport"], json!({"type": "ws", "path": "/"}));
+        // The slots are the same for every type, so a grpc VLESS takes its
+        // service name from `path`, where a real grpc Trojan keeps it; an
+        // obfs the importer does not know skips the entry.
+        set(&mut e, "obfs", s("grpc"));
+        set(&mut e, "path", s("svc"));
+        assert_eq!(to_vless(&e, "T").unwrap().unwrap()["transport"], json!({"type": "grpc", "service_name": "svc"}));
+        set(&mut e, "obfs", s("quic"));
+        assert_eq!(to_vless(&e, "T").unwrap(), None);
     }
 
     #[test]

@@ -630,10 +630,11 @@ applies whatever's in the review file, regardless of which client it came from.
 
 VLESS, VMess, Trojan, TUIC, AnyTLS, Shadowsocks and Hysteria2 servers import
 (Shadowsocks with its simple-obfs setting, Hysteria2 with its Salamander obfs,
-Trojan and VMess with their WebSocket transport). Other protocols, a
-Shadowsocks server chained through another, a Trojan or VMess entry with a
-transport other than WebSocket, and a Shadowsocks or Hysteria2 entry with a
-plugin or an SSR-style proto set are not imported: the line after
+VLESS, Trojan and VMess with a WebSocket or gRPC transport, TUIC with its UDP
+relay mode). Other protocols, a Shadowsocks server chained through another, a
+VLESS, Trojan or VMess entry with a transport other than those two, and a
+Shadowsocks or Hysteria2 entry with a plugin or an SSR-style proto set are not
+imported: the line after
 the import's summary names them by protocol (`not imported: WireGuard (1)`), and
 the review file counts them under `skipped`. For one you need, export its share
 link from the app and `rowt server add` it. A Hysteria2 entry's `pluginParam`

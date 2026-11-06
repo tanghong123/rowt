@@ -7,11 +7,23 @@ release is cut; everything under Unreleased ships with the next one.
 
 - `rowt server import --from shadowrocket` converts Trojan, VMess and TUIC
   entries too, with their TLS settings and, for Trojan and VMess, a WebSocket
-  transport. They used to be counted as "not imported" although `rowt server
+  or gRPC transport; a TUIC entry's UDP relay mode (native or quic) comes
+  along. They used to be counted as "not imported" although `rowt server
   add` takes the same servers from a share link. The mapping comes from real
   Shadowrocket entries made from rowt's own links, not from guesswork; an
   entry with a transport the importer does not know is still skipped and
-  named in the summary. Both the shell and the Rust version.
+  named in the summary. (A Trojan entry Shadowrocket made from an h2 link
+  has no transport in Shadowrocket's own store, so it imports as Shadowrocket
+  has it: plain TLS.) Both the shell and the Rust version.
+- A VLESS entry with a WebSocket transport imports with its path and its Host
+  header in the right places. The importer read the field Shadowrocket keeps
+  the Host in as the path, so such a server came out with its Host as its
+  path and no Host header, and would not connect; a gRPC service name was read
+  from the same wrong field. The older store layout, which has no separate
+  path field, keeps the reading it had. A VLESS entry with a transport the
+  importer does not know is now skipped and named in the summary, as a Trojan
+  or VMess one is, instead of imported without it. Both the shell and the
+  Rust version.
 - `rowt server import --from shadowrocket` now reads the copy of the server
   store that Shadowrocket keeps in iCloud Drive. A newer Shadowrocket writes
   its entries there as archived dictionaries, a layout the importer did not

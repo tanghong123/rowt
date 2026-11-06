@@ -109,13 +109,15 @@ TYPES = [
     None,
     "vless",
 ]
-# Trojan, VMess and TUIC fields, as real entries made from rowt's own links
-# showed them (2026-11-06): the path in `path`, the ws Host in `obfsParam` and
-# again in an archived `obfsParams` dict, VMess's `alterId` a string and its
-# cipher in `method`, TUIC's uuid in `user`, its congestion control in `proto`
-# and its UDP relay mode in `udp` as a number — plus the shapes each reader
-# must refuse or default the same way.
-PATHS = ["/ws", "/p", "", None, 7]
+# Trojan, VMess, VLESS and TUIC fields, as real entries made from rowt's own
+# links showed them (2026-11-06): the ws path or grpc service name in `path`,
+# the ws Host in `obfsParam` and again in an archived `obfsParams` dict (the
+# same slots for all three; a VLESS entry WITHOUT a `path` key is the older
+# record, read the old way), VMess's `alterId` a string and its cipher in
+# `method`, TUIC's uuid in `user`, its congestion control in `proto` and its
+# UDP relay mode in `udp` as a number (1 native, 2 quic) — plus the shapes each
+# reader must refuse or default the same way.
+PATHS = ["/ws", "/p", "grpc-svc", "", None, 7]
 ALTER_IDS = ["4", "0", "", None, 7, "x", 1.5, True, b"2"]
 VMESS_METHODS = ["aes-128-gcm", "auto", "chacha20-poly1305", "none", "", None]
 TUIC_UUIDS = [
@@ -268,14 +270,15 @@ def server_entry(rng: random.Random, objs: list) -> dict:
     hy2 = typ == "Hysteria2"
     trojan = typ == "Trojan"
     vmess = typ == "Vmess"
+    vless = typ == "VLESS"
     tuic = typ == "TUIC"
     if rng.random() < (0.9 if hy2 else 0.5 if trojan or vmess or tuic else 0.1):
         e["alpn"] = ref(rng.choice(HY2_ALPN + ["h2,http/1.1", "http/1.1"]))
     if rng.random() < (0.7 if hy2 else 0.05):
         e["hpkp"] = ref(rng.choice(["0123456789abcdef" * 4, "", None]))
     if rng.random() < (0.6 if hy2 or trojan or vmess or tuic else 0.05):
-        e["udp"] = ref(rng.choice([1, 0, True, None, 2, 2, "2", 3]))
-    if rng.random() < (0.5 if trojan or vmess else 0.1):
+        e["udp"] = ref(rng.choice([1, 1, 0, True, None, 2, 2, "1", "2", 3]))
+    if rng.random() < (0.5 if trojan or vmess or vless else 0.1):
         e["path"] = ref(rng.choice(PATHS))
     if rng.random() < (0.4 if trojan or vmess else 0.05):
         e["obfsParams"] = archived_dict(objs, [("Host", "ws-host.example.com")])

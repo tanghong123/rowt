@@ -122,6 +122,10 @@ def _to_vless(s: dict, tag: str) -> dict | None:
     vid = s.get("password") or s.get("uuid")
     if not host or not vid:
         return None
+    try:
+        transport = _vless_transport(s)
+    except _Unknown:
+        return None
     out: dict = {
         "type": "vless",
         "tag": tag,
@@ -151,18 +155,36 @@ def _to_vless(s: dict, tag: str) -> dict | None:
             "server_name": sni,
             "utls": {"enabled": True, "fingerprint": "chrome"},
         }
+    if transport:
+        out["transport"] = transport
+    return out
+
+
+def _vless_transport(s: dict) -> dict | None:
+    """The newer record (the one with a `path` key, which the archived iCloud
+    store writes) keeps a VLESS entry's transport in the slots _obfs_transport
+    reads, as a real ws entry made from rowt's own link showed on 2026-11-06:
+    the Host in `obfsParam`, the path in `path`. Through 3.8.37 this converter
+    read `obfsParam` as the path, so a ws VLESS imported with its Host as its
+    path and no Host header. The older flat record has no `path` key at all,
+    and no real ws or grpc entry of that shape has been seen, so it keeps the
+    reading it has had since 1.0.0 (the path from `obfsParam`, then
+    `pluginParam`; a service name from `obfsParam`), unpinned and unchanged.
+    An obfs the importer does not know raises _Unknown on either record, and
+    the entry is skipped as a Trojan or VMess one is."""
+    if "path" in s:
+        return _obfs_transport(s)
     obfs = str(s.get("obfs") or "none").lower()
+    if obfs == "none":
+        return None
     if obfs in ("ws", "websocket"):
-        out["transport"] = {
+        return {
             "type": "ws",
             "path": str(s.get("obfsParam") or s.get("pluginParam") or "/"),
         }
-    elif obfs == "grpc":
-        out["transport"] = {
-            "type": "grpc",
-            "service_name": str(s.get("obfsParam") or ""),
-        }
-    return out
+    if obfs == "grpc":
+        return {"type": "grpc", "service_name": str(s.get("obfsParam") or "")}
+    raise _Unknown(obfs)
 
 
 def _to_anytls(s: dict, tag: str) -> dict | None:
@@ -296,14 +318,19 @@ class _Unknown(Exception):
 
 
 def _obfs_transport(s: dict) -> dict | None:
-    """The transport a Trojan or VMess entry carries, in the shape _transport
-    builds from a link's `type=`. Shadowrocket keeps the kind in `obfs`
-    ("websocket" for ws), the path in its own `path` key and the Host header in
-    `obfsParam` (and again under obfsParams["Host"], which is not read), as real
-    entries made from rowt's own links showed on 2026-11-06. "none", or unset,
-    is no transport. Anything else raises _Unknown, and the caller skips the
-    entry rather than import a server that would never connect with its
-    transport dropped."""
+    """The transport a Trojan, VMess or VLESS entry carries, in the shape
+    _transport builds from a link's `type=`. Shadowrocket keeps the kind in
+    `obfs` ("websocket" for ws, "grpc"), the path (or the gRPC service name) in
+    its own `path` key and the ws Host header in `obfsParam` (and again under
+    obfsParams["Host"], which is not read); the slots are the same for all three
+    types, as real entries made from rowt's own links showed on 2026-11-06.
+    "none", or unset, is no transport. Anything else raises _Unknown, and the
+    caller skips the entry rather than import a server that would never connect
+    with its transport dropped. What is not here is not pinned: a Trojan entry
+    Shadowrocket made from an h2 link (`type=http`) came out with `obfs` none,
+    the path and Host kept in their slots and no h2 flag set, so Shadowrocket
+    keeps no h2 transport for a Trojan and the entry imports as it holds it,
+    plain TLS; what "h2" or "http" in `obfs` would mean has not been seen."""
     obfs = str(s.get("obfs") or "none").lower()
     if obfs == "none":
         return None
@@ -313,6 +340,8 @@ def _obfs_transport(s: dict) -> dict | None:
         if host:
             transport["headers"] = {"Host": host}
         return transport
+    if obfs == "grpc":
+        return {"type": "grpc", "service_name": str(s.get("path") or "")}
     raise _Unknown(obfs)
 
 
@@ -398,8 +427,9 @@ def _to_tuic(s: dict, tag: str) -> dict | None:
     own id), the password in `password`, the SNI in `peer`, `allowInsecure` an
     int, `alpn` a comma list (h3 when unset, as parse_tuic offers it), the
     congestion control in `proto` ("bbr"), and the UDP relay mode in `udp` as a
-    number: 2 is quic. Any other value leaves sing-box's default. A uuid
-    sing-box would refuse skips the entry, as parse_tuic refuses the link."""
+    number: 1 is native, 2 is quic (entries made from links naming each,
+    2026-11-06). Any other value leaves sing-box's default. A uuid sing-box
+    would refuse skips the entry, as parse_tuic refuses the link."""
     host, uuid, pw = s.get("host"), s.get("user"), s.get("password")
     if not host or not uuid or not pw:
         return None
@@ -425,8 +455,9 @@ def _to_tuic(s: dict, tag: str) -> dict | None:
     cc = str(s.get("proto") or "").lower().replace("-", "_")
     if cc in ("cubic", "new_reno", "bbr"):
         out["congestion_control"] = cc
-    if str(s.get("udp")) == "2":
-        out["udp_relay_mode"] = "quic"
+    relay = {"1": "native", "2": "quic"}.get(str(s.get("udp")))
+    if relay:
+        out["udp_relay_mode"] = relay
     out["tls"] = tls
     return out
 
