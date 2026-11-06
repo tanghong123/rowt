@@ -5,6 +5,8 @@ release is cut; everything under Unreleased ships with the next one.
 
 ## Unreleased
 
+## 3.8.39 — 2026-11-07
+
 - `rowt status` says `no answer at HH:MM:SS` of an escape server whose last
   delay test failed, and `untested` only of one never tested. sing-box's
   clash API forgets a server's delay history when a test fails, so a server
@@ -36,6 +38,9 @@ release is cut; everything under Unreleased ships with the next one.
   its entries there as archived dictionaries, a layout the importer did not
   read, so on a Mac that could not open the app's own container the import
   found no servers and said nothing. Both the shell and the Rust version.
+
+## 3.8.35 — 2026-11-03
+
 - `rowt status` and `rowt watch status` no longer report the watchdog as
   "NOT loaded" when run over SSH while launchd is running it. The check now
   asks launchd's gui domain for the agent by name (`launchctl print
