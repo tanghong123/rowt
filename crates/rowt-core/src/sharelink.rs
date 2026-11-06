@@ -287,7 +287,7 @@ pub fn parse_trojan(link: &str, tag: &str) -> Result<Value, String> {
 }
 
 /// `_UUID.fullmatch` — 8-4-4-4-12 hex, with every hyphen or none of them.
-fn is_uuid(s: &str) -> bool {
+pub(crate) fn is_uuid(s: &str) -> bool {
     let b = s.as_bytes();
     let hex = |r: &[u8]| r.iter().all(|c| c.is_ascii_hexdigit());
     match b.len() {

@@ -100,10 +100,33 @@ TYPES = [
     "Hysteria2",
     "Hysteria2",
     "Trojan",
+    "Trojan",
+    "Vmess",
+    "Vmess",
+    "TUIC",
+    "TUIC",
     "",
     None,
     "vless",
 ]
+# Trojan, VMess and TUIC fields, as real entries made from rowt's own links
+# showed them (2026-11-06): the path in `path`, the ws Host in `obfsParam` and
+# again in an archived `obfsParams` dict, VMess's `alterId` a string and its
+# cipher in `method`, TUIC's uuid in `user`, its congestion control in `proto`
+# and its UDP relay mode in `udp` as a number — plus the shapes each reader
+# must refuse or default the same way.
+PATHS = ["/ws", "/p", "", None, 7]
+ALTER_IDS = ["4", "0", "", None, 7, "x", 1.5, True, b"2"]
+VMESS_METHODS = ["aes-128-gcm", "auto", "chacha20-poly1305", "none", "", None]
+TUIC_UUIDS = [
+    "66666666-7777-8888-9999-aaaaaaaaaaaa",
+    "66666666777788889999aaaaaaaaaaaa",
+    "not-a-uuid",
+    "6666666-7777-8888-9999-aaaaaaaaaaaa",
+    "",
+    None,
+]
+TUIC_PROTOS = ["bbr", "cubic", "new-reno", "new_reno", "BBR", "none", "", None, 7]
 PORTS = [443, 8443, 0, "8443", " 8443 ", "abc", 1.5, True, None, -1, 65536, "8388", [1]]
 OBFS = ["none", "ws", "WebSocket", "grpc", "", None, "tls", "http", "HTTP", "salamander", "Salamander"]
 # Hysteria2's own fields, as a colleague's dump of a real store showed them:
@@ -243,12 +266,27 @@ def server_entry(rng: random.Random, objs: list) -> dict:
         )
     ss = typ == "Shadowsocks"
     hy2 = typ == "Hysteria2"
-    if rng.random() < (0.9 if hy2 else 0.1):
-        e["alpn"] = ref(rng.choice(HY2_ALPN))
+    trojan = typ == "Trojan"
+    vmess = typ == "Vmess"
+    tuic = typ == "TUIC"
+    if rng.random() < (0.9 if hy2 else 0.5 if trojan or vmess or tuic else 0.1):
+        e["alpn"] = ref(rng.choice(HY2_ALPN + ["h2,http/1.1", "http/1.1"]))
     if rng.random() < (0.7 if hy2 else 0.05):
         e["hpkp"] = ref(rng.choice(["0123456789abcdef" * 4, "", None]))
-    if rng.random() < (0.6 if hy2 else 0.05):
-        e["udp"] = ref(rng.choice([1, 0, True, None]))
+    if rng.random() < (0.6 if hy2 or trojan or vmess or tuic else 0.05):
+        e["udp"] = ref(rng.choice([1, 0, True, None, 2, 2, "2", 3]))
+    if rng.random() < (0.5 if trojan or vmess else 0.1):
+        e["path"] = ref(rng.choice(PATHS))
+    if rng.random() < (0.4 if trojan or vmess else 0.05):
+        e["obfsParams"] = archived_dict(objs, [("Host", "ws-host.example.com")])
+    if rng.random() < (0.8 if vmess else 0.05):
+        e["alterId"] = ref(rng.choice(ALTER_IDS))
+    if vmess and rng.random() < 0.8:
+        e["method"] = ref(rng.choice(VMESS_METHODS))
+    if rng.random() < (0.9 if tuic else 0.05):
+        e["user"] = ref(rng.choice(TUIC_UUIDS))
+    if tuic and rng.random() < 0.8:
+        e["proto"] = ref(rng.choice(TUIC_PROTOS))
     if rng.random() < (0.9 if ss else 0.1):
         e["method"] = ref(rng.choice(SS_METHODS))
     if rng.random() < (0.5 if ss or hy2 else 0.1):

@@ -45,6 +45,7 @@ pub fn type_name(v: &PlVal) -> &'static str {
         PlVal::Uid(_) => "UID",
         PlVal::Array(_) => "list",
         PlVal::Dict(_) => "dict",
+        PlVal::SelfRef { dict } => if *dict { "dict" } else { "list" },
     }
 }
 
@@ -61,6 +62,8 @@ pub fn truthy(v: Option<&PlVal>) -> bool {
         Some(PlVal::Str(s)) => !s.is_empty(),
         Some(PlVal::Array(a)) => !a.is_empty(),
         Some(PlVal::Dict(d)) => !d.is_empty(),
+        // A container that holds itself is never empty.
+        Some(PlVal::SelfRef { .. }) => true,
     }
 }
 
@@ -94,6 +97,9 @@ pub fn py_repr(v: &PlVal) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        // What Python prints for the inner occurrence of a container that
+        // holds itself.
+        PlVal::SelfRef { dict } => if *dict { "{...}" } else { "[...]" }.into(),
     }
 }
 
@@ -574,6 +580,176 @@ pub fn to_hysteria2(s: &Entry, tag: &str, notes: &mut Vec<String>) -> R<Option<V
     Ok(Some(Value::Object(out)))
 }
 
+/// `[a for a in alpn.split(",") if a]`
+fn alpn_list(alpn: &str) -> Value {
+    Value::Array(alpn.split(',').filter(|a| !a.is_empty()).map(|a| Value::String(a.into())).collect())
+}
+
+/// The transport a Trojan or VMess entry carries, in the shape
+/// `sharelink::transport` builds from a link's `type=`. Shadowrocket keeps the
+/// kind in `obfs` ("websocket" for ws), the path in its own `path` key and the
+/// Host header in `obfsParam` (and again under `obfsParams["Host"]`, which is
+/// not read) — as real entries made from rowt's own links showed on
+/// 2026-11-06. "none", or unset, is no transport. Anything else is `Err(())`,
+/// and the caller skips the entry rather than import a server that would
+/// never connect with its transport dropped.
+fn obfs_transport(s: &Entry) -> Result<Option<Value>, ()> {
+    match str_or(get(s, "obfs"), "none").to_lowercase().as_str() {
+        "none" => Ok(None),
+        "ws" | "websocket" => {
+            let mut t = Map::new();
+            t.insert("type".into(), Value::String("ws".into()));
+            t.insert("path".into(), Value::String(str_or(get(s, "path"), "/")));
+            let host = str_or(get(s, "obfsParam"), "");
+            if !host.is_empty() {
+                let mut h = Map::new();
+                h.insert("Host".into(), Value::String(host));
+                t.insert("headers".into(), Value::Object(h));
+            }
+            Ok(Some(Value::Object(t)))
+        }
+        _ => Err(()),
+    }
+}
+
+/// `_to_trojan`. Shadowrocket's Trojan entry, as a real store holds one made
+/// from rowt's own link (2026-11-06, made-up values): the password in
+/// `password`, the SNI in `peer`, `allowInsecure` an int, `alpn` a comma list,
+/// the transport in `obfs`/`path`/`obfsParam`, `tls` unset — a Trojan is always
+/// TLS, so it is not read — and no fingerprint field at all, so the outbound
+/// takes the `chrome` the link parser takes when a link names none. The shape
+/// is `sharelink::parse_trojan`'s, so a store import and a link import of one
+/// node agree. The checks come in the Python's order: the secret, then the
+/// transport, then `int(port)`, which is what raises.
+pub fn to_trojan(s: &Entry, tag: &str) -> R<Option<Value>> {
+    let host = get(s, "host");
+    let pw = get(s, "password");
+    if !truthy(host) || !truthy(pw) {
+        return Ok(None);
+    }
+    let Ok(transport) = obfs_transport(s) else { return Ok(None) };
+    let host = host.unwrap();
+    let sni = py_str_top(if truthy(get(s, "peer")) { get(s, "peer").unwrap() } else { host });
+    let mut tls = Map::new();
+    tls.insert("enabled".into(), Value::Bool(true));
+    tls.insert("server_name".into(), Value::String(sni));
+    tls.insert("insecure".into(), Value::Bool(truthy(get(s, "allowInsecure"))));
+    let alpn = str_or(get(s, "alpn"), "");
+    if !alpn.is_empty() {
+        tls.insert("alpn".into(), alpn_list(&alpn));
+    }
+    let mut utls = Map::new();
+    utls.insert("enabled".into(), Value::Bool(true));
+    utls.insert("fingerprint".into(), Value::String("chrome".into()));
+    tls.insert("utls".into(), Value::Object(utls));
+    let mut out = Map::new();
+    out.insert("type".into(), Value::String("trojan".into()));
+    out.insert("tag".into(), Value::String(tag.into()));
+    out.insert("server".into(), Value::String(py_str_top(host)));
+    out.insert("server_port".into(), Value::from(port_of(s)?));
+    out.insert("password".into(), Value::String(py_str_top(pw.unwrap())));
+    out.insert("tls".into(), Value::Object(tls));
+    if let Some(t) = transport {
+        out.insert("transport".into(), t);
+    }
+    Ok(Some(Value::Object(out)))
+}
+
+/// `_to_vmess`. Shadowrocket spells the type `Vmess`. The id sits in
+/// `password`, as for VLESS (`uuid` is Shadowrocket's own id, and is not a
+/// fallback here); `alterId` is a string, `method` the cipher (`security` in
+/// sing-box), `tls` a real bool, `alpn` a comma list, the transport as for
+/// Trojan. No fingerprint is stored, and the link parser adds uTLS to a VMess
+/// outbound only when a link names one, so none is added here. The shape is
+/// `sharelink::parse_vmess`'s, its SNI falling back from `peer` through the ws
+/// Host to the host as the link's falls from `sni` through `host` to `add`. An
+/// `alterId` that is not a number skips the entry, as a Shadowsocks port that
+/// is not one does.
+pub fn to_vmess(s: &Entry, tag: &str) -> R<Option<Value>> {
+    let host = get(s, "host");
+    let id = get(s, "password");
+    if !truthy(host) || !truthy(id) {
+        return Ok(None);
+    }
+    let Ok(transport) = obfs_transport(s) else { return Ok(None) };
+    // `int(s.get("alterId") or 0)`.
+    let alter_id = match get(s, "alterId") {
+        Some(v) if truthy(Some(v)) => match py_int(v) {
+            Ok(n) => n.clamp(i64::MIN as i128, i64::MAX as i128) as i64,
+            Err(e) if e.name == "ValueError" => return Ok(None),
+            Err(e) => return Err(e),
+        },
+        _ => 0,
+    };
+    let host = host.unwrap();
+    let mut out = Map::new();
+    out.insert("type".into(), Value::String("vmess".into()));
+    out.insert("tag".into(), Value::String(tag.into()));
+    out.insert("server".into(), Value::String(py_str_top(host)));
+    out.insert("server_port".into(), Value::from(port_of(s)?));
+    out.insert("uuid".into(), Value::String(py_str_top(id.unwrap())));
+    out.insert("security".into(), Value::String(str_or(get(s, "method"), "auto")));
+    out.insert("alter_id".into(), Value::from(alter_id));
+    if let Some(t) = transport {
+        out.insert("transport".into(), t);
+    }
+    if truthy(get(s, "tls")) {
+        let sni = or2(or2(get(s, "peer"), get(s, "obfsParam")), Some(host)).unwrap();
+        let mut tls = Map::new();
+        tls.insert("enabled".into(), Value::Bool(true));
+        tls.insert("server_name".into(), Value::String(py_str_top(sni)));
+        let alpn = str_or(get(s, "alpn"), "");
+        if !alpn.is_empty() {
+            tls.insert("alpn".into(), alpn_list(&alpn));
+        }
+        out.insert("tls".into(), Value::Object(tls));
+    }
+    Ok(Some(Value::Object(out)))
+}
+
+/// `_to_tuic`. The TUIC uuid sits in `user` (the `uuid` key is, as ever,
+/// Shadowrocket's own id), the password in `password`, the SNI in `peer`,
+/// `allowInsecure` an int, `alpn` a comma list (h3 when unset, as the link
+/// parser offers it), the congestion control in `proto` ("bbr"), and the UDP
+/// relay mode in `udp` as a number: 2 is `quic`. Any other value leaves
+/// sing-box's default. A uuid sing-box would refuse skips the entry, as the
+/// link parser refuses the link. The shape is `sharelink::parse_tuic`'s.
+pub fn to_tuic(s: &Entry, tag: &str) -> R<Option<Value>> {
+    let host = get(s, "host");
+    let uuid = get(s, "user");
+    let pw = get(s, "password");
+    if !truthy(host) || !truthy(uuid) || !truthy(pw) {
+        return Ok(None);
+    }
+    let uuid = py_str_top(uuid.unwrap());
+    if !sharelink::is_uuid(&uuid) {
+        return Ok(None);
+    }
+    let host = host.unwrap();
+    let sni = py_str_top(if truthy(get(s, "peer")) { get(s, "peer").unwrap() } else { host });
+    let mut tls = Map::new();
+    tls.insert("enabled".into(), Value::Bool(true));
+    tls.insert("server_name".into(), Value::String(sni));
+    tls.insert("insecure".into(), Value::Bool(truthy(get(s, "allowInsecure"))));
+    tls.insert("alpn".into(), alpn_list(&str_or(get(s, "alpn"), "h3")));
+    let mut out = Map::new();
+    out.insert("type".into(), Value::String("tuic".into()));
+    out.insert("tag".into(), Value::String(tag.into()));
+    out.insert("server".into(), Value::String(py_str_top(host)));
+    out.insert("server_port".into(), Value::from(port_of(s)?));
+    out.insert("uuid".into(), Value::String(uuid));
+    out.insert("password".into(), Value::String(py_str_top(pw.unwrap())));
+    let cc = str_or(get(s, "proto"), "").to_lowercase().replace('-', "_");
+    if matches!(cc.as_str(), "cubic" | "new_reno" | "bbr") {
+        out.insert("congestion_control".into(), Value::String(cc));
+    }
+    if str_of(get(s, "udp")) == "2" {
+        out.insert("udp_relay_mode".into(), Value::String("quic".into()));
+    }
+    out.insert("tls".into(), Value::Object(tls));
+    Ok(Some(Value::Object(out)))
+}
+
 /// The shared `tls` object, in the key order each caller writes it.
 fn tls_block(sni: &str, reality: Option<Map<String, Value>>, insecure: Option<bool>) -> Value {
     let mut tls = Map::new();
@@ -700,7 +876,10 @@ pub fn scan_store(root: &PlVal) -> R<Scan> {
                 e.insert("title".into(), Value::String(str_or(get(s, "title"), "")));
                 out.subscriptions.push(Value::Object(e));
             }
-        } else if typ == "VLESS" || typ == "AnyTLS" || typ == "Shadowsocks" || typ == "Hysteria2" {
+        } else if matches!(
+            typ.as_str(),
+            "VLESS" | "AnyTLS" | "Shadowsocks" | "Hysteria2" | "Trojan" | "Vmess" | "VMess" | "TUIC"
+        ) {
             // The tag is taken BEFORE the conversion, so a server that cannot
             // be converted still burns its name — the same coupling
             // `sharelink::parse_many` has.
@@ -711,6 +890,9 @@ pub fn scan_store(root: &PlVal) -> R<Scan> {
                 "VLESS" => to_vless(s, &tag)?,
                 "AnyTLS" => to_anytls(s, &tag)?,
                 "Hysteria2" => to_hysteria2(s, &tag, &mut notes)?,
+                "Trojan" => to_trojan(s, &tag)?,
+                "Vmess" | "VMess" => to_vmess(s, &tag)?,
+                "TUIC" => to_tuic(s, &tag)?,
                 _ => to_shadowsocks(s, &tag)?,
             };
             // Printed per entry, as the Python prints them from inside the
@@ -927,6 +1109,156 @@ mod tests {
         assert!(e.is_err_and(|e| e.name == "TypeError"));
         let o = to_shadowsocks(&ss_entry(&[("port", PlVal::Array(vec![]))]), "t").unwrap().unwrap();
         assert_eq!(o["server_port"], 443);
+    }
+
+    /// Overwrite or add one field of an entry.
+    fn set(e: &mut Entry, k: &str, v: PlVal) {
+        match e.iter_mut().find(|(ek, _)| matches!(ek, PlVal::Str(n) if n == k)) {
+            Some(slot) => slot.1 = v,
+            None => e.push((s(k), v)),
+        }
+    }
+
+    /// Trojan, VMess and TUIC entries as a real store holds ones made from
+    /// rowt's own links (2026-11-06; made-up values; `uuid` is Shadowrocket's
+    /// own id). The keys every entry carries empty are left out: the reader
+    /// treats absent and empty alike.
+    fn trojan_entry() -> Entry {
+        entry(&[
+            ("type", s("Trojan")),
+            ("host", s("trojan.example.com")),
+            ("port", s("8443")),
+            ("password", s("TrojanPassExample")),
+            ("peer", s("sni-trojan.example.com")),
+            ("allowInsecure", PlVal::Int(1)),
+            ("alpn", s("h2,http/1.1")),
+            ("obfs", s("websocket")),
+            ("obfsParam", s("ws-host.example.com")),
+            ("path", s("/trojan-path")),
+            ("proto", s("none")),
+            ("udp", PlVal::Int(1)),
+            ("title", s("Doc-Trojan")),
+            ("uuid", s("765CB505-57E3-41E4-A080-A91F3A617632")),
+        ])
+    }
+    fn vmess_entry() -> Entry {
+        entry(&[
+            ("type", s("Vmess")),
+            ("host", s("vmess.example.com")),
+            ("port", s("2053")),
+            ("password", s("11111111-2222-3333-4444-555555555555")),
+            ("alterId", s("4")),
+            ("method", s("aes-128-gcm")),
+            ("peer", s("sni-vmess.example.com")),
+            ("tls", PlVal::Bool(true)),
+            ("alpn", s("http/1.1")),
+            ("obfs", s("websocket")),
+            ("obfsParam", s("vmess-host.example.com")),
+            ("path", s("/vmess-path")),
+            ("proto", s("none")),
+            ("udp", PlVal::Int(1)),
+            ("title", s("Doc-VMess")),
+            ("uuid", s("FC5F6720-1414-4D16-8BB2-BDD7C7F64900")),
+        ])
+    }
+    fn tuic_entry() -> Entry {
+        entry(&[
+            ("type", s("TUIC")),
+            ("host", s("tuic.example.com")),
+            ("port", s("9443")),
+            ("user", s("66666666-7777-8888-9999-aaaaaaaaaaaa")),
+            ("password", s("TuicPassExample")),
+            ("peer", s("sni-tuic.example.com")),
+            ("allowInsecure", PlVal::Int(1)),
+            ("alpn", s("h3")),
+            ("obfs", s("none")),
+            ("proto", s("bbr")),
+            ("udp", PlVal::Int(2)),
+            ("title", s("Doc-TUIC")),
+            ("uuid", s("45F68F33-5770-44C0-A9AA-A22A21D46F5F")),
+        ])
+    }
+
+    #[test]
+    fn a_trojan_entry_converts_to_what_its_link_parses_to() {
+        let link = "trojan://TrojanPassExample@trojan.example.com:8443?security=tls&sni=sni-trojan.example.com&alpn=h2%2Chttp%2F1.1&fp=chrome&allowInsecure=1&type=ws&path=%2Ftrojan-path&host=ws-host.example.com#Doc-Trojan";
+        assert_eq!(
+            to_trojan(&trojan_entry(), "Doc-Trojan").unwrap().unwrap(),
+            sharelink::parse_trojan(link, "Doc-Trojan").unwrap()
+        );
+    }
+
+    #[test]
+    fn a_vmess_entry_converts_to_what_its_link_parses_to() {
+        // The link names no fingerprint: Shadowrocket keeps none, so an entry
+        // can never reproduce a link's `fp`, and the parser adds uTLS to a
+        // VMess outbound only when a link names one.
+        let link = "vmess://eyJ2IjoiMiIsInBzIjoiRG9jLVZNZXNzIiwiYWRkIjoidm1lc3MuZXhhbXBsZS5jb20iLCJwb3J0IjoiMjA1MyIsImlkIjoiMTExMTExMTEtMjIyMi0zMzMzLTQ0NDQtNTU1NTU1NTU1NTU1IiwiYWlkIjoiNCIsInNjeSI6ImFlcy0xMjgtZ2NtIiwibmV0Ijoid3MiLCJ0eXBlIjoibm9uZSIsImhvc3QiOiJ2bWVzcy1ob3N0LmV4YW1wbGUuY29tIiwicGF0aCI6Ii92bWVzcy1wYXRoIiwidGxzIjoidGxzIiwic25pIjoic25pLXZtZXNzLmV4YW1wbGUuY29tIiwiYWxwbiI6Imh0dHAvMS4xIn0=";
+        assert_eq!(
+            to_vmess(&vmess_entry(), "Doc-VMess").unwrap().unwrap(),
+            sharelink::parse_vmess(link, "Doc-VMess").unwrap()
+        );
+    }
+
+    #[test]
+    fn a_tuic_entry_converts_to_what_its_link_parses_to() {
+        let link = "tuic://66666666-7777-8888-9999-aaaaaaaaaaaa:TuicPassExample@tuic.example.com:9443?sni=sni-tuic.example.com&alpn=h3&congestion_control=bbr&udp_relay_mode=quic&allow_insecure=1#Doc-TUIC";
+        assert_eq!(
+            to_tuic(&tuic_entry(), "Doc-TUIC").unwrap().unwrap(),
+            sharelink::parse_tuic(link, "Doc-TUIC").unwrap()
+        );
+    }
+
+    #[test]
+    fn a_transport_the_importer_does_not_know_skips_the_entry_and_none_is_no_transport() {
+        let mut e = trojan_entry();
+        set(&mut e, "obfs", s("tls"));
+        assert_eq!(to_trojan(&e, "t").unwrap(), None);
+        let mut e = vmess_entry();
+        set(&mut e, "obfs", s("kcp"));
+        assert_eq!(to_vmess(&e, "t").unwrap(), None);
+        set(&mut e, "obfs", s("none"));
+        let v = to_vmess(&e, "t").unwrap().unwrap();
+        assert!(v.get("transport").is_none());
+        // Without a Host the ws transport has no headers, and the path
+        // defaults as a link's does.
+        let mut e = trojan_entry();
+        set(&mut e, "obfsParam", s(""));
+        set(&mut e, "path", PlVal::None);
+        let v = to_trojan(&e, "t").unwrap().unwrap();
+        assert_eq!(v["transport"], json!({"type": "ws", "path": "/"}));
+    }
+
+    #[test]
+    fn what_sing_box_would_refuse_is_skipped_and_the_tuic_tunables_are_read() {
+        let mut e = tuic_entry();
+        set(&mut e, "user", s("not-a-uuid"));
+        assert_eq!(to_tuic(&e, "t").unwrap(), None);
+        let mut e = tuic_entry();
+        set(&mut e, "proto", s("new-reno"));
+        set(&mut e, "udp", PlVal::Int(1));
+        set(&mut e, "alpn", s(""));
+        let v = to_tuic(&e, "t").unwrap().unwrap();
+        assert_eq!(v["congestion_control"], "new_reno");
+        assert!(v.get("udp_relay_mode").is_none());
+        assert_eq!(v["tls"]["alpn"], json!(["h3"]));
+        let mut e = vmess_entry();
+        set(&mut e, "alterId", s("x"));
+        assert_eq!(to_vmess(&e, "t").unwrap(), None);
+        set(&mut e, "alterId", s(""));
+        assert_eq!(to_vmess(&e, "t").unwrap().unwrap()["alter_id"], 0);
+    }
+
+    #[test]
+    fn a_vmess_entry_without_tls_has_none_and_its_sni_falls_back_through_the_ws_host() {
+        let mut e = vmess_entry();
+        set(&mut e, "tls", PlVal::Bool(false));
+        assert!(to_vmess(&e, "t").unwrap().unwrap().get("tls").is_none());
+        set(&mut e, "tls", PlVal::Bool(true));
+        set(&mut e, "peer", s(""));
+        assert_eq!(to_vmess(&e, "t").unwrap().unwrap()["tls"]["server_name"], "vmess-host.example.com");
+        set(&mut e, "obfsParam", PlVal::None);
+        assert_eq!(to_vmess(&e, "t").unwrap().unwrap()["tls"]["server_name"], "vmess.example.com");
     }
 
     #[test]

@@ -20,10 +20,11 @@
 //!
 //! Everything else matches, including the parts that look like bugs: a short
 //! read inside an integer or a UID yields a SMALLER number rather than an
-//! error, `0x0f` is the empty byte string, and almost every malformed file
-//! collapses to one `InvalidFileException` because the Python wraps the whole
-//! parse in `except (OSError, IndexError, struct.error, OverflowError,
-//! ValueError)`.
+//! error, `0x0f` is the empty byte string, a container that refers back to
+//! itself is read, as the Python reads it, into a value that contains itself
+//! ([`PlVal::SelfRef`]), and almost every malformed file collapses to one
+//! `InvalidFileException` because the Python wraps the whole parse in
+//! `except (OSError, IndexError, struct.error, OverflowError, ValueError)`.
 
 use std::collections::HashSet;
 
@@ -45,6 +46,16 @@ pub enum PlVal {
     /// Insertion-ordered, as Python's dict is. Keys can be any hashable value,
     /// which in a real archive means strings but in a hand-built file need not.
     Dict(Vec<(PlVal, PlVal)>),
+    /// A container that contains itself — what `plistlib` builds from a damaged
+    /// file whose array or dict refers back to one still being read: it
+    /// registers the half-built object first, so the inner reference IS the
+    /// outer object. This stands in for that inner occurrence; the outer one is
+    /// the real `Array` or `Dict` around it. It prints as Python prints the
+    /// inner occurrence (`[...]`, `{...}`), is truthy as a non-empty container
+    /// is, and is no more hashable than one. `$objects` is flat and UIDs are
+    /// leaves, so no real archive has one; a byte flip that turns a string's
+    /// marker into an array's does (one in 1,200 of `sr-diff`'s corpus).
+    SelfRef { dict: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,10 +163,11 @@ struct P<'a> {
     pos: usize,
     ref_size: usize,
     offsets: Vec<u64>,
-    /// Refs on the current path. The Python builds containers around a
-    /// placeholder so a cycle becomes a self-referential list; a plain
-    /// recursive reader would not return at all, so a cycle is an invalid file
-    /// here. `$objects` is flat and UIDs are leaves, so no real archive has one.
+    /// Refs on the current path. The Python registers a container before it
+    /// fills it, so a reference back to one still being read returns that same
+    /// half-built object and the file yields a list or dict that contains
+    /// itself. A plain recursive reader would not return at all; this one
+    /// notices the ref on its path and puts a [`PlVal::SelfRef`] there.
     path: HashSet<u64>,
 }
 
@@ -248,7 +260,10 @@ impl P<'_> {
             return None; // IndexError
         }
         if !self.path.insert(r) {
-            return None; // a cycle — see the note on `path`
+            // A cycle — see the note on `path`. Only a container can be on the
+            // path, and its marker was readable when it was entered.
+            let marker = self.buf.get(self.offsets[r as usize] as usize).copied()?;
+            return Some(PlVal::SelfRef { dict: marker & 0xF0 == 0xD0 });
         }
         let out = self.read_object_inner(r, num_objects);
         self.path.remove(&r);
@@ -383,7 +398,7 @@ fn utf16be(d: &[u8]) -> Option<String> {
 /// Which values Python can use as a dict key. A list or a dict cannot, and the
 /// `TypeError` that raises is caught and re-raised as an invalid file.
 fn hashable(v: &PlVal) -> bool {
-    !matches!(v, PlVal::Array(_) | PlVal::Dict(_))
+    !matches!(v, PlVal::Array(_) | PlVal::Dict(_) | PlVal::SelfRef { .. })
 }
 
 /// `datetime.datetime(2001, 1, 1) + datetime.timedelta(seconds=f)`, or `None`
@@ -554,8 +569,26 @@ mod tests {
     }
 
     #[test]
-    fn a_cycle_does_not_recurse_forever() {
-        let f = bp(vec![vec![0xA1, 0]], 0); // an array holding itself
+    fn a_cycle_is_read_as_the_self_containing_value_python_builds() {
+        // An array holding itself: `[[...]]` in Python.
+        let f = bp(vec![vec![0xA1, 0]], 0);
+        assert_eq!(load(&f).unwrap(), PlVal::Array(vec![PlVal::SelfRef { dict: false }]));
+        // {"k": <itself>}: `{'k': {...}}`.
+        let f = bp(vec![vec![0xD1, 1, 0], ascii("k")], 0);
+        assert_eq!(
+            load(&f).unwrap(),
+            PlVal::Dict(vec![(PlVal::Str("k".into()), PlVal::SelfRef { dict: true })])
+        );
+        // Two levels down, the inner occurrence is still the stand-in and the
+        // outer one the real container.
+        let f = bp(vec![vec![0xA1, 1], vec![0xA2, 2, 0], vec![0x10, 7]], 0);
+        assert_eq!(
+            load(&f).unwrap(),
+            PlVal::Array(vec![PlVal::Array(vec![PlVal::Int(7), PlVal::SelfRef { dict: false }])])
+        );
+        // A dict as its own key is unhashable, so the file is invalid, as the
+        // Python's TypeError makes it.
+        let f = bp(vec![vec![0xD1, 0, 1], vec![0x10, 1]], 0);
         assert_eq!(load(&f), Err(PlErr::Invalid));
     }
 

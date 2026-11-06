@@ -5,6 +5,13 @@ release is cut; everything under Unreleased ships with the next one.
 
 ## Unreleased
 
+- `rowt server import --from shadowrocket` converts Trojan, VMess and TUIC
+  entries too, with their TLS settings and, for Trojan and VMess, a WebSocket
+  transport. They used to be counted as "not imported" although `rowt server
+  add` takes the same servers from a share link. The mapping comes from real
+  Shadowrocket entries made from rowt's own links, not from guesswork; an
+  entry with a transport the importer does not know is still skipped and
+  named in the summary. Both the shell and the Rust version.
 - `rowt server import --from shadowrocket` now reads the copy of the server
   store that Shadowrocket keeps in iCloud Drive. A newer Shadowrocket writes
   its entries there as archived dictionaries, a layout the importer did not

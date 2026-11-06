@@ -8,9 +8,9 @@ and emits a JSON summary on stdout:
 
     {
       "subscriptions": [{"url": "...", "info": "...", "title": "..."}],
-      "servers":       [ <sing-box outbound>, ... ],   # VLESS / AnyTLS / Shadowsocks / Hysteria2
+      "servers":       [ <sing-box outbound>, ... ],   # the protocols rowt speaks
       "proxy_domains": ["google.com", ...],            # [Rule] ...,PROXY
-      "skipped":       {"Trojan": 3, "Shadowsocks": 1} # not importable
+      "skipped":       {"WireGuard": 1, "Shadowsocks": 1} # not importable
     }
 
 Nothing is written and no credentials are printed to stderr. Stdlib only.
@@ -291,6 +291,146 @@ def _to_hysteria2(s: dict, tag: str) -> dict | None:
     return out
 
 
+class _Unknown(Exception):
+    """An `obfs` the transport reader does not know."""
+
+
+def _obfs_transport(s: dict) -> dict | None:
+    """The transport a Trojan or VMess entry carries, in the shape _transport
+    builds from a link's `type=`. Shadowrocket keeps the kind in `obfs`
+    ("websocket" for ws), the path in its own `path` key and the Host header in
+    `obfsParam` (and again under obfsParams["Host"], which is not read), as real
+    entries made from rowt's own links showed on 2026-11-06. "none", or unset,
+    is no transport. Anything else raises _Unknown, and the caller skips the
+    entry rather than import a server that would never connect with its
+    transport dropped."""
+    obfs = str(s.get("obfs") or "none").lower()
+    if obfs == "none":
+        return None
+    if obfs in ("ws", "websocket"):
+        transport: dict = {"type": "ws", "path": str(s.get("path") or "/")}
+        host = str(s.get("obfsParam") or "")
+        if host:
+            transport["headers"] = {"Host": host}
+        return transport
+    raise _Unknown(obfs)
+
+
+def _to_trojan(s: dict, tag: str) -> dict | None:
+    """Shadowrocket's Trojan entry, as a real store holds one made from rowt's
+    own link (2026-11-06, made-up values): the password in `password`, the SNI
+    in `peer`, `allowInsecure` an int, `alpn` a comma list, the transport in
+    `obfs`/`path`/`obfsParam`, `tls` unset (a Trojan is always TLS, so it is not
+    read) and no fingerprint field at all, so the outbound takes the `chrome`
+    the link parser takes when a link names none. The shape is parse_trojan's,
+    so a store import and a link import of one node agree."""
+    host, pw = s.get("host"), s.get("password")
+    if not host or not pw:
+        return None
+    try:
+        transport = _obfs_transport(s)
+    except _Unknown:
+        return None
+    tls: dict = {
+        "enabled": True,
+        "server_name": str(s.get("peer") or host),
+        "insecure": bool(s.get("allowInsecure")),
+    }
+    alpn = str(s.get("alpn") or "")
+    if alpn:
+        tls["alpn"] = [a for a in alpn.split(",") if a]
+    tls["utls"] = {"enabled": True, "fingerprint": "chrome"}
+    out: dict = {
+        "type": "trojan",
+        "tag": tag,
+        "server": str(host),
+        "server_port": int(s.get("port") or 443),
+        "password": str(pw),
+        "tls": tls,
+    }
+    if transport:
+        out["transport"] = transport
+    return out
+
+
+def _to_vmess(s: dict, tag: str) -> dict | None:
+    """Shadowrocket spells the type `Vmess`. The id sits in `password`, as for
+    VLESS (`uuid` is Shadowrocket's own id, and is not a fallback here);
+    `alterId` is a string, `method` the cipher (sing-box's `security`), `tls` a
+    real bool, `alpn` a comma list, the transport as for Trojan. No fingerprint
+    is stored, and parse_vmess adds uTLS only when a link names one, so none is
+    added here. The SNI falls back from `peer` through the ws Host to the host,
+    as the link's falls from `sni` through `host` to `add`. An `alterId` that is
+    not a number skips the entry, as a Shadowsocks port that is not one does."""
+    host, vid = s.get("host"), s.get("password")
+    if not host or not vid:
+        return None
+    try:
+        transport = _obfs_transport(s)
+        alter_id = int(s.get("alterId") or 0)
+    except (_Unknown, ValueError):
+        return None
+    out: dict = {
+        "type": "vmess",
+        "tag": tag,
+        "server": str(host),
+        "server_port": int(s.get("port") or 443),
+        "uuid": str(vid),
+        "security": str(s.get("method") or "auto"),
+        "alter_id": alter_id,
+    }
+    if transport:
+        out["transport"] = transport
+    if s.get("tls"):
+        tls: dict = {
+            "enabled": True,
+            "server_name": str(s.get("peer") or s.get("obfsParam") or host),
+        }
+        alpn = str(s.get("alpn") or "")
+        if alpn:
+            tls["alpn"] = [a for a in alpn.split(",") if a]
+        out["tls"] = tls
+    return out
+
+
+def _to_tuic(s: dict, tag: str) -> dict | None:
+    """The TUIC uuid sits in `user` (the `uuid` key is, as ever, Shadowrocket's
+    own id), the password in `password`, the SNI in `peer`, `allowInsecure` an
+    int, `alpn` a comma list (h3 when unset, as parse_tuic offers it), the
+    congestion control in `proto` ("bbr"), and the UDP relay mode in `udp` as a
+    number: 2 is quic. Any other value leaves sing-box's default. A uuid
+    sing-box would refuse skips the entry, as parse_tuic refuses the link."""
+    host, uuid, pw = s.get("host"), s.get("user"), s.get("password")
+    if not host or not uuid or not pw:
+        return None
+    uuid = str(uuid)
+    if not vp._UUID.fullmatch(uuid):
+        return None
+    tls: dict = {
+        "enabled": True,
+        "server_name": str(s.get("peer") or host),
+        "insecure": bool(s.get("allowInsecure")),
+    }
+    alpn = str(s.get("alpn") or "h3")
+    if alpn:
+        tls["alpn"] = [a for a in alpn.split(",") if a]
+    out: dict = {
+        "type": "tuic",
+        "tag": tag,
+        "server": str(host),
+        "server_port": int(s.get("port") or 443),
+        "uuid": uuid,
+        "password": str(pw),
+    }
+    cc = str(s.get("proto") or "").lower().replace("-", "_")
+    if cc in ("cubic", "new_reno", "bbr"):
+        out["congestion_control"] = cc
+    if str(s.get("udp")) == "2":
+        out["udp_relay_mode"] = "quic"
+    out["tls"] = tls
+    return out
+
+
 def _names_under(pattern: str) -> bool:
     """A DOMAIN-WILDCARD pattern of the one shape a lane entry can hold: `*.x`,
     with no other wildcard (`*`, `?`, or a `[...]` class) in `x`."""
@@ -324,6 +464,19 @@ def _parse_rules(conf: str) -> list[str]:
     # dedupe, keep order
     seen: set[str] = set()
     return [x for x in doms if not (x in seen or seen.add(x))]
+
+
+# By Shadowrocket's own `type` spelling (`Vmess`, with `VMess` accepted too).
+CONVERTERS = {
+    "VLESS": _to_vless,
+    "AnyTLS": _to_anytls,
+    "Shadowsocks": _to_shadowsocks,
+    "Hysteria2": _to_hysteria2,
+    "Trojan": _to_trojan,
+    "Vmess": _to_vmess,
+    "VMess": _to_vmess,
+    "TUIC": _to_tuic,
+}
 
 
 def main() -> int:
@@ -373,14 +526,9 @@ def main() -> int:
                             "title": str(s.get("title") or ""),
                         }
                     )
-            elif typ in ("VLESS", "AnyTLS", "Shadowsocks", "Hysteria2"):
+            elif typ in CONVERTERS:
                 tag = _sanitize(str(s.get("title") or s.get("host")), i, used)
-                convert = {
-                    "VLESS": _to_vless,
-                    "AnyTLS": _to_anytls,
-                    "Shadowsocks": _to_shadowsocks,
-                    "Hysteria2": _to_hysteria2,
-                }[typ]
+                convert = CONVERTERS[typ]
                 v = convert(s, tag)
                 if v:
                     result["servers"].append(v)
