@@ -272,7 +272,7 @@ def _to_hysteria2(s: dict, tag: str) -> dict | None:
     tls: dict = {
         "enabled": True,
         "server_name": sni,
-        "insecure": bool(s.get("allowInsecure")),
+        "insecure": str(s.get("allowInsecure") or "0").lower() in ("1", "true"),
     }
     alpn = str(s.get("alpn") or "")
     if alpn:
