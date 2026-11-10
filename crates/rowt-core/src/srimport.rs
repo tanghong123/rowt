@@ -557,7 +557,7 @@ pub fn to_hysteria2(s: &Entry, tag: &str, notes: &mut Vec<String>) -> R<Option<V
     let mut tls = Map::new();
     tls.insert("enabled".into(), Value::Bool(true));
     tls.insert("server_name".into(), Value::String(sni));
-    tls.insert("insecure".into(), Value::Bool(truthy(get(s, "allowInsecure"))));
+    tls.insert("insecure".into(), Value::Bool(matches!(str_or(get(s, "allowInsecure"), "0").to_lowercase().as_str(), "1" | "true")));
     let alpn = str_or(get(s, "alpn"), "");
     if !alpn.is_empty() {
         let list: Vec<Value> = alpn.split(',').filter(|a| !a.is_empty()).map(|a| Value::String(a.into())).collect();
@@ -1058,6 +1058,17 @@ mod tests {
             (s("NS.objects"), PlVal::Array(vec![])),
             (s("$class"), PlVal::Uid(9)),
         ])
+    }
+
+    #[test]
+    fn hysteria2_insecure_requires_an_explicit_true_value() {
+        for (flag, expected) in [(s("0"), false), (s("false"), false),
+            (PlVal::Int(0), false), (PlVal::Bool(false), false), (PlVal::None, false),
+            (s(""), false), (s("unknown"), false), (s("1"), true), (s("true"), true),
+            (s("TRUE"), true), (PlVal::Int(1), true), (PlVal::Bool(true), true)] {
+            let (o, _) = hy2(&[("allowInsecure", flag.clone()), ("hpkp", s(""))]);
+            assert_eq!(o.unwrap()["tls"]["insecure"], expected, "{flag:?}");
+        }
     }
 
     #[test]
