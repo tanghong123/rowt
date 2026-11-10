@@ -5,6 +5,8 @@ release is cut; everything under Unreleased ships with the next one.
 
 ## Unreleased
 
+## 3.8.40 — 2026-11-10
+
 - The monitor's control keys (`R`, `u`, `a`, `o`, and the lane keys) keep
   working after `brew upgrade`. Under `ROWT_IMPL=rust`, `rowt monitor`
   told the monitor to run its keys through rowt-rs by its versioned Homebrew
