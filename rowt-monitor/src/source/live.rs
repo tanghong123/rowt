@@ -221,7 +221,7 @@ impl LiveSource {
             .name("rowt-monitor-ctl".into())
             .spawn(move || {
                 let _in_flight = in_flight;
-                let bin = std::env::var("ROWT_BIN").unwrap_or_else(|_| "rowt".to_string());
+                let bin = ctl_bin();
                 let outcome = match std::process::Command::new(&bin).args(&args).output() {
                     Ok(o) if o.status.success() => crate::source::CtlOutcome::Ok(if subscriptions {
                         subscription_message(&String::from_utf8_lossy(&o.stdout)).unwrap_or(ok)
@@ -700,7 +700,7 @@ impl Source for LiveSource {
         std::thread::Builder::new()
             .name("rowt-monitor-ctl".into())
             .spawn(move || {
-                let bin = std::env::var("ROWT_BIN").unwrap_or_else(|_| "rowt".to_string());
+                let bin = ctl_bin();
                 let mut err: Option<String> = None;
                 for lane in lanes {
                     let r = std::process::Command::new(&bin)
@@ -746,7 +746,7 @@ impl Source for LiveSource {
             .name("rowt-monitor-ctl".into())
             .spawn(move || {
                 let _in_flight = in_flight;
-                let bin = std::env::var("ROWT_BIN").unwrap_or_else(|_| "rowt".to_string());
+                let bin = ctl_bin();
                 let render = std::process::Command::new(&bin).arg("render").output();
                 let outcome = match render {
                     Ok(o) if o.status.success() && router_runs_rendered(&cfg) => {
@@ -1566,6 +1566,35 @@ pub fn cellar_version(p: &Path) -> Option<String> {
     p.to_string_lossy().split("/Cellar/rowt/").nth(1).and_then(|s| s.split('/').next()).map(|s| s.to_string())
 }
 
+/// The CLI the control keys run: `$ROWT_BIN`, which `rowt monitor` exports so
+/// the keys drive the CLI and config the monitor was launched from.
+///
+/// rowt-rs before 3.8.40 exported its own Cellar path, and a monitor outlives
+/// that path: `brew upgrade` deletes the old Cellar folder, and the monitor
+/// re-execs into the new build with its env unchanged. Every key then failed
+/// with "…/rowt-rs: No such file or directory" (rowt #s89). So a path in
+/// another install's Cellar than this monitor's means the same file in ours,
+/// and a path that is gone means `rowt` on PATH, the front door the install
+/// links. A bare name is left to PATH, as it always was.
+pub fn ctl_bin() -> String {
+    let me = std::env::current_exe().ok();
+    ctl_bin_for(std::env::var("ROWT_BIN").ok().as_deref(), me.as_deref())
+}
+
+fn ctl_bin_for(handed: Option<&str>, me: Option<&Path>) -> String {
+    let Some(h) = handed.filter(|h| !h.is_empty()) else { return "rowt".into() };
+    if !h.contains('/') {
+        return h.to_string();
+    }
+    if let (Some(theirs), Some(ours)) = (cellar_version(Path::new(h)), me.and_then(cellar_version)) {
+        if theirs != ours {
+            let moved = h.replacen(&format!("/Cellar/rowt/{theirs}/"), &format!("/Cellar/rowt/{ours}/"), 1);
+            return if Path::new(&moved).is_file() { moved } else { "rowt".into() };
+        }
+    }
+    if Path::new(h).is_file() { h.to_string() } else { "rowt".into() }
+}
+
 /// The top-rule label for a monitor that has outlived its install; None when
 /// this process is the installed one.
 fn detect_stale_monitor() -> Option<String> {
@@ -2188,6 +2217,41 @@ mod stale_monitor_tests {
         assert_eq!(stale_label(&dev, Some(&dev), Some(&new)).as_deref(), Some("monitor is not the installed one \u{00b7} restart"));
         // …unless its file is gone (a cargo clean under it): then the install is all there is
         assert_eq!(reexec_target(None, Some(&new)), Some(new.clone()));
+    }
+
+    /// #s89: the control keys outlive the install that launched the monitor.
+    #[test]
+    fn control_keys_follow_the_install_not_the_launchers_cellar() {
+        let root = std::env::temp_dir().join(format!("rowt-monitor-s89-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let bin = |v: &str, name: &str| root.join(format!("Cellar/rowt/{v}/libexec/bin/{name}"));
+        for v in ["3.8.39", "3.8.40"] {
+            std::fs::create_dir_all(bin(v, "")).unwrap();
+            std::fs::write(bin(v, "rowt-rs"), v).unwrap();
+        }
+        let s = |p: PathBuf| p.to_string_lossy().into_owned();
+        let me = bin("3.8.40", "rowt-monitor");
+        // Launched by this install: kept.
+        assert_eq!(ctl_bin_for(Some(&s(bin("3.8.40", "rowt-rs"))), Some(&me)), s(bin("3.8.40", "rowt-rs")));
+        // Launched by the install before, still on disk: the same file in ours.
+        assert_eq!(ctl_bin_for(Some(&s(bin("3.8.39", "rowt-rs"))), Some(&me)), s(bin("3.8.40", "rowt-rs")));
+        // …and already cleaned up: the same answer, from the path alone.
+        assert_eq!(ctl_bin_for(Some(&s(bin("3.8.35", "rowt-rs"))), Some(&me)), s(bin("3.8.40", "rowt-rs")));
+        // Our install has no such file: the front door on PATH.
+        assert_eq!(ctl_bin_for(Some(&s(bin("3.8.35", "rowt-old"))), Some(&me)), "rowt");
+        // A path outside any Cellar that is gone: the front door on PATH.
+        assert_eq!(ctl_bin_for(Some(&s(root.join("gone/bin/rowt"))), Some(&me)), "rowt");
+        // The front door the shell hands over (`/opt/homebrew/bin/rowt`), or
+        // rowt-rs's `opt/rowt` path: outside any Cellar, so kept while it exists.
+        let door = root.join("bin/rowt");
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(&door, "").unwrap();
+        assert_eq!(ctl_bin_for(Some(&s(door.clone())), Some(&me)), s(door));
+        // Nothing handed, or a bare name: PATH decides, as before.
+        assert_eq!(ctl_bin_for(None, Some(&me)), "rowt");
+        assert_eq!(ctl_bin_for(Some(""), Some(&me)), "rowt");
+        assert_eq!(ctl_bin_for(Some("rowt"), Some(&me)), "rowt");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

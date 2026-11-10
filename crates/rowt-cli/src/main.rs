@@ -391,6 +391,30 @@ pub fn watch_self() -> PathBuf {
     here_dir().join("bin/rowt")
 }
 
+/// What `rowt monitor` hands the TUI as `$ROWT_BIN`, the CLI its control keys
+/// run: this binary, so the keys drive the same CLI and config, but never by
+/// its Cellar path. `brew upgrade` deletes `Cellar/rowt/<old>/`, and a monitor
+/// outlives that (it re-execs into the new build, env and all), so a Cellar
+/// path left every key failing with "…/rowt-rs: No such file or directory"
+/// after the first upgrade (rowt #s89). Homebrew's `opt/rowt` link names the
+/// same file and follows each upgrade; it is used only when it does resolve to
+/// this file. A cargo build is handed over as it is. The shell hands over the
+/// front door as invoked (`/opt/homebrew/bin/rowt`), which never had this.
+pub(crate) fn monitor_ctl_bin(exe: &Path) -> PathBuf {
+    let s = exe.to_string_lossy();
+    if let Some((prefix, rest)) = s.split_once("/Cellar/rowt/") {
+        if let Some((_version, tail)) = rest.split_once('/') {
+            let opt = PathBuf::from(format!("{prefix}/opt/rowt/{tail}"));
+            if let (Ok(a), Ok(b)) = (opt.canonicalize(), exe.canonicalize()) {
+                if a == b {
+                    return opt;
+                }
+            }
+        }
+    }
+    exe.to_path_buf()
+}
+
 /// `cmd_probe` — which escape mode works here?
 ///
 /// Reaches every server BOTH via the default route and bound to the physical
@@ -2499,7 +2523,7 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
             let bin = cands.into_iter().find(|c| c.is_file())
                 .ok_or("rowt-monitor not found — build it, or set ROWT_MONITOR")?;
             let err = std::process::Command::new(bin)
-                .args(&rest).env("ROWT_BIN", &here).exec_replace();
+                .args(&rest).env("ROWT_BIN", monitor_ctl_bin(&here)).exec_replace();
             Err(err)
         }
         "render" => {
@@ -2816,5 +2840,31 @@ mod tests {
         assert_eq!(human_bytes(1_048_575), "1024K");
         assert_eq!(human_bytes(1_048_576), "1.0M");
         assert_eq!(human_bytes(1_073_741_823), "1024.0M");
+    }
+
+    /// #s89: the monitor is handed `opt/rowt`, which follows `brew upgrade`,
+    /// never the Cellar folder the upgrade deletes; and only when that link
+    /// really names this file.
+    #[test]
+    fn the_monitor_is_handed_a_path_that_survives_an_upgrade() {
+        let root = std::env::temp_dir().join(format!("rowt-s89-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for v in ["3.8.39", "3.8.40"] {
+            let d = root.join(format!("Cellar/rowt/{v}/libexec/bin"));
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("rowt-rs"), v).unwrap();
+        }
+        std::fs::create_dir_all(root.join("opt")).unwrap();
+        std::os::unix::fs::symlink("../Cellar/rowt/3.8.39", root.join("opt/rowt")).unwrap();
+        let current = root.join("Cellar/rowt/3.8.39/libexec/bin/rowt-rs");
+        let other = root.join("Cellar/rowt/3.8.40/libexec/bin/rowt-rs");
+        // The installed version: its stable name.
+        assert_eq!(monitor_ctl_bin(&current), root.join("opt/rowt/libexec/bin/rowt-rs"));
+        // A Cellar version opt/rowt does not point at: as it is.
+        assert_eq!(monitor_ctl_bin(&other), other);
+        // A cargo build: as it is.
+        let dev = root.join("code/rowt/target/release/rowt-rs");
+        assert_eq!(monitor_ctl_bin(&dev), dev);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -5,6 +5,15 @@ release is cut; everything under Unreleased ships with the next one.
 
 ## Unreleased
 
+- The monitor's control keys (`R`, `u`, `a`, `o`, and the lane keys) keep
+  working after `brew upgrade`. Under `ROWT_IMPL=rust`, `rowt monitor`
+  told the monitor to run its keys through rowt-rs by its versioned Homebrew
+  path, which the upgrade deletes; a monitor left open (it switches itself to
+  the new build) then failed every key with "…/rowt-rs: No such file or
+  directory". rowt-rs now hands over Homebrew's stable `opt/rowt` path, and
+  the monitor finds the installed rowt itself when the path it was given is
+  gone or belongs to an older install. The shell version was not affected.
+
 ## 3.8.39 — 2026-11-07
 
 - `rowt status` says `no answer at HH:MM:SS` of an escape server whose last
