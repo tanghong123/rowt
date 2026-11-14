@@ -496,46 +496,36 @@ brew install tanghong123/tap/rowt
 rowt version
 ```
 
-### `rowt-rust` — the same tool, in Rust (preview)
+### The Rust CLI, and the way back to the shell
 
-A second command, `rowt-rust`, ships alongside `rowt` on Apple Silicon. It is a
-Rust port of the whole CLI, and it is a **preview you can ignore**: nothing runs
-it unless you ask (below), and removing it changes nothing.
+Since 3.9.0 `rowt` hands every command to its Rust CLI, `rowt-rs` (also on your
+PATH as `rowt-rust`). It is a port of the whole tool and answers all 41 command
+arms. Every one is compared against the shell — stdout, exit status, the config
+tree with file modes, the argv trace and the audit log — over 500 cases
+(`tests/parity/`), and it ran as the everyday `rowt`, watchdog included, for a
+fourteen-day trial before it became the default. A rowt with no Rust CLI of
+its own install (a checkout nobody built) runs the shell, as every version
+before 3.9.0 did.
 
-It exists so the two can be run side by side on the same config:
-
-```sh
-rowt status          # the shell
-rowt-rust status     # the port, same config, same output
-```
-
-All 41 command arms answer natively, and every one is compared against the shell — stdout, exit status, the
-config tree with file modes, the argv trace and the audit log — over 500 cases
-(`tests/parity/`). What is NOT yet proven is time
-on real networks, which is what the preview is for. If the two ever disagree on
-your machine, that is worth reporting: the whole design of the port is that they
-should not.
-
-Two smaller binaries ship next to it, `rowt-render` and `rowt-watch-tick`. Those
-are inert unless you turn a comparison on (`ROWT_RENDER_SHADOW=1`,
-`ROWT_WATCH_SHADOW=1`), which makes `rowt` record where the Rust would have
-disagreed with it, and act on its own answer regardless.
-
-**Trying it as your everyday `rowt`.** `export ROWT_IMPL=rust` (in `~/.zshrc`)
-makes `rowt` itself hand each command to the Rust version; the few it does not
-answer yet come back to the shell on their own. The watchdog never reads your
-shell's settings, so it stays on the shell until you run `rowt watch refresh`
-from a shell with `ROWT_IMPL=rust` set. rowt remembers that choice, so an
-upgrade keeps it. The way back:
+The shell still ships, and one variable brings it back:
 
 ```sh
+export ROWT_IMPL=bash               # this terminal: rowt runs the shell
 ROWT_IMPL=bash rowt watch refresh   # the watchdog, back on the shell
-export ROWT_IMPL=bash               # this terminal; delete the export for new ones
 ```
 
-A watchdog on the Rust version is no longer compared with anything: the
-watchdog comparison (`ROWT_WATCH_SHADOW`) checks the shell's tick, and the
-shell's tick has stopped running.
+The watchdog never reads your shell's settings, so it has its own switch:
+`rowt watch refresh` with `ROWT_IMPL=bash` set puts it on the shell, rowt
+remembers that through upgrades, and `ROWT_IMPL=rust rowt watch refresh` puts it
+back on the Rust CLI. If the two ever disagree on your machine, that is worth
+reporting: the whole design of the port is that they should not.
+
+On the shell, two smaller binaries can check it against the Rust: `rowt-render`
+and `rowt-watch-tick` are inert unless you turn a comparison on
+(`ROWT_RENDER_SHADOW=1`, `ROWT_WATCH_SHADOW=1`), which makes the shell record
+where the Rust would have disagreed with it, and act on its own answer
+regardless. The watchdog comparison checks the shell's tick, so it runs only
+where the watchdog is on the shell.
 
 The installer is **version-guarded**: re-running it does nothing if the installed
 copy is the same or newer than the source (`--force` overrides; `--uninstall`

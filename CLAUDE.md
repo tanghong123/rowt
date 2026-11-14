@@ -16,9 +16,12 @@ skill** in `skills/rowt/`. Don't duplicate that here.
 - **`bin/rowt`** — the whole CLI, one bash script (~5.3k lines).
   `ROWT_VERSION="X.Y.Z"` at line ~56. Runs under **bash**; the interactive shell
   here is zsh with `noclobber`, so use `>|` (or the file tools) for redirection,
-  and prefer `bash bin/rowt …` when testing. It is still what runs for anyone
-  who has not set `ROWT_IMPL=rust`, but it now FOLLOWS rowt-rs (see "Rust
-  first" below).
+  and prefer `bash bin/rowt …` when testing. It is also the front door: since
+  3.9.0 it hands every command to rowt-rs, from this tree's `target/` in a
+  checkout, so `bash bin/rowt …` runs whatever rowt-rs you last built (a stale
+  build included). Test the shell itself with `ROWT_IMPL=bash bash bin/rowt …`.
+  It is still what runs under `ROWT_IMPL=bash`, the way back, and it FOLLOWS
+  rowt-rs (see "Rust first" below).
 - **`crates/`** — the Rust workspace: `rowt-core` (pure), `rowt-platform` (the OS
   seam), `rowt-cli` (`rowt-rs`). Began as the strangler port of `bin/rowt`; it
   now answers all 41 commands and is where new work starts. **PORTING.md** has

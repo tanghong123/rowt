@@ -4,4 +4,5 @@ rewrite. The plist here is only a stand-in; refresh replaces it whole.
 
   watch refresh                   an upgrade's refresh, empty environment: the
                                   choice survives, the plist keeps ROWT_IMPL=rust
-  ROWT_IMPL=bash watch refresh    the way back: state says bash, the key goes
+  ROWT_IMPL=bash watch refresh    the way back: state says bash, and so does the
+                                  plist's key (rowt #s92; it used to drop it)

@@ -37,8 +37,12 @@ tests/parity/bin/selftest                # break each gate; every one must fire
 ```
 
 The shell side of every gate runs the shell, whatever `ROWT_IMPL` the calling
-terminal exports — a terminal on the everyday-rowt trial would otherwise put
-rowt-rs on both sides and every gate would pass. To run the shell side through
+terminal exports, and even though bin/rowt has handed every command to
+rowt-rs by default since 3.9.0. Either would otherwise put rowt-rs on both
+sides, and every gate would pass. `parity run` and the gates built on it pin `ROWT_IMPL=bash`;
+cli-diff holds its shell side with `ROWT_DELEGATED=1` instead, because
+`watch install|refresh` records an explicit `ROWT_IMPL` and rowt-rs, run
+directly, would record nothing (selftest 54). To run the shell side through
 the rowt-rs front door on purpose, say so: `PARITY_BASH_IMPL=rust parity …`
 for the whole run, or `parity run -- ROWT_IMPL=rust <args>` for one command.
 

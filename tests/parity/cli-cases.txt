@@ -1204,7 +1204,15 @@ ROWT_PARITY_SUDO=no-tty watch install
 # Which implementation the watchdog's tick runs (rowt #s65). A watchdog already
 # switched to rowt-rs keeps it through a refresh with an empty environment (what
 # an upgrade does) — the plist carries ROWT_IMPL=rust, from state — and
-# ROWT_IMPL=bash is the way back: state says bash and the key goes. The plain
-# `watch install` above is the third case: nobody chose, so no key at all.
+# ROWT_IMPL=bash is the way back: state says bash, and so does the key (rowt
+# #s92: with rowt-rs the front door's default, a missing key no longer means
+# the shell). A watchdog put back on the shell keeps its key through the same
+# empty-environment refresh. The plain `watch install` above is the last case:
+# nobody chose, so no key at all, and the agent follows the default.
 PARITY_SCENARIO=watch-impl-rust watch refresh
 PARITY_SCENARIO=watch-impl-rust ROWT_IMPL=bash watch refresh
+PARITY_SCENARIO=watch-impl-bash watch refresh
+# Back to rowt-rs by name records rust; a word that names neither records
+# nothing, because the front door reads it as the default.
+PARITY_SCENARIO=watch-impl-bash ROWT_IMPL=rust watch refresh
+PARITY_SCENARIO=watch-impl-bash ROWT_IMPL=yes watch refresh

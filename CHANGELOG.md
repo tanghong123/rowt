@@ -5,6 +5,19 @@ release is cut; everything under Unreleased ships with the next one.
 
 ## Unreleased
 
+- **rowt-rs is the default.** `rowt` hands every command to its Rust CLI,
+  which answers all 41 commands and ran as the everyday `rowt`, watchdog
+  included, through a fourteen-day trial with nothing to explain. The shell
+  still ships: `ROWT_IMPL=bash` runs it, and `ROWT_IMPL=bash rowt watch
+  refresh` puts the watchdog on it, remembered through upgrades
+  (`ROWT_IMPL=rust rowt watch refresh` puts it back). A watchdog nobody
+  switched follows the default from its first tick after the upgrade. A rowt with no
+  Rust CLI of its own install, such as a checkout nobody built, runs the shell
+  as before. A watchdog put back on the shell now carries `ROWT_IMPL=bash` in
+  its plist, and every watchdog's plist is rewritten once, by its first tick
+  after the upgrade, so one put back under 3.8 gets the key. Any `ROWT_IMPL`
+  other than `bash` or `rust` is read as the default and no longer recorded
+  for the watchdog.
 - Traffic metrics record the port each byte came in on: `main`, or a named
   port from `rowt port add`. `traffic.db` moves to schema 2, which adds a
   `port` column to every tier; the upgrade migrates the store in place, and

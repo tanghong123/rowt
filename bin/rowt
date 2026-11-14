@@ -62,7 +62,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.8.42"
+ROWT_VERSION="3.9.0"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -6403,7 +6403,10 @@ FOLLOW_LAST="$CFG/follow.last"                 # rowt #s36: "<utc stamp><TAB><ta
 # diff would call it stale forever and rewrite on every tick.
 #   v2 = adds AbandonProcessGroup (without it launchd SIGKILLs the router a tick
 #        starts, the moment that tick exits — silent ~10-minute outages).
-WATCH_PLIST_VERSION="3"
+#   v4 = names ROWT_IMPL=bash as well as rust (rowt #s92). A watchdog put back
+#        on the shell under 3.8 has no key, which now means rowt-rs; the bump
+#        makes its first tick after the upgrade write the key.
+WATCH_PLIST_VERSION="4"
 WATCH_PLIST_MARK="rowt-watch-plist v$WATCH_PLIST_VERSION"
 WATCH_SELFHEAL="$CFG/watch.plistheal"        # epoch of the last plist self-heal (anti-loop)
 WATCH_CPU="$CFG/watch.cpu"                   # last CPU/traffic sample: "epoch cpusecs pid bytes"
@@ -7353,12 +7356,15 @@ _watch_plist_body() {
     <key>$v</key><string>$val</string>"
   done
   # Which implementation the tick runs: `watch install|refresh` remembers
-  # ROWT_IMPL in state (below), and only rust is written, because the front door
-  # reads anything else as the shell, so a plist nobody switched stays exactly
-  # what it was. From state rather than the environment, so the tick's own
-  # self-heal and a refresh with an empty environment write the same file.
-  [ "$(sget watch_impl)" = rust ] && envxml="$envxml
-    <key>ROWT_IMPL</key><string>rust</string>"
+  # ROWT_IMPL in state (below), and the plist names it whichever it is (rowt
+  # #s92): rowt-rs is the front door's default, so a watchdog put back on the
+  # shell must say bash to stay there, as one switched over says rust.
+  # Nothing remembered, nothing written: that agent follows the default. From
+  # state rather than the environment, so the tick's own self-heal and a
+  # refresh with an empty environment write the same file.
+  local wimpl; wimpl="$(sget watch_impl || true)"
+  case "$wimpl" in rust|bash) envxml="$envxml
+    <key>ROWT_IMPL</key><string>$wimpl</string>" ;; esac
   cat <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -7494,10 +7500,13 @@ cmd_watch() {
       # quietly end a shadow window at the next brew upgrade.
       [ -n "${ROWT_WATCH_SHADOW:-}" ]  && sset shadow_watch  "$ROWT_WATCH_SHADOW"
       [ -n "${ROWT_RENDER_SHADOW:-}" ] && sset shadow_render "$ROWT_RENDER_SHADOW"
-      # The same for which implementation the tick runs. ROWT_IMPL=rust reaches
-      # rowt-rs before this shell, so what normally lands here is bash: the way
-      # back, `ROWT_IMPL=bash rowt watch refresh`.
-      [ -n "${ROWT_IMPL:-}" ] && sset watch_impl "$([ "$ROWT_IMPL" = rust ] && echo rust || echo bash)"
+      # The same for which implementation the tick runs. rowt-rs is the front
+      # door's default (rowt #s92) and answers ROWT_IMPL=rust itself, so what
+      # normally lands here is bash: the way back, `ROWT_IMPL=bash rowt watch
+      # refresh`. Only those two words are recorded: any other value means the
+      # default at the front door, and recording it as either would pin the
+      # agent to something nobody chose.
+      case "${ROWT_IMPL:-}" in rust|bash) sset watch_impl "$ROWT_IMPL" ;; esac
       if [ "$refresh" = 1 ] && [ ! -f "$WATCH_PLIST" ]; then info "watch not installed — nothing to refresh"; return 0; fi
       local self; self="$(_watch_self)"
       [ -x "$self" ] || die "cannot resolve the rowt binary path ($self)"
@@ -9554,13 +9563,14 @@ run_command() {
 # The Rust CLI, located like the other companions. Brew puts it at
 # libexec/bin/rowt-rs (and symlinks it into the prefix as `rowt-rust`);
 # install.sh copies it to $PREFIX/bin/rowt-rust; a checkout builds it in
-# target/.
-_rust_cli() {
+# target/. `own` stops before PATH: only a rowt-rs of this install will do.
+_rust_cli() { # [own]
   local b
   for b in "$HERE/bin/rowt-rs" "$HERE/bin/rowt-rust" \
            "$HERE/target/release/rowt-rs" "$HERE/target/debug/rowt-rs"; do
     [ -x "$b" ] && { echo "$b"; return 0; }
   done
+  [ "${1:-}" = own ] && return 1
   command -v rowt-rust 2>/dev/null
 }
 
@@ -9619,9 +9629,11 @@ _setup_py_helpers() {
 _py_ok() { [ "${PY_HAVE:-0}" = 1 ]; }
 
 main() {
-  # §6.6 — ROWT_IMPL=rust hands the whole invocation to rowt-rs. BEFORE the
-  # preamble: rowt-rs migrates, rotates and audits for itself, and doing it on
-  # both sides would double every audit line.
+  # §6.6 — rowt-rs answers every command, and ROWT_IMPL=bash keeps this shell
+  # (rowt #s92: the default since 3.9.0, decided by the owner on 2026-11-14
+  # after the fourteen-day trial; before, only ROWT_IMPL=rust handed over).
+  # BEFORE the preamble: rowt-rs migrates, rotates and audits for itself, and
+  # doing it on both sides would double every audit line.
   #
   # Guarded on ROWT_DELEGATED but deliberately NOT setting it. That marker means
   # "rowt-rs sent this here", and rowt-rs REFUSES to delegate when it is already
@@ -9630,20 +9642,33 @@ main() {
   # Reading it and leaving it alone gives both properties — rust → bash → runs
   # natively, and no loop, because the second pass sees the marker and does not
   # switch again.
-  if [ "${ROWT_IMPL:-bash}" = rust ] && [ "${ROWT_DELEGATED:-}" != 1 ]; then
-    local _rb; _rb="$(_rust_cli)" || true
-    # Silence here would be the footgun §6.6 names: someone who asked for rust
-    # and is quietly handed bash collects a window's worth of evidence about the
-    # wrong implementation.
-    [ -n "$_rb" ] || { echo "error: ROWT_IMPL=rust but no rowt-rs found — build it (cargo build --release -p rowt-cli) or install it" >&2; exit 1; }
-    # The LaunchAgent must name the FRONT DOOR, never whichever binary happened
-    # to write it. rowt-rs is ad-hoc-signed and its cdhash changes every
-    # release, and a launch constraint pins code identity (PORTING.md §2.1) —
-    # but the plain reason is parity: without this the two implementations
-    # write a different <string> into the same plist. Hand over the same path
-    # `_watch_self` picks, so there is one answer.
-    export ROWT_SELF="${ROWT_SELF:-$(_watch_self)}"
-    exec "$_rb" "$@"
+  #
+  # ROWT_IMPL=rust, asked for by name, takes rowt-rs from anywhere it can be
+  # found, PATH included, and with none is an error: silence there would be the
+  # footgun §6.6 names, someone who asked for rust quietly handed bash. The
+  # default is not asked for, so it takes only a rowt-rs of this install (brew's
+  # libexec, install.sh's prefix, a checkout's target/) and with none runs this
+  # shell, as every rowt before 3.9.0 did. Not PATH: from a checkout nobody
+  # built, that is whatever brew installed, another version reading the same
+  # config. Any other ROWT_IMPL is the default too.
+  if [ "${ROWT_DELEGATED:-}" != 1 ] && [ "${ROWT_IMPL:-}" != bash ]; then
+    local _rb=""
+    if [ "${ROWT_IMPL:-}" = rust ]; then
+      _rb="$(_rust_cli)" || true
+      [ -n "$_rb" ] || { echo "error: ROWT_IMPL=rust but no rowt-rs found — build it (cargo build --release -p rowt-cli) or install it" >&2; exit 1; }
+    else
+      _rb="$(_rust_cli own)" || true
+    fi
+    if [ -n "$_rb" ]; then
+      # The LaunchAgent must name the FRONT DOOR, never whichever binary
+      # happened to write it. rowt-rs is ad-hoc-signed and its cdhash changes
+      # every release, and a launch constraint pins code identity (PORTING.md
+      # §2.1) — but the plain reason is parity: without this the two
+      # implementations write a different <string> into the same plist. Hand
+      # over the same path `_watch_self` picks, so there is one answer.
+      export ROWT_SELF="${ROWT_SELF:-$(_watch_self)}"
+      exec "$_rb" "$@"
+    fi
   fi
   _setup_py_helpers
   migrate

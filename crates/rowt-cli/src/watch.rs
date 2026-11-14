@@ -22,7 +22,10 @@ pub const LABEL: &str = "club.annaslife.rowt.watch";
 /// older rowt is recognised as stale and re-synced. A marker beats diffing the
 /// body, which legitimately varies with the installing shell's ROWT_* env.
 ///   v2 = adds AbandonProcessGroup.
-pub const PLIST_MARK: &str = "rowt-watch-plist v3";
+///   v4 = names ROWT_IMPL=bash as well as rust (rowt #s92). A watchdog put
+///        back on the shell under 3.8 has no key, which now means rowt-rs; the
+///        bump makes its first tick after the upgrade write the key.
+pub const PLIST_MARK: &str = "rowt-watch-plist v4";
 
 /// Was the installed agent written by an older rowt (different plist shape)?
 pub fn plist_stale(plist: &Path) -> bool {
@@ -187,12 +190,14 @@ fn plist_body(ctx: &Ctx, self_bin: &Path) -> String {
             }
         }
     }
-    // Which implementation the tick runs, remembered by `install|refresh`. Only
-    // rust is written (the front door reads anything else as the shell), and it
-    // comes from state, so the tick's self-heal writes the same file as the
-    // refresh that chose it.
-    if ctx.sget("watch_impl") == "rust" {
-        envxml.push_str("\n    <key>ROWT_IMPL</key><string>rust</string>");
+    // Which implementation the tick runs, remembered by `install|refresh`, and
+    // written whichever it is (rowt #s92): rowt-rs is the front door's
+    // default, so a watchdog someone put back on the shell must say bash to
+    // stay there, as one switched to rowt-rs says rust. Nothing remembered,
+    // nothing written: that agent follows the default. From state, so the
+    // tick's self-heal writes the same file as the refresh that chose it.
+    if let v @ ("rust" | "bash") = ctx.sget("watch_impl").as_str() {
+        envxml.push_str(&format!("\n    <key>ROWT_IMPL</key><string>{v}</string>"));
     }
     let interval = env_or("ROWT_WATCH_INTERVAL", "120");
     format!(r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -1361,13 +1366,17 @@ pub fn cmd(ctx: &Ctx, self_bin: &Path, action: &str) -> Result<String, String> {
                     }
                 }
             }
-            // And which implementation the tick runs. Through the front door
-            // ROWT_IMPL=rust lands here, never in the shell, so this is the side
-            // that switches the watchdog over; `ROWT_IMPL=bash rowt watch
-            // refresh` reaches the shell and switches it back.
+            // And which implementation the tick runs. rowt-rs is the front
+            // door's default (rowt #s92), so a plain refresh lands here and
+            // records nothing: the agent follows the default. `ROWT_IMPL=bash
+            // rowt watch refresh` reaches the shell and puts the watchdog there;
+            // ROWT_IMPL=rust, here, brings it back. Only those two words are
+            // recorded: any other value means the default at the front door,
+            // and recording it as either would pin the agent to something
+            // nobody chose.
             if let Ok(v) = std::env::var("ROWT_IMPL") {
-                if !v.is_empty() {
-                    lifecycle::sset(ctx, "watch_impl", if v == "rust" { "rust" } else { "bash" });
+                if v == "rust" || v == "bash" {
+                    lifecycle::sset(ctx, "watch_impl", &v);
                 }
             }
             if refresh && !plist.is_file() {
@@ -2012,6 +2021,28 @@ mod tests {
         std::fs::remove_file(&p).unwrap();
         assert!(!plist_stale(&p));
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// rowt #s92. The plist names the implementation state remembers, either
+    /// one, and nothing when nobody chose — the agent then follows the front
+    /// door's default. A watchdog put back on the shell that lost its key would
+    /// move to rowt-rs at the next refresh and say nothing.
+    #[test]
+    fn the_plist_names_the_implementation_state_remembers() {
+        let dir = std::env::temp_dir().join(format!("rowt-plist-impl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = Ctx::new(dir.clone());
+        let key = |v: &str| format!("<key>ROWT_IMPL</key><string>{v}</string>");
+        for (state, want) in [("watch_impl=rust\n", Some("rust")), ("watch_impl=bash\n", Some("bash")),
+                              ("mode=host\n", None), ("watch_impl=python\n", None)] {
+            std::fs::write(dir.join("state"), state).unwrap();
+            let body = plist_body(&ctx, Path::new("/opt/homebrew/bin/rowt"));
+            match want {
+                Some(v) => assert!(body.contains(&key(v)), "{state:?} must write {}", key(v)),
+                None => assert!(!body.contains("<key>ROWT_IMPL</key>"), "{state:?} must write no ROWT_IMPL"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

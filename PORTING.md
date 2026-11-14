@@ -1,14 +1,14 @@
 # Porting rowt: bash → Rust, macOS → macOS + Linux
 
 *Investigation and design, 2026-08-08. Status as of 2026-11-14: phases 0, 2, 4
-and 6 done — the repo has no Python on any runtime path, and `ROWT_IMPL=rust`
-runs every command in Rust, the shell kept only for typos (§5, "What
-still reaches for bash"). aries-black ran it as its everyday rowt from
-2026-10-31, watchdog included from 2026-11-01, and the fourteen-day window
-closed on 2026-11-14 with §6.5's promotion rule met (§6.6, "Data"). The owner
-decided the same day: rowt-rs becomes the default in the next release, with
-`ROWT_IMPL=bash` as the way back (#s91; the switch is #s92). 1 and 3 are
-code-complete and gated, waiting on that cutover; phase 5 (Linux) not started.
+and 6 done — the repo has no Python on any runtime path, and rowt-rs runs
+every command in Rust, the shell kept only for typos (§5, "What still reaches
+for bash"). aries-black ran it as its everyday rowt from 2026-10-31, watchdog
+included from 2026-11-01, and the fourteen-day window closed on 2026-11-14
+with §6.5's promotion rule met (§6.6, "Data"). The owner decided the same day
+to make it the default (#s91), and since 3.9.0 it is: `rowt` hands every
+command to rowt-rs, and `ROWT_IMPL=bash` is the way back (§6.6, #s92). 1 and 3
+are code-complete and gated; phase 5 (Linux) not started.
 The per-phase table in §5 is the authority — this line is a summary and will
 drift first.*
 
@@ -248,7 +248,7 @@ revertible and gated.
 | **1** ◑ | `rowt-core::render` — replace the giant jq program. bash calls `rowt-rs render` internally. | **render done** — `crates/rowt-render`, 18/18 cases canonically identical on host + vm (`parity render-matrix`), and identical against the real 22-server config. Remaining: throwaway-port outbound oracle, bash cutover, shadow window |
 | **2** ✅ | classify/explain, lane set logic, absorb `corp-sync-reconcile.py` | **done** — classify: 9/9 cases × 92 destinations identical on `(lane, reason)`; lane edits: 12/12 cases identical across all three files + messages; reconcile: 210 generated cases identical to the Python. `selftest` 9/9 |
 | **3** ◑ | watchdog: FSM into core, effects via `PlatformMac`; `cmd_watch` execs the Rust tick | **FSM + shadow done** — `rowt-core::watch`, 18 unit tests replaying §11's decision table; `parity watch-diff` 5/5; `ROWT_WATCH_SHADOW=1` compares the shell's decisions against the FSM's plan on every real tick, feeding it the tick's own captive verdict rather than re-probing. **Effects done too** — `perform` drives `PlatformMac`, runs the real `cmd_reload` for a recovery, and re-probes the escape lane through the clash delay test the way the shell does. Remaining: the `cmd_watch` cutover (bash still runs its own tick and merely shadows this one), and **time** — the shadow window itself |
-| **4** ◑ | CLI. Built as `rowt-rs` alongside the shell first, so each command lands with evidence; only then does bash reduce to a wrapper and get deleted. Formula ships the prebuilt binary (monitor-asset pattern). | **all 37 arms native AND gated** — `parity cli-diff` compares stdout, exit status, the **whole config tree** (content and mode), the **argv trace** and the **audit log** over 253 cases. Every arm but the TUI is compared; the lifecycle four were the last to be, and all four diverged when first asked. `ROWT_IMPL=rust` hands the whole invocation to rowt-rs and is off by default (§6.6). **Done** |
+| **4** ◑ | CLI. Built as `rowt-rs` alongside the shell first, so each command lands with evidence; only then does bash reduce to a wrapper and get deleted. Formula ships the prebuilt binary (monitor-asset pattern). | **all 37 arms native AND gated** — `parity cli-diff` compares stdout, exit status, the **whole config tree** (content and mode), the **argv trace** and the **audit log** over 253 cases. Every arm but the TUI is compared; the lifecycle four were the last to be, and all four diverged when first asked. `ROWT_IMPL=rust` hands the whole invocation to rowt-rs, by default since 3.9.0; `ROWT_IMPL=bash` is the way back (§6.6). **Done** |
 | **5** | `PlatformLinux` + tun mode + systemd units; CI matrix (macOS + ubuntu — core tests run on both, platform tests feature-gated); linux tar assets | fresh-VM install → onboard → probe → captive drill; VPN-coexistence drill with Tailscale up |
 | 6 ✅ | port the import pipeline (1,302 lines of parsing Python). No longer optional — the 2026-08-09 decision is one language in the repo, and this is what retires `depends_on "python@3.12"`. | **ported AND cut over** — `rowt-core::{sharelink,importmerge,foreign,srimport}` (+`bplist`), plus `pycli` (the seven `config/*.py` command surfaces) and the log splitter. `bin/rowt` runs the Rust: every `python3 config/*.py` call site is `rowt-rs _py <tool>`, and `ROWT_PY=1` puts the Pythons back so `cli-diff` still compares an extractor against an extractor. Gates: `vless-diff` 2,000, `merge-diff` 1,500, `foreign-diff` 1,200, `sr-diff` 1,200, `netdetect-diff`, and two the cutover forced into existence — `geosite-diff` and `splitter-diff` |
 
@@ -771,9 +771,11 @@ alongside as `rowt-legacy` for one full release cycle and the Formula carries
 both. Rollback is an env var, not a reinstall. Phase 4 deletes the bash only
 after a release cycle in which the fallback was never needed.
 
-**Built, and OFF by default.** `ROWT_IMPL` is unset for everyone until §6.5's
-window says otherwise; what exists is the door, not the decision to walk
-through it. Three details are load-bearing:
+**On by default since 3.9.0** (#s92). Through 3.8 it was built and off: the
+door existed, and walking through it waited for §6.5's window, which closed on
+2026-11-14 with the promotion rule met, and for the owner's decision the same
+day. Now an unset `ROWT_IMPL` means rowt-rs and `ROWT_IMPL=bash` means the
+shell. The details that are load-bearing:
 
 * **It execs before the preamble.** rowt-rs migrates, rotates and audits for
   itself, and doing it on both sides doubles every audit line.
@@ -784,24 +786,44 @@ through it. Three details are load-bearing:
   falling back to the shell. Reading it and leaving it alone gives both
   properties: rust → bash runs natively, and there is no loop, because the
   second pass sees the marker and does not switch again.
-* **A missing binary is an error, not a fallback.** Silently handing bash to
-  someone who asked for rust is how a fourteen-day window fills with evidence
-  about the wrong implementation.
-* **The watchdog follows only when asked** (rowt #s65). launchd starts the tick
-  with the plist's environment, never a shell's, so an `export` in `~/.zshrc`
-  leaves it on bash. `watch install|refresh` remembers an explicit `ROWT_IMPL`
-  in state as `watch_impl`, the way the shadow knobs are remembered (a
-  post-upgrade refresh runs with an empty environment), and the plist carries
-  `ROWT_IMPL=rust` only when state says rust, so a plist nobody switched is
-  byte-for-byte what it was. It comes from state rather than the environment
-  so the tick's own self-heal writes the same file as the refresh that chose
-  it. Through the front door `ROWT_IMPL=rust` reaches rowt-rs before the
-  shell, so rowt-rs is the side that records rust and the shell, in practice,
-  records the way back: `ROWT_IMPL=bash rowt watch refresh`. A watchdog on
-  rowt-rs ends §6.5's tick shadow on that machine, since the shadow compares
-  the shell's tick and the shell's tick no longer runs; what is left there is
-  behaviour (watch.log, the audit's restarts, captive episodes). Keep one
-  machine on the shell's watchdog, shadow armed, while another runs rowt-rs.
+* **Asked for by name, a missing binary is an error, not a fallback.**
+  Silently handing bash to someone who asked for rust is how a fourteen-day
+  window fills with evidence about the wrong implementation. `ROWT_IMPL=rust`
+  takes rowt-rs from anywhere, PATH included.
+* **The default takes only its own rowt-rs, and without one runs the shell.**
+  Brew's `libexec/bin/rowt-rs`, install.sh's `$PREFIX/bin/rowt-rust`, a
+  checkout's `target/` — never PATH, which from a checkout nobody built is
+  whatever brew installed: another version, reading the same config. Nobody
+  asked for rust, so the shell every rowt before 3.9.0 ran is the right
+  answer there. Any `ROWT_IMPL` other than `bash` and `rust` is the default.
+* **The watchdog's choice is remembered** (rowt #s65, #s92). launchd starts
+  the tick with the plist's environment, never a shell's, so an `export` in
+  `~/.zshrc` does not reach it. `watch install|refresh` remembers an explicit
+  `ROWT_IMPL=bash` or `rust` in state as `watch_impl`, the way the shadow
+  knobs are remembered (a post-upgrade refresh runs with an empty
+  environment), and the plist names whichever state remembers; nothing
+  remembered, nothing written, and the agent follows the default. Through
+  3.8 only rust was written, because a missing key meant the shell; since the
+  default moved, a watchdog put back on the shell needs its key as much as
+  one switched to rowt-rs did. It comes from state rather than the
+  environment so the tick's own self-heal writes the same file as the refresh
+  that chose it. The plist's generation went to v4 with this, so each
+  agent's first tick after the upgrade rewrites it, and one put back on the
+  shell under 3.8, with no key, gets its `bash`. Any other word is not
+  recorded: the front door reads it as
+  the default, and recording it as either would pin the agent to something
+  nobody chose. A watchdog on rowt-rs ends §6.5's tick shadow on that
+  machine, since the shadow compares the shell's tick and the shell's tick no
+  longer runs; what is left there is behaviour (watch.log, the audit's
+  restarts, captive episodes).
+* **The gates hold their shell side on the shell.** cli-diff's shell side
+  carries `ROWT_DELEGATED=1`, not `ROWT_IMPL=bash`: the latter would be
+  recorded as `watch_impl` on that side of every watch case and never on
+  rowt-rs's, and the case every upgraded Mac takes, nothing chosen, would go
+  uncompared. `selftest` 54 mutates the shell and runs a case that asks for
+  rust: a harness that let the front door hand its shell side to rowt-rs
+  would compare rowt-rs with itself and miss the mutation. The front door
+  itself is tested in `tests/test_front_door.py`.
 
 `PARITY_BASH_IMPL=rust parity cli-diff` runs the whole matrix with the bash side
 wrapped. Be blunt about what that proves: both sides are then the same binary,
@@ -837,13 +859,10 @@ three separate things, none of which is more porting:
    `$HERE/bin/rowt-rs` first, which is what the brew layout produces, then the
    install.sh name, then a checkout's `target/`, then `PATH`.
 
-3. **The switch itself**, which is small: `exec` before the preamble (rowt-rs
-   migrates, rotates and audits for itself, and doing it on both sides doubles
-   every audit line), guarded on `ROWT_DELEGATED` so a delegated help page
-   cannot bounce back and forth. Worth gating with a cli-diff run whose BASH
-   side carries `ROWT_IMPL=rust`: that compares rowt-rs against itself through
-   the wrapper, which proves the front door is transparent — not that anything
-   was ported, which is what the other 240 cases are for.
+3. ~~**The switch itself.**~~ Done in 3.9.0 (#s92), on the owner's word of
+   2026-11-14 (#s91). Small, as expected: the door's condition turned round,
+   the default stopped looking on PATH, and the plist learned to name the
+   shell. The harness had to change more than the product (above).
 
 ### 6.7 Bash bugs are behavior until deliberately retired
 

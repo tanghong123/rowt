@@ -198,3 +198,12 @@ Check that the API host is in escape: `rowt explain api.anthropic.com`.
 **First `up` in China fails to fetch rule-sets.** It needs a path to GitHub. Keep the
 old VPN on and run `rowt fetch host`. The sing-box engine itself is bundled; nothing
 is downloaded for it.
+
+**A command misbehaves since 3.9.0, and it did not before.** Since 3.9.0 `rowt`
+hands every command to its Rust CLI (rowt-rs); the shell it replaced still ships.
+Run the same command as `ROWT_IMPL=bash rowt <command>`. If only the Rust CLI gets
+it wrong, that is a bug to report, with both outputs. Until it is fixed, the user
+can stay on the shell: `export ROWT_IMPL=bash` in their shell profile, and
+`ROWT_IMPL=bash rowt watch refresh` for the watchdog, which never reads the
+profile and remembers the choice through upgrades. `ROWT_IMPL=rust rowt watch
+refresh` puts the watchdog back.
