@@ -5,6 +5,18 @@ release is cut; everything under Unreleased ships with the next one.
 
 ## Unreleased
 
+- Traffic metrics record the port each byte came in on: `main`, or a named
+  port from `rowt port add`. `traffic.db` moves to schema 2, which adds a
+  `port` column to every tier; the upgrade migrates the store in place, and
+  rows from before it read as port `-`. `rowt metrics path` shows the new
+  column and a per-port query. A downgrade to 3.8.40 or earlier leaves the
+  store at schema 2, which the older collector cannot write to: nothing is
+  recorded until rowt is upgraded again.
+- The monitor's `P` key shows one port's traffic: it cycles all ports, `main`,
+  then each named port, and back. The header's rates, the live connections and
+  their history follow the choice; the errors pane stays on all ports and says
+  so. With only `main`, `P` says how to add a port.
+
 ## 3.8.40 — 2026-11-10
 
 - The monitor's control keys (`R`, `u`, `a`, `o`, and the lane keys) keep
