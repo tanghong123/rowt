@@ -1485,7 +1485,7 @@ pub fn cmd(ctx: &Ctx, self_bin: &Path, action: &str) -> Result<String, String> {
             std::process::exit(1);
         }
         "tick" => {
-            tick(ctx);
+            tick(ctx, self_bin);
             Ok(String::new())
         }
         // Internal: the router starts this in `auto` (lifecycle::start_follow).
@@ -1509,7 +1509,87 @@ fn finish_tick(ctx: &Ctx, lock: &Path) {
     let _ = std::fs::remove_dir(lock);
 }
 
-fn tick(ctx: &Ctx) {
+/// The detached half of the plist self-heal, word for word the shell's in
+/// `_watch_selfheal_plist`: wait for the old job to be GONE (bootout is
+/// asynchronous; a bootstrap issued while launchd still tears the job down
+/// fails), with a ceiling, then bootstrap the rewritten plist and write the
+/// VERIFIED outcome to watch.log — the tick that spawned it is gone by then, so
+/// nothing else can. A job that will not leave is reported and left alone.
+const SELFHEAL_RELOAD_SH: &str = r#"
+    uid="$1"; label="$2"; plist="$3"; log="$4"; ver="$5"
+    say() { printf "%s  %s\n" "$(date "+%Y-%m-%d %H:%M:%S")" "$*" >> "$log" 2>/dev/null || true; }
+    sleep 2
+    launchctl bootout "gui/$uid/$label" >/dev/null 2>&1 || true
+    n=0
+    while launchctl print "gui/$uid/$label" >/dev/null 2>&1; do
+      n=$((n + 1))
+      if [ "$n" -ge 20 ]; then
+        say "self-heal: agent $label did not unload within 10s — NOT bootstrapping over it. Watchdog state unknown; fix: rowt watch refresh"
+        exit 0
+      fi
+      sleep 0.5
+    done
+    out="$(launchctl bootstrap "gui/$uid" "$plist" 2>&1)"; rc=$?
+    if launchctl print "gui/$uid/$label" >/dev/null 2>&1; then
+      say "self-heal: agent re-bootstrapped for rowt $ver — loaded"
+    else
+      say "self-heal FAILED: bootstrap rc=$rc${out:+ ($out)} — WATCHDOG NOT LOADED. Fix: rowt watch refresh"
+    fi
+  "#;
+
+/// Rewrite an agent an older rowt wrote — the shell's `_watch_selfheal_plist`.
+/// The marker bump (PLIST_MARK) is the only way a plist change reaches an
+/// agent already on disk: brew's post_install never refreshes the agent, so a
+/// tick noticing its own marker is out of date is the whole delivery
+/// mechanism. rowt-rs's tick lacked it until 3.9.0 (#s92), when rowt-rs became
+/// the front door's default and so the tick nearly every agent runs: without
+/// it the v4 plist, and every later fix to the plist, would never arrive.
+///
+/// Rate-limited to once an hour (watch.plistheal) so a plist that somehow never
+/// takes cannot loop. The reload is handed to `reload`, the detached launchctl
+/// dance in the field and a recorder in tests: no parity case can run it, since
+/// the child outlives the case and would reach the real launchctl, and the real
+/// agent's label, once the sandbox's shims are cleaned up.
+fn selfheal_plist(ctx: &Ctx, self_bin: &Path, plist: &Path, reload: impl FnOnce(&Path)) -> bool {
+    if !plist_stale(plist) {
+        return false;
+    }
+    let stamp = ctx.cfg.join("watch.plistheal");
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let last: i64 = crate::read(&stamp).trim().parse().unwrap_or(0);
+    if now - last < 3600 {
+        return false;
+    }
+    let _ = std::fs::write(&stamp, format!("{now}\n"));
+    let body = plist_body(ctx, self_bin);
+    if !body.contains(PLIST_MARK) {
+        return false;
+    }
+    let tmp = PathBuf::from(format!("{}.new.{}", plist.display(), std::process::id()));
+    if std::fs::write(&tmp, &body).is_err() || std::fs::rename(&tmp, plist).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return false;
+    }
+    watch_log(ctx, &format!("agent plist was written by an older rowt — rewrote it for {}; re-bootstrapping the agent out-of-band (outcome follows)", env!("ROWT_SHELL_VERSION")));
+    reload(plist);
+    true
+}
+
+/// The reload, detached: `launchctl bootout` kills this tick's process group,
+/// so done inline it would unload the agent and never reach `bootstrap`. A new
+/// session (perl, as the shell does it: macOS ships no setsid binary) outlives
+/// the tick. Waits only for perl's parent, which exits as soon as it forks.
+fn selfheal_reload_detached(ctx: &Ctx, plist: &Path) {
+    let _ = Command::new("perl")
+        .args(["-e", "use POSIX (); my $p = fork(); exit 0 if $p; POSIX::setsid(); exec @ARGV",
+               "/bin/sh", "-c", SELFHEAL_RELOAD_SH, "_",
+               &uid(), LABEL, &plist.to_string_lossy(), &watch_log_path(ctx).to_string_lossy(),
+               env!("ROWT_SHELL_VERSION")])
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+        .status();
+}
+
+fn tick(ctx: &Ctx, self_bin: &Path) {
     if crate::pool::subscription_update_busy(&ctx.cfg) { return; }
     // The debounce lock is taken UP FRONT, so the crash-recovery, stale-proxy
     // and reload paths can never overlap a concurrent tick — a StartInterval
@@ -1536,6 +1616,9 @@ fn tick(ctx: &Ctx) {
         finish_tick(ctx, &lock);
         return;
     }
+    // Before anything else, as the shell does: if this agent predates the
+    // current plist shape, rewrite it. Costs a read on a healthy tick.
+    selfheal_plist(ctx, self_bin, &plist_path(), |p| selfheal_reload_detached(ctx, p));
     let cfg = cfg_of(ctx);
     let mut st = load_state(ctx);
     let mut disk = st.clone();
@@ -2042,6 +2125,49 @@ mod tests {
                 None => assert!(!body.contains("<key>ROWT_IMPL</key>"), "{state:?} must write no ROWT_IMPL"),
             }
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// rowt #s92. The tick's self-heal, now on rowt-rs's side too: a plist from
+    /// an older rowt is rewritten with this rowt's marker and the remembered
+    /// implementation, logged, and handed to the reload once; within the hour,
+    /// or for a current plist or none, nothing happens.
+    #[test]
+    fn a_tick_rewrites_an_agent_from_an_older_rowt_once_an_hour() {
+        let dir = std::env::temp_dir().join(format!("rowt-selfheal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = Ctx::new(dir.clone());
+        std::fs::write(dir.join("state"), "watch_impl=bash\n").unwrap();
+        let plist = dir.join("agent.plist");
+        let me = Path::new("/opt/homebrew/bin/rowt");
+        let mut reloads = Vec::new();
+
+        // No agent at all: nothing to heal, and no stamp taken.
+        assert!(!selfheal_plist(&ctx, me, &plist, |p| reloads.push(p.to_path_buf())));
+        assert!(!dir.join("watch.plistheal").exists());
+
+        // An agent from 3.8: rewritten, with the bash key it never had.
+        std::fs::write(&plist, "<!-- rowt-watch-plist v3 --><plist/>").unwrap();
+        assert!(selfheal_plist(&ctx, me, &plist, |p| reloads.push(p.to_path_buf())));
+        let body = std::fs::read_to_string(&plist).unwrap();
+        assert!(body.contains(PLIST_MARK) && !plist_stale(&plist));
+        assert!(body.contains("<key>ROWT_IMPL</key><string>bash</string>"));
+        assert_eq!(reloads, vec![plist.clone()], "the reload runs once, on the rewritten plist");
+        let log = std::fs::read_to_string(dir.join("log/watch.log")).unwrap();
+        assert!(log.contains("agent plist was written by an older rowt — rewrote it for"), "{log}");
+        assert!(std::fs::read_dir(&dir).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().contains(".new.")),
+                "no temp file left behind");
+
+        // Current now: a healthy tick changes nothing.
+        assert!(!selfheal_plist(&ctx, me, &plist, |p| reloads.push(p.to_path_buf())));
+        // Stale again within the hour (a plist that never takes): left alone.
+        std::fs::write(&plist, "<!-- rowt-watch-plist v3 --><plist/>").unwrap();
+        assert!(!selfheal_plist(&ctx, me, &plist, |p| reloads.push(p.to_path_buf())));
+        // …and healed again once the hour has passed.
+        std::fs::write(dir.join("watch.plistheal"), "1000\n").unwrap();
+        assert!(selfheal_plist(&ctx, me, &plist, |p| reloads.push(p.to_path_buf())));
+        assert_eq!(reloads.len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
