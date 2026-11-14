@@ -6,3 +6,5 @@ rewrite. The plist here is only a stand-in; refresh replaces it whole.
                                   choice survives, the plist keeps ROWT_IMPL=rust
   ROWT_IMPL=bash watch refresh    the way back: state says bash, and so does the
                                   plist's key (rowt #s92; it used to drop it)
+  ROWT_IMPL=yes watch refresh     a word naming neither: nothing recorded, the
+                                  state and the key stay rust (rowt #s92)
