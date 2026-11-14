@@ -5,6 +5,8 @@ release is cut; everything under Unreleased ships with the next one.
 
 ## Unreleased
 
+## 3.9.0 — 2026-11-15
+
 - **rowt-rs is the default.** `rowt` hands every command to its Rust CLI,
   which answers all 41 commands and ran as the everyday `rowt`, watchdog
   included, through a fourteen-day trial with nothing to explain. The shell
