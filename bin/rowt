@@ -62,7 +62,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.9.0"
+ROWT_VERSION="3.9.1"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -5648,6 +5648,10 @@ Everyday:
     $PROG config export     move the setup to another Mac — 'config import' merges it in (holds secrets — encrypt)
     $PROG config export --to shadowrocket   the same lanes (and servers) for Shadowrocket on an iPhone
     $PROG down              stop everything
+
+If a command misbehaves since 3.9.0, when rowt-rs (the Rust CLI) became what runs:
+    ROWT_IMPL=bash $PROG <command>        the same command in the shell version
+    ROWT_IMPL=bash $PROG watch refresh    the watchdog too (remembered; ROWT_IMPL=rust moves it back)
 EOF
 
   # Installed docs (shipped alongside the tool) + per-command help.
@@ -8263,6 +8267,9 @@ Notes:
     it at a reachable tailnet-shared rowt (short names expand through Tailscale);
     rowt-remote-system-on <remote-host> / -off apply the remote proxy to macOS;
     rowt-share-on / -off / -status manage that share.
+  • Since 3.9.0 rowt answers through its Rust CLI, rowt-rs. ROWT_IMPL=bash in front of
+    a command runs the shell version instead; 'ROWT_IMPL=bash $PROG watch refresh' puts
+    the watchdog on it too, and 'ROWT_IMPL=rust $PROG watch refresh' moves it back.
 
 Edit which domains escape:  $DOMAINS
 Env: ROWT_PORT ($PORT)  ROWT_CLASH_PORT ($CLASH_PORT)  ROWT_IFACE (auto)  ROWT_DNS_DIRECT ($DNS_DIRECT)  SINGBOX_VERSION ($SINGBOX_VERSION)

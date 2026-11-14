@@ -5,6 +5,11 @@ release is cut; everything under Unreleased ships with the next one.
 
 ## Unreleased
 
+- `rowt help` and `rowt onboard` say what 3.9.0 changed: rowt runs its Rust
+  CLI, rowt-rs, and `ROWT_IMPL=bash` in front of a command runs the shell
+  version instead. `ROWT_IMPL=bash rowt watch refresh` puts the watchdog on the
+  shell too. Until now only the README and the rowt skill said so.
+
 ## 3.9.0 — 2026-11-15
 
 - **rowt-rs is the default.** `rowt` hands every command to its Rust CLI,

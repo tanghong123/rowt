@@ -705,6 +705,16 @@ field and would fail the whole config.
   "is it loaded" question names the gui domain, the one `watch install`
   bootstraps into: `launchctl list <label>` answers for the caller's own
   session, so over SSH a running watchdog read as NOT loaded (rowt #s77).
+
+  The agent runs whichever rowt `rowt` itself runs: since 3.9.0 that is
+  rowt-rs, the Rust CLI. `ROWT_IMPL=bash rowt watch refresh` puts it on the
+  shell instead, and `ROWT_IMPL=rust` puts it back. The choice is kept in
+  `state` (`watch_impl`) and written into the plist as `ROWT_IMPL`, because
+  launchd starts the agent with no shell profile to read it from; with no
+  choice recorded the plist names none and the agent follows the default. Both
+  ticks carry the self-heal above. A change to the plist reaches an installed
+  agent only through it, so a tick without it would leave every upgraded Mac
+  on its old plist, shown as stale, for good.
 - **Captive portals (hotel/airport Wi-Fi).** Pre-login walled gardens make the
   login popup vanish and the portal page unloadable while the proxy is on. rowt
   handles this automatically — probe hosts on the proxy bypass so the popup
