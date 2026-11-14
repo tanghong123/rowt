@@ -8,7 +8,8 @@ included from 2026-11-01, and the fourteen-day window closed on 2026-11-14
 with §6.5's promotion rule met (§6.6, "Data"). The owner decided the same day
 to make it the default (#s91), and since 3.9.0 it is: `rowt` hands every
 command to rowt-rs, and `ROWT_IMPL=bash` is the way back (§6.6, #s92). 1 and 3
-are code-complete and gated; phase 5 (Linux) not started.
+are code-complete and gated, and through the default they are what runs; phase 5
+(Linux) not started.
 The per-phase table in §5 is the authority — this line is a summary and will
 drift first.*
 
@@ -245,9 +246,9 @@ revertible and gated.
 | Phase | Scope | Parity gate (mechanisms in §6) |
 |---|---|---|
 | **0** ✅ | Characterization: generate + harvest the corpus (§6.1), build the differential harness (§6.2) and platform shims (§6.4), write the coverage ledger (§6.8), commit synthetic fixtures | **done** — `tests/parity/`. Mask makes all 38 read-only commands byte-stable across runs; 92-verdict classifier golden; ledger green on all 37 command arms; containment verified (sandboxed `proxy on` / `up` / `down` leave the live system untouched) |
-| **1** ◑ | `rowt-core::render` — replace the giant jq program. bash calls `rowt-rs render` internally. | **render done** — `crates/rowt-render`, 18/18 cases canonically identical on host + vm (`parity render-matrix`), and identical against the real 22-server config. Remaining: throwaway-port outbound oracle, bash cutover, shadow window |
+| **1** ◑ | `rowt-core::render` — replace the giant jq program. bash calls `rowt-rs render` internally. | **render done** — `crates/rowt-render`, 18/18 cases canonically identical on host + vm (`parity render-matrix`), and identical against the real 22-server config. Remaining: throwaway-port outbound oracle, bash cutover, shadow window. Since 3.9.0 rowt-rs answers every command by default and renders for itself, so the bash cutover is left only for `ROWT_IMPL=bash` |
 | **2** ✅ | classify/explain, lane set logic, absorb `corp-sync-reconcile.py` | **done** — classify: 9/9 cases × 92 destinations identical on `(lane, reason)`; lane edits: 12/12 cases identical across all three files + messages; reconcile: 210 generated cases identical to the Python. `selftest` 9/9 |
-| **3** ◑ | watchdog: FSM into core, effects via `PlatformMac`; `cmd_watch` execs the Rust tick | **FSM + shadow done** — `rowt-core::watch`, 18 unit tests replaying §11's decision table; `parity watch-diff` 5/5; `ROWT_WATCH_SHADOW=1` compares the shell's decisions against the FSM's plan on every real tick, feeding it the tick's own captive verdict rather than re-probing. **Effects done too** — `perform` drives `PlatformMac`, runs the real `cmd_reload` for a recovery, and re-probes the escape lane through the clash delay test the way the shell does. Remaining: the `cmd_watch` cutover (bash still runs its own tick and merely shadows this one), and **time** — the shadow window itself |
+| **3** ◑ | watchdog: FSM into core, effects via `PlatformMac`; `cmd_watch` execs the Rust tick | **FSM + shadow done** — `rowt-core::watch`, 18 unit tests replaying §11's decision table; `parity watch-diff` 5/5; `ROWT_WATCH_SHADOW=1` compares the shell's decisions against the FSM's plan on every real tick, feeding it the tick's own captive verdict rather than re-probing. **Effects done too** — `perform` drives `PlatformMac`, runs the real `cmd_reload` for a recovery, and re-probes the escape lane through the clash delay test the way the shell does. Remaining: the `cmd_watch` cutover (bash still runs its own tick and merely shadows this one), and **time** — the shadow window itself. Since 3.9.0 the agent runs rowt-rs's tick by default (the window closed 2026-11-14, §6.6), so both are left only for `ROWT_IMPL=bash` |
 | **4** ◑ | CLI. Built as `rowt-rs` alongside the shell first, so each command lands with evidence; only then does bash reduce to a wrapper and get deleted. Formula ships the prebuilt binary (monitor-asset pattern). | **all 37 arms native AND gated** — `parity cli-diff` compares stdout, exit status, the **whole config tree** (content and mode), the **argv trace** and the **audit log** over 253 cases. Every arm but the TUI is compared; the lifecycle four were the last to be, and all four diverged when first asked. `ROWT_IMPL=rust` hands the whole invocation to rowt-rs, by default since 3.9.0; `ROWT_IMPL=bash` is the way back (§6.6). **Done** |
 | **5** | `PlatformLinux` + tun mode + systemd units; CI matrix (macOS + ubuntu — core tests run on both, platform tests feature-gated); linux tar assets | fresh-VM install → onboard → probe → captive drill; VPN-coexistence drill with Tailscale up |
 | 6 ✅ | port the import pipeline (1,302 lines of parsing Python). No longer optional — the 2026-08-09 decision is one language in the repo, and this is what retires `depends_on "python@3.12"`. | **ported AND cut over** — `rowt-core::{sharelink,importmerge,foreign,srimport}` (+`bplist`), plus `pycli` (the seven `config/*.py` command surfaces) and the log splitter. `bin/rowt` runs the Rust: every `python3 config/*.py` call site is `rowt-rs _py <tool>`, and `ROWT_PY=1` puts the Pythons back so `cli-diff` still compares an extractor against an extractor. Gates: `vless-diff` 2,000, `merge-diff` 1,500, `foreign-diff` 1,200, `sr-diff` 1,200, `netdetect-diff`, and two the cutover forced into existence — `geosite-diff` and `splitter-diff` |
@@ -767,8 +768,9 @@ foreign-network day.
 ### 6.6 Cutover keeps a live escape hatch
 
 `ROWT_IMPL=bash|rust` selects the implementation at runtime; the bash ships
-alongside as `rowt-legacy` for one full release cycle and the Formula carries
-both. Rollback is an env var, not a reinstall. Phase 4 deletes the bash only
+alongside for at least one full release cycle (as `bin/rowt` itself, the front
+door, rather than the `rowt-legacy` this section first planned), and the
+Formula carries both. Rollback is an env var, not a reinstall. Phase 4 deletes the bash only
 after a release cycle in which the fallback was never needed.
 
 **On by default since 3.9.0** (#s92). Through 3.8 it was built and off: the
@@ -809,7 +811,13 @@ shell. The details that are load-bearing:
   environment so the tick's own self-heal writes the same file as the refresh
   that chose it. The plist's generation went to v4 with this, so each
   agent's first tick after the upgrade rewrites it, and one put back on the
-  shell under 3.8, with no key, gets its `bash`. Any other word is not
+  shell under 3.8, with no key, gets its `bash`. That rewrite was the
+  shell tick's alone (`_watch_selfheal_plist`); rowt-rs's tick never had it,
+  and with rowt-rs the default no plist change would have reached an agent
+  again. It is ported word for word, reload script included, and unit-tested
+  rather than run by cli-diff: its detached child outlives the case and,
+  once a passing case's sandbox and shims are cleaned up, would reach the
+  real launchctl and the real agent's label. Any other word is not
   recorded: the front door reads it as
   the default, and recording it as either would pin the agent to something
   nobody chose. A watchdog on rowt-rs ends §6.5's tick shadow on that

@@ -18,8 +18,9 @@ skill** in `skills/rowt/`. Don't duplicate that here.
   here is zsh with `noclobber`, so use `>|` (or the file tools) for redirection,
   and prefer `bash bin/rowt …` when testing. It is also the front door: since
   3.9.0 it hands every command to rowt-rs, from this tree's `target/` in a
-  checkout, so `bash bin/rowt …` runs whatever rowt-rs you last built (a stale
-  build included). Test the shell itself with `ROWT_IMPL=bash bash bin/rowt …`.
+  checkout (`target/release` before `target/debug`), so `bash bin/rowt …` runs
+  the last release build, however stale. Test the shell itself with
+  `ROWT_IMPL=bash bash bin/rowt …`.
   It is still what runs under `ROWT_IMPL=bash`, the way back, and it FOLLOWS
   rowt-rs (see "Rust first" below).
 - **`crates/`** — the Rust workspace: `rowt-core` (pure), `rowt-platform` (the OS
@@ -114,6 +115,10 @@ trusting a summary. It runs on every push to `main` and every PR:
 For subscription/watchdog changes, also run `python3 tests/test_subscriptions.py`
 locally after the release build. It uses Python stdlib + `jq`, isolated configs,
 a loopback feed, and a fake router; no live subscription or sing-box is needed.
+
+For a change to `main()`'s hand-over or `_rust_cli`, run
+`python3 tests/test_front_door.py` (no build needed): no parity gate passes
+through the front door, since every gate holds its shell side on the shell.
 
 **Do NOT run `cargo fmt`.** The tree is intentionally hand-formatted with long
 lines and is not fmt-clean. CI deliberately omits `cargo fmt --check`. Match the

@@ -15,7 +15,9 @@ release is cut; everything under Unreleased ships with the next one.
   Rust CLI of its own install, such as a checkout nobody built, runs the shell
   as before. A watchdog put back on the shell now carries `ROWT_IMPL=bash` in
   its plist, and every watchdog's plist is rewritten once, by its first tick
-  after the upgrade, so one put back under 3.8 gets the key. Any `ROWT_IMPL`
+  after the upgrade, so one put back under 3.8 gets the key. That rewrite
+  used to happen only on the shell's tick; rowt-rs's tick does it too now, or
+  no change to the plist would ever reach an agent again. Any `ROWT_IMPL`
   other than `bash` or `rust` is read as the default and no longer recorded
   for the watchdog.
 - Traffic metrics record the port each byte came in on: `main`, or a named

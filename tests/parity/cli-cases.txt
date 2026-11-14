@@ -1213,6 +1213,8 @@ PARITY_SCENARIO=watch-impl-rust watch refresh
 PARITY_SCENARIO=watch-impl-rust ROWT_IMPL=bash watch refresh
 PARITY_SCENARIO=watch-impl-bash watch refresh
 # Back to rowt-rs by name records rust; a word that names neither records
-# nothing, because the front door reads it as the default.
+# nothing, because the front door reads it as the default. On the rust
+# scenario, so a side that still turned any other word into bash would flip
+# both the state and the plist's key.
 PARITY_SCENARIO=watch-impl-bash ROWT_IMPL=rust watch refresh
-PARITY_SCENARIO=watch-impl-bash ROWT_IMPL=yes watch refresh
+PARITY_SCENARIO=watch-impl-rust ROWT_IMPL=yes watch refresh

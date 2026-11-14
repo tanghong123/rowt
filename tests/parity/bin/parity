@@ -1307,10 +1307,12 @@ cmd_platform_diff() {
     # Source rowt with `version` so main() is a cheap no-op, truncate the trace,
     # then call the helper itself. Running it through `rowt run` would exec a NEW
     # shell where rowt's functions do not exist — which silently compared two
-    # unrelated traces the first time this was written.
+    # unrelated traces the first time this was written. ROWT_IMPL=bash: since
+    # 3.9.0 main() hands every command to rowt-rs by default, and an exec there
+    # would replace this shell before the helper ran (rowt #s92).
     env -i HOME="$A/home" XDG_CONFIG_HOME="$A/home" \
         PATH="$A/shims:/usr/bin:/bin:/usr/sbin:/sbin" TERM=dumb LC_ALL=C TZ=UTC \
-        PARITY_TRACE="$A/trace" PARITY_ENV="$A/env" \
+        PARITY_TRACE="$A/trace" PARITY_ENV="$A/env" ROWT_IMPL=bash \
         bash -c 'source "$0" version >/dev/null 2>&1; : > "$PARITY_TRACE"; '"$shell_expr"' >/dev/null 2>&1 || true' \
         "$ROWT" || true
     # shellcheck disable=SC2086

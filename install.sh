@@ -92,7 +92,11 @@ done
 LINK="$BINDIR/rowt"
 
 # version helpers ($1 >= $2 ?)
-ver_of() { "$1" version 2>/dev/null | awk '{print $NF}'; }
+# The shell's own version, by name: since 3.9.0 a plain `rowt version` is
+# answered by the rowt-rs beside it, whose version was fixed when it was built,
+# and a checkout's bin/rowt can be ahead of its last build. Older installs
+# ignore ROWT_IMPL=bash and answer from the shell as they always did.
+ver_of() { ROWT_IMPL=bash "$1" version 2>/dev/null | awk '{print $NF}'; }
 ver_ge() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]; }
 
 if [ "$UNINSTALL" -eq 1 ]; then
