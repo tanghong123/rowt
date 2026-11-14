@@ -50,6 +50,7 @@
 #   47.  stop writing one band's lane rule-sets      -> cli-diff must fire (config tree)
 #   48.  let a live-path fixture go stale             -> live-fixtures must fire
 #   51.  hand hotspot to the shell again             -> cli-diff must fire (hotspot answered by rowt-rs)
+#   54.  a shell side the front door hands to rowt-rs -> cli-diff must still see the shell
 #   52.  misspell a doctor FLAG in the shell          -> cli-diff must fire (doctor)
 #
 # Everything happens in a throwaway copy of the repo; the real tree is never
@@ -1497,6 +1498,31 @@ else
     bad "cli-diff passed with the shell's NOT loaded line reworded — the scenario never reached it"
   else
     ok "the scenario reaches the NOT loaded branch, so the key still matches the call"
+  fi
+  cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+fi
+
+echo "54. cli-diff's shell side must run the shell when the front door would pick rowt-rs"
+cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+if [ ! -x "$ROOT/target/release/rowt-rs" ]; then
+  echo "  skip — no release build"
+else
+  # rowt #s92. rowt-rs is the front door's default, so the shell side of
+  # cli-diff runs the shell only because the harness holds it there
+  # (ROWT_DELEGATED=1). Drop that and the copy's front door finds rowt-rs
+  # through the linked target/ and execs it: both sides are then rowt-rs and
+  # every case matches. The case asks for rust by name, so this holds on a
+  # tree from before the default changed as well as after; the reworded NOT
+  # loaded line (step 53's) can then differ only if the shell really ran.
+  perl -0pi -e 's/echo "watchdog:     NOT loaded /echo "watchdog:     NOT loaded (MUTATED for selftest) /' "$tmp/bin/rowt"
+  if ! grep -qF 'NOT loaded (MUTATED for selftest)' "$tmp/bin/rowt"; then
+    bad "could not reword the shell's NOT loaded line (cmd_status moved?)"
+  elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" \
+       PARITY_CASES="$(only 'ROWT_IMPL=rust PARITY_SCENARIO=watch-not-loaded status')" \
+       "$P" cli-diff >/dev/null 2>&1; then
+    bad "cli-diff passed with the shell mutated — its shell side ran rowt-rs"
+  else
+    ok "cli-diff's shell side ran the shell with the front door asking for rowt-rs"
   fi
   cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
 fi

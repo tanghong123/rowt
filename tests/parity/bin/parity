@@ -1449,6 +1449,18 @@ cmd_cli_diff() {
     # PARITY_BASH_IMPL=rust deliberately wins over it: that mode is asking for
     # the wrapper, and the wrapper execs a binary that has no Pythons to go back
     # to. selftest 28 requires this to be the way round it is.
+    #
+    # ROWT_DELEGATED=1 holds this side on the shell whatever the front door
+    # would pick (rowt #s92: rowt-rs is the default, so an unset ROWT_IMPL no
+    # longer means the shell). Not ROWT_IMPL=bash: `watch install|refresh`
+    # writes an explicit ROWT_IMPL into state as watch_impl, so pinning it here
+    # would record bash on this side of every watch case while rowt-rs, run
+    # directly, records nothing — and the case every upgraded Mac takes, no
+    # choice made, would never be compared. The marker is what rowt-rs sets when
+    # it hands a command to the shell; the front door reads it as "already
+    # chosen" and nothing else in the shell reads it. selftest 54.
+    local -a shell_side=(ROWT_DELEGATED=1)
+    [ -n "${PARITY_BASH_IMPL:-}" ] && shell_side=(ROWT_IMPL="$PARITY_BASH_IMPL")
     ( env -i HOME="$A/home" XDG_CONFIG_HOME="$A/home" \
         PATH="$A/shims:/usr/bin:/bin:/usr/sbin:/sbin" TERM=dumb LC_ALL=C TZ=UTC \
         PARITY_TRACE="$A/trace" PARITY_ENV="$A/env" \
@@ -1456,7 +1468,7 @@ cmd_cli_diff() {
         ROWT_CORP_HEALTH="$A/env/corp-health" \
         ${cenv[@]+"${cenv[@]}"} \
         ROWT_PY="${PARITY_BASH_PY:-1}" \
-        ${PARITY_BASH_IMPL:+ROWT_IMPL="$PARITY_BASH_IMPL"} \
+        "${shell_side[@]}" \
         perl -e "$TMO" "$tmo" \
         bash "$ROWT" $cmdline > "$A/out" 2>/dev/null < /dev/null ) 2>/dev/null || arc=$?
     # shellcheck disable=SC2086

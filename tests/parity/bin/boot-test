@@ -79,6 +79,9 @@ fi
 
 export XDG_CONFIG_HOME="$S" ROWT_PORT="$PORT" ROWT_CLASH_PORT="$CLASH"
 export ROWT_NO_SYSPROXY=1   # the whole reason the lifecycle below is safe
+# The shell, by name: rowt-rs is the front door's default (rowt #s92), and the
+# `source "$ROWT"` below would otherwise exec it before detect_iface ran.
+export ROWT_IMPL=bash
 
 echo "1. render, both implementations, and let sing-box judge them"
 bash "$ROWT" render >/dev/null 2>&1 || true
