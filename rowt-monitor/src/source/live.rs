@@ -645,7 +645,7 @@ impl Source for LiveSource {
         };
         let now = SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
         let lane_s = lane.map(|l| l.label());
-        crate::metrics::history_map(&conn, now, spans, lane_s).unwrap_or_default()
+        crate::metrics::history_map(&conn, now, spans, lane_s, None).unwrap_or_default()
     }
 
     fn force_probe(&self) -> Result<(), &'static str> {

@@ -39,6 +39,23 @@ pub struct RawConn {
     pub down: u64, // cumulative bytes
     pub chains: Vec<String>,
     pub rule: String,
+    /// The rowt port it came in on (`port_of_inbound`): `main`, a named port's
+    /// name, or `-` when the feed names no inbound. Not `port`, which is the
+    /// destination's.
+    pub inbound: String,
+}
+
+/// The rowt port a connection came in on, from the feed's `metadata.type`,
+/// `<inbound type>/<inbound tag>`. rowt tags main `in` and a named port
+/// `<name>-in` (`rowt_core::render`), so `mixed/in` is `main` and
+/// `mixed/vm-in` is `vm`, the names `rowt port list` prints. A tag rowt did
+/// not render is kept as it is; no tag at all is `-`.
+pub fn port_of_inbound(ty: &str) -> String {
+    match ty.split_once('/').map(|(_, tag)| tag).unwrap_or("") {
+        "" => crate::metrics::NO_PORT.to_string(),
+        "in" => crate::metrics::MAIN_PORT.to_string(),
+        tag => tag.strip_suffix("-in").filter(|n| !n.is_empty()).unwrap_or(tag).to_string(),
+    }
 }
 
 /// Identity of a connections-table row: its lane, host, and port.
@@ -87,6 +104,7 @@ pub fn parse_connections(v: &Value) -> Vec<RawConn> {
             down: c.get("download").and_then(u64_of).unwrap_or(0),
             chains,
             rule: normalize_rule(c.get("rule").and_then(|s| s.as_str()).unwrap_or("")),
+            inbound: port_of_inbound(meta.get("type").and_then(|s| s.as_str()).unwrap_or("")),
         });
     }
     out
@@ -577,6 +595,25 @@ mod tests {
         assert_eq!(esc_lane.conns, 2);
         assert_eq!(all.conns, 3); // escape 2 + direct 1, block excluded
         assert_eq!(all.down, 2205.0);
+    }
+
+    #[test]
+    fn inbound_names_the_rowt_port() {
+        // The shapes sing-box 1.13's clash feed was seen to carry, plus the edges.
+        assert_eq!(port_of_inbound("mixed/in"), "main");
+        assert_eq!(port_of_inbound("mixed/vm-in"), "vm");
+        assert_eq!(port_of_inbound("mixed/guest-net-in"), "guest-net");
+        assert_eq!(port_of_inbound("mixed/other"), "other", "a tag rowt did not render is kept");
+        assert_eq!(port_of_inbound("mixed/-in"), "-in", "an empty name is not a port");
+        assert_eq!(port_of_inbound("mixed"), "-");
+        assert_eq!(port_of_inbound(""), "-");
+        let v = json!({"connections": [
+            {"id":"a","metadata":{"host":"x.example","destinationPort":"443","type":"mixed/vm-in"},"upload":1,"download":2,"chains":["direct"]},
+            {"id":"b","metadata":{"host":"x.example","destinationPort":"443"},"upload":1,"download":2,"chains":["direct"]}
+        ]});
+        let raw = parse_connections(&v);
+        assert_eq!(raw[0].inbound, "vm");
+        assert_eq!(raw[1].inbound, "-", "no type in the feed");
     }
 
     #[test]

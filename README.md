@@ -981,7 +981,7 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 | `explain <domain\|ip>` | explain which lane a destination takes — `escape` (proxy), `corp` (into the corp VPN), `block`, or `direct` (pass-through) — and which rule matched. Mirrors the real routing: a `--domain` (whole-host) entry wins outright, else hand-list domain suffixes win by **longest match** across all three lanes, then — for a name no rule matched, when the final route is direct — the address the router resolves it to at its own resolver, checked against the corp CIDRs and the private/overlay ranges (a hit routes it corp), then final. A name that resolver cannot answer gets a note with both hand fixes (`corp add` for an intranet name, `hotspot add` for an overlay zone only the OS resolves). Adds a live HTTP check if the router is running. (`route` still works as a hidden alias.) |
 | `report` | full offline diagnostic (deps, configs, per-server reachability, DNS, through-proxy tests, log + audit tail) → `~/.config/rowt/diag-*.txt`, **secrets masked**, for sharing. |
 | `audit [-n N\|all\|path\|clear]` | the **mutation trail** — one line per state-changing op, whether you ran it or the `watch` agent did, with `BEGIN`/`END`/`ABORT`, timing, and a `by=<parent>(<tty>)` field that says whether it was hands-on (`by=zsh`) or the watchdog (`by=launchd`). `BEGIN` is written before the work, so even a command that hangs leaves a trace. Read-only commands aren't recorded. Every **lane membership change** is in it too, as `LANE <from> -> <to> (<n>): <entries>` — an add, an `rm`, every entry of an `import`, a monitor route, a `corp sync` — and an edit made to a lane file outside rowt is logged as `outside rowt` at the next command or watchdog tick. `direct` means "in no lane"; entries are written exactly as in the lane file, so reversing a line is `rowt <lane> add|rm` of the same text. → `~/.config/rowt/log/audit.log`. |
-| `metrics [status\|top\|path\|query]` | **per-domain traffic history** — a `collector` sidecar records bytes in/out per domain/lane into a tiered SQLite store (5s → 1y). `status` shows liveness; `top [secs]` the heaviest domains; `path` the store path + schema; `query "<SQL>"` a read-only SQL passthrough. Surfaced interactively in `monitor` via the `v` flip. See [Traffic metrics](#traffic-metrics). |
+| `metrics [status\|top\|path\|query]` | **per-domain traffic history** — a `collector` sidecar records bytes in/out per domain/lane/port into a tiered SQLite store (5s → 1y). `status` shows liveness; `top [secs]` the heaviest domains; `path` the store path + schema; `query "<SQL>"` a read-only SQL passthrough. Surfaced interactively in `monitor` via the `v` flip. See [Traffic metrics](#traffic-metrics). |
 | `config [list\|export\|import]` | **back up / move the whole setup** to another machine — or, with `export --to shadowrocket`, hand it to Shadowrocket on your iPhone (see [Your rules on the iPhone](#your-rules-on-the-iphone-shadowrocket)). `export [--no-servers]` bundles the source-of-truth files (server pool, subscriptions, escape/corp/block/hotspot lane rules, `escape-dns.txt`, `manual-sources.tsv`) into a `.tgz` — `--no-servers` omits the pool and those two (they name servers), so the lane rules are safe to share or commit. `import <file>` **merges** the bundle's lane lists into yours by default (union, deduped, single-lane; entries the bundle would pull into another lane are listed and confirmed first) and leaves your server pool as-is; `--replace` overwrites the matching files instead — a whole-bundle restore. Either re-renders after. Skips the machine-specific `host.json`/`state`/binary — those regenerate via `render`/`up`. Bundle holds credentials: move it encrypted. |
 | `monitor` | **full-screen TUI** (`htop`-style) — the live view of everything at once: connections + throughput, errors/blocked over a rolling window, and server health, plus confirmed, reversible controls (server switch, lane routing, proxy toggle). See [Monitor (TUI)](#monitor-tui). |
 | `run <command> [args…]` | run a command through whatever proxy path actually reaches the internet — probes, in order, the current shell proxy env → the macOS system proxy → rowt's port (if the router is up and the system proxy is off) → direct, and execs the command with the first where the target host answers (default `https://www.google.com/`; override `ROWT_RUN_TARGET`). Aborts without running if none work. Handy for CLI tools (`claude`, `git`, `npm`…) that ignore the system proxy: `rowt run claude`. |
@@ -1214,8 +1214,9 @@ installed alongside `rowt` (also runnable standalone as `rowt-monitor`).
 ## Traffic metrics
 
 A lightweight **always-on collector** records per-domain, per-lane bytes in/out
-over time — so you can see where your bandwidth actually went, from the last five
-seconds to the last year. It runs as a **sidecar of the router** (started once the
+over time, kept apart by the port they came in on — so you can see where your
+bandwidth actually went, and through which port, from the last five seconds to
+the last year. It runs as a **sidecar of the router** (started once the
 router comes up healthy, stopped with it — no separate service to manage), holding
 the clash API's `/connections` websocket and diffing each connection's cumulative
 counters into 5-second buckets. Set `ROWT_METRICS=off` to disable it.
@@ -1230,10 +1231,12 @@ consolidated RRD-style so it stays tiny (well under ~15 MB):
 | `sample_1h` | 1 hour    | 90 days |
 | `sample_1d` | 1 day     | 1 year |
 
-Each row is `(ts, domain, lane, bytes_up, bytes_dn)`; a `meta` table holds the
-collector heartbeat. Bytes moved by connections too short-lived to sample land in
-an `(unattributed)` row, reconciled against the router's monotonic grand totals so
-the books always balance.
+Each row is `(ts, domain, lane, bytes_up, bytes_dn, port)`; a `meta` table holds
+the collector heartbeat. `port` is the port the bytes came in on, as
+`rowt port list` names it: `main` for rowt's own 127.0.0.1:7890, or a named
+port's name. Rows recorded before rowt kept ports say `-`. Bytes moved by
+connections too short-lived to sample land in an `(unattributed)` row, reconciled
+against the router's monotonic grand totals so the books always balance.
 
 ```sh
 rowt metrics                     # collector status: running? last write, size, rows
@@ -1249,9 +1252,17 @@ collector's data. Example — total bytes moved today:
 rowt metrics query "SELECT sum(bytes_up) up, sum(bytes_dn) dn FROM sample_1m"
 ```
 
+Per port over the last hour, and the heaviest domains on one port (each tier
+holds its own span, so a longer window sums several tiers, as the monitor does):
+
+```sh
+rowt metrics query "SELECT port, sum(bytes_up) up, sum(bytes_dn) dn FROM sample_5s GROUP BY port"
+rowt metrics query "SELECT domain, lane, sum(bytes_dn) dn FROM sample_5s WHERE port='vm' GROUP BY domain, lane ORDER BY dn DESC LIMIT 10"
+```
+
 The richer, interactive view is the monitor: `rowt monitor`, then **`v`** to flip
-the connections pane through the upload/download history (see
-[Monitor](#monitor-tui)).
+the connections pane through the upload/download history, and **`P`** to show one
+port's traffic (see [Monitor](#monitor-tui)).
 
 ## How it decides (probe)
 

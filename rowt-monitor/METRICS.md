@@ -1,8 +1,9 @@
 # rowt metrics — per-domain traffic history
 
-Lightweight, always-on collection of per-domain bytes in/out over time, with
-tiered rollup from 5-second resolution (1 hour) up to daily (1 year), surfaced
-in the monitor by flipping the connections pane.
+Lightweight, always-on collection of per-domain bytes in/out over time, kept
+apart by the port the traffic came in on, with tiered rollup from 5-second
+resolution (1 hour) up to daily (1 year), surfaced in the monitor by flipping
+the connections pane.
 
 ## 1. Data source
 
@@ -12,7 +13,10 @@ tracker. This build (`with_clash_api`, no `with_v2ray_api`) offers:
 - `GET /connections` — snapshot; **also upgrades to a websocket that pushes the
   full snapshot ~1×/second** (verified). Each connection carries a stable `id`
   and **cumulative** `upload`/`download` counters, plus `metadata.host`
-  (domain) and `chains` (lane).
+  (domain), `chains` (lane) and `metadata.type`, `<inbound type>/<inbound tag>`
+  (the port). rowt renders main's inbound as `in` and a named port's as
+  `<name>-in`, so `mixed/in` is port `main` and `mixed/vm-in` is port `vm`, the
+  names `rowt port list` prints (verified on sing-box 1.13.14, 2026-11-14).
 - Top-level `uploadTotal`/`downloadTotal` — **monotonic, loss-free** grand
   totals.
 
@@ -30,14 +34,15 @@ Mechanism — holds the `/connections` **websocket** (push, no poll-scheduler
 gaps; idle backoff-reconnect while the router is down = ~zero overhead):
 
 1. Per frame, per connection: `lane = classify_lane(chains)` (skip `block`);
-   `domain = host || destinationIP || "?"`. Diff cumulative counters against the
-   in-memory per-`id` cursor: `Δ = current − last` (saturating, so a sing-box
-   restart / id reuse can't go negative). Accumulate `Δ` into the current 5-second
-   bucket keyed `(domain, lane)`.
+   `domain = host || destinationIP || "?"`; `port = port_of_inbound(type)`.
+   Diff cumulative counters against the in-memory per-`id` cursor: `Δ = current
+   − last` (saturating, so a sing-box restart / id reuse can't go negative).
+   Accumulate `Δ` into the current 5-second bucket keyed `(domain, lane, port)`.
 2. **Reconcile** against the monotonic grand totals: `unattributed = ΔgrandTotal
-   − Σ Δconn`, bucketed under `("(unattributed)", "-")`. Captures the sub-second
-   tail of connections that opened+closed inside one frame, so the books always
-   balance against `uploadTotal`/`downloadTotal`.
+   − Σ Δconn`, bucketed under `("(unattributed)", "-", "-")`. Captures the
+   sub-second tail of connections that opened+closed inside one frame, so the
+   books always balance against `uploadTotal`/`downloadTotal`. The grand totals
+   are not split by port, so neither is this remainder.
 3. On 5s bucket rollover, flush the bucket to SQLite (`bin += Δ` upsert).
 4. Every 60s, run rollup (§4).
 5. On ws disconnect: flush the pending bucket, clear the per-`id` cursor (counters
@@ -58,11 +63,30 @@ same shape, `WITHOUT ROWID`:
 ```
 sample_5s / sample_1m / sample_1h / sample_1d
   (ts INTEGER, domain TEXT, lane TEXT, bytes_up INTEGER, bytes_dn INTEGER,
-   PRIMARY KEY (ts, domain, lane))
+   port TEXT DEFAULT '-',
+   PRIMARY KEY (ts, domain, lane, port))
 meta (k TEXT PRIMARY KEY, v TEXT)   -- schema_version, pid, started, last_write
 ```
 
 `bytes_up` = upload (↑), `bytes_dn` = download (↓). `ts` = bucket start (epoch s).
+`port` = the rowt port the bytes came in on: `main` or a named port's name; `-`
+when it is not known. It comes last so the first five columns keep their
+version-1 places for a `SELECT *` someone wrote against them.
+
+**Schema version 2** (2026-11-14) added `port`. Version 1 was keyed
+`(ts, domain, lane)`, and a key cannot be altered in place, so the collector's
+`open_db` rebuilds each tier in one transaction: rename, create, copy with
+`port = '-'`, drop. Rows from before the port was recorded say `-`, never
+`main`: the store cannot tell which port they came in on. Whether a tier has the
+column is read from the table, not from `schema_version`. Two version skews:
+
+- **A new monitor on a version-1 store.** After `brew upgrade` the old collector
+  keeps running until the router restarts, so the store stays at version 1 for a
+  while. The monitor only reads, never migrates, and reads such a tier as all
+  `-`: history shows whole with no port filter, empty with one.
+- **An old collector on a version-2 store** (a downgrade). Its upsert names the
+  version-1 key, which no longer matches a key, so its writes fail and nothing
+  is recorded until rowt is upgraded again. The rows already there are kept.
 
 ## 4. Rollup / retention (RRD-style consolidation)
 
@@ -73,10 +97,11 @@ meta (k TEXT PRIMARY KEY, v TEXT)   -- schema_version, pid, started, last_write
 | 1h   | 1 hour    | 90 days   | 1d |
 | 1d   | 1 day     | 1 year    | (deleted) |
 
-Fold = `INSERT … SELECT (ts/step)*step, domain, lane, sum(up), sum(dn) … WHERE
-ts < cutoff GROUP BY bucket,domain,lane ON CONFLICT DO UPDATE SET += …; DELETE
-… WHERE ts < cutoff`, in one transaction. At a few hundred rows/min this stays
-well under ~15 MB steady-state.
+Fold = `INSERT … SELECT (ts/step)*step, domain, lane, port, sum(up), sum(dn) …
+WHERE ts < cutoff GROUP BY bucket,domain,lane,port ON CONFLICT DO UPDATE SET +=
+…; DELETE … WHERE ts < cutoff`, in one transaction. At a few hundred rows/min
+this stays well under ~15 MB steady-state; a named port adds rows only for the
+domains its traffic reaches.
 
 ## 5. Surfacing in the monitor
 

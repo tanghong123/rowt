@@ -62,7 +62,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.8.40"
+ROWT_VERSION="3.8.41"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -8499,7 +8499,9 @@ $PROG metrics — per-domain traffic history (bytes in/out over time).
 An always-on collector runs as a sidecar of the router (started when the router
 comes up healthy, stopped with it) and records per-domain, per-lane bytes into a
 tiered SQLite store — 5-second resolution for the last hour, rolled up to daily
-for a year — at $CFG/metrics/traffic.db. Set ROWT_METRICS=off to disable it.
+for a year — at $CFG/metrics/traffic.db. Each row also names the port the bytes
+came in on (main, or a port from '$PROG port add'). Set ROWT_METRICS=off to
+disable it.
 
   $PROG metrics            collector status                             [default]
   $PROG metrics status     running? + last write, store path/size, row count
@@ -8510,7 +8512,7 @@ for a year — at $CFG/metrics/traffic.db. Set ROWT_METRICS=off to disable it.
 Read-only (even 'query' opens the DB read-only). The richer view is the monitor:
 '$PROG monitor', then press 'v' to
 flip the connections pane through live -> up-history -> down-history, with a
-'w'-selectable timescale band.
+'w'-selectable timescale band, and 'P' to show one port's traffic.
 EOF
 ;;
     config) cat <<EOF
@@ -9153,11 +9155,19 @@ ages (older buckets roll up into the next tier):
   lane        TEXT      NOT NULL · escape | corp | direct | - · part of PK
   bytes_up    INTEGER   NOT NULL DEFAULT 0 · upload (↑)
   bytes_dn    INTEGER   NOT NULL DEFAULT 0 · download (↓)
-  (PRIMARY KEY (ts, domain, lane); tables are WITHOUT ROWID)
+  port        TEXT      NOT NULL DEFAULT '-' · main | <named port> | - · part of PK
+  (PRIMARY KEY (ts, domain, lane, port); tables are WITHOUT ROWID)
+
+port is the rowt port the bytes came in on, as 'rowt port list' names it: main
+(rowt's own listener) or a named port. '-' marks rows recorded before the store
+kept ports, and the '(unattributed)' rows.
 
 Also 'meta' (k TEXT PRIMARY KEY, v TEXT) — the collector heartbeat:
 schema_version, pid, started, last_write. Rows with domain '(unattributed)' hold
 sub-second traffic reconciled against the router's monotonic grand totals.
+
+Traffic per port over the last hour:
+  rowt metrics query "SELECT port, sum(bytes_up) up, sum(bytes_dn) dn FROM sample_5s GROUP BY port"
 EOF
       ;;
     query)
