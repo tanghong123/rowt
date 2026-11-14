@@ -1,11 +1,14 @@
 # Porting rowt: bash → Rust, macOS → macOS + Linux
 
-*Investigation and design, 2026-08-08. Status as of 2026-11-01: phases 0, 2, 4
+*Investigation and design, 2026-08-08. Status as of 2026-11-14: phases 0, 2, 4
 and 6 done — the repo has no Python on any runtime path, and `ROWT_IMPL=rust`
 runs every command in Rust, the shell kept only for typos (§5, "What
-still reaches for bash"); aries-black has run it as its everyday rowt since
-2026-10-31, watchdog included since 2026-11-01. 1 and 3 are code-complete and gated, waiting on their
-cutovers and on the shadow window's fourteen days; phase 5 (Linux) not started.
+still reaches for bash"). aries-black ran it as its everyday rowt from
+2026-10-31, watchdog included from 2026-11-01, and the fourteen-day window
+closed on 2026-11-14 with §6.5's promotion rule met (§6.6, "Data"). The owner
+decided the same day: rowt-rs becomes the default in the next release, with
+`ROWT_IMPL=bash` as the way back (#s91; the switch is #s92). 1 and 3 are
+code-complete and gated, waiting on that cutover; phase 5 (Linux) not started.
 The per-phase table in §5 is the authority — this line is a summary and will
 drift first.*
 
@@ -815,7 +818,15 @@ three separate things, none of which is more porting:
 1. **Data.** §6.5's promotion rule — 14 days of real use with zero unexplained
    divergences, including a corp-network day and a foreign-network day. The
    shadow window ships (3.2.6) but a window that was never started produces
-   silence, and silence looks exactly like agreement.
+   silence, and silence looks exactly like agreement. **Met on 2026-11-14**
+   (#s59): fourteen days of everyday use, every audited command exiting 0,
+   every shadow comparison identical on both machines since 2026-10-21, corp
+   traffic every day and a day abroad in local mode. What the window found
+   that no gate could were two install-layout bugs, both rowt-rs looking for a
+   file where a brew keg does not keep it (#s76, #s89); the parity sandbox runs
+   from a checkout, where every lookup agrees. An install layout the trial
+   never ran, a pinned package or an Intel source build, is where the next one
+   would hide.
 2. ~~**Packaging.**~~ Done. `install.sh` excludes both `target/` trees and
    copies the five binaries into `$PREFIX/bin/`; the Formula installs `rowt-rs`
    into `libexec/bin` and symlinks it as `rowt-rust`. Both were one change, not
