@@ -125,6 +125,21 @@ once, so `v` never re-queries or reorders.
 - **`w`** (+ `[` `]`) — the errors pane's rolling window, **global** (kept separate
   from `s` so neither key needs focus).
 - **`f`** (+ `1/2/3/0`) — lane filter, scopes both panes incl. metrics.
+- **`P`** — port scope, **global**: `all → main → each named port → all`, from
+  `Snapshot::ports` (the inbounds of `host.json`). Unlike `f`, which narrows the
+  detail rows and leaves the header aggregate whole, the port scopes everything
+  the connections pane counts: the source filters the live connections by
+  `RawConn::inbound` before building rows and the per-lane rates, keeps its
+  closed-connection carry-over per port (capped per port, so a busy port cannot
+  evict a quiet one's totals), and passes the port to `history_map`.
+  So the pane reads as if that port were the router's only one. The errors pane
+  is not scoped: the lane logs carry no inbound (at the router's log level the
+  `inbound/mixed[...]` lines are not written), and its caption says
+  `· all ports` while a port is chosen. The connections caption names the port
+  (`live connections · port vm`). The server-health override still reads every
+  port's escape traffic. `esc` clears the scope after the lane filter; a port
+  removed while chosen drops the scope on the next tick, with a toast. With
+  main the only port, `P` says how to add one instead of cycling.
 - **`/`** — host search: a case-insensitive regex (literal-substring fallback if it
   doesn't compile) on the host name, filtering the **detail rows of both panes**,
   composed **AND** with `f`. It never touches the header aggregate — search hides
@@ -163,4 +178,5 @@ connections` (the `·`-as-separator convention stays for real field joins).
 | `s` | span — from Live opens ↑ upload, then cycles the band (recent/days/year) |
 | `w` `[` `]` | errors pane rolling window |
 | `f` `1/2/3/0` | lane filter (scopes both panes) |
+| `P` | port scope — one port's traffic in the connections pane (main / each named port / all) |
 | `/` | host search — regex filter on both panes (AND with `f`); `↵` commit · `esc` clear |

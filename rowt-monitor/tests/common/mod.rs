@@ -81,6 +81,10 @@ impl Source for Recording {
         self.inner.history(spans, lane)
     }
 
+    fn set_port(&mut self, port: Option<&str>) {
+        self.inner.set_port(port)
+    }
+
     fn use_server(&self, tag: &str) {
         self.calls.lock().unwrap().push(tag.to_string());
     }

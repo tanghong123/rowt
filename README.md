@@ -1133,6 +1133,13 @@ reports its background wrongly, or if you switch light/dark mid-session.
   - The header rows are a **per-lane aggregate** of whatever the pane shows (all /
     escape / corp / direct), and stay all-lanes even when `f` filters the detail
     list. Block-lane traffic is excluded.
+  - Press **`P`** to show **one port's traffic**: `main` (rowt's own
+    127.0.0.1:7890), then each port from `rowt port add`, then every port again.
+    Unlike `f`, the port scopes the whole pane, header rates included, as if that
+    port were the only one: live rows, the per-lane rates and the upload/download
+    history. The caption names it (`live connections · port vm`). The errors pane
+    stays all ports, since the router's logs don't say which port a line came in
+    on. `esc` clears it, after the lane filter.
   - Press **`/`** to search hosts by **regex** (case-insensitive; a literal-substring
     fallback if it doesn't compile). It filters the detail rows of **both** panes at
     once and composes **AND** with the lane filter, but — like `f` — never touches
@@ -1152,7 +1159,7 @@ its selection) · `←→`/`hl` switch pane / pick a server (wrapping at the end
 · `g` toggle scroll/list
 · `Tab` cycle focus (connections → errors → health)
 · `v` flip the connections pane (live / ↑ upload / ↓ download) · `s` span (the
-metrics timescale band) · `f` (or `1`/`2`/`3`, `0`) lane filter · `/` search
+metrics timescale band) · `f` (or `1`/`2`/`3`, `0`) lane filter · `P` port · `/` search
 hosts (regex, filters both panes; `↵` commit, `esc` clear) · `w` / `[` `]`
 errors window · `y` copy the selected domain · `p` pause · `?` help · `q` quit —
 all focus-independent. Mouse: wheel scrolls the list

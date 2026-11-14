@@ -25,9 +25,12 @@ rowt-monitor --render 150x38   # print one frame as plain text (dev/testing)
 forgets it) · `←→`/`hl` switch pane / pick a server chip · `Tab` cycle focus
 (conns → errors → health) · `g` toggle servers: scroll / list · `v` flip the connections pane (live / ↑ upload /
 ↓ download history) · `s` span (metrics timescale band) · `f` lane filter
-(`1`/`2`/`3` jump, `0` clear) · `/` search hosts (regex, filters both panes;
-`↵` commit, `esc` clear) · `w` or `[`/`]` errors window · `y` yank selected
-domain · `p` pause · `?` help · `q` quit. (`v`/`s`/`f`/`/`/`w` are all global.)
+(`1`/`2`/`3` jump, `0` clear) · `P` port: show one port's traffic in the
+connections pane, header rates and history included (main, then each named
+port, then all; the errors pane stays all ports) · `/` search hosts (regex,
+filters both panes; `↵` commit, `esc` clear) · `w` or `[`/`]` errors window ·
+`y` yank selected domain · `p` pause · `?` help · `q` quit.
+(`v`/`s`/`f`/`P`/`/`/`w` are all global.)
 
 **Controls** (confirmed, reversible; each runs the matching `rowt` command):
 `e`/`c`/`b`/`d` route the locked domain → escape/corp/block/direct (arm, then

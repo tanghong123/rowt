@@ -37,6 +37,14 @@ pub trait Source {
         History::new()
     }
 
+    /// Scope later polls and history reads to one rowt port (`main` or a named
+    /// port, as `Snapshot::ports` lists them); `None` = every port. Unlike the
+    /// lane filter, which narrows only the detail rows, a port scope narrows
+    /// what the connections pane counts, its header rates included: it shows
+    /// that port's traffic as if it were the only one. The errors pane stays
+    /// whole, since the lane logs do not say which port a line came in on.
+    fn set_port(&mut self, _port: Option<&str>) {}
+
     /// Request an immediate server re-probe, or explain why it cannot start.
     fn force_probe(&self) -> Result<(), &'static str> { Err("probe unavailable") }
 

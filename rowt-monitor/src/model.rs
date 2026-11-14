@@ -384,6 +384,9 @@ pub struct Snapshot {
     /// read lands. Turning auto off pins exactly this, so it is never guessed.
     pub auto_now: Option<String>,
     pub chips: Vec<Server>, // complete pool, including pending readings; UI sorts by health and latency
+    /// The ports the router listens on, as `rowt port list` names them: `main`
+    /// first, then each named port. What `P` cycles through.
+    pub ports: Vec<String>,
 }
 
 #[cfg(test)]

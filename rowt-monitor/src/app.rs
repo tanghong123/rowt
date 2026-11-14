@@ -254,6 +254,7 @@ pub enum Action {
     WindowSet(Window),
     ConnViewCycle, // v — pan the connections pane: live → ↑ upload → ↓ download
     BandCycle,     // s — cycle the metrics-view timescale band (span)
+    PortCycle,     // P — scope the connections pane to one port: all → main → each named port → all
     Yank,
     TogglePause,
     ToggleHelp,
@@ -273,7 +274,7 @@ pub enum Action {
     RouteHotspotSuffix,
     ArmEdit(Edit), // a text key while armed — edit the entry in the confirm bar
     Confirm,      // Enter — commit the armed edit
-    Escape,       // Esc — cancel arm / clear selection / clear lane filter (in that order)
+    Escape,       // Esc — cancel arm / clear selection / search / lane filter / port scope (in that order)
     UseServer,    // u — switch to the selected server (immediate); in auto mode, pins it
     ToggleProxy,  // o — toggle the macOS system proxy (immediate)
     ToggleAuto,   // a — auto server selection on/off (global); off pins the server in use
@@ -307,6 +308,9 @@ pub struct App {
 
     pub paused: bool,
     pub lane_filter: Option<Lane>,
+    /// The port the connections pane shows (`P`); None = every port. Held by
+    /// the source too (`Source::set_port`), which does the scoping.
+    pub port_scope: Option<String>,
     pub window: Window,
 
     pub focus: Focus,
@@ -387,6 +391,7 @@ impl App {
             snap,
             paused: false,
             lane_filter: None,
+            port_scope: None,
             window,
             focus: Focus::Conn,
             conn_sel: 0,
@@ -435,6 +440,14 @@ impl App {
     pub fn tick(&mut self) {
         if !self.paused {
             self.repoll();
+            // The scoped port was removed (`rowt port rm`): show every port
+            // again rather than an empty pane named after a port that is gone.
+            if let Some(p) = self.port_scope.clone() {
+                if !self.snap.ports.is_empty() && !self.snap.ports.contains(&p) {
+                    self.notify(format!("port {p} is gone · showing all ports"));
+                    self.set_port_scope(None);
+                }
+            }
             self.refetch_history();
             self.resolve_keys();
             self.clamp_selection();
@@ -647,6 +660,7 @@ impl App {
             }
             ConnViewCycle => self.pan_conn_view(),
             BandCycle => self.cycle_band(),
+            PortCycle => self.cycle_port(),
             Yank => self.yank(),
             FocusConn => self.set_focus(Focus::Conn),
             FocusErr => self.set_focus(Focus::Err),
@@ -1001,7 +1015,7 @@ impl App {
     }
 
     /// Esc priority: cancel an arm, else clear the focused selection, else clear
-    /// the host search, else clear the lane filter.
+    /// the host search, else clear the lane filter, else the port scope.
     fn handle_escape(&mut self) {
         if self.armed.take().is_some() {
             return;
@@ -1028,7 +1042,42 @@ impl App {
         if self.lane_filter.is_some() {
             self.lane_filter = None;
             self.on_lane_change();
+            return;
         }
+        if self.port_scope.is_some() {
+            self.set_port_scope(None);
+        }
+    }
+
+    /// `P` — the next port in `Snapshot::ports` (main, then each named port),
+    /// then every port again. With main the only port there is nothing to
+    /// pick, so it says how to make another instead.
+    fn cycle_port(&mut self) {
+        let ports = self.snap.ports.clone();
+        let next = match self.port_scope.as_ref().and_then(|p| ports.iter().position(|q| q == p)) {
+            Some(i) => ports.get(i + 1).cloned(),
+            // Unscoped, or scoped to a port no longer listed: start over.
+            None if self.port_scope.is_some() => None,
+            None if ports.len() < 2 => {
+                self.notify("only the main port · `rowt port add` makes another".to_string());
+                return;
+            }
+            None => ports.first().cloned(),
+        };
+        self.set_port_scope(next);
+    }
+
+    /// Change the port scope: hand it to the source, re-poll and re-query the
+    /// history under it, and drop the selection, which may name a host the new
+    /// scope does not have (the same reset a lane change does).
+    fn set_port_scope(&mut self, port: Option<String>) {
+        self.port_scope = port;
+        self.source.set_port(self.port_scope.as_deref());
+        self.conn_sel = 0;
+        self.conn_scroll = 0;
+        self.conn_key = None;
+        self.repoll();
+        self.refetch_history();
     }
 
     fn use_selected_server(&mut self) {

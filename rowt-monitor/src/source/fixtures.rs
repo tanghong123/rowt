@@ -15,16 +15,29 @@ pub struct FixtureSource {
     /// When true, every field returns its exact anchor value (no jitter). Used
     /// by `--render` so the output matches the golden captures byte-for-byte.
     still: bool,
+    /// The port scope (`Source::set_port`). The fixture has two ports: `vm`,
+    /// a guest VM's apt mirror and some of its API calls, and `main`, the
+    /// rest. Unscoped it shows both, exactly as the golden captures do.
+    port: Option<String>,
 }
+
+/// The fixture's ports, as `rowt port list` would name them.
+const FIXTURE_PORTS: [&str; 2] = ["main", "vm"];
 
 impl FixtureSource {
     pub fn new() -> Self {
-        FixtureSource { tick: 0, seed: 0x9e3779b97f4a7c15, still: false }
+        FixtureSource { tick: 0, seed: 0x9e3779b97f4a7c15, still: false, port: None }
     }
 
     /// A motionless fixture: anchors only, for golden-render diffing.
     pub fn still() -> Self {
-        FixtureSource { tick: 0, seed: 0x9e3779b97f4a7c15, still: true }
+        FixtureSource { tick: 0, seed: 0x9e3779b97f4a7c15, still: true, port: None }
+    }
+
+    /// Which fixture port the scope names: Some(true) = vm, Some(false) =
+    /// main, None = unscoped (every port).
+    fn scope_is_vm(&self) -> Option<bool> {
+        self.port.as_deref().map(|p| p == "vm")
     }
 
     fn next_unit(&mut self) -> f64 {
@@ -76,7 +89,10 @@ impl Source for FixtureSource {
         // dormant-only — heavy in history but not connected now — to show the
         // greyed superset rows. Each anchor is a ~24h download total, apportioned
         // across the band columns by span; upload is a fraction.
-        let anchors: [(&str, Lane, u64); 6] = [
+        //
+        // Per port: vm carries all of the debian mirror and 300 MB of the API
+        // calls; main the rest. Unscoped is the sum, the anchors as before.
+        let all: [(&str, Lane, u64); 6] = [
             ("api.anthropic.com", Lane::Escape, 1_240_000_000),
             ("www.youtube.com", Lane::Escape, 980_000_000),
             ("netflix.com", Lane::Escape, 1_500_000_000), // dormant-only
@@ -84,6 +100,19 @@ impl Source for FixtureSource {
             ("backups.corp.example.com", Lane::Corp, 340_000_000), // dormant-only
             ("mail.google.com", Lane::Escape, 96_000_000),
         ];
+        let vm: [(&str, Lane, u64); 2] = [
+            ("api.anthropic.com", Lane::Escape, 300_000_000),
+            ("mirrors.debian.org", Lane::Direct, 128_000_000),
+        ];
+        let anchors: Vec<(&str, Lane, u64)> = match self.scope_is_vm() {
+            None => all.to_vec(),
+            Some(true) => vm.to_vec(),
+            Some(false) => all
+                .iter()
+                .map(|(d, l, day)| (*d, *l, day - vm.iter().find(|v| v.0 == *d).map_or(0, |v| v.2)))
+                .filter(|(_, _, day)| *day > 0)
+                .collect(),
+        };
         let widest = spans[3] as f64;
         anchors
             .iter()
@@ -117,16 +146,56 @@ impl Source for FixtureSource {
         ];
 
         // Per-lane aggregates match the header rows in the renders.
-        let lanes = vec![
+        let mut lanes = vec![
             LaneAgg { lane: Lane::Escape, up: self.jitter(2.7 * MB, 0.06), down: self.jitter(3.5 * MB, 0.06), conns: 20 },
             LaneAgg { lane: Lane::Corp, up: self.jitter(144.0 * KB, 0.1), down: self.jitter(44.0 * KB, 0.1), conns: 3 },
             LaneAgg { lane: Lane::Direct, up: self.jitter(5.0 * KB, 0.15), down: self.jitter(2.0 * KB, 0.15), conns: 2 },
         ];
-        let all = AllAgg {
+        let mut all = AllAgg {
             up: self.jitter(2.9 * MB, 0.05),
             down: self.jitter(3.5 * MB, 0.05),
             conns: 25,
         };
+        let mut conns = conns;
+        // A port scope: vm's share, or main as the whole less vm's share.
+        // vm holds one API connection (120 MB up, 96 MB down so far, moving
+        // 0.4/0.6 MB/s) and the debian mirror's one.
+        let vm_api = (120.0 * MB, 96.0 * MB);
+        let vm_lanes = [(Lane::Escape, 0.4 * MB, 0.6 * MB, 1u32), (Lane::Corp, 0.0, 0.0, 0), (Lane::Direct, 1.0 * KB, 1.0 * KB, 1)];
+        match self.scope_is_vm() {
+            None => {}
+            Some(true) => {
+                conns.retain(|c| c.host == "api.anthropic.com" || c.host == "mirrors.debian.org");
+                for c in &mut conns {
+                    if c.host == "api.anthropic.com" {
+                        (c.conns, c.up, c.down) = (1, vm_api.0, vm_api.1);
+                    }
+                }
+                for (l, (lane, up, down, n)) in lanes.iter_mut().zip(vm_lanes) {
+                    debug_assert_eq!(l.lane, lane);
+                    (l.up, l.down, l.conns) = (up, down, n);
+                }
+            }
+            Some(false) => {
+                conns.retain(|c| c.host != "mirrors.debian.org");
+                for c in &mut conns {
+                    if c.host == "api.anthropic.com" {
+                        (c.conns, c.up, c.down) = (c.conns - 1, c.up - vm_api.0, c.down - vm_api.1);
+                    }
+                }
+                for (l, (lane, up, down, n)) in lanes.iter_mut().zip(vm_lanes) {
+                    debug_assert_eq!(l.lane, lane);
+                    (l.up, l.down, l.conns) = (l.up - up, l.down - down, l.conns - n);
+                }
+            }
+        }
+        if self.port.is_some() {
+            all = AllAgg {
+                up: lanes.iter().map(|l| l.up).sum(),
+                down: lanes.iter().map(|l| l.down).sum(),
+                conns: lanes.iter().map(|l| l.conns).sum(),
+            };
+        }
 
         let errors = vec![
             err(15, ErrKind::Timeout, "vpn.corp.example.com"),
@@ -186,7 +255,12 @@ impl Source for FixtureSource {
             active_server: "JP-Tokyo".into(),
             auto_now: None,
             chips,
+            ports: FIXTURE_PORTS.iter().map(|p| p.to_string()).collect(),
         }
+    }
+
+    fn set_port(&mut self, port: Option<&str>) {
+        self.port = port.map(str::to_string);
     }
 }
 
