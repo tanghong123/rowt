@@ -275,12 +275,49 @@ def free_port():
 
 def local_address():
     """An IPv4 address of this machine other than loopback, or None."""
-    out = subprocess.run(["ifconfig"], capture_output=True, text=True).stdout
+    # By path: a non-interactive ssh shell's PATH can lack /sbin.
+    ifconfig = "/sbin/ifconfig" if os.access("/sbin/ifconfig", os.X_OK) else "ifconfig"
+    out = subprocess.run([ifconfig], capture_output=True, text=True).stdout
     for line in out.splitlines():
         parts = line.split()
         if len(parts) >= 2 and parts[0] == "inet" and not parts[1].startswith("127."):
             return parts[1]
     return None
+
+
+def answers_here(host):
+    """Whether a listener of this test's own on `host` gets a connection's data.
+
+    With the macOS application firewall on, a listener on the LAN address
+    completes the handshake but never receives data (Homebrew's Python is not
+    on the firewall's allowed list), while the same listener on 127.0.0.1
+    does. The drill below would then read as rowt failing to probe."""
+    srv = socket.socket()
+    srv.bind((host, 0))
+    srv.listen(1)
+    srv.settimeout(3)
+
+    def serve():
+        try:
+            c, _ = srv.accept()
+            with c:
+                c.settimeout(3)
+                c.sendall(recv_exact(c, 4))
+        except OSError:
+            pass
+
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+    try:
+        with socket.create_connection((host, srv.getsockname()[1]), 3) as c:
+            c.settimeout(3)
+            c.sendall(b"ping")
+            return recv_exact(c, 4) == b"ping"
+    except (OSError, ConnectionError):
+        return False
+    finally:
+        srv.close()
+        t.join(4)
 
 
 def recv_exact(c, n):
@@ -387,6 +424,10 @@ class ProbeDrill(unittest.TestCase):
         lan = local_address()
         if not lan:
             self.skipTest("no non-loopback IPv4 address to stand for the second candidate")
+        if not answers_here(lan):
+            self.skipTest(f"a listener on this Mac's own address {lan} gets no data, so the second "
+                          "candidate cannot answer: is the application firewall on? "
+                          "(/usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate)")
         for implementation in ("bash", "rust"):
             with self.subTest(implementation=implementation):
                 a, b = FakeDoH(), FakeDoH()
