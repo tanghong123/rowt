@@ -1179,15 +1179,16 @@ else
   cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
 fi
 
-echo "40. a route to direct must name the lane the entry left"
+echo "40. an entry taken out of every lane must name the lane it left"
 cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
 if [ ! -x "$ROOT/target/release/rowt-rs" ]; then
   echo "  skip — no release build"
 else
-  # The case this exists for: the monitor's `d` runs `rm` against all four
-  # lanes, and only the lane that held the host may log — by name. Spell the
-  # absent side differently on one implementation; the block rm case must fail.
-  perl -0pi -e 's|f = \(e in b\) \? b\[e\] : "direct"|f = (e in b) ? b[e] : "unlisted"|' "$tmp/bin/rowt"
+  # The case this exists for: the monitor's `d` runs `rm` against every lane,
+  # and only the lane that held the host may log — by name. Spell the absent
+  # side ("none" since the direct lane, "direct" before) differently on one
+  # implementation; the block add case must fail.
+  perl -0pi -e 's|f = \(e in b\) \? b\[e\] : "none"|f = (e in b) ? b[e] : "unlisted"|' "$tmp/bin/rowt"
   if ! grep -qF ': "unlisted"; t =' "$tmp/bin/rowt"; then
     bad "could not respell the absent lane (_lane_diff moved?)"
   elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" \
