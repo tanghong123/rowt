@@ -327,6 +327,16 @@ snapshot_fs() {  # $1=outdir — the config tree, minus what is volatile by desi
             "$(stat -f %Lp "$f" 2>/dev/null || stat -c %a "$f" 2>/dev/null || echo '?')" \
             "$f"
         done
+    # A link is not a file to `-type f`, so one side removing a lane's dangling
+    # link and the other keeping it would read as agreement (direct-dangling).
+    # Its target is recorded as written, the sandbox's own root spelled @OUT@.
+    find . -type l \
+      ! -path './log/*' ! -path './cache/*' ! -path './bin/*' \
+      | sort | while read -r f; do
+          t="$(readlink "$f")"
+          case "$t" in "$out"/*) t="@OUT@/${t#"$out"/}" ;; esac
+          printf 'link %s  %s\n' "$t" "$f"
+        done
   ) > "$out/fsstate"
   # The rc files are NOT in the config tree — they live in $HOME beside it — and
   # two commands write them: `shell-init --install` appends the eval block and

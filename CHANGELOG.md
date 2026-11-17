@@ -5,6 +5,11 @@ release is cut; everything under Unreleased ships with the next one.
 
 ## Unreleased
 
+- The shell (`ROWT_IMPL=bash`) leaves a lane file that is a dangling link as it
+  is and lists that lane as empty, as rowt-rs does. It used to remove the link
+  at the first command, and `rowt <lane> list` stopped with no output while a
+  lane could not be read.
+
 ## 3.10.1 — 2026-11-18
 
 - **A direct lane: `rowt direct add|rm|list|import|clear|dump`.** Names in

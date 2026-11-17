@@ -40,7 +40,7 @@
 #   36.  keep empty query values in a share link   -> vless-diff must fire
 #   38.  rename the overlay bypass marker          -> cli-diff must fire
 #   39.  stop noticing lane edits made outside rowt -> cli-diff must fire
-#   40.  stop naming the lane an entry LEFT          -> cli-diff must fire
+#   40.  blind either side of a LANE line         -> cli-diff must fire
 #   41.  take the lowest sample, not the median      -> cli-diff must fire
 #   42.  drop best's 50 ms tolerance to 0             -> cli-diff must fire
 #   43.  pass a stale corp verdict off as current    -> cli-diff must fire
@@ -52,6 +52,7 @@
 #   51.  hand hotspot to the shell again             -> cli-diff must fire (hotspot answered by rowt-rs)
 #   54.  a shell side the front door hands to rowt-rs -> cli-diff must still see the shell
 #   52.  misspell a doctor FLAG in the shell          -> cli-diff must fire (doctor)
+#   55.  remove a dangling lane link in the shell    -> cli-diff must fire (config tree links)
 #
 # Everything happens in a throwaway copy of the repo; the real tree is never
 # touched. Run it after changing the harness itself.
@@ -1179,25 +1180,39 @@ else
   cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
 fi
 
-echo "40. an entry taken out of every lane must name the lane it left"
+echo "40. a lane line must name the lane an entry left and the lane it joined"
 cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
 if [ ! -x "$ROOT/target/release/rowt-rs" ]; then
   echo "  skip — no release build"
 else
   # The case this exists for: the monitor's `d` runs `rm` against every lane,
-  # and only the lane that held the host may log — by name. Spell the absent
-  # side ("none" since the direct lane, "direct" before) differently on one
-  # implementation; the block add case must fail.
-  perl -0pi -e 's|f = \(e in b\) \? b\[e\] : "none"|f = (e in b) ? b[e] : "unlisted"|' "$tmp/bin/rowt"
-  if ! grep -qF ': "unlisted"; t =' "$tmp/bin/rowt"; then
-    bad "could not respell the absent lane (_lane_diff moved?)"
-  elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" \
-       PARITY_CASES="$(only 'block add fresh-sentinel.example --no-reload')" \
-       "$P" cli-diff >/dev/null 2>&1; then
-    bad "cli-diff passed with the two sides naming a lane transition differently"
-  else
-    ok "cli-diff caught a lane transition named differently"
-  fi
+  # and only the lane that held the host may log — by name. Each mutation
+  # blinds one implementation to one side of `LANE <from> -> <to>`, and the case
+  # that writes that side must fail: the lane a removed entry left, and the
+  # absent side ("none" since the direct lane, "direct" before) where an added
+  # entry came from and where a removed one went.
+  lane_side() { # $1=the side  $2=perl substitution  $3=a string it leaves  $4=case
+    cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+    perl -0pi -e "$2" "$tmp/bin/rowt"
+    if ! grep -qF "$3" "$tmp/bin/rowt"; then
+      bad "could not blind $1 (_lane_diff moved?)"
+    elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" \
+         PARITY_CASES="$(only "$4")" \
+         "$P" cli-diff >/dev/null 2>&1; then
+      bad "cli-diff passed with the two sides naming $1 differently"
+    else
+      ok "cli-diff caught $1 named differently"
+    fi
+  }
+  lane_side "the lane a removed entry left" \
+    's|f = \(e in b\) \? b\[e\] :|f = (e in b) ? "a lane" :|' 'f = (e in b) ? "a lane" :' \
+    'block rm tracker.example.net --no-reload'
+  lane_side "where an added entry came from" \
+    's|f = \(e in b\) \? b\[e\] : "none"|f = (e in b) ? b[e] : "unlisted"|' ': "unlisted"; t =' \
+    'block add fresh-sentinel.example --no-reload'
+  lane_side "where a removed entry went" \
+    's|t = \(e in a\) \? a\[e\] : "none"|t = (e in a) ? a[e] : "unlisted"|' 'a[e] : "unlisted"' \
+    'block rm tracker.example.net --no-reload'
   cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
 fi
 
@@ -1550,6 +1565,27 @@ else
     bad "cli-diff passed with the shell mutated — its shell side ran rowt-rs"
   else
     ok "cli-diff's shell side ran the shell with the front door asking for rowt-rs"
+  fi
+  cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+fi
+
+echo "55. a dangling lane link one side removes must be caught"
+cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+if [ ! -x "$ROOT/target/release/rowt-rs" ]; then
+  echo "  skip — no release build"
+else
+  # The tree snapshot lists only files, so until it recorded links, the shell
+  # removing a lane's dangling link after a failed seed (as it did through
+  # 3.10.1) and rowt-rs keeping it read as agreement. Put the old removal back.
+  perl -0pi -e 's|  if \[ -e "\$1" \]; then rm -f "\$\{1:\?\}" 2>/dev/null; fi\n|  rm -f "\${1:?}" 2>/dev/null\n|' "$tmp/bin/rowt"
+  if grep -qF 'if [ -e "$1" ]; then rm -f' "$tmp/bin/rowt"; then
+    bad "could not put the old removal back (_seed_lane moved?)"
+  elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" \
+       PARITY_CASES="$(only 'PARITY_SCENARIO=direct-dangling direct list')" \
+       "$P" cli-diff >/dev/null 2>&1; then
+    bad "cli-diff passed with the shell removing the dangling link rowt-rs keeps"
+  else
+    ok "cli-diff caught the shell removing a dangling lane link"
   fi
   cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
 fi

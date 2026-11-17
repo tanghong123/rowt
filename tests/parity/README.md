@@ -424,6 +424,11 @@ Three limits, stated rather than implied:
   `make_sandbox` removes after the overlay (`direct-seed`: no
   `direct-domains.txt`, so the first command seeds it from the template, as on
   a box last run by a rowt from before the direct lane).
+* **Links are part of the tree.** The snapshot records each symlink in the
+  config tree with its target, outside `log/`, `cache/` and `bin/` as for
+  files. A link is not a file to `find -type f`, so before this one side
+  removing a lane's dangling link and the other keeping it read as agreement
+  (`direct-dangling`, selftest 55).
 * **A purge leaves nothing to compare, and that is agreement.** `diff -q` on
   two files that are both absent exits 2, which reads like "differs" — so the
   lane-file check asks whether either side still has the file before it

@@ -376,6 +376,10 @@ block rm ads.example
 PARITY_SCENARIO=direct-seed direct list
 PARITY_SCENARIO=direct-seed escape list
 PARITY_SCENARIO=direct-seed escape add new.example
+# A lane file that is a dangling link: the seed cannot write through it, both
+# sides leave the link, and every lane lists, the dangling one as empty.
+PARITY_SCENARIO=direct-dangling direct list
+PARITY_SCENARIO=direct-dangling escape list
 PARITY_SCENARIO=direct-tie render
 # `log` is `tail -f`: both sides are expected to be killed by the alarm, so
 # it gets a short one rather than a minute of proving they hang alike.

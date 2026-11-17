@@ -1,0 +1,7 @@
+A lane file that is a dangling link: direct-domains.txt points into a folder
+that does not exist (say a dotfiles link whose folder is not synced yet). The
+overlay's link replaces the base fixture's file. Every command tries to seed
+the lane, because nothing exists at the path, and the write cannot open
+through the link. Both sides must leave the link as it is (through 3.10.1 the
+shell removed it) and read the lane as empty: a read-only `list` used to end
+the shell when a lane could not be read. The tree snapshot records links.

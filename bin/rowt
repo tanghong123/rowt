@@ -62,7 +62,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.10.1"
+ROWT_VERSION="3.10.2"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -466,7 +466,9 @@ sub_count() {
 _seed_lane() { # $1=lane file $2=template
   # Anything already at the path is left alone, a directory included, and a
   # write that fails (a config folder rowt cannot write) says nothing: rowt-cli
-  # checks `exists()` and ignores the write's error, as the old `cp` did.
+  # checks `exists()` and ignores the write's error, as the old `cp` did. A
+  # write that could not even open leaves the path as it was, so a dangling
+  # link stays, as rowt-cli's does; only a file the failed write left is removed.
   if [ -e "$1" ] || [ ! -f "$2" ]; then return 1; fi
   local -a others=(); local f
   for f in "$BLOCK_DOMAINS" "$CORP_DOMAINS" "$DIRECT_DOMAINS" "$DOMAINS" "$HOTSPOT_DOMAINS"; do
@@ -480,7 +482,8 @@ _seed_lane() { # $1=lane file $2=template
        { print }' ${others[@]+"${others[@]}"} "$2" > "$1"; } 2>/dev/null; then
     return 0
   fi
-  rm -f "${1:?}" 2>/dev/null; return 1
+  if [ -e "$1" ]; then rm -f "${1:?}" 2>/dev/null; fi
+  return 1
 }
 # The seeded lanes' entries ($@ = lane file pairs), logged against the last
 # logged lane state as `seeded: `, which then holds them — or the next bracket
@@ -1012,7 +1015,9 @@ edit_list() {
   # already-present entry, or removing a missing one, is a no-op — no restart).
   # Snapshot ALL lanes, not just the target: an `add` may also pull the entry out
   # of a sibling lane (single-lane invariant), which likewise needs a reload.
-  local _before; _before="$(cat "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" "$DIRECT_DOMAINS" 2>/dev/null)"
+  # A lane that cannot be read (a seed that failed, a dangling link) reads as
+  # empty, as rowt-cli's `read` has it, rather than ending a read-only `list`.
+  local _before; _before="$(cat "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" "$DIRECT_DOMAINS" 2>/dev/null || true)"
   # The hotspot lane is tracked apart: nothing in it is rendered, so a change
   # there re-applies the OS bypass list (_hotspot_apply) instead of bouncing
   # the router — the four routing lanes alone decide whether sing-box restarts.
