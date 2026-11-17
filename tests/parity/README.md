@@ -419,6 +419,11 @@ Three limits, stated rather than implied:
   alone (`lanes-live`, `corp-vpn-running`). That holds only while the committed
   host.json IS what the scenario renders; `parity live-fixtures` checks it, and
   `--update` regenerates it after a deliberate render change.
+* **A scenario can take a base file away.** Its overlay can only add files, so
+  a scenario's `absent` lists, one per line, the base fixture's config files
+  `make_sandbox` removes after the overlay (`direct-seed`: no
+  `direct-domains.txt`, so the first command seeds it from the template, as on
+  a box last run by a rowt from before the direct lane).
 * **A purge leaves nothing to compare, and that is agreement.** `diff -q` on
   two files that are both absent exits 2, which reads like "differs" — so the
   lane-file check asks whether either side still has the file before it

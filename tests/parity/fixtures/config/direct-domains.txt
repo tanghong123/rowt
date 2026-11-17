@@ -1,0 +1,6 @@
+# direct-domains.txt — the parity fixture's direct lane: names sent straight
+# out ahead of the geosite sets. dl.example.com sits under escape's
+# example.com (deeper wins), and the exact host under escape's sub.example.net.
+direct.example
+dl.example.com
+domain:mirror.sub.example.net

@@ -1,0 +1,209 @@
+{
+  "log": {
+    "level": "warn",
+    "timestamp": true
+  },
+  "dns": {
+    "servers": [
+      {
+        "type": "local",
+        "tag": "local"
+      },
+      {
+        "type": "https",
+        "tag": "dns-direct",
+        "server": "223.5.5.5",
+        "detour": "direct"
+      }
+    ],
+    "rules": [
+      {
+        "domain_suffix": [
+          "corp.example",
+          "intranet.corp.example",
+          "synced.corp.example"
+        ],
+        "server": "local"
+      }
+    ],
+    "final": "dns-direct"
+  },
+  "inbounds": [
+    {
+      "type": "mixed",
+      "tag": "in",
+      "listen": "127.0.0.1",
+      "listen_port": 7890
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "vless",
+      "tag": "alpha",
+      "server": "203.0.113.10",
+      "server_port": 443,
+      "uuid": "00000000-0000-4000-8000-000000000001",
+      "flow": "xtls-rprx-vision",
+      "packet_encoding": "xudp",
+      "tls": {
+        "enabled": true,
+        "server_name": "alpha.example",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        },
+        "reality": {
+          "enabled": true,
+          "public_key": "PARITYFIXTUREPUBLICKEY",
+          "short_id": "01"
+        }
+      },
+      "bind_interface": "en0"
+    },
+    {
+      "type": "vless",
+      "tag": "beta",
+      "server": "203.0.113.11",
+      "server_port": 8443,
+      "uuid": "00000000-0000-4000-8000-000000000002",
+      "packet_encoding": "xudp",
+      "tls": {
+        "enabled": true,
+        "server_name": "beta.example",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        }
+      },
+      "bind_interface": "en0"
+    },
+    {
+      "type": "urltest",
+      "tag": "auto",
+      "outbounds": [
+        "alpha",
+        "beta"
+      ],
+      "url": "https://www.gstatic.com/generate_204",
+      "interval": "20m"
+    },
+    {
+      "type": "selector",
+      "tag": "escape",
+      "outbounds": [
+        "auto",
+        "alpha",
+        "beta"
+      ],
+      "default": "auto"
+    },
+    {
+      "type": "direct",
+      "tag": "corp",
+      "domain_resolver": {
+        "server": "local",
+        "strategy": "prefer_ipv4"
+      }
+    },
+    {
+      "type": "direct",
+      "tag": "direct",
+      "bind_interface": "en0"
+    },
+    {
+      "type": "block",
+      "tag": "block"
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "action": "sniff"
+      },
+      {
+        "domain_suffix": [
+          "intranet.corp.example"
+        ],
+        "outbound": "corp"
+      },
+      {
+        "domain_suffix": [
+          "synced.corp.example"
+        ],
+        "outbound": "corp"
+      },
+      {
+        "domain_suffix": [
+          "tracker.example.net"
+        ],
+        "outbound": "block"
+      },
+      {
+        "domain_suffix": [
+          "spaced.example.org"
+        ],
+        "outbound": "escape"
+      },
+      {
+        "domain_suffix": [
+          "sub.example.net"
+        ],
+        "outbound": "escape"
+      },
+      {
+        "domain_suffix": [
+          "corp.example"
+        ],
+        "outbound": "corp"
+      },
+      {
+        "domain_suffix": [
+          "example.com"
+        ],
+        "outbound": "escape"
+      },
+      {
+        "domain_suffix": [
+          "example.com"
+        ],
+        "outbound": "escape"
+      },
+      {
+        "domain_suffix": [
+          "ads.example"
+        ],
+        "outbound": "block"
+      },
+      {
+        "ip_cidr": [
+          "198.51.100.0/24",
+          "10.99.0.0/16",
+          "203.0.113.0/24"
+        ],
+        "outbound": "corp"
+      },
+      {
+        "ip_cidr": [
+          "10.0.0.0/8",
+          "172.16.0.0/12",
+          "192.168.0.0/16",
+          "100.64.0.0/10",
+          "169.254.0.0/16"
+        ],
+        "outbound": "corp"
+      }
+    ],
+    "final": "direct",
+    "auto_detect_interface": false,
+    "default_domain_resolver": {
+      "server": "dns-direct",
+      "strategy": "prefer_ipv4"
+    }
+  },
+  "experimental": {
+    "clash_api": {
+      "external_controller": "127.0.0.1:9090",
+      "secret": "PARITYFIXTURESECRET00000"
+    }
+  }
+}

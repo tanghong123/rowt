@@ -688,17 +688,25 @@ impl Source for LiveSource {
 
     fn unroute(&self, domain: &str) {
         // Single-lane invariant means the domain is in at most one lane, but we
-        // don't track which from an errors row — remove from all four (a miss is
-        // a harmless "not found"), so the result is always "back to direct".
+        // don't track which from an errors row — remove from all five (a miss is
+        // a harmless "not found"), so the result is always "back to the default
+        // route", which is direct unless ROWT_FINAL says otherwise.
         //
-        // Hotspot only when its file exists: the three routing lanes are seeded
-        // from templates, that one is created by the first `hotspot add`, and
-        // `rm` on a lane that has no file dies ("hotspot list is empty") — which
-        // writes an ABORT audit line, one per `d` press, on every machine that
-        // never touched the lane.
+        // Hotspot only when its file exists: the routing lanes are seeded from
+        // templates, that one is created by the first `hotspot add`, and `rm` on
+        // a lane that has no file dies ("hotspot list is empty") — which writes
+        // an ABORT audit line, one per `d` press, on every machine that never
+        // touched the lane. The direct lane (#s98) the same way: seeded since it
+        // existed, but a config last touched by an older rowt has no file yet.
         let out = Arc::clone(&self.ctl_out);
-        let (bin_domain, ok) = (domain.to_string(), format!("{domain} → direct"));
+        // Not "→ direct": with the direct lane, a host that lane held (npm) goes
+        // back to whatever the rules below the hand lists say, a geosite set's
+        // escape included (#s98).
+        let (bin_domain, ok) = (domain.to_string(), format!("{domain} taken out of every lane"));
         let mut lanes = vec!["escape", "corp", "block"];
+        if self.cfg.join("direct-domains.txt").is_file() {
+            lanes.push("direct");
+        }
         if self.cfg.join("hotspot-domains.txt").is_file() {
             lanes.push("hotspot");
         }

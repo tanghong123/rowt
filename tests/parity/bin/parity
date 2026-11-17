@@ -173,6 +173,17 @@ make_sandbox() { # $1=outdir  [$2=scenario]
     # to add a second copy, and there is no way to reach it from a config
     # fixture.
     [ -d "$DIR/fixtures/scenarios/$scenario/home" ]   && cp -R "$DIR/fixtures/scenarios/$scenario/home/." "$out/home/"
+    # …and `absent`, one config file name per line, for a base fixture the
+    # scenario must NOT have: an overlay can add files but not take one away,
+    # and the path that creates a missing file (seeding a lane template) is
+    # only reached without it.
+    if [ -f "$DIR/fixtures/scenarios/$scenario/absent" ]; then
+      local _gone
+      while IFS= read -r _gone; do
+        case "$_gone" in ''|'#'*|*/*|..*) continue ;; esac
+        rm -f "${cfg:?}/$_gone"
+      done < "$DIR/fixtures/scenarios/$scenario/absent"
+    fi
   fi
   # A rendered config names files inside the config dir — the corp lane's two
   # rule-sets — so a committed host.json/vm.json that has to equal a fresh render
@@ -1094,7 +1105,7 @@ cmd_splitter_diff() { # [count]
   echo "  $fails/$n cases differ — artifacts: $work"; return 1
 }
 
-# Lane-list edits, bash vs Rust: the three files afterwards, and the lines the
+# Lane-list edits, bash vs Rust: the four files afterwards, and the lines the
 # user is told. The shell's surrounding effects (geosite fetch, the coverage
 # hint, the router reload) are filtered out — they are not set logic.
 cmd_lanes_diff() {
@@ -1119,7 +1130,7 @@ cmd_lanes_diff() {
     "$rust" --config-dir "$B/home/rowt" $line > "$B/out.raw" 2>/dev/null || true
     grep -iE "$core" "$B/out.raw" > "$B/out" 2>/dev/null || : > "$B/out"
     local bad="" f
-    for f in escape-domains.txt corp-domains.txt block-domains.txt; do
+    for f in escape-domains.txt corp-domains.txt block-domains.txt direct-domains.txt; do
       diff -q "$A/home/rowt/$f" "$B/home/rowt/$f" >/dev/null 2>&1 || bad="$bad $f"
     done
     diff -q "$A/out" "$B/out" >/dev/null 2>&1 || bad="$bad messages"
@@ -1495,7 +1506,7 @@ cmd_cli_diff() {
     normalize "$A/out" "$A" > "$A/out.n"; normalize "$B/out" "$B" > "$B/out.n"
     diff -q "$A/out.n" "$B/out.n" >/dev/null 2>&1 || bad="$bad stdout"
     [ "$arc" = "$brc" ] || bad="$bad rc($arc/$brc)"
-    for f in escape-domains.txt corp-domains.txt block-domains.txt; do
+    for f in escape-domains.txt corp-domains.txt block-domains.txt direct-domains.txt; do
       # `diff -q` on two ABSENT files exits 2, which reads here as "differs" —
       # and after `uninstall --purge` both sides are absent, which is agreement.
       # So compare presence first: identical only when both are gone. One side

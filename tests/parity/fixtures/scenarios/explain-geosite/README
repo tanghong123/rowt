@@ -11,5 +11,9 @@ the names that set lists:
     (both hits here), since apple comes first and might have taken the name;
   - nocache is named on the escape lane with no .srs, so the router skips it,
     and a name no set lists gets a note saying so.
+The direct lane (#s98) names npm.example, and the github set lists
+registry.npm.example too: the hand list comes first, so explain says DIRECT by
+the direct lane and asks no set. (The scenario's direct-domains.txt replaces
+the base fixture's.)
 The .srs files are placeholders: only the stub reads them, and only to check
 that they exist.

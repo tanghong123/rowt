@@ -310,15 +310,16 @@ fn sync_labels(cfg: &Path) -> Vec<String> {
     if v.is_empty() { vec!["corp".into()] } else { v }
 }
 
-/// The suffixes the user has explicitly tunnelled, blocked or put in the
-/// hotspot lane. Their choice wins over an auto-discovered corp domain — a
-/// network must not be able to de-tunnel something you deliberately put in the
-/// escape lane, and a venue's own domain is exactly what the venue advertises
-/// over DHCP while it is the one that has to bypass the proxy.
+/// The suffixes the user has explicitly tunnelled, blocked, sent direct or put
+/// in the hotspot lane. Their choice wins over an auto-discovered corp domain —
+/// a network must not be able to de-tunnel something you deliberately put in
+/// the escape lane, and a venue's own domain is exactly what the venue
+/// advertises over DHCP while it is the one that has to bypass the proxy.
 fn esc_block_suffixes(cfg: &Path) -> Vec<String> {
     use rowt_core::render::{parse_list, Filter};
     let mut v: Vec<String> = parse_list(&read(&cfg.join("escape-domains.txt")), Filter::Domain);
     v.extend(parse_list(&read(&cfg.join("block-domains.txt")), Filter::Domain));
+    v.extend(parse_list(&read(&cfg.join("direct-domains.txt")), Filter::Domain));
     v.extend(parse_list(&read(&cfg.join("hotspot-domains.txt")), Filter::Domain));
     v.sort();
     v.dedup();
@@ -382,6 +383,7 @@ fn overlay_bypass_sync(ctx: &Ctx, dry: bool, quiet: bool) -> Option<String> {
     use rowt_core::render::{parse_list, Filter};
     let mut lanes: Vec<String> = parse_list(&read(&ctx.cfg.join("escape-domains.txt")), Filter::Domain);
     lanes.extend(parse_list(&read(&ctx.cfg.join("block-domains.txt")), Filter::Domain));
+    lanes.extend(parse_list(&read(&ctx.cfg.join("direct-domains.txt")), Filter::Domain));
     lanes.extend(parse_list(&head(&read(&ctx.cfg.join("corp-domains.txt"))).join("\n"), Filter::Domain));
     let mut lanes: Vec<String> = lanes.into_iter().map(|d| d.to_ascii_lowercase()).collect();
     lanes.sort();
@@ -414,7 +416,7 @@ fn overlay_bypass_sync(ctx: &Ctx, dry: bool, quiet: bool) -> Option<String> {
     }
     if !quiet {
         for d in &dropped {
-            eprintln!("error: corp sync: '{d}' is answered only by an overlay resolver, which no lane can reach — but you keep it in escape/block/corp, so your rule wins");
+            eprintln!("error: corp sync: '{d}' is answered only by an overlay resolver, which no lane can reach — but you keep it in escape/block/corp/direct, so your rule wins");
         }
     }
     // Truncate in place rather than rename: the hotspot file is not 0600 like

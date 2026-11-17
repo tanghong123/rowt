@@ -9,10 +9,10 @@
 //! all.
 //!
 //! So the bracket now diffs lane membership. The state is every `(lane, entry)`
-//! pair across the four lane files; a change is an entry whose SET of lanes
-//! moved — `block -> direct` when the monitor routes a host direct,
-//! `escape -> block` when an add pulls it out of another lane, `direct -> block`
-//! for each line of an import. Diffing at the bracket rather than at each
+//! pair across the five lane files; a change is an entry whose SET of lanes
+//! moved — `block -> none` when the monitor unroutes a host, `escape -> block`
+//! when an add pulls it out of another lane, `none -> block` for each line of
+//! an import, `escape -> direct` when `direct add` takes a host off escape. Diffing at the bracket rather than at each
 //! writer is what covers every path at once: add, rm, import, clear, `config
 //! import`, the monitor's routes, `corp sync`.
 //!
@@ -25,16 +25,19 @@ use std::collections::{BTreeMap, BTreeSet};
 /// The lanes whose membership is tracked, and the file each lives in — in the
 /// byte order the snapshot sorts them, which is the order a multi-lane set is
 /// spelled (`corp+hotspot`).
-pub const LANES: [(&str, &str); 4] = [
+pub const LANES: [(&str, &str); 5] = [
     ("block", "block-domains.txt"),
     ("corp", "corp-domains.txt"),
+    ("direct", "direct-domains.txt"),
     ("escape", "escape-domains.txt"),
     ("hotspot", "hotspot-domains.txt"),
 ];
 
-/// The name for "in no lane": an unlisted entry takes the final route, and
-/// `direct` is what the monitor's key and the lane errors call it.
-pub const NONE: &str = "direct";
+/// The name for "in no lane": an unlisted entry takes the final route. Until
+/// the direct lane existed (#s98) this was `direct`, what the monitor's key
+/// calls an unroute; with a lane of that name, `none -> direct` (a `direct
+/// add`) and `escape -> none` (an unroute) have to read differently.
+pub const NONE: &str = "none";
 
 /// awk's `[[:space:]]` under LC_ALL=C — the class the shell strips. Not
 /// `char::is_whitespace` (which takes Unicode spaces too) and not
@@ -49,6 +52,42 @@ pub fn entries(body: &str) -> Vec<String> {
         .map(|l| l.chars().filter(|c| !is_space(*c)).collect::<String>())
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .collect()
+}
+
+/// A lane template as rowt seeds it into a config that lacks the lane: the
+/// template's lines, less each entry another lane already holds (compared with
+/// whitespace removed, ASCII case folded). Seeding the direct lane's npm
+/// entries into a config whose escape lane holds `npmjs.org` would otherwise
+/// leave a twin, which the router settles by lane order and every render warns
+/// about (#s98). `others` are the other lane files' bodies. Every line comes
+/// out with a newline, as awk prints it.
+pub fn seed_body(template: &str, others: &[String]) -> String {
+    let fold = |l: &str| l.chars().filter(|c| !is_space(*c)).collect::<String>().to_ascii_lowercase();
+    let have: BTreeSet<String> = others.iter().flat_map(|b| entries(b)).map(|e| e.to_ascii_lowercase()).collect();
+    let mut out = String::new();
+    for line in template.split_inclusive('\n') {
+        let line = line.strip_suffix('\n').unwrap_or(line);
+        let e = fold(line);
+        if !e.is_empty() && !e.starts_with('#') && have.contains(&e) {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// The last logged state with a freshly seeded lane's entries added, so the
+/// seeding is logged as such (`LANE seeded: none -> direct …`) rather than as
+/// an edit made outside rowt at the next command. Only the seeded lane's
+/// entries are added: anything else that moved since is still the next
+/// bracket's to find.
+pub fn with_seeded(prev: &str, lane: &str, body: &str) -> String {
+    let mut lines: BTreeSet<String> = prev.split('\n').filter(|l| !l.is_empty()).map(str::to_string).collect();
+    for e in entries(body) {
+        lines.insert(format!("{lane}\t{e}"));
+    }
+    lines.into_iter().map(|l| l + "\n").collect()
 }
 
 /// The state as `<lane>\t<entry>` lines, byte-sorted and unique — the format
@@ -119,6 +158,23 @@ mod tests {
     }
 
     #[test]
+    fn a_seeded_lane_leaves_out_what_another_lane_holds() {
+        let tmpl = "# header\n#\n\n# --- npm ---\nnpmjs.org\nnpmjs.com\nnpm.community\n";
+        let others = vec!["NPMjs.org\n# npmjs.com is only a comment here\n".to_string(), "geosite:github\n".to_string()];
+        assert_eq!(seed_body(tmpl, &others), "# header\n#\n\n# --- npm ---\nnpmjs.com\nnpm.community\n");
+        // Nothing elsewhere: the template as it is; a last line gets its newline.
+        assert_eq!(seed_body("a.example\nb.example", &[]), "a.example\nb.example\n");
+    }
+
+    #[test]
+    fn seeding_is_logged_against_the_last_logged_state() {
+        let prev = "escape\tNPMjs.org\nescape\tgithub.com\n";
+        let now = with_seeded(prev, "direct", "# h\nnpmjs.com\nnpm.community\n");
+        assert_eq!(now, "direct\tnpm.community\ndirect\tnpmjs.com\nescape\tNPMjs.org\nescape\tgithub.com\n");
+        assert_eq!(diff_lines(prev, &now, "seeded: "), ["LANE seeded: none -> direct (2): npm.community npmjs.com"]);
+    }
+
+    #[test]
     fn entries_are_kept_as_written_and_comments_drop_out() {
         let body = "# header\n\n  a.example  \n\t# indented comment\ndomain:B.example\n*.c.example\ngeosite:x\n# --- rowt corp sync: marker ---\n10.0.0.0/8\n";
         assert_eq!(entries(body), ["a.example", "domain:B.example", "*.c.example", "geosite:x", "10.0.0.0/8"]);
@@ -140,21 +196,32 @@ mod tests {
     }
 
     #[test]
-    fn a_route_to_direct_names_the_lane_it_left() {
-        // The monitor's `d` runs `rm` against all four lanes; the log has to
-        // say which one actually held the host.
+    fn an_unroute_names_the_lane_it_left() {
+        // The monitor's `d` runs `rm` against every lane; the log has to say
+        // which one actually held the host.
         let before = snap(&[("block-domains.txt", "att-api.example\nkeep.example\n")]);
         let after = snap(&[("block-domains.txt", "keep.example\n")]);
-        assert_eq!(diff_lines(&before, &after, ""), ["LANE block -> direct (1): att-api.example"]);
+        assert_eq!(diff_lines(&before, &after, ""), ["LANE block -> none (1): att-api.example"]);
+    }
+
+    #[test]
+    fn the_direct_lane_is_a_lane_and_no_lane_is_none() {
+        let before = snap(&[("escape-domains.txt", "npmjs.org\n")]);
+        let after = snap(&[("direct-domains.txt", "npmjs.org\nnpmjs.com\n")]);
+        assert_eq!(diff_lines(&before, &after, ""), [
+            "LANE escape -> direct (1): npmjs.org",
+            "LANE none -> direct (1): npmjs.com",
+        ]);
     }
 
     #[test]
     fn an_import_is_one_line_listing_every_entry_and_a_pull_out_is_its_own() {
         let before = snap(&[("escape-domains.txt", "moved.example\n")]);
         let after = snap(&[("block-domains.txt", "c.example\na.example\nmoved.example\nb.example\n")]);
+        // Byte order of the transition, as the shell's `sort`: escape before none.
         assert_eq!(diff_lines(&before, &after, ""), [
-            "LANE direct -> block (3): a.example b.example c.example",
             "LANE escape -> block (1): moved.example",
+            "LANE none -> block (3): a.example b.example c.example",
         ]);
     }
 
@@ -181,6 +248,6 @@ mod tests {
     #[test]
     fn a_malformed_snapshot_line_is_skipped_not_fatal() {
         let before = "garbage\nblock\t\n\tnolane\nblock\tok.example\n";
-        assert_eq!(diff_lines(before, "", ""), ["LANE block -> direct (1): ok.example"]);
+        assert_eq!(diff_lines(before, "", ""), ["LANE block -> none (1): ok.example"]);
     }
 }

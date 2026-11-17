@@ -19,10 +19,11 @@ use std::io::{BufRead, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const LANE_FILES: [(&str, &str); 4] = [
+const LANE_FILES: [(&str, &str); 5] = [
     ("escape", "escape-domains.txt"),
     ("corp", "corp-domains.txt"),
     ("block", "block-domains.txt"),
+    ("direct", "direct-domains.txt"),
     ("hotspot", "hotspot-domains.txt"),
 ];
 
@@ -79,6 +80,7 @@ pub fn export_shadowrocket(ctx: &Ctx, out: &str, routes_only: bool) -> Result<St
     let esc = read(&cfg.join("escape-domains.txt"));
     let corp = read(&cfg.join("corp-domains.txt"));
     let blk = read(&cfg.join("block-domains.txt"));
+    let dir = read(&cfg.join("direct-domains.txt"));
     let hot = read(&cfg.join("hotspot-domains.txt"));
     let cache = cfg.join("cache");
     let sb = ctx.sb();
@@ -111,9 +113,11 @@ pub fn export_shadowrocket(ctx: &Ctx, out: &str, routes_only: bool) -> Result<St
         escape_exact: &parse_list(&esc, Filter::Exact),
         corp_exact: &parse_list(&corp, Filter::Exact),
         block_exact: &parse_list(&blk, Filter::Exact),
+        direct_exact: &parse_list(&dir, Filter::Exact),
         escape: &parse_list(&esc, Filter::Domain),
         corp: &parse_list(&corp, Filter::Domain),
         block: &parse_list(&blk, Filter::Domain),
+        direct: &parse_list(&dir, Filter::Domain),
         geos: &geos,
         corp_cidrs: &parse_list(&corp, Filter::Cidr),
         private_default_corp: env_or("ROWT_PRIVATE_DEFAULT", "corp") == "corp",
@@ -223,7 +227,8 @@ pub fn import(ctx: &Ctx, args: &[String]) -> Result<String, String> {
     // rules — the two things it carries; subs.txt or a secondary pool JSON on
     // its own is not one (a bare URL list is not a bundle).
     let is_bundle = listing.lines().any(|l| matches!(l.rsplit('/').next().unwrap_or(""),
-        "servers.json" | "escape-domains.txt" | "corp-domains.txt" | "block-domains.txt" | "hotspot-domains.txt"));
+        "servers.json" | "escape-domains.txt" | "corp-domains.txt" | "block-domains.txt" | "direct-domains.txt"
+        | "hotspot-domains.txt"));
     if !is_bundle {
         die(cfg, &format!("{input} doesn't look like a rowt config bundle"));
     }
@@ -268,7 +273,12 @@ pub fn import(ctx: &Ctx, args: &[String]) -> Result<String, String> {
         // system proxy: the swap, then the user's restart, is what applies it.
         let me = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("rowt-rs"));
         let mut report = String::new();
-        for (lane, name) in LANE_FILES {
+        // Each fold pulls its entries out of the other lanes, so the last fold
+        // keeps an entry two lanes of the bundle share. The direct lane folds
+        // first: in the router a tie goes to the other lane, and a bundle from a
+        // box whose escape lane already held npm carries the seeded direct entry
+        // too (#s98) — folding direct last would send that npm direct here.
+        for (lane, name) in [LANE_FILES[3], LANE_FILES[0], LANE_FILES[1], LANE_FILES[2], LANE_FILES[4]] {
             let src = inx.join(name);
             if !src.is_file() {
                 continue;

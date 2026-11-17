@@ -57,6 +57,7 @@ walks the rules **top to bottom, first match wins**:
 | `domain_suffix` in `block-domains.txt` | **block** | refused instantly — no DNS, no dial (kills the ad/tracker retry storm) |
 | `domain_suffix` in `corp-domains.txt` | **corp** | resolved to an intranet IP (see §4), sent via the **routing table** → matches the corp route → into `utunN` → corp network |
 | `domain_suffix` in `escape-domains.txt` | **escape** | VLESS socket **bound to en0** → home router → VPS → the VPS reaches Google |
+| `domain_suffix` in `direct-domains.txt` | **direct** | the same socket as the final route below, **bound to en0** — but ahead of the geosite sets and the ad set, so it takes a name a broader rule would catch. The shipped list holds npm's domains (`npmjs.org`, `npmjs.com`, `npm.community`), which `geosite:github` on the escape lane lists: npm goes direct while github.com stays on escape. No `geosite:` and no addresses (an address goes direct already unless a corp CIDR claims it) |
 | `geosite:<name>` in `escape-domains.txt` / `block-domains.txt` (e.g. `geosite:google`) | that lane | a maintained sing-geosite category, pulled as a `rule_set` — covers a whole service (all ccTLDs) without enumerating suffixes; runs after the hand lists, before the ad set. Escape + block only (corp is domains/CIDRs); a specific suffix always wins over it |
 | `geosite-category-ads-all` rule-set | **block** | broad ad/tracker blocklist (opaque, so it runs *after* the hand lists — and before the address rules below, so an ad domain is never resolved) |
 | **resolve** a name no rule above matched (only when `final` is `direct`) | — | not a lane: the router looks the name up at the direct lane's own resolver (`dns-direct`, `prefer_ipv4`), so the two address rules below can route it. One lookup, the one the direct lane would have made anyway, reused by the outbound. Never emitted for an `escape`/`block` final, whose names must not be looked up locally. A name that does not resolve fails here, logged as `router: lookup …` and filed under the direct lane |
@@ -65,12 +66,15 @@ walks the rules **top to bottom, first match wins**:
 | no match → `final` (default `direct`) | **direct** | direct socket **bound to en0** → home router → the public internet, corp untouched |
 
 **Longest suffix wins, not lane order.** rowt does *not* emit one rule per lane
-(which would make an earlier lane shadow a later one). It flattens the three hand
+(which would make an earlier lane shadow a later one). It flattens the four hand
 lists into **one rule per suffix, ordered most-specific-first** (more labels, then
 longer). So `api.foo.com` in escape beats `foo.com` in block for `api.foo.com`,
 while `www.foo.com` still lands in block. A suffix lives in **at most one lane** —
-`rowt escape/corp/block add` pulls the entry out of the other two — so there are
-never two lanes fighting over the same suffix. The opaque geosite rule-set can't
+`rowt escape/corp/block/direct add` pulls the entry out of the other lanes — so
+there are never two lanes fighting over the same suffix. A file edited by hand can
+still hold a twin; then the lane order escape, corp, block, direct breaks the tie,
+so the direct lane loses it (the shipped npm entries never override a person's own
+escape entry for the same name). The opaque geosite rule-set can't
 be interleaved by specificity, so it sits after the hand lists (explicit intent
 overrides the broad blocklist) but before `final`.
 
@@ -282,7 +286,7 @@ into:
   Every lane rule, hand entries and synced DHCP domains alike, renders as a
   local sing-box rule-set under `rule-sets/` beside `host.json`, which only
   points at the files: one set per lane per label count, bare and dot-led
-  entries apart, the exact entries ahead — 48 sets that keep longest-suffix-wins
+  entries apart, the exact entries ahead — 64 sets that keep longest-suffix-wins
   for every entry of up to eight labels, lane order among deeper ones
   (`rowt_core::render::RULE_SETS_DIR` has the argument) — plus one set
   for the corp CIDRs. sing-box watches a local rule-set file and swaps its rules
@@ -801,20 +805,23 @@ field and would fail the whole config.
   `block import my-list.txt` ran, not what it added — on 2026-10-06, finding
   why one site's bot-defence host was blocked meant digging a month-old import
   file off the disk. Now each command's bracket also diffs every `(lane, entry)`
-  pair across the four lane files and logs one line per transition:
+  pair across the five lane files and logs one line per transition:
 
   ```
   … BEGIN block rm att-api.example --no-reload
-  … LANE block -> direct (1): att-api.example
+  … LANE block -> none (1): att-api.example
   … END   block rm att-api.example --no-reload rc=0 (0s)
-  … LANE direct -> block (336): a.example b.example …     # one import, in full
+  … LANE none -> block (336): a.example b.example …       # one import, in full
   … LANE escape -> block (1): moved.example               # an add's pull-out
-  … LANE outside rowt: direct -> block (1): hand.example  # edited behind rowt's back
-  … LANE watchdog corp sync: direct -> corp (2): 10.9.0.0/16 …
+  … LANE escape -> direct (1): npmjs.org                  # the direct lane took it
+  … LANE outside rowt: none -> block (1): hand.example    # edited behind rowt's back
+  … LANE watchdog corp sync: none -> corp (2): 10.9.0.0/16 …
   ```
 
-  `direct` means "in no lane". The monitor's routing keys are covered for free —
-  they shell out to `rowt <lane> add|rm` — and of the four `rm`s a `d` sends,
+  `none` means "in no lane", and `direct` is the direct lane. Until the direct
+  lane existed, "in no lane" was spelled `direct`, so in an older line
+  `block -> direct` is an unroute. The monitor's routing keys are covered for free —
+  they shell out to `rowt <lane> add|rm` — and of the `rm`s a `d` sends,
   only the lane that held the host logs, by name. Entries are kept as written
   (`domain:x`, `*.x`), so reversing a line is re-adding exactly that text, and
   the list is never truncated (`AUDIT_MAX` counts lines, so a long line costs

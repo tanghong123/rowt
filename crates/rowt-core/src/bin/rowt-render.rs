@@ -79,6 +79,7 @@ fn run() -> Result<String, String> {
     let escape_src = read(&cfg.join("escape-domains.txt"));
     let corp_src = read(&cfg.join("corp-domains.txt"));
     let block_src = read(&cfg.join("block-domains.txt"));
+    let direct_src = read(&cfg.join("direct-domains.txt"));
 
     let port: u64 = env_or("ROWT_PORT", "7890").parse().map_err(|_| "bad ROWT_PORT")?;
     let clash_port: u64 = env_or("ROWT_CLASH_PORT", "9090").parse().map_err(|_| "bad ROWT_CLASH_PORT")?;
@@ -187,9 +188,11 @@ fn run() -> Result<String, String> {
             corp_domains: parse_list(&corp_src, Filter::Domain),
             corp_cidrs: parse_list(&corp_src, Filter::Cidr),
             block_domains: parse_list(&block_src, Filter::Domain),
+            direct_domains: parse_list(&direct_src, Filter::Domain),
             escape_exact: parse_list(&escape_src, Filter::Exact),
             corp_exact: parse_list(&corp_src, Filter::Exact),
             block_exact: parse_list(&block_src, Filter::Exact),
+            direct_exact: parse_list(&direct_src, Filter::Exact),
         },
         escape_outbound: if local_mode { "direct".into() } else { "escape".into() },
         escape_hosts: cfg.join("escape-hosts").to_string_lossy().into_owned(),

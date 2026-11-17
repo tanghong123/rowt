@@ -577,6 +577,7 @@ fn load_lanes(cfg: &Path) -> Lanes {
         escape: read(&lane_file(cfg, Lane::Escape)),
         corp: read(&lane_file(cfg, Lane::Corp)),
         block: read(&lane_file(cfg, Lane::Block)),
+        direct: read(&lane_file(cfg, Lane::Direct)),
         hotspot: read(&hotspot_file(cfg)),
     }
 }
@@ -684,9 +685,20 @@ fn cmd_explain(cfg: &Path, dest: &str) -> String {
         out.push('\n');
         out.push_str(&n);
     }
+    let running = c.lane != Lane::Block && lifecycle::host_running(&ctx).is_some();
+    // #s98: an upgrade seeds the direct lane, but the router keeps running the
+    // host.json it started from until a reload or a lane edit renders the
+    // lane's sets in, so until then it routes the name by the rules below the
+    // hand lists (npm's names by geosite:github, to escape). Every render since
+    // names `direct-exact`, empty or not.
+    if running && c.lane == Lane::Direct && c.why.contains(" direct-domains ") && ctx.host_cfg().is_file()
+        && !read(&ctx.host_cfg()).contains("\"direct-exact\"")
+    {
+        out.push_str(&format!("\n  note:    the running router started before rowt had a direct lane, so it does not route by this entry yet: '{PROG} reload' puts the lane in"));
+    }
     if c.lane == Lane::Block {
         out.push_str("\n  live:    (skipped — blocked by design)");
-    } else if lifecycle::host_running(&ctx).is_some() {
+    } else if running {
         // Deliberately no `--noproxy '*'` — that would override -x and send the
         // probe DIRECT, which is exactly not the path being tested.
         let code = lifecycle::curl_code(&format!("http://127.0.0.1:{}", ctx.port),
@@ -1047,8 +1059,9 @@ fn cmd_lane(cfg: &Path, target: Target, action: &str, args: &[String]) -> Result
     let body = match target {
         Target::Lane(Lane::Escape) => &lanes.escape,
         Target::Lane(Lane::Corp) => &lanes.corp,
+        Target::Lane(Lane::Block) => &lanes.block,
+        Target::Lane(Lane::Direct) => &lanes.direct,
         Target::Hotspot => &lanes.hotspot,
-        _ => &lanes.block,
     }
     .clone();
 
@@ -1130,23 +1143,25 @@ fn cmd_lane(cfg: &Path, target: Target, action: &str, args: &[String]) -> Result
                 _ => Op::Rm(mark(args)),
             };
             let e = apply_to(&lanes, target, &op);
-            // `edit_list`'s snapshot of the three routing lanes, the way it
-            // takes it — `$(cat "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS")`,
-            // one string, trailing newlines gone — so the router is reloaded
-            // below only when that string changed.
+            // `edit_list`'s snapshot of the four routing lanes, the way it
+            // takes it — `$(cat "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS"
+            // "$DIRECT_DOMAINS")`, one string, trailing newlines gone — so the
+            // router is reloaded below only when that string changed.
             let routed = |l: &Lanes| {
-                let mut s = String::with_capacity(l.escape.len() + l.corp.len() + l.block.len());
+                let mut s = String::with_capacity(l.escape.len() + l.corp.len() + l.block.len() + l.direct.len());
                 s.push_str(&l.escape);
                 s.push_str(&l.corp);
                 s.push_str(&l.block);
+                s.push_str(&l.direct);
                 s.trim_end_matches('\n').to_string()
             };
             let routed_changed = routed(&lanes) != routed(&e.lanes);
-            for l in [Lane::Escape, Lane::Corp, Lane::Block] {
+            for l in Lanes::editable() {
                 let (before, after) = match l {
                     Lane::Escape => (&lanes.escape, &e.lanes.escape),
                     Lane::Corp => (&lanes.corp, &e.lanes.corp),
-                    _ => (&lanes.block, &e.lanes.block),
+                    Lane::Block => (&lanes.block, &e.lanes.block),
+                    Lane::Direct => (&lanes.direct, &e.lanes.direct),
                 };
                 if before != after {
                     let p = lane_file(cfg, l);
@@ -1175,7 +1190,7 @@ fn cmd_lane(cfg: &Path, target: Target, action: &str, args: &[String]) -> Result
             // `have` comes from the POST-edit lane, matching `_geosite_hint`'s
             // position after `_lane_append` and `_lane_dedupe` — so it includes
             // the entry just added and excludes whatever dedupe pulled out of
-            // the other two lanes.
+            // the other lanes.
             let mut out = e.messages.clone();
             if let Op::Add { entries, .. } = &op {
                 // `geosite:` is escape/block only — corp routes internal names,
@@ -1863,8 +1878,8 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
             // in either, but both name servers, so they sit in POOL below.
             let src = ["servers.json", "manual.json", "import-review.json", "subs.txt",
                        "outbound.json", "escape-domains.txt", "corp-domains.txt",
-                       "block-domains.txt", "hotspot-domains.txt", "escape-dns.txt",
-                       "manual-sources.tsv"];
+                       "block-domains.txt", "direct-domains.txt", "hotspot-domains.txt",
+                       "escape-dns.txt", "manual-sources.tsv"];
             match rest.first().map(|s| s.as_str()).unwrap_or("list") {
                 "list" => {
                     let mut o = format!("config bundle — '{PROG} config export' packs the present ones:");
@@ -2214,16 +2229,25 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                 other => Ok(connections_show(&ctx, other.unwrap_or(""))),
             }
         }
-        // 'direct' is not an editable lane — it is the pass-through default, so
-        // only the diagnostics exist. What FAILED going direct is the useful
-        // question: those are the escape-lane candidates.
-        "direct" => match rest.first().map(|s| s.as_str()).unwrap_or("errors") {
-            "errors" | "stats" => {
-                cmd_lane_errors(&cfg, "direct", rest.get(1).map(|s| s.as_str()).unwrap_or("10m"))
+        // 'direct' is the pass-through default AND, since #s98, a hand lane:
+        // names sent straight out even where a broader rule (a geosite set,
+        // the ad set) would take them elsewhere. Bare `direct` stays the
+        // diagnostics — what FAILED going direct is the useful question:
+        // those are the escape-lane candidates.
+        "direct" => {
+            let action = rest.first().cloned().unwrap_or_else(|| "errors".into());
+            let args = &rest[1.min(rest.len())..];
+            match action.as_str() {
+                "errors" | "stats" => {
+                    cmd_lane_errors(&cfg, "direct", args.first().map(|s| s.as_str()).unwrap_or("10m"))
+                }
+                "log" => cmd_lane_log(&cfg, "direct"),
+                "list" | "dump" | "add" | "rm" | "remove" | "clear" | "import" => {
+                    cmd_lane(&cfg, Target::Lane(Lane::Direct), &action, args)
+                }
+                _ => die(&cfg, &format!("usage: {PROG} direct [errors [5m|10m|1h|…|all] | log | list | add [--domain] [--force] <e>… | rm [--domain] <e>… | import <file> | clear | dump [file]]")),
             }
-            "log" => cmd_lane_log(&cfg, "direct"),
-            _ => die(&cfg, &format!("usage: {PROG} direct [errors [5m|10m|1h|…|all] | log]")),
-        },
+        }
         "version" | "--version" | "-V" => Ok(format!("{PROG} {}", env!("ROWT_SHELL_VERSION"))),
         // hidden: the log splitter re-execs this binary so sing-box's output is
         // classified by a process that outlives the CLI
@@ -2391,6 +2415,7 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
             let esc = read(&cfg.join("escape-domains.txt"));
             let corp = read(&cfg.join("corp-domains.txt"));
             let blk = read(&cfg.join("block-domains.txt"));
+            let dir = read(&cfg.join("direct-domains.txt"));
             // `--domain` entries count too — they are entries the operator put
             // there, and omitting them makes `status` read as "the flag did
             // nothing" right when they'd check.
@@ -2400,12 +2425,13 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                        + n(&corp, rowt_core::render::Filter::Cidr)
                        + n(&corp, rowt_core::render::Filter::Exact);
             let n_blk = n(&blk, rowt_core::render::Filter::All) + n(&blk, rowt_core::render::Filter::Exact);
+            let n_dir = n(&dir, rowt_core::render::Filter::Domain) + n(&dir, rowt_core::render::Filter::Exact);
             let ads = if cfg.join("cache/geosite-category-ads-all.srs").is_file() { "+ads" } else { "" };
             let mut geo: Vec<String> = rowt_core::render::geosites_of(&esc);
             geo.extend(rowt_core::render::geosites_of(&blk));
             geo.sort(); geo.dedup();
             let geo_s = if geo.is_empty() { String::new() } else { format!(" +geosite:{}", geo.join(",")) };
-            o.push(format!("buckets:      escape={n_esc} corp={n_corp} block={n_blk}{ads}{geo_s} final={}",
+            o.push(format!("buckets:      escape={n_esc} corp={n_corp} block={n_blk}{ads}{geo_s} direct={n_dir} final={}",
                            env_or("ROWT_FINAL", "direct")));
             // What rowt's corp lane sees, and a checker's verdict — never rowt's
             // own call on the VPN (rowt_core::corpview, the shell's _corp_view).

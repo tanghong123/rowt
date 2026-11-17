@@ -1,0 +1,6 @@
+A router that is running (host.pid.self) the host.json an older rowt rendered,
+from before the direct lane (#s98): it names no direct-* rule-set. That is a
+box right after `brew upgrade` brought the lane: the first command seeds
+direct-domains.txt, but the router keeps its old rules until a reload or a lane
+edit. explain of a direct-lane name must say so and point at `rowt reload`.
+The host.json is a static copy (no @CFG@), so live-fixtures leaves it alone.

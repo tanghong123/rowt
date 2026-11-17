@@ -110,7 +110,7 @@ pub fn route(ctx: &Ctx, lanes: &Lanes, dest: &str) -> (Classification, GeoRoute)
     let pd = env_or("ROWT_PRIVATE_DEFAULT", "corp");
     // A name no hand list matched reaches the sets first; only one none of them
     // lists goes on to the router's lookup.
-    let unlisted = needs_resolution(dest, &lanes.escape, &lanes.corp, &lanes.block);
+    let unlisted = needs_resolution(dest, &lanes.escape, &lanes.corp, &lanes.block, &lanes.direct);
     let geo = if unlisted { geosite_route(ctx, lanes, &normalize_dest(dest)) } else { GeoRoute::default() };
     // The resolver the router uses for a name no rule matched (the direct lane's
     // dns-direct: the public one in local mode), and only when the router
@@ -128,7 +128,7 @@ pub fn route(ctx: &Ctx, lanes: &Lanes, dest: &str) -> (Classification, GeoRoute)
         String::new()
     };
     let c = classify(dest, &ClassifyInput {
-        escape_list: &lanes.escape, corp_list: &lanes.corp, block_list: &lanes.block,
+        escape_list: &lanes.escape, corp_list: &lanes.corp, block_list: &lanes.block, direct_list: &lanes.direct,
         private_cidrs: &private, private_default: &pd, final_route,
         local_mode: mode == "local", resolved_ip: &ip, prog: PROG, resolver: &resolver,
         geosite: geo.hit.as_ref().map(|(n, l)| (n.as_str(), *l)),

@@ -66,8 +66,15 @@ from the source and are not listed.
 | `hotspot errors` | **no** | — |
 | `hotspot log` | **no** | — |
 | `hotspot stats` | **no** | — |
+| `direct add` | yes | direct_add |
+| `direct clear` | yes | direct_clear |
+| `direct dump` | yes | direct_dump |
 | `direct errors` | yes | direct_errors |
+| `direct import` | yes | direct_import |
+| `direct list` | yes | direct_list |
 | `direct log` | yes | direct_log |
+| `direct remove` | yes | direct_remove |
+| `direct rm` | yes | direct_rm |
 | `direct stats` | yes | direct_stats |
 | `proxy check` | yes | proxy_check |
 | `proxy env` | yes | proxy_env |

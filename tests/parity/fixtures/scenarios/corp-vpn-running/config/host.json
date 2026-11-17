@@ -154,6 +154,12 @@
       },
       {
         "rule_set": [
+          "direct-exact"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "rule_set": [
           "escape-8"
         ],
         "outbound": "escape"
@@ -169,6 +175,12 @@
           "block-8"
         ],
         "outbound": "block"
+      },
+      {
+        "rule_set": [
+          "direct-8"
+        ],
+        "outbound": "direct"
       },
       {
         "rule_set": [
@@ -190,6 +202,12 @@
       },
       {
         "rule_set": [
+          "direct-8-dot"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "rule_set": [
           "escape-7"
         ],
         "outbound": "escape"
@@ -205,6 +223,12 @@
           "block-7"
         ],
         "outbound": "block"
+      },
+      {
+        "rule_set": [
+          "direct-7"
+        ],
+        "outbound": "direct"
       },
       {
         "rule_set": [
@@ -226,6 +250,12 @@
       },
       {
         "rule_set": [
+          "direct-7-dot"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "rule_set": [
           "escape-6"
         ],
         "outbound": "escape"
@@ -241,6 +271,12 @@
           "block-6"
         ],
         "outbound": "block"
+      },
+      {
+        "rule_set": [
+          "direct-6"
+        ],
+        "outbound": "direct"
       },
       {
         "rule_set": [
@@ -262,6 +298,12 @@
       },
       {
         "rule_set": [
+          "direct-6-dot"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "rule_set": [
           "escape-5"
         ],
         "outbound": "escape"
@@ -277,6 +319,12 @@
           "block-5"
         ],
         "outbound": "block"
+      },
+      {
+        "rule_set": [
+          "direct-5"
+        ],
+        "outbound": "direct"
       },
       {
         "rule_set": [
@@ -298,6 +346,12 @@
       },
       {
         "rule_set": [
+          "direct-5-dot"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "rule_set": [
           "escape-4"
         ],
         "outbound": "escape"
@@ -313,6 +367,12 @@
           "block-4"
         ],
         "outbound": "block"
+      },
+      {
+        "rule_set": [
+          "direct-4"
+        ],
+        "outbound": "direct"
       },
       {
         "rule_set": [
@@ -334,6 +394,12 @@
       },
       {
         "rule_set": [
+          "direct-4-dot"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "rule_set": [
           "escape-3"
         ],
         "outbound": "escape"
@@ -349,6 +415,12 @@
           "block-3"
         ],
         "outbound": "block"
+      },
+      {
+        "rule_set": [
+          "direct-3"
+        ],
+        "outbound": "direct"
       },
       {
         "rule_set": [
@@ -370,6 +442,12 @@
       },
       {
         "rule_set": [
+          "direct-3-dot"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "rule_set": [
           "escape-2"
         ],
         "outbound": "escape"
@@ -385,6 +463,12 @@
           "block-2"
         ],
         "outbound": "block"
+      },
+      {
+        "rule_set": [
+          "direct-2"
+        ],
+        "outbound": "direct"
       },
       {
         "rule_set": [
@@ -406,6 +490,12 @@
       },
       {
         "rule_set": [
+          "direct-2-dot"
+        ],
+        "outbound": "direct"
+      },
+      {
+        "rule_set": [
           "escape-1"
         ],
         "outbound": "escape"
@@ -421,6 +511,12 @@
           "block-1"
         ],
         "outbound": "block"
+      },
+      {
+        "rule_set": [
+          "direct-1"
+        ],
+        "outbound": "direct"
       },
       {
         "action": "resolve",
@@ -471,6 +567,12 @@
       },
       {
         "type": "local",
+        "tag": "direct-exact",
+        "format": "source",
+        "path": "@CFG@/rule-sets/direct-exact/direct-exact.json"
+      },
+      {
+        "type": "local",
         "tag": "escape-8",
         "format": "source",
         "path": "@CFG@/rule-sets/escape-8/escape-8.json"
@@ -486,6 +588,12 @@
         "tag": "block-8",
         "format": "source",
         "path": "@CFG@/rule-sets/block-8/block-8.json"
+      },
+      {
+        "type": "local",
+        "tag": "direct-8",
+        "format": "source",
+        "path": "@CFG@/rule-sets/direct-8/direct-8.json"
       },
       {
         "type": "local",
@@ -507,6 +615,12 @@
       },
       {
         "type": "local",
+        "tag": "direct-8-dot",
+        "format": "source",
+        "path": "@CFG@/rule-sets/direct-8-dot/direct-8-dot.json"
+      },
+      {
+        "type": "local",
         "tag": "escape-7",
         "format": "source",
         "path": "@CFG@/rule-sets/escape-7/escape-7.json"
@@ -522,6 +636,12 @@
         "tag": "block-7",
         "format": "source",
         "path": "@CFG@/rule-sets/block-7/block-7.json"
+      },
+      {
+        "type": "local",
+        "tag": "direct-7",
+        "format": "source",
+        "path": "@CFG@/rule-sets/direct-7/direct-7.json"
       },
       {
         "type": "local",
@@ -543,6 +663,12 @@
       },
       {
         "type": "local",
+        "tag": "direct-7-dot",
+        "format": "source",
+        "path": "@CFG@/rule-sets/direct-7-dot/direct-7-dot.json"
+      },
+      {
+        "type": "local",
         "tag": "escape-6",
         "format": "source",
         "path": "@CFG@/rule-sets/escape-6/escape-6.json"
@@ -558,6 +684,12 @@
         "tag": "block-6",
         "format": "source",
         "path": "@CFG@/rule-sets/block-6/block-6.json"
+      },
+      {
+        "type": "local",
+        "tag": "direct-6",
+        "format": "source",
+        "path": "@CFG@/rule-sets/direct-6/direct-6.json"
       },
       {
         "type": "local",
@@ -579,6 +711,12 @@
       },
       {
         "type": "local",
+        "tag": "direct-6-dot",
+        "format": "source",
+        "path": "@CFG@/rule-sets/direct-6-dot/direct-6-dot.json"
+      },
+      {
+        "type": "local",
         "tag": "escape-5",
         "format": "source",
         "path": "@CFG@/rule-sets/escape-5/escape-5.json"
@@ -594,6 +732,12 @@
         "tag": "block-5",
         "format": "source",
         "path": "@CFG@/rule-sets/block-5/block-5.json"
+      },
+      {
+        "type": "local",
+        "tag": "direct-5",
+        "format": "source",
+        "path": "@CFG@/rule-sets/direct-5/direct-5.json"
       },
       {
         "type": "local",
@@ -615,6 +759,12 @@
       },
       {
         "type": "local",
+        "tag": "direct-5-dot",
+        "format": "source",
+        "path": "@CFG@/rule-sets/direct-5-dot/direct-5-dot.json"
+      },
+      {
+        "type": "local",
         "tag": "escape-4",
         "format": "source",
         "path": "@CFG@/rule-sets/escape-4/escape-4.json"
@@ -630,6 +780,12 @@
         "tag": "block-4",
         "format": "source",
         "path": "@CFG@/rule-sets/block-4/block-4.json"
+      },
+      {
+        "type": "local",
+        "tag": "direct-4",
+        "format": "source",
+        "path": "@CFG@/rule-sets/direct-4/direct-4.json"
       },
       {
         "type": "local",
@@ -651,6 +807,12 @@
       },
       {
         "type": "local",
+        "tag": "direct-4-dot",
+        "format": "source",
+        "path": "@CFG@/rule-sets/direct-4-dot/direct-4-dot.json"
+      },
+      {
+        "type": "local",
         "tag": "escape-3",
         "format": "source",
         "path": "@CFG@/rule-sets/escape-3/escape-3.json"
@@ -666,6 +828,12 @@
         "tag": "block-3",
         "format": "source",
         "path": "@CFG@/rule-sets/block-3/block-3.json"
+      },
+      {
+        "type": "local",
+        "tag": "direct-3",
+        "format": "source",
+        "path": "@CFG@/rule-sets/direct-3/direct-3.json"
       },
       {
         "type": "local",
@@ -687,6 +855,12 @@
       },
       {
         "type": "local",
+        "tag": "direct-3-dot",
+        "format": "source",
+        "path": "@CFG@/rule-sets/direct-3-dot/direct-3-dot.json"
+      },
+      {
+        "type": "local",
         "tag": "escape-2",
         "format": "source",
         "path": "@CFG@/rule-sets/escape-2/escape-2.json"
@@ -702,6 +876,12 @@
         "tag": "block-2",
         "format": "source",
         "path": "@CFG@/rule-sets/block-2/block-2.json"
+      },
+      {
+        "type": "local",
+        "tag": "direct-2",
+        "format": "source",
+        "path": "@CFG@/rule-sets/direct-2/direct-2.json"
       },
       {
         "type": "local",
@@ -723,6 +903,12 @@
       },
       {
         "type": "local",
+        "tag": "direct-2-dot",
+        "format": "source",
+        "path": "@CFG@/rule-sets/direct-2-dot/direct-2-dot.json"
+      },
+      {
+        "type": "local",
         "tag": "escape-1",
         "format": "source",
         "path": "@CFG@/rule-sets/escape-1/escape-1.json"
@@ -738,6 +924,12 @@
         "tag": "block-1",
         "format": "source",
         "path": "@CFG@/rule-sets/block-1/block-1.json"
+      },
+      {
+        "type": "local",
+        "tag": "direct-1",
+        "format": "source",
+        "path": "@CFG@/rule-sets/direct-1/direct-1.json"
       },
       {
         "type": "local",

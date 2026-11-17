@@ -299,6 +299,7 @@ pub fn json(ctx: &Ctx, probe: bool) -> String {
     let esc = read(&cfg.join("escape-domains.txt"));
     let corp = read(&cfg.join("corp-domains.txt"));
     let blk = read(&cfg.join("block-domains.txt"));
+    let dir = read(&cfg.join("direct-domains.txt"));
     let n = |src: &str, f| rowt_core::render::parse_list(src, f).len();
     let mut geo: Vec<String> = rowt_core::render::geosites_of(&esc);
     geo.extend(rowt_core::render::geosites_of(&blk));
@@ -376,6 +377,7 @@ pub fn json(ctx: &Ctx, probe: bool) -> String {
             "escape": n(&esc, rowt_core::render::Filter::All) + n(&esc, rowt_core::render::Filter::Exact),
             "corp": n(&corp, rowt_core::render::Filter::Domain) + n(&corp, rowt_core::render::Filter::Cidr) + n(&corp, rowt_core::render::Filter::Exact),
             "block": n(&blk, rowt_core::render::Filter::All) + n(&blk, rowt_core::render::Filter::Exact),
+            "direct": n(&dir, rowt_core::render::Filter::Domain) + n(&dir, rowt_core::render::Filter::Exact),
             "ads": cfg.join("cache/geosite-category-ads-all.srs").is_file(),
             "geosites": geo,
             "final": env_or("ROWT_FINAL", "direct"),

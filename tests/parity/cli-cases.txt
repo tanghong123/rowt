@@ -78,7 +78,7 @@ PARITY_SCENARIO=corp-synced corp add new.corp.example
 PARITY_SCENARIO=corp-synced corp add 192.0.2.0/24
 PARITY_SCENARIO=corp-synced corp add new.corp.example second.corp.example
 PARITY_SCENARIO=corp-synced escape add new.example
-# Every lane rule renders as a rule-set file under rule-sets/ (48 banded lane
+# Every lane rule renders as a rule-set file under rule-sets/ (64 banded lane
 # sets and corp-cidr.json), which fsstate compares byte for byte, modes too.
 # The synced DHCP domains rank by depth with the hand entries, in the router
 # and in explain alike (see the corp-sync-shadowed README).
@@ -108,6 +108,23 @@ PARITY_SCENARIO=explain-geosite explain unlisted.example
 PARITY_SCENARIO=explain-geosite explain example.com
 PARITY_SCENARIO=explain-geosite explain 198.51.100.7
 PARITY_SCENARIO=explain-geosite-local explain registry.pkg.example
+# The direct lane (#s98): a hand list, so ahead of the geosite sets — a name
+# geosite:github lists goes direct by it — and ranked with the other hand lists
+# by depth (dl.example.com under escape's example.com; an exact host under
+# escape's sub.example.net, and what is under that host); a tie with escape
+# goes to escape, the router's set order.
+PARITY_SCENARIO=explain-geosite explain registry.npm.example
+explain dl.example.com
+explain mirror.sub.example.net
+explain sub.mirror.sub.example.net
+explain direct.example
+PARITY_SCENARIO=direct-tie explain www.example.com
+PARITY_SCENARIO=render-local explain dl.example.com
+# …and under a router started before the lane existed: a note says it does not
+# route by the entry until a reload; a name the lane does not hold gets none.
+PARITY_SCENARIO=direct-router-old explain dl.example.com
+PARITY_SCENARIO=direct-router-old explain example.com
+PARITY_SCENARIO=lanes-live explain dl.example.com
 PARITY_SCENARIO=render-local escape list
 
 # newly ported: version, the proxy read paths, and lane import
@@ -336,6 +353,30 @@ escape errors
 corp errors 1h
 block errors
 direct errors
+direct
+# The direct lane's edits (#s98), like the other lanes': the audit's LANE lines
+# say `none` for "in no lane", so `none -> direct` and `escape -> direct` read
+# apart from an unroute. A geosite set and an address are declined.
+direct list
+direct dump
+direct add new.example
+direct add example.com
+direct add --domain exact.direct.example
+direct add geosite:github
+direct add 198.51.100.0/24 ok.example
+direct add 203.0.113.5
+direct add com
+direct add --no-reload batched.example
+direct rm direct.example
+direct rm absent.example
+direct import tests/parity/fixtures/import-list.txt
+direct clear
+escape add dl.example.com
+block rm ads.example
+PARITY_SCENARIO=direct-seed direct list
+PARITY_SCENARIO=direct-seed escape list
+PARITY_SCENARIO=direct-seed escape add new.example
+PARITY_SCENARIO=direct-tie render
 # `log` is `tail -f`: both sides are expected to be killed by the alarm, so
 # it gets a short one rather than a minute of proving they hang alike.
 PARITY_TIMEOUT=3 direct log
@@ -674,6 +715,9 @@ PARITY_SCENARIO=lanes-live corp add 192.0.2.0/24
 PARITY_SCENARIO=lanes-live escape clear
 PARITY_SCENARIO=lanes-live escape add --no-reload batched.example
 PARITY_SCENARIO=lanes-live escape add present.example present.example
+PARITY_SCENARIO=lanes-live direct add new.example
+PARITY_SCENARIO=lanes-live direct add example.com
+PARITY_SCENARIO=lanes-live direct rm dl.example.com
 ROWT_LANES_HOT=0 PARITY_SCENARIO=lanes-live escape add new.example
 ROWT_CORP_HOT=0 PARITY_SCENARIO=lanes-live escape add new.example
 # A CIDR-looking line in the escape lane is not a suffix: both renders leave it

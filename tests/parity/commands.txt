@@ -99,6 +99,12 @@ block_errors      ro     block errors
 block_stats       ro     block stats
 direct_errors     ro     direct errors
 direct_stats      ro     direct stats
+direct_add        skip   direct add        # writes the lane; cli-diff compares it (and lanes-diff the files)
+direct_rm         skip   direct rm         # same
+direct_remove     skip   direct remove     # same, the alias
+direct_clear      skip   direct clear      # same
+direct_import     skip   direct import     # same, needs a file
+direct_dump       skip   direct dump       # a mutating arm (it can write a file), so not a mask case; cli-diff compares it
 completion_zsh    ro     completion zsh
 server_dump       ro     server dump
 corp_suggest      mut    corp suggest

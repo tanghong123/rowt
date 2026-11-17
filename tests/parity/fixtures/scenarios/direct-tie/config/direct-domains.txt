@@ -1,0 +1,2 @@
+# a twin of escape's example.com
+example.com

@@ -1,0 +1,5 @@
+The same entry in the escape lane and the direct lane, as a hand edit or a
+bundle can leave it (#s98). The router's set order puts the direct lane last, so the escape entry
+wins the tie, and explain must say so. The render also warns about the twin on
+stderr, which cli-diff does not compare. Seeding itself no longer makes this
+twin (see direct-seed); a hand edit or a bundle still can.

@@ -1335,12 +1335,12 @@ cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
 if [ ! -x "$ROOT/target/release/rowt-rs" ]; then
   echo "  skip — no release build"
 else
-  # The lane rules are 48 rule-set files the render writes under rule-sets/,
+  # The lane rules are 64 rule-set files the render writes under rule-sets/,
   # and host.json names every one. A band the shell stopped writing would leave
   # the router with no rule for those entries (sing-box refuses the missing
   # file) while the two renders still agreed on host.json. Stop the shell's band
-  # loop one short; cli-diff's config-tree compare must see the three missing
-  # files.
+  # loop one short; cli-diff's config-tree compare must see the four missing
+  # files (one band-1 set per lane).
   perl -0pi -e 's/range\(\$bands; 0; -1\) as \$n/range(\$bands; 1; -1) as \$n/' "$tmp/bin/rowt"
   if ! grep -qF 'range($bands; 1; -1) as $n' "$tmp/bin/rowt"; then
     bad "could not stop the band loop early (_lane_set_bodies moved?)"

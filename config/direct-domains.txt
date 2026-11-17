@@ -1,0 +1,21 @@
+# direct-domains.txt — names sent straight out the physical network, even
+# where a broader rule would take them elsewhere.
+#
+# This is the "direct" lane. A name no rule matches goes direct already; this
+# list is for the names a geosite set or the ad set would otherwise catch. Its
+# entries rank with the other hand lists (the longest match wins across
+# escape, corp, block and direct), and the hand lists come before the geosite
+# sets, so an entry here takes that name off `geosite:github` while the rest
+# of the set still applies.
+#
+#   rowt direct add <domain>     rowt direct rm <domain>     rowt direct list
+#
+# Matching is domain_suffix (HasSuffix), same as the other lists — so
+# `npmjs.org` also covers `registry.npmjs.org`; `--domain` (a `domain:<host>`
+# line) matches that one host. No geosite: entries and no addresses here. One
+# entry per line; # = comment.
+
+# --- npm: geosite:github lists these, but the registry needs no tunnel ---
+npmjs.org
+npmjs.com
+npm.community

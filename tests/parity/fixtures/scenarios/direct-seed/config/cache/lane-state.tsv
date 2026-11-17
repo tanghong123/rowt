@@ -1,0 +1,11 @@
+block	ads.example
+block	tracker.example.net
+corp	10.99.0.0/16
+corp	198.51.100.0/24
+corp	corp.example
+corp	intranet.corp.example
+escape	NPMjs.org
+escape	example.com
+escape	geosite:google
+escape	spaced.example.org
+escape	sub.example.net

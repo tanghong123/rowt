@@ -51,6 +51,7 @@ fn run() -> Result<String, String> {
     let escape = read(&cfg.join("escape-domains.txt"));
     let corp = read(&cfg.join("corp-domains.txt"));
     let block = read(&cfg.join("block-domains.txt"));
+    let direct = read(&cfg.join("direct-domains.txt"));
     let state = read(&cfg.join("state"));
     let mode = {
         let m = sget(&state, "mode");
@@ -73,6 +74,7 @@ fn run() -> Result<String, String> {
         escape_list: &escape,
         corp_list: &corp,
         block_list: &block,
+        direct_list: &direct,
         private_cidrs: &private_cidrs,
         private_default: &private_default,
         final_route,

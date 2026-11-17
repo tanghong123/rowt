@@ -1,10 +1,10 @@
 //! `rowt-lanes` — apply one lane-list edit, writing the files back.
 //!
-//!   rowt-lanes --config-dir DIR <escape|corp|block> add <entry>…
-//!   rowt-lanes --config-dir DIR <escape|corp|block> rm <entry>…
-//!   rowt-lanes --config-dir DIR <escape|corp|block> clear
-//!   rowt-lanes --config-dir DIR <escape|corp|block> import <file>
-//!   rowt-lanes --config-dir DIR <escape|corp|block> dump
+//!   rowt-lanes --config-dir DIR <escape|corp|block|direct> add <entry>…
+//!   rowt-lanes --config-dir DIR <escape|corp|block|direct> rm <entry>…
+//!   rowt-lanes --config-dir DIR <escape|corp|block|direct> clear
+//!   rowt-lanes --config-dir DIR <escape|corp|block|direct> import <file>
+//!   rowt-lanes --config-dir DIR <escape|corp|block|direct> dump
 //!
 //! Prints the same lines the shell prints for these operations. What it
 //! deliberately does not do is the shell's surrounding side effects — fetching a
@@ -44,8 +44,7 @@ fn run() -> Result<String, String> {
     let lane = rest
         .first()
         .and_then(|s| Lane::parse(s))
-        .filter(|l| *l != Lane::Direct)
-        .ok_or("usage: rowt-lanes --config-dir DIR <escape|corp|block> <op> [args…]")?;
+        .ok_or("usage: rowt-lanes --config-dir DIR <escape|corp|block|direct> <op> [args…]")?;
     let action = rest.get(1).cloned().unwrap_or_else(|| "list".into());
     let (operands, exact) = rowt_core::lanes::take_kind(&rest[2.min(rest.len())..]);
     let force = operands.iter().any(|a| a == "--force");
@@ -56,6 +55,7 @@ fn run() -> Result<String, String> {
         escape: read(&file_of(&cfg, Lane::Escape)),
         corp: read(&file_of(&cfg, Lane::Corp)),
         block: read(&file_of(&cfg, Lane::Block)),
+        direct: read(&file_of(&cfg, Lane::Direct)),
         hotspot: read(&hotspot_file),
     };
 
@@ -63,7 +63,8 @@ fn run() -> Result<String, String> {
         let body = match lane {
             Lane::Escape => &lanes.escape,
             Lane::Corp => &lanes.corp,
-            _ => &lanes.block,
+            Lane::Block => &lanes.block,
+            Lane::Direct => &lanes.direct,
         };
         return Ok(dump(body).join("\n"));
     }
@@ -88,17 +89,14 @@ fn run() -> Result<String, String> {
     };
 
     let edit = apply(&lanes, lane, &op);
-    for l in [Lane::Escape, Lane::Corp, Lane::Block] {
-        let before = match l {
-            Lane::Escape => &lanes.escape,
-            Lane::Corp => &lanes.corp,
-            _ => &lanes.block,
+    for l in Lanes::editable() {
+        let pick = |x: &Lanes| match l {
+            Lane::Escape => x.escape.clone(),
+            Lane::Corp => x.corp.clone(),
+            Lane::Block => x.block.clone(),
+            Lane::Direct => x.direct.clone(),
         };
-        let after = match l {
-            Lane::Escape => &edit.lanes.escape,
-            Lane::Corp => &edit.lanes.corp,
-            _ => &edit.lanes.block,
-        };
+        let (before, after) = (pick(&lanes), pick(&edit.lanes));
         if before != after {
             let p = file_of(&cfg, l);
             std::fs::write(&p, after).map_err(|e| format!("write: {e}"))?;

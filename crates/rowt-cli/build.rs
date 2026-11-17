@@ -75,13 +75,13 @@ fn main() {
     }
     std::fs::write(out.join("help_detail.txt"), recs).unwrap();
 
-    // `seed_lists` copies three templates out of the repo's config/ directory.
+    // `seed_lists` copies four templates out of the repo's config/ directory.
     // The shell finds them relative to itself; embedding them instead keeps
     // rowt-rs working from target/release, a brew prefix or anywhere else, and
     // they are static text with no logic, so there is nothing to reimplement.
     let cfgdir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config");
-    let mut seeds = String::from("pub const SEEDS: [(&str, &str); 3] = [\n");
-    for n in ["escape-domains.txt", "corp-domains.txt", "block-domains.txt"] {
+    let mut seeds = String::from("pub const SEEDS: [(&str, &str); 4] = [\n");
+    for n in ["escape-domains.txt", "corp-domains.txt", "block-domains.txt", "direct-domains.txt"] {
         let p = cfgdir.join(n);
         println!("cargo:rerun-if-changed={}", p.display());
         let text = std::fs::read_to_string(&p).unwrap_or_default();

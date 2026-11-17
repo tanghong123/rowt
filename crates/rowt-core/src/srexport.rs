@@ -8,8 +8,8 @@
 //! CLI's (`rowt-cli::bundle`).
 //!
 //! What a rule says, in Shadowrocket's words: an escape entry is `PROXY`
-//! (whichever server is selected there), a block entry `REJECT`, corp and
-//! hotspot `DIRECT`, and the catch-all `FINAL,DIRECT`. The order follows rowt's
+//! (whichever server is selected there), a block entry `REJECT`, corp,
+//! direct and hotspot `DIRECT`, and the catch-all `FINAL,DIRECT`. The order follows rowt's
 //! precedence — the first matching rule wins — which is why the hand-listed
 //! suffixes are sorted most specific first.
 
@@ -39,10 +39,14 @@ pub struct Input<'a> {
     pub escape_exact: &'a [String],
     pub corp_exact: &'a [String],
     pub block_exact: &'a [String],
+    pub direct_exact: &'a [String],
     /// Suffix entries per lane, duplicates and all — `list_json` does not dedupe.
     pub escape: &'a [String],
     pub corp: &'a [String],
     pub block: &'a [String],
+    /// The direct lane: DIRECT, ranked with the other hand-listed suffixes, so
+    /// ahead of the geosite categories as in the router.
+    pub direct: &'a [String],
     /// The escape lane's categories (PROXY), then the block lane's (REJECT), in
     /// file order with duplicates kept, as `geosites_of` lists them.
     pub geos: &'a [Geo],
@@ -134,12 +138,15 @@ pub fn rules(i: &Input) -> Rules {
     o.extend(i.escape_exact.iter().map(|e| format!("DOMAIN,{},PROXY", e.to_ascii_lowercase())));
     o.extend(i.corp_exact.iter().map(|e| format!("DOMAIN,{},DIRECT", e.to_ascii_lowercase())));
     o.extend(i.block_exact.iter().map(|e| format!("DOMAIN,{},REJECT", e.to_ascii_lowercase())));
+    o.extend(i.direct_exact.iter().map(|e| format!("DOMAIN,{},DIRECT", e.to_ascii_lowercase())));
     o.push("# hand-listed suffixes, most specific first".into());
-    // jq: block + corp + escape, `sort_by([labels, length]) | reverse`. sort_by
-    // is stable, so among equal keys the LATER input comes first after the
-    // reverse — escape before corp before block, and a lane's own entries in
-    // reverse file order. Lengths are in characters, as jq counts them.
+    // jq: direct + block + corp + escape, `sort_by([labels, length]) |
+    // reverse`. sort_by is stable, so among equal keys the LATER input comes
+    // first after the reverse — escape before corp before block before
+    // direct, and a lane's own entries in reverse file order. Lengths are in
+    // characters, as jq counts them.
     let mut suf: Vec<(&String, &str)> = Vec::new();
+    suf.extend(i.direct.iter().map(|s| (s, "DIRECT")));
     suf.extend(i.block.iter().map(|s| (s, "REJECT")));
     suf.extend(i.corp.iter().map(|s| (s, "DIRECT")));
     suf.extend(i.escape.iter().map(|s| (s, "PROXY")));
@@ -187,7 +194,7 @@ pub fn config(version: &str, stamp: &str, prog: &str, rules: &Rules, skip_proxy:
     let mut o: Vec<String> = vec![
         format!("# Shadowrocket config written by rowt {version} ('{prog} config export --to shadowrocket'), {stamp}."),
         "# Routing rules only: PROXY is whichever server is selected in Shadowrocket (no server is in this file).".into(),
-        "#   escape -> PROXY   block -> REJECT   corp, hotspot -> DIRECT   everything else -> FINAL,DIRECT".into(),
+        "#   escape -> PROXY   block -> REJECT   corp, direct, hotspot -> DIRECT   everything else -> FINAL,DIRECT".into(),
         "# The order follows rowt's precedence (the first matching rule wins). Regenerate rather than edit.".into(),
     ];
     if rules.regex > 0 {
@@ -272,27 +279,31 @@ mod tests {
     #[test]
     fn suffixes_sort_most_specific_first_and_ties_break_escape_corp_block_in_reverse_file_order() {
         let i = Input {
-            prog: "rowt", hotspot: &[], escape_exact: &[], corp_exact: &[], block_exact: &[],
+            prog: "rowt", hotspot: &[], escape_exact: &[], corp_exact: &[], block_exact: &[], direct_exact: &[],
             escape: &v(&["e.x", "e2.x", "a.b.x"]), corp: &v(&["c.x", "zz.x"]), block: &v(&["b.x"]),
+            direct: &v(&["d.x", "npm.a.b.x"]),
             geos: &[], corp_cidrs: &[], private_default_corp: false, ads: None,
         };
         let r = rules(&i);
         let from = r.lines.iter().position(|l| l == "# hand-listed suffixes, most specific first").unwrap();
         let to = r.lines.iter().position(|l| l == "# corp and private ranges").unwrap();
-        // jq: `sort_by([labels, len]) | reverse` over block + corp + escape, checked
-        // against jq itself: a.b.x (3 labels), then by length 4 (zz.x, e2.x — the
-        // later input first), then the 3-long ties escape, corp, block.
+        // jq: `sort_by([labels, len]) | reverse` over direct + block + corp +
+        // escape: npm.a.b.x (4 labels), a.b.x (3), then by length 4 (zz.x,
+        // e2.x — the later input first), then the 3-long ties escape, corp,
+        // block, direct.
         assert_eq!(&r.lines[from + 1..to], &[
+            "DOMAIN-SUFFIX,npm.a.b.x,DIRECT",
             "DOMAIN-SUFFIX,a.b.x,PROXY", "DOMAIN-SUFFIX,e2.x,PROXY", "DOMAIN-SUFFIX,zz.x,DIRECT",
             "DOMAIN-SUFFIX,e.x,PROXY", "DOMAIN-SUFFIX,c.x,DIRECT", "DOMAIN-SUFFIX,b.x,REJECT",
+            "DOMAIN-SUFFIX,d.x,DIRECT",
         ]);
     }
 
     #[test]
     fn duplicates_in_a_lane_are_emitted_twice_as_list_json_leaves_them() {
         let i = Input {
-            prog: "rowt", hotspot: &[], escape_exact: &[], corp_exact: &[], block_exact: &[],
-            escape: &v(&["example.com", "example.com"]), corp: &[], block: &[],
+            prog: "rowt", hotspot: &[], escape_exact: &[], corp_exact: &[], block_exact: &[], direct_exact: &[],
+            escape: &v(&["example.com", "example.com"]), corp: &[], block: &[], direct: &[],
             geos: &[], corp_cidrs: &[], private_default_corp: false, ads: None,
         };
         assert_eq!(rules(&i).lines.iter().filter(|l| l.as_str() == "DOMAIN-SUFFIX,example.com,PROXY").count(), 2);
@@ -327,7 +338,8 @@ mod tests {
         let i = Input {
             prog: "rowt", hotspot: &v(&[".portal.example", "login.example"]),
             escape_exact: &v(&["Exact.Example"]), corp_exact: &[], block_exact: &v(&["bad.example"]),
-            escape: &[], corp: &[], block: &[], geos: &[],
+            direct_exact: &v(&["Dl.Example"]),
+            escape: &[], corp: &[], block: &[], direct: &[], geos: &[],
             corp_cidrs: &v(&["198.51.100.0/24", "2001:db8::/32"]), private_default_corp: true, ads: Some(&ads),
         };
         let r = rules(&i);
@@ -335,7 +347,7 @@ mod tests {
             "# hotspot lane: reached without the proxy",
             "DOMAIN-WILDCARD,*.portal.example,DIRECT", "DOMAIN-SUFFIX,login.example,DIRECT",
             "# exact hosts (--domain)",
-            "DOMAIN,exact.example,PROXY", "DOMAIN,bad.example,REJECT",
+            "DOMAIN,exact.example,PROXY", "DOMAIN,bad.example,REJECT", "DOMAIN,dl.example,DIRECT",
             "# hand-listed suffixes, most specific first",
             "# corp and private ranges",
             "IP-CIDR,198.51.100.0/24,DIRECT,no-resolve", "IP-CIDR6,2001:db8::/32,DIRECT,no-resolve",
@@ -345,7 +357,7 @@ mod tests {
             "# geosite:category-ads-all", "DOMAIN-WILDCARD,*.ads.example,REJECT",
             "FINAL,DIRECT",
         ]);
-        assert_eq!(counts(&r), Counts { total: 12, proxy: 1, reject: 2, direct: 9 });
+        assert_eq!(counts(&r), Counts { total: 13, proxy: 1, reject: 2, direct: 10 });
     }
 
     #[test]

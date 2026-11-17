@@ -134,19 +134,21 @@ pub fn body(ctx: &Ctx, here: &Path) -> String {
     let esc = read(&cfg.join("escape-domains.txt"));
     let corp = read(&cfg.join("corp-domains.txt"));
     let blk = read(&cfg.join("block-domains.txt"));
+    let dir = read(&cfg.join("direct-domains.txt"));
     use rowt_core::render::{geosites_of, parse_list, Filter};
     let ads = cfg.join("cache/geosite-category-ads-all.srs").is_file();
     let mut geo: Vec<String> = geosites_of(&esc);
     geo.extend(geosites_of(&blk));
     geo.sort();
     geo.dedup();
-    o.push(format!("  buckets: escape={} corp={} block={}{}{}",
+    o.push(format!("  buckets: escape={} corp={} block={}{}{} direct={}",
         parse_list(&esc, Filter::All).len() + parse_list(&esc, Filter::Exact).len(),
         parse_list(&corp, Filter::Domain).len() + parse_list(&corp, Filter::Cidr).len()
             + parse_list(&corp, Filter::Exact).len(),
         parse_list(&blk, Filter::All).len() + parse_list(&blk, Filter::Exact).len(),
         if ads { " +geosite-ads" } else { "" },
-        if geo.is_empty() { String::new() } else { format!(" +geosite:{}", geo.join(",")) }));
+        if geo.is_empty() { String::new() } else { format!(" +geosite:{}", geo.join(",")) },
+        parse_list(&dir, Filter::Domain).len() + parse_list(&dir, Filter::Exact).len()));
     o.push(String::new());
 
     o.push("----- generated configs -----".into());

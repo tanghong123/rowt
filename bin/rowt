@@ -62,7 +62,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.9.2"
+ROWT_VERSION="3.10.0"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -103,9 +103,11 @@ SB="$BIN/sing-box"                   # pinned host binary
 DOMAINS_TMPL="$HERE/config/escape-domains.txt"
 CORP_TMPL="$HERE/config/corp-domains.txt"
 BLOCK_TMPL="$HERE/config/block-domains.txt"
+DIRECT_TMPL="$HERE/config/direct-domains.txt"
 DOMAINS="$CFG/escape-domains.txt"                # -> escape (VLESS tunnel)
 CORP_DOMAINS="$CFG/corp-domains.txt"             # -> corp (into the corp VPN)
 BLOCK_DOMAINS="$CFG/block-domains.txt"           # -> block (ad/telemetry sinkhole)
+DIRECT_DOMAINS="$CFG/direct-domains.txt"         # -> direct, ahead of the geosite sets and the ad set
 HOTSPOT_DOMAINS="$CFG/hotspot-domains.txt"       # -> OS proxy bypass (captive-portal hosts; never rendered)
 # Pre-compiled geosite ad/tracker rule-set (blocks thousands of domains). Cached
 # like the other artifacts so 'up' works offline; rendered in only when present.
@@ -280,10 +282,12 @@ _audit() { # $* = message
 # ran, not which entries it added: on 2026-10-06 tracing why one site's
 # bot-defence host was blocked meant finding a month-old import file on disk and
 # grepping it, and a lane file written outside rowt left no trace at all. So the
-# bracket diffs membership too — every (lane, entry) pair across the four lane
-# files — and logs each change as a transition, `block -> direct` for a host the
-# monitor routed direct, `escape -> block` for one an add pulled out of escape,
-# `direct -> block` for every line of an import. One line per transition, the
+# bracket diffs membership too — every (lane, entry) pair across the five lane
+# files — and logs each change as a transition, `block -> none` for a host the
+# monitor took out of every lane, `escape -> block` for one an add pulled out of
+# escape, `none -> block` for every line of an import, `escape -> direct` for
+# one moved into the direct lane. `none` is "in no lane"; before the direct lane
+# (#s98) that was spelled `direct`. One line per transition, the
 # entries in full: a 300-entry import is one long line (AUDIT_MAX counts lines),
 # and the full list is what makes it reversible. Entries are kept AS WRITTEN
 # (`domain:x`, `*.x`), so undoing a line re-adds the identical text.
@@ -300,8 +304,8 @@ _audit() { # $* = message
 LANE_STATE="$CACHE/lane-state.tsv"
 _lane_snapshot() { # every lane entry as "<lane>\t<entry>", byte-sorted, unique
   local l f
-  for l in block corp escape hotspot; do
-    case "$l" in block) f="$BLOCK_DOMAINS" ;; corp) f="$CORP_DOMAINS" ;; escape) f="$DOMAINS" ;; *) f="$HOTSPOT_DOMAINS" ;; esac
+  for l in block corp direct escape hotspot; do
+    case "$l" in block) f="$BLOCK_DOMAINS" ;; corp) f="$CORP_DOMAINS" ;; direct) f="$DIRECT_DOMAINS" ;; escape) f="$DOMAINS" ;; *) f="$HOTSPOT_DOMAINS" ;; esac
     [ -f "$f" ] || continue
     LC_ALL=C awk -v l="$l" '{ gsub(/[[:space:]]/, "") } $0 != "" && substr($0, 1, 1) != "#" { print l "\t" $0 }' "$f"
   done | LC_ALL=C sort -u
@@ -312,7 +316,7 @@ _lane_diff() { # $1=before $2=after (snapshot files)  $3=prefix -> "LANE …" li
       l = substr($0, 1, t - 1); e = substr($0, t + 1) }
     FILENAME == ARGV[1] { b[e] = (e in b) ? b[e] "+" l : l; s[e] = 1; next }
     { a[e] = (e in a) ? a[e] "+" l : l; s[e] = 1 }
-    END { for (e in s) { f = (e in b) ? b[e] : "direct"; t = (e in a) ? a[e] : "direct"
+    END { for (e in s) { f = (e in b) ? b[e] : "none"; t = (e in a) ? a[e] : "none"
                          if (f != t) print f " -> " t "\t" e } }
   ' <(LC_ALL=C sort -u "$1") <(LC_ALL=C sort -u "$2") | LC_ALL=C sort | LC_ALL=C awk -F'\t' -v pre="${3:-}" '
     $1 != k { if (k != "") print "LANE " pre k " (" n "): " list; k = $1; n = 0; list = "" }
@@ -454,10 +458,52 @@ sub_count() {
 }
 
 # Seed the user-editable routing lists from the repo templates on first use.
+# A lane the config lacks, from its template — less each entry another lane
+# already holds (whitespace removed, ASCII case folded), so seeding the direct
+# lane's npm entries beside an escape lane that holds npmjs.org leaves no twin
+# (#s98). rowt_core::lanestate::seed_body, byte for byte. Succeeds only when it
+# wrote the file.
+_seed_lane() { # $1=lane file $2=template
+  if [ -f "$1" ] || [ ! -f "$2" ]; then return 1; fi
+  local -a others=(); local f
+  for f in "$BLOCK_DOMAINS" "$CORP_DOMAINS" "$DIRECT_DOMAINS" "$DOMAINS" "$HOTSPOT_DOMAINS"; do
+    # An unreadable lane reads as empty, as rowt-cli's `read` has it.
+    if [ "$f" != "$1" ] && [ -f "$f" ] && [ -r "$f" ]; then others+=("$f"); fi
+  done
+  if LC_ALL=C awk -v t="$2" '
+       { e = $0; gsub(/[[:space:]]/, "", e) }
+       FILENAME != t { if (e != "" && substr(e, 1, 1) != "#") have[tolower(e)] = 1; next }
+       e != "" && substr(e, 1, 1) != "#" && (tolower(e) in have) { next }
+       { print }' ${others[@]+"${others[@]}"} "$2" > "$1" 2>/dev/null; then
+    return 0
+  fi
+  rm -f "${1:?}"; return 1
+}
+# The seeded lanes' entries ($@ = lane file pairs), logged against the last
+# logged lane state as `seeded: `, which then holds them — or the next bracket
+# would log the upgrade's own seeding as an edit made outside rowt. No state yet
+# logs nothing. rowt-cli's lanelog::seeded.
+_lane_seed_audit() {
+  if [ ! -f "$LANE_STATE" ] || [ ! -r "$LANE_STATE" ]; then return 0; fi
+  local now; now="$(mktemp 2>/dev/null)" || return 0
+  {
+    cat "$LANE_STATE"
+    while [ "$#" -ge 2 ]; do
+      LC_ALL=C awk -v l="$1" '{ gsub(/[[:space:]]/, "") } $0 != "" && substr($0, 1, 1) != "#" { print l "\t" $0 }' "$2"
+      shift 2
+    done
+  } 2>/dev/null | LC_ALL=C sort -u > "$now"
+  _lane_audit_lines "$LANE_STATE" "$now" "seeded: "
+  _lane_state_keep "$now"
+}
 seed_lists() {
-  [ -f "$DOMAINS" ]       || { cp "$DOMAINS_TMPL" "$DOMAINS" 2>/dev/null || true; }
-  [ -f "$CORP_DOMAINS" ]  || { cp "$CORP_TMPL" "$CORP_DOMAINS" 2>/dev/null || true; }
-  [ -f "$BLOCK_DOMAINS" ] || { cp "$BLOCK_TMPL" "$BLOCK_DOMAINS" 2>/dev/null || true; }
+  local -a seeded=()
+  if _seed_lane "$DOMAINS" "$DOMAINS_TMPL"; then seeded+=(escape "$DOMAINS"); fi
+  if _seed_lane "$CORP_DOMAINS" "$CORP_TMPL"; then seeded+=(corp "$CORP_DOMAINS"); fi
+  if _seed_lane "$BLOCK_DOMAINS" "$BLOCK_TMPL"; then seeded+=(block "$BLOCK_DOMAINS"); fi
+  if _seed_lane "$DIRECT_DOMAINS" "$DIRECT_TMPL"; then seeded+=(direct "$DIRECT_DOMAINS"); fi
+  if [ "${#seeded[@]}" -gt 0 ]; then _lane_seed_audit "${seeded[@]}"; fi
+  return 0
 }
 
 # Migrations to the current multi-source server model.
@@ -752,6 +798,7 @@ domains_json()    { list_json "$DOMAINS" domain; }          # escape suffixes (a
 corp_domains_json() { list_json "$CORP_DOMAINS" domain; }   # corp suffixes
 corp_cidrs_json()   { list_json "$CORP_DOMAINS" cidr; }     # corp IP ranges
 block_domains_json() { list_json "$BLOCK_DOMAINS" domain; } # block suffixes (extra, on top of the geosite set)
+direct_domains_json() { list_json "$DIRECT_DOMAINS" domain; } # direct suffixes (ahead of the geosite sets)
 hotspot_domains_json() { list_json "$HOTSPOT_DOMAINS" domain; } # hotspot suffixes (OS bypass; corp sync leaves them alone)
 # `--domain` entries per lane — sing-box `domain` (whole-host) rules. The
 # `buckets:` counts in status/report add these to the suffix counts: they are
@@ -761,6 +808,7 @@ hotspot_domains_json() { list_json "$HOTSPOT_DOMAINS" domain; } # hotspot suffix
 escape_exact_json() { list_json "$DOMAINS" exact; }
 corp_exact_json()   { list_json "$CORP_DOMAINS" exact; }
 block_exact_json()  { list_json "$BLOCK_DOMAINS" exact; }
+direct_exact_json() { list_json "$DIRECT_DOMAINS" exact; }
 
 # Re-render and restart the router if it is currently running.
 reload_if_running() {
@@ -771,17 +819,19 @@ reload_if_running() {
   if host_running; then info "reloading router"; cmd_render >/dev/null; cmd_router restart; fi
 }
 
-# The three editable routing lanes, plus hotspot. A domain lives in AT MOST one
-# of them: the route rules are first-match-wins (block → corp → escape), so a
-# domain sitting in two lists is silently shadowed by the earliest lane — and a
-# hotspot entry never reaches the router at all (the OS skips the proxy for it),
-# so a routing-lane twin of it would be dead. Adding to one lane therefore
-# removes the exact entry from the other three (see _lane_dedupe).
+# The four editable routing lanes, plus hotspot. A domain lives in AT MOST one
+# of them: the route rules are first-match-wins (escape → corp → block → direct
+# within a band), so a domain sitting in two lists is silently shadowed by the
+# earlier lane — and a hotspot entry never reaches the router at all (the OS
+# skips the proxy for it), so a routing-lane twin of it would be dead. Adding to
+# one lane therefore removes the exact entry from the other four (see
+# _lane_dedupe).
 _lane_label() {
   case "$1" in
     "$DOMAINS")         echo escape ;;
     "$CORP_DOMAINS")    echo corp ;;
     "$BLOCK_DOMAINS")   echo block ;;
+    "$DIRECT_DOMAINS")  echo direct ;;
     "$HOTSPOT_DOMAINS") echo hotspot ;;
     *)                  echo "$1" ;;
   esac
@@ -817,7 +867,7 @@ _lane_without() { # $1=file $2=entry
 # ends up in a single lane. Echoes a note per lane it was pulled out of.
 _lane_dedupe() { # $1=keep-file $2=entry
   local keep="$1" e="$2" f tmp
-  for f in "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" "$HOTSPOT_DOMAINS"; do
+  for f in "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" "$DIRECT_DOMAINS" "$HOTSPOT_DOMAINS"; do
     [ "$f" = "$keep" ] && continue
     [ -f "$f" ] || continue
     if _lane_has "$f" "$e"; then
@@ -959,10 +1009,10 @@ edit_list() {
   # already-present entry, or removing a missing one, is a no-op — no restart).
   # Snapshot ALL lanes, not just the target: an `add` may also pull the entry out
   # of a sibling lane (single-lane invariant), which likewise needs a reload.
-  local _before; _before="$(cat "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" 2>/dev/null)"
+  local _before; _before="$(cat "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" "$DIRECT_DOMAINS" 2>/dev/null)"
   # The hotspot lane is tracked apart: nothing in it is rendered, so a change
   # there re-applies the OS bypass list (_hotspot_apply) instead of bouncing
-  # the router — the three routing lanes alone decide whether sing-box restarts.
+  # the router — the four routing lanes alone decide whether sing-box restarts.
   # And --no-reload does not gate that refresh: it means "don't bounce the
   # router", and the TUI's batched reload is a render + restart that never
   # touches the proxy, so a refresh skipped here would not happen at all.
@@ -1007,11 +1057,19 @@ edit_list() {
           hotspot:*) ;;
           *'*'*) echo "  skipped $e — '*' matches nothing in a routing lane; for the names under z.com, add .z.com (or *.z.com) without --domain"; continue ;;
         esac
-        # geosite: is escape/block only (corp routes internal domains/CIDRs, and
-        # the OS bypass list cannot hold a rule-set).
+        # geosite: is escape/block only (corp routes internal domains/CIDRs, the
+        # direct lane exists to send names past the sets, and the OS bypass list
+        # cannot hold a rule-set).
         case "$e" in
-          geosite:*) case "$label" in corp|hotspot) echo "  skipped $e — geosite: is only for the escape and block lanes"; continue ;; esac ;;
+          geosite:*) case "$label" in corp|direct|hotspot) echo "  skipped $e — geosite: is only for the escape and block lanes"; continue ;; esac ;;
         esac
+        # The direct lane routes names: an address goes direct already unless a
+        # corp CIDR claims it, and the render would drop the entry without a
+        # word, as it does on escape. Mirrors rowt_core::render::is_cidr and
+        # classify::is_ipv4 (a bare address).
+        if [ "$label" = direct ] && { [[ "$e" =~ /[0-9]+$ ]] || [[ "$e" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }; then
+          echo "  skipped $e — the direct lane takes names, not addresses"; continue
+        fi
         if _lane_has "$file" "$e"; then echo "  already present: $e"
         else _lane_append "$file" "$e"; echo "  added: $e"; fi
         _lane_dedupe "$file" "$e"  # single-lane invariant: pull it from the other lanes
@@ -1056,7 +1114,7 @@ edit_list() {
     *) die "usage: $PROG $label [list | add [--domain] [--force] <e>… | rm [--domain] <e>… | import <file> | clear | dump [file]]" ;;
   esac
   # only re-render/restart if some lane changed (and reload wasn't suppressed)
-  local _after _hafter; _after="$(cat "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" 2>/dev/null)"
+  local _after _hafter; _after="$(cat "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" "$DIRECT_DOMAINS" 2>/dev/null)"
   _hafter="$(cat "$HOTSPOT_DOMAINS" 2>/dev/null || true)"
   [ "$_hbefore" != "$_hafter" ] && _hotspot_apply || true
   # …live through the lane rule-sets when the router runs this host.json, a
@@ -1117,7 +1175,7 @@ AUTO_CORP_DOMAINS="${ROWT_AUTO_CORP_DOMAINS:-1}"
 # at them, and a lane edit leaves host.json byte-identical: the running router
 # picks the change up with no restart (_lanes_apply), where every edit used to
 # be a render plus `router restart` that reset every connection on the Mac.
-# Precedence — longest suffix wins across the three lanes — is kept by BANDS:
+# Precedence — longest suffix wins across the four lanes — is kept by BANDS:
 # one set per lane per label count, a bare set and a dot-led set each, the
 # exact entries ahead; _lane_set_tags has the order and
 # rowt_core::render::RULE_SETS_DIR the argument. The corp CIDRs stay one set
@@ -1125,6 +1183,7 @@ AUTO_CORP_DOMAINS="${ROWT_AUTO_CORP_DOMAINS:-1}"
 # own, rule-sets/<tag>/<tag>.json: sing-box watches a set's DIRECTORY, and on
 # macOS the watcher (kqueue) holds a descriptor for every file in it — 49 sets
 # in one directory cost 49² of them (measured: 2,550; one directory each: 100).
+# There are 65 since the direct lane (#s98), each still in its own directory.
 # ROUTER_CFG_SUM is the cksum of the host.json the running router was started
 # (or SIGHUP-reloaded) from: an edit applies live only when the fresh render is
 # that same file; anything else (an older rowt started it, a geosite: came or
@@ -1278,8 +1337,8 @@ _corp_block_domains() {
 }
 
 # The lane sets as "lane<TAB>tag" lines in ROUTE order: the exact sets in lane
-# order escape/corp/block, then for each band from the deepest down the bare
-# sets in lane order, then the dot-led sets. 48 lines. Why this order keeps
+# order escape/corp/block/direct, then for each band from the deepest down the
+# bare sets in lane order, then the dot-led sets. 64 lines. Why this order keeps
 # longest-suffix-wins: for a host and a label count there is exactly one
 # candidate suffix (its last N labels — matching is on a label boundary), so two
 # entries of one band can both match a host only when they are the same entry,
@@ -1289,11 +1348,11 @@ _corp_block_domains() {
 # band. Mirrors rowt_core::render::lane_bands.
 _lane_set_tags() {
   local l n
-  for l in escape corp block; do printf '%s\t%s-exact\n' "$l" "$l"; done
+  for l in escape corp block direct; do printf '%s\t%s-exact\n' "$l" "$l"; done
   n=$LANE_BANDS
   while [ "$n" -ge 1 ]; do
-    for l in escape corp block; do printf '%s\t%s-%s\n' "$l" "$l" "$n"; done
-    if [ "$n" -ge 2 ]; then for l in escape corp block; do printf '%s\t%s-%s-dot\n' "$l" "$l" "$n"; done; fi
+    for l in escape corp block direct; do printf '%s\t%s-%s\n' "$l" "$l" "$n"; done
+    if [ "$n" -ge 2 ]; then for l in escape corp block direct; do printf '%s\t%s-%s-dot\n' "$l" "$l" "$n"; done; fi
     n=$((n - 1))
   done
 }
@@ -1338,7 +1397,7 @@ _lane_set_count() { # $1=file, or - for stdin
   if [ "$1" = - ]; then jq '[.rules[]? | .[] | length] | add // 0' 2>/dev/null || echo 0
   else jq '[.rules[]? | .[] | length] | add // 0' "$1" 2>/dev/null || echo 0; fi
 }
-# Every rule-set file under LANE_SETS_DIR, from the lane files: the 48 lane
+# Every rule-set file under LANE_SETS_DIR, from the lane files: the 64 lane
 # sets and the corp CIDR set. Unchanged bytes are left alone (a rewrite would
 # make sing-box reload the set for nothing). Sets that GAINED entries are
 # written before sets that lost them: a lane move touches two files, sing-box
@@ -1355,6 +1414,7 @@ _lane_sets_write() {
   { _lane_set_bodies escape "$(domains_json)" "$(escape_exact_json)" \
     && _lane_set_bodies corp "$(corp_domains_json)" "$(corp_exact_json)" \
     && _lane_set_bodies block "$(block_domains_json)" "$(block_exact_json)" \
+    && _lane_set_bodies direct "$(direct_domains_json)" "$(direct_exact_json)" \
     && printf 'corp-cidr\t%s\n' "$(corp_cidrs_json | jq -c '{version:1, rules:(if length > 0 then [{ip_cidr:.}] else [] end)}')"
   } > "$all" || { rm -f "$all" "$grew" "$rest"; return 1; }
   while IFS=$'\t' read -r tag body; do
@@ -1374,28 +1434,31 @@ _lane_sets_write() {
   rm -f "$all" "$grew" "$rest"
   return "$rc"
 }
-# What the bands cannot rank, said once per render on stderr. A case twin: the
-# same entry in two lanes spelled in different case (a hand-edited file; `add`
-# declines it), one entry to the router, which takes the first lane's rule. A
+# What the bands cannot rank, said once per render on stderr. A twin: the same
+# entry in two lanes, in any case (a hand-edited file or a bundle; `add` pulls
+# it out of the other lanes), one entry to the router, which takes the first
+# lane's rule. A
 # band-8 pair: an entry of more than LANE_BANDS labels whose suffix of
 # LANE_BANDS labels or more sits in another lane AND in a set the router
 # consults first — band 8 keeps lane order (bare sets, then dot-led, escape /
-# corp / block in each), not length. Mirrors rowt_core::render::case_twins and
+# corp / block / direct in each), not length. Mirrors rowt_core::render::case_twins and
 # overflow_pairs.
 _lane_sets_warn() {
   jq -r -n --argjson bands "$LANE_BANDS" \
     --argjson es "$(domains_json)" --argjson cs "$(corp_domains_json)" --argjson bs "$(block_domains_json)" \
-    --argjson ee "$(escape_exact_json)" --argjson ce "$(corp_exact_json)" --argjson be "$(block_exact_json)" '
-    def lanes: [["escape", $es, $ee], ["corp", $cs, $ce], ["block", $bs, $be]];
+    --argjson ds "$(direct_domains_json)" \
+    --argjson ee "$(escape_exact_json)" --argjson ce "$(corp_exact_json)" --argjson be "$(block_exact_json)" \
+    --argjson de "$(direct_exact_json)" '
+    def lanes: [["escape", $es, $ee], ["corp", $cs, $ce], ["block", $bs, $be], ["direct", $ds, $de]];
     def twins: [ lanes | combinations(2) | select(.[0][0] != .[1][0]) | . as [$a, $b]
                  | select(([lanes[] | .[0]] | index($a[0])) < ([lanes[] | .[0]] | index($b[0])))
                  | ( $a[1][] as $e | select(($b[1] | map(ascii_downcase) | index($e | ascii_downcase)) != null)
-                     | "warning: \($e | ascii_downcase) is in both the \($a[0]) and \($b[0]) lanes in different case — one entry to the router, which takes the \($a[0]) lane; remove one" ),
+                     | "warning: \($e | ascii_downcase) is in both the \($a[0]) and \($b[0]) lanes — one entry to the router, which takes the \($a[0]) lane; remove one" ),
                    ( $a[2][] as $e | select(($b[2] | map(ascii_downcase) | index($e | ascii_downcase)) != null)
-                     | "warning: domain:\($e | ascii_downcase) is in both the \($a[0]) and \($b[0]) lanes in different case — one entry to the router, which takes the \($a[0]) lane; remove one" ) ];
+                     | "warning: domain:\($e | ascii_downcase) is in both the \($a[0]) and \($b[0]) lanes — one entry to the router, which takes the \($a[0]) lane; remove one" ) ];
     def deep: [ lanes | to_entries[] | .key as $li | .value[0] as $l | .value[1][] | ascii_downcase
                 | select((split(".") | length) >= $bands)
-                | {e: ., lane: $l, n: (split(".") | length), rank: ((if startswith(".") then 3 else 0 end) + $li)} ];
+                | {e: ., lane: $l, n: (split(".") | length), rank: ((if startswith(".") then (lanes | length) else 0 end) + $li)} ];
     def under($a; $b): if ($b | startswith(".")) then ($a | endswith($b)) and (($a | length) > ($b | length)) or ($a == ($b | ltrimstr(".")))
                        else ($a | endswith("." + $b)) end;
     def overflow: [ deep[] as $a | deep[] as $b
@@ -1497,7 +1560,7 @@ EOF
 # hotspot file (_esc_block_suffixes counts it) and drops its own copy in the
 # same pass: one rewrite, then stable.
 _overlay_claimed_lanes() {
-  { { domains_json; block_domains_json; } 2>/dev/null | jq -r '.[]?' 2>/dev/null
+  { { domains_json; block_domains_json; direct_domains_json; } 2>/dev/null | jq -r '.[]?' 2>/dev/null
     _corp_head | grep -vE "^[[:space:]]*(#|$)|$_CIDR_RE" 2>/dev/null | sed 's/[[:space:]]//g'
   } | awk 'NF' | tr 'A-Z' 'a-z' | sort -u || true
 }
@@ -1509,12 +1572,12 @@ _overlay_claimed_bypass() {
     | sed 's/[[:space:]]//g' | tr 'A-Z' 'a-z' | awk 'NF' | sort -u || true
 }
 
-# Domain suffixes the user has explicitly put in escape, block or hotspot —
-# their choice wins over an auto-discovered corp domain (a network must not
-# de-tunnel them, and a venue's own domain is exactly what the venue advertises
-# over DHCP while it is the one that has to bypass the proxy).
+# Domain suffixes the user has explicitly put in escape, block, direct or
+# hotspot — their choice wins over an auto-discovered corp domain (a network must
+# not de-tunnel them, and a venue's own domain is exactly what the venue
+# advertises over DHCP while it is the one that has to bypass the proxy).
 _esc_block_suffixes() {
-  { domains_json; block_domains_json; hotspot_domains_json; } 2>/dev/null | jq -r '.[]?' 2>/dev/null | sort -u || true
+  { domains_json; block_domains_json; direct_domains_json; hotspot_domains_json; } 2>/dev/null | jq -r '.[]?' 2>/dev/null | sort -u || true
 }
 
 # Rewrite $CORP_DOMAINS = head + DHCP-domain block + CIDR block (either may be empty).
@@ -1563,7 +1626,7 @@ _overlay_bypass_sync() { # $1=dry-run  $2=quiet
     rm -f "$want"; return 0
   fi
   [ -n "$dropped" ] && [ "$quiet" != 1 ] && while IFS= read -r d; do
-    [ -n "$d" ] && err "corp sync: '$d' is answered only by an overlay resolver, which no lane can reach — but you keep it in escape/block/corp, so your rule wins"
+    [ -n "$d" ] && err "corp sync: '$d' is answered only by an overlay resolver, which no lane can reach — but you keep it in escape/block/corp/direct, so your rule wins"
   done <<< "$dropped"
   # Truncate in place rather than mv: the hotspot file is not 0600 like the corp
   # one (it holds no route table), and a rename would hand it mktemp's mode.
@@ -1778,15 +1841,18 @@ cmd_hotspot() {
     *)                edit_list "$HOTSPOT_DOMAINS" hotspot "$a" "$@" ;;
   esac
 }
-# 'direct' isn't an editable lane (it's the pass-through default) — only diagnostics.
-# 'direct errors' surfaces the domains that FAILED going out directly: the ones a
-# web app needs but that are blocked/unreachable → your escape (or corp) candidates.
+# 'direct' is the pass-through default AND, since #s98, a hand lane: names sent
+# straight out even where a broader rule (a geosite set, the ad set) would take
+# them elsewhere. Bare 'direct' stays the diagnostics: 'direct errors' surfaces
+# the domains that FAILED going out directly — the ones a web app needs but that
+# are blocked/unreachable → your escape (or corp) candidates.
 cmd_direct() {
   local a="${1:-errors}"; [ "$#" -gt 0 ] && shift
   case "$a" in
     errors|stats) lane_errors direct "${1:-10m}" ;;
     log)          _lane_log_tail direct ;;
-    *)            die "usage: $PROG direct [errors [5m|10m|1h|…|all] | log]" ;;
+    list|dump|add|rm|remove|clear|import) edit_list "$DIRECT_DOMAINS" direct "$a" "$@" ;;
+    *)            die "usage: $PROG direct [errors [5m|10m|1h|…|all] | log | list | add [--domain] [--force] <e>… | rm [--domain] <e>… | import <file> | clear | dump [file]]" ;;
   esac
 }
 _lane_log_tail() { local f; f="$(lane_log "$1")"; [ -f "$f" ] || die "no $1 log yet — start the router first: $PROG up"; tail -f "$f"; }
@@ -2242,6 +2308,7 @@ assemble_host() {
   # discipline as ads). A geosite: line hand-added to corp is ignored + flagged.
   _warn_uncached_geosites
   [ -n "$(geosites_of "$CORP_DOMAINS")" ] && err "geosite: in corp-domains.txt is ignored — only the escape and block lanes support geosite:"
+  if [ -n "$(geosites_of "$DIRECT_DOMAINS")" ]; then err "geosite: in direct-domains.txt is ignored — only the escape and block lanes support geosite:"; fi
   local esc_geo block_geo geo_sets
   esc_geo="$(_lane_geo_json "$DOMAINS")"
   block_geo="$(_lane_geo_json "$BLOCK_DOMAINS")"
@@ -2278,8 +2345,9 @@ assemble_host() {
     # _lane_set_tags emits them — the exact sets first (whole-host equality
     # beats every suffix), then the bands from the deepest down, bare before
     # dot-led. First match wins, so that order IS longest-suffix-wins across
-    # the three lanes: an explicit api.foo.com in escape still beats a foo.com
-    # in block. The escape lane rules point at $esc_out (direct in local mode).
+    # the four lanes: an explicit api.foo.com in escape still beats a foo.com
+    # in block, and a direct-lane npmjs.org beats geosite:github below. The
+    # escape lane rules point at $esc_out (direct in local mode).
     ($lane_sets | map({rule_set:[.tag], outbound:(if .lane == "escape" then $esc_out else .lane end)})) as $lane_rules
     |
     # Per-lane `geosite:<name>` rule-sets (e.g. `geosite:google` in escape) sit after
@@ -5637,6 +5705,7 @@ Choose what goes where (edit anytime; a lane 'add' reaches a running router live
     $PROG corp   suggest                   list this network's internal domains (on corp LAN / VPN up)
     $PROG corp   sync                      mirror the corp VPN's DHCP domains + routed CIDRs into the corp lane
     $PROG block  add ads.example           sinkhole (ad/telemetry); a big ad set is on by default
+    $PROG direct add npmjs.org             straight out even where a geosite set would take it (npm ships here)
     $PROG hotspot add unitedwifi.com       a venue's captive portal: the OS reaches it WITHOUT the proxy, so its login page loads
     unlisted traffic → direct (physical NIC); private/overlay IPs → OS routing (unbound).  '$PROG explain <domain|ip>' shows a destination's lane.
 
@@ -5932,20 +6001,21 @@ _list_hit() {
   return 1
 }
 
-# Longest-suffix-wins across the three hand lists (mirrors the render: rowt emits
+# Longest-suffix-wins across the four hand lists (mirrors the render: rowt emits
 # one rule per suffix, most-specific-first). Echoes "<lane> <suffix>" for the
 # longest matching domain suffix, or returns nonzero if none match. Uses the same
 # plain-suffix test as _list_hit so this predictor matches the router.
 # -> "<lane> <exact|suffix> <entry>". An EXACT (`domain:`) hit beats every suffix
 # at any length, because the render emits the `domain` rules first and sing-box
 # is first-match-wins; among exacts the first lane seen wins, matching that same
-# emission order (escape -> corp -> block). Entries are compared ASCII-lowercased,
+# emission order (escape -> corp -> block -> direct; a suffix tie goes the same
+# way, so the direct lane loses one). Entries are compared ASCII-lowercased,
 # as the rule-sets hold them: sing-box lowercases the name it matches, so a
 # mixed-case entry reaches the router lowercased or not at all, and explain
 # lowercases the name it is asked (cmd_explain).
 _longest_domain_hit() { # $1=domain
   local val="$1" best_e="" best_lane="" ex_e="" ex_lane="" e lane f pair ent
-  for pair in "escape:$DOMAINS" "corp:$CORP_DOMAINS" "block:$BLOCK_DOMAINS"; do
+  for pair in "escape:$DOMAINS" "corp:$CORP_DOMAINS" "block:$BLOCK_DOMAINS" "direct:$DIRECT_DOMAINS"; do
     lane="${pair%%:*}"; f="${pair#*:}"
     [ -f "$f" ] || continue
     while IFS= read -r e; do
@@ -6070,7 +6140,7 @@ EOF
 }
 
 # Which lane a destination takes. Mirrors the render: hand-list domain suffixes
-# win by LONGEST match across all three lanes (block/corp/escape), then the
+# win by LONGEST match across all four lanes (escape/corp/block/direct), then the
 # cached geosite sets in render order (escape's, block's, the ad set), then
 # corp ip_cidr on the resolved IP, then final.
 #
@@ -6112,7 +6182,7 @@ _route_of() {
     # and the address rules route it — a name resolving into a corp CIDR or a
     # private/overlay range goes corp, as the address would. Ask exactly that
     # resolver, and only then (rowt_core::classify::router_resolves).
-    lane="$FINAL_ROUTE"; why="no block/corp/escape rule; final route = $FINAL_ROUTE"
+    lane="$FINAL_ROUTE"; why="no block/corp/escape/direct rule; final route = $FINAL_ROUTE"
     unmatched=1   # a NAME no lane rule matched: a port whose catch-all is escape never resolves it here
     local rns=""
     # The renderer's own test — its corp CIDR list non-empty, or the private default on.
@@ -6198,8 +6268,17 @@ cmd_explain() {
       echo "  note:    the router skips geosite:$geo_uncached — named on a lane but not cached ('$PROG fetch host' fetches it, then '$PROG reload' puts it in the router)"
     fi
   fi
+  # #s98: an upgrade seeds the direct lane, but the router keeps running the
+  # host.json it started from until a reload or a lane edit renders the lane's
+  # sets in. Every render since names `direct-exact`, empty or not.
+  local running=0
+  [ "$lane" != block ] && host_running && running=1
+  if [ "$running" = 1 ] && [ "$lane" = direct ] && [[ "$why" == *" direct-domains "* ]] \
+     && [ -f "$HOST_CFG" ] && ! grep -qF '"direct-exact"' "$HOST_CFG"; then
+    echo "  note:    the running router started before rowt had a direct lane, so it does not route by this entry yet: '$PROG reload' puts the lane in"
+  fi
   if [ "$lane" = block ]; then echo "  live:    (skipped — blocked by design)"
-  elif host_running; then
+  elif [ "$running" = 1 ]; then
     # NOTE: do NOT pass --noproxy '*' here — it overrides -x and makes curl go
     # DIRECT (which fails in China), instead of through the router we're testing.
     # -x already beats any env *_proxy. '|| true' avoids a set -e abort on failure.
@@ -6384,7 +6463,7 @@ cmd_status() {
   [ -n "$svc" ] && printf 'system proxy: %s (%s)\n' "$(networksetup -getsecurewebproxy "$svc" 2>/dev/null | awk '/Enabled/{print $2}' | head -1)" "$svc"
   [ -n "$svc" ] && _proxy_pac_on "$svc" && echo "auto-proxy:   ⚠ a PAC is enabled on '$svc' and macOS resolves it BEFORE rowt's proxy — traffic may bypass the lanes ('$PROG proxy check' for detail)"
   [ "$(sget captive)" = 1 ] && echo "captive:      portal detected — proxy dropped until login clears (watchdog auto-restores)"
-  echo "buckets:      escape=$(( $(domains_json | jq length) + $(escape_exact_json | jq length) )) corp=$(( $(corp_domains_json | jq length) + $(corp_cidrs_json | jq length) + $(corp_exact_json | jq length) )) block=$(( $(block_domains_json | jq length) + $(block_exact_json | jq length) ))$([ -f "$ADS_SRS" ] && echo '+ads')$(g="$(all_geosites | paste -sd, - 2>/dev/null)"; [ -n "$g" ] && echo " +geosite:$g") final=$FINAL_ROUTE"
+  echo "buckets:      escape=$(( $(domains_json | jq length) + $(escape_exact_json | jq length) )) corp=$(( $(corp_domains_json | jq length) + $(corp_cidrs_json | jq length) + $(corp_exact_json | jq length) )) block=$(( $(block_domains_json | jq length) + $(block_exact_json | jq length) ))$([ -f "$ADS_SRS" ] && echo '+ads')$(g="$(all_geosites | paste -sd, - 2>/dev/null)"; [ -n "$g" ] && echo " +geosite:$g") direct=$(( $(direct_domains_json | jq length) + $(direct_exact_json | jq length) )) final=$FINAL_ROUTE"
   echo "corp lane:    $(_corp_view)"
   if [ -x "$SB" ] && [ -f "$HOST_CFG" ]; then
     "$SB" check -c "$HOST_CFG" >/dev/null 2>&1 && echo "config:       host.json OK" || echo "config:       host.json INVALID (run '$PROG render')"
@@ -8221,7 +8300,7 @@ diag_body() {
   else _d "  (none)"; fi
   _d "  subscriptions: $(sub_count)"
   [ -s "$SUBS_FILE" ] && sed -E 's#(https?://.{10}).*#  \1…(masked)#' "$SUBS_FILE" | grep -vE '^\s*#' || true
-  _d "  buckets: escape=$(( $(domains_json | jq length) + $(escape_exact_json | jq length) )) corp=$(( $(corp_domains_json | jq length) + $(corp_cidrs_json | jq length) + $(corp_exact_json | jq length) )) block=$(( $(block_domains_json | jq length) + $(block_exact_json | jq length) ))$([ -f "$ADS_SRS" ] && echo ' +geosite-ads')$(g="$(all_geosites | paste -sd, - 2>/dev/null)"; [ -n "$g" ] && echo " +geosite:$g")"
+  _d "  buckets: escape=$(( $(domains_json | jq length) + $(escape_exact_json | jq length) )) corp=$(( $(corp_domains_json | jq length) + $(corp_cidrs_json | jq length) + $(corp_exact_json | jq length) )) block=$(( $(block_domains_json | jq length) + $(block_exact_json | jq length) ))$([ -f "$ADS_SRS" ] && echo ' +geosite-ads')$(g="$(all_geosites | paste -sd, - 2>/dev/null)"; [ -n "$g" ] && echo " +geosite:$g") direct=$(( $(direct_domains_json | jq length) + $(direct_exact_json | jq length) ))"
   _d ""
   _d "----- generated configs -----"
   if [ -x "$SB" ]; then
@@ -8327,7 +8406,7 @@ c@routing lanes@escape <list|add|rm|import|clear|dump|errors>@edit the escape la
 o@routing lanes@corp <list|add|rm|import|clear|dump|errors|sync|suggest>@edit the corp lane; 'sync' mirrors an overlay VPN's routes (corp/Tailscale) into it
 o@routing lanes@block <list|add|rm|import|clear|dump|errors>@block lane (ad/telemetry sinkhole); 'errors' = what got blocked
 o@routing lanes@hotspot <list|add|rm|import|clear|dump>@captive-portal hosts the OS reaches WITHOUT the proxy, so a venue's login page loads while rowt is up
-o@routing lanes@direct <errors|log>@diagnose the pass-through lane; 'errors' = what failed direct (escape candidates)
+o@routing lanes@direct <errors|list|add|rm|import|clear|dump|log>@names sent straight out ahead of the geosite sets (npm ships here); 'errors' = what failed direct (escape candidates)
 o@routing lanes@port <add|rm|list>@named extra ports: main's rules, each with its own catch-all, for the clients on it (a VM, a container, one app)
 o@proxy@proxy <status|check|on|off|env>@macOS system proxy + CLI env exports
 a@internals@render@regenerate the sing-box configs from current state
@@ -8346,8 +8425,8 @@ $PROG — split traffic three ways from one local proxy (127.0.0.1:$PORT) while 
 corporate VPN keeps the default route:
   escape  domains in escape-domains.txt  -> your personal tunnel (e.g. google)
   corp    domains/CIDRs in corp-domains.txt -> into the corp VPN (e.g. intranet)
-  direct  everything else                -> straight out the physical NIC, bypassing
-                                            corp AND escape (e.g. baidu / China)
+  direct  everything else, and domains in -> straight out the physical NIC, bypassing
+          direct-domains.txt                corp AND escape (e.g. baidu / China, npm)
 
 Usage:  $PROG <command> [args]      ($PROG help, or no args, shows this)
 Detail: $PROG <command> --help      (or: $PROG help <command>)
@@ -8934,8 +9013,8 @@ $PROG $1 <subcommand> — edit the $1 lane$([ "$1" = escape ] && echo " (domains
                        scoped resolvers' domains, which are only candidates for
                        'corp add'). It sees them only on the corp LAN or VPN.")
 A domain lives in AT MOST one lane: 'add'/'import' here pulls the exact entry out
-of the other lanes (block/corp/escape), since the router matches block→corp→escape
-first-match-wins and a domain in two lists would be silently shadowed. The two rule
+of the other lanes (escape/corp/block/direct), since the router takes the first
+match and a domain in two lists would be silently shadowed. The two rule
 kinds are different entries, so 'z.com' and '--domain z.com' can sit in different
 lanes; the exact rule is emitted first and therefore wins for that one host.
 
@@ -8952,21 +9031,39 @@ not no traffic — for what's flowing right now, use '$PROG connections'.
 EOF
 ;;
     direct) cat <<EOF
-$PROG direct <errors|log> — diagnose the pass-through (direct) lane.
+$PROG direct [list | add | rm | import | clear | dump | errors | log] — the direct lane.
 
-'direct' is the default for unlisted traffic — you can't edit it, but you CAN see
-what it's failing on. sing-box logs a line per failed/refused connection with the
-outbound it used; the router captures those per lane. So after a web app misbehaves
-on the default DIRECT policy, this tells you exactly which domains it couldn't reach
-directly — your escape (or corp) candidates — without switching the default.
+'direct' is where unlisted traffic goes, and it is also a hand lane: names sent
+straight out even where a broader rule would take them elsewhere, above all a
+geosite set on the escape lane. rowt's default escape list carries geosite:github,
+which lists npm's domains; the shipped direct list (npmjs.org, npmjs.com,
+npm.community) takes those back out, while github.com stays on escape.
 
+  (no verb)            the same as 'errors'                          [default]
+  list                 list the lane
+  add <entry> [more]   add domain(s); each is pulled out of the other lanes
+  rm <entry> [more]    remove entries
+  --domain, --domain-suffix, --force   as on the other lanes ('$PROG help escape')
+  import <file>        batch-add one entry per line from a file (# comments ok)
+  clear                remove every entry (keeps the file's comment header)
+  dump [file]          print the lane (or write it to a file) for backup/versioning
   errors [5m|10m|1h|…|all]  domains that FAILED going direct in the window (default 10m)
   log                       live-tail the direct-lane error log
 
-Categories: timeout/reset/refused ⇒ likely blocked (add to escape); dns ⇒ often a
-transient resolver blip. Typical use: reproduce the app, then '$PROG direct errors 10m'
-and '$PROG escape add <domain>' the real ones. (For what's succeeding right now, see
-'$PROG connections'.)
+Entries rank with the other hand lists: the longest match wins across all four, so
+'registry.npmjs.org' in escape beats 'npmjs.org' here, and every hand list comes
+before the geosite sets and the ad set. geosite: entries and addresses are declined:
+a set is not sent direct wholesale, and an address goes direct already unless a
+corp CIDR claims it. Edits reach a running router like any lane edit.
+
+The diagnostics: sing-box logs a line per failed/refused connection with the
+outbound it used, and the router captures those per lane. So after a web app
+misbehaves on the default DIRECT policy, 'errors' tells you exactly which domains it
+couldn't reach directly — your escape (or corp) candidates — without switching the
+default. Categories: timeout/reset/refused ⇒ likely blocked (add to escape); dns ⇒
+often a transient resolver blip. Typical use: reproduce the app, then
+'$PROG direct errors 10m' and '$PROG escape add <domain>' the real ones. (For what's
+succeeding right now, see '$PROG connections'.)
 EOF
 ;;
     connections|conns) cat <<EOF
@@ -9314,7 +9411,7 @@ EOF
 #
 # Shadowrocket takes the first rule that matches, like sing-box, so the ORDER is
 # the render's (assemble_host): the hotspot lane first, since macOS bypasses those
-# hosts before rowt sees them; then exact hosts (escape, corp, block); then every
+# hosts before rowt sees them; then exact hosts (escape, corp, block, direct); then every
 # hand suffix, most specific first; then the geosite categories (escape, block);
 # then the corp and private ranges; then the ad set. Categories are expanded from
 # the cached .srs — Shadowrocket cannot read a sing-box rule-set — and their regex
@@ -9352,9 +9449,12 @@ _export_shadowrocket() { # $1 = output path, or - for stdout; $2 = 1 for rules o
     escape_exact_json | jq -r '.[] | "DOMAIN,\(ascii_downcase),PROXY"'
     corp_exact_json   | jq -r '.[] | "DOMAIN,\(ascii_downcase),DIRECT"'
     block_exact_json  | jq -r '.[] | "DOMAIN,\(ascii_downcase),REJECT"'
+    direct_exact_json | jq -r '.[] | "DOMAIN,\(ascii_downcase),DIRECT"'
     echo "# hand-listed suffixes, most specific first"
-    jq -rn --argjson e "$(domains_json)" --argjson c "$(corp_domains_json)" --argjson b "$(block_domains_json)" "$sr"'
-      (($b | map({s: ., p: "REJECT"})) + ($c | map({s: ., p: "DIRECT"})) + ($e | map({s: ., p: "PROXY"})))
+    jq -rn --argjson e "$(domains_json)" --argjson c "$(corp_domains_json)" --argjson b "$(block_domains_json)" \
+       --argjson d "$(direct_domains_json)" "$sr"'
+      (($d | map({s: ., p: "DIRECT"})) + ($b | map({s: ., p: "REJECT"})) + ($c | map({s: ., p: "DIRECT"}))
+       + ($e | map({s: ., p: "PROXY"})))
       | sort_by([(.s | split(".") | length), (.s | length)]) | reverse | .[] | . as $r | $r.s | sr($r.p)'
   } > "$t/rules"
   # Called directly, not in a subshell: it adds to $regex.
@@ -9378,7 +9478,7 @@ _export_shadowrocket() { # $1 = output path, or - for stdout; $2 = 1 for rules o
   {
     echo "# Shadowrocket config written by rowt $ROWT_VERSION ('$PROG config export --to shadowrocket'), $(date '+%Y-%m-%d %H:%M:%S')."
     echo "# Routing rules only: PROXY is whichever server is selected in Shadowrocket (no server is in this file)."
-    echo "#   escape -> PROXY   block -> REJECT   corp, hotspot -> DIRECT   everything else -> FINAL,DIRECT"
+    echo "#   escape -> PROXY   block -> REJECT   corp, direct, hotspot -> DIRECT   everything else -> FINAL,DIRECT"
     echo "# The order follows rowt's precedence (the first matching rule wins). Regenerate rather than edit."
     if [ "$regex" -gt 0 ]; then echo "# $regex regex entries from the geosite categories are not included: Shadowrocket has no domain-regex rule."; fi
     echo
@@ -9449,7 +9549,7 @@ cmd_config() {
   # import brought which manual server) travel too. Neither holds a credential,
   # but both name servers, so --routes-only leaves them with the pool.
   local src=("$SERVERS" "$MANUAL" "$SR_REVIEW" "$SUBS_FILE" "$OUTBOUND" \
-             "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" "$HOTSPOT_DOMAINS" \
+             "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" "$DIRECT_DOMAINS" "$HOTSPOT_DOMAINS" \
              "$ESCAPE_DNS_CONF" "$SOURCES_TSV")
   case "${1:-list}" in
     list)
@@ -9520,7 +9620,7 @@ cmd_config() {
       # setup (no pool, empty escape) — exactly what --no-servers is for. The
       # other lane files close that. subs.txt / the secondary pool JSONs are not
       # distinctive enough to stand alone (a bare URL list is not a bundle).
-      tar tzf "$in" 2>/dev/null | grep -qE '(^|/)(servers\.json|(escape|corp|block|hotspot)-domains\.txt)$' \
+      tar tzf "$in" 2>/dev/null | grep -qE '(^|/)(servers\.json|(escape|corp|block|direct|hotspot)-domains\.txt)$' \
         || die "$in doesn't look like a rowt config bundle"
       mkdir -p "$CFG"
       if [ "$replace" = 1 ]; then
@@ -9551,7 +9651,7 @@ cmd_config() {
         xdg="$work/x"; stage="$xdg/rowt"; inx="$work/in"
         mkdir -p "$stage" "$inx"
         tar xzf "$in" -C "$inx" || { rm -rf "$work"; die "extract failed"; }
-        local lf; for lf in "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" "$HOTSPOT_DOMAINS"; do
+        local lf; for lf in "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" "$DIRECT_DOMAINS" "$HOTSPOT_DOMAINS"; do
           [ -f "$lf" ] && cp "$lf" "$stage/$(basename "$lf")"
         done
         # Fold each lane in. A child that FAILS aborts the whole merge with its own
@@ -9559,8 +9659,11 @@ cmd_config() {
         # this check a failed child would silently swap in the unchanged copy and
         # still report success — and under `set -e` exit mid-merge with the error
         # captured but never shown.)
+        # Each fold pulls its entries out of the other lanes, so the last fold
+        # keeps an entry two lanes of the bundle share. The direct lane folds
+        # first: in the router a tie goes to the other lane (#s98).
         local report="" pair lane name out rc
-        for pair in escape:escape-domains.txt corp:corp-domains.txt block:block-domains.txt hotspot:hotspot-domains.txt; do
+        for pair in direct:direct-domains.txt escape:escape-domains.txt corp:corp-domains.txt block:block-domains.txt hotspot:hotspot-domains.txt; do
           lane="${pair%%:*}"; name="${pair##*:}"
           [ -f "$inx/$name" ] || continue
           rc=0
@@ -9597,7 +9700,7 @@ $out"
             case "$ans" in y|Y|yes|YES) ;; *) echo "aborted."; rm -rf "$work"; return 1 ;; esac
           fi
         fi
-        for name in escape-domains.txt corp-domains.txt block-domains.txt hotspot-domains.txt; do
+        for name in escape-domains.txt corp-domains.txt block-domains.txt direct-domains.txt hotspot-domains.txt; do
           [ -f "$stage/$name" ] && mv "$stage/$name" "$CFG/$name"
         done
         rm -rf "$work"

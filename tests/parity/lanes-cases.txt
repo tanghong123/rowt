@@ -42,3 +42,22 @@ escape import tests/parity/fixtures/import-wildcards.txt
 # Any other '*' matches nothing, so add declines it, --force or not.
 escape add cdn*.example.com
 escape add --force cdn*.example.com ok.example
+# The direct lane (#s98): edited like the others, last in the walk order, and
+# declining what it cannot route — a geosite set, an address.
+direct add new.example
+direct add example.com
+direct add sub.example.net
+escape add direct.example
+block add dl.example.com
+direct add --domain exact.direct.example
+direct add --domain mirror.sub.example.net
+direct add geosite:google
+direct add 198.51.100.0/24 ok.example
+direct add 203.0.113.5 999.1.1.1.example
+direct add com
+direct rm direct.example
+direct rm --domain mirror.sub.example.net
+direct rm absent.example
+direct clear
+direct dump
+direct import tests/parity/fixtures/import-wildcards.txt
