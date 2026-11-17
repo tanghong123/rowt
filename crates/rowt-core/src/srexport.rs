@@ -241,7 +241,7 @@ pub fn counts(rules: &Rules) -> Counts {
 /// its share-link and subscription counts, when one was written.
 pub fn summary(c: &Counts, regex: usize, servers: Option<(usize, usize, &str)>, to_stdout: bool) -> Vec<String> {
     let mut o = vec![format!(
-        "  {} rules: {} PROXY (escape), {} REJECT (block), {} DIRECT (corp, hotspot, ranges) + FINAL,DIRECT",
+        "  {} rules: {} PROXY (escape), {} REJECT (block), {} DIRECT (corp, direct, hotspot, ranges) + FINAL,DIRECT",
         c.total, c.proxy, c.reject, c.direct
     )];
     if regex > 0 {
@@ -382,7 +382,7 @@ mod tests {
         let c = Counts { total: 3, proxy: 1, reject: 1, direct: 1 };
         let s = summary(&c, 0, None, true);
         assert_eq!(s, vec![
-            "  3 rules: 1 PROXY (escape), 1 REJECT (block), 1 DIRECT (corp, hotspot, ranges) + FINAL,DIRECT",
+            "  3 rules: 1 PROXY (escape), 1 REJECT (block), 1 DIRECT (corp, direct, hotspot, ranges) + FINAL,DIRECT",
             "  rules only (--routes-only): PROXY uses whichever server is selected in Shadowrocket",
         ]);
         let s = summary(&c, 2, Some((4, 1, "x-servers.txt")), false);

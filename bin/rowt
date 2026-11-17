@@ -62,7 +62,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.10.0"
+ROWT_VERSION="3.10.1"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -464,20 +464,23 @@ sub_count() {
 # (#s98). rowt_core::lanestate::seed_body, byte for byte. Succeeds only when it
 # wrote the file.
 _seed_lane() { # $1=lane file $2=template
-  if [ -f "$1" ] || [ ! -f "$2" ]; then return 1; fi
+  # Anything already at the path is left alone, a directory included, and a
+  # write that fails (a config folder rowt cannot write) says nothing: rowt-cli
+  # checks `exists()` and ignores the write's error, as the old `cp` did.
+  if [ -e "$1" ] || [ ! -f "$2" ]; then return 1; fi
   local -a others=(); local f
   for f in "$BLOCK_DOMAINS" "$CORP_DOMAINS" "$DIRECT_DOMAINS" "$DOMAINS" "$HOTSPOT_DOMAINS"; do
     # An unreadable lane reads as empty, as rowt-cli's `read` has it.
     if [ "$f" != "$1" ] && [ -f "$f" ] && [ -r "$f" ]; then others+=("$f"); fi
   done
-  if LC_ALL=C awk -v t="$2" '
+  if { LC_ALL=C awk -v t="$2" '
        { e = $0; gsub(/[[:space:]]/, "", e) }
        FILENAME != t { if (e != "" && substr(e, 1, 1) != "#") have[tolower(e)] = 1; next }
        e != "" && substr(e, 1, 1) != "#" && (tolower(e) in have) { next }
-       { print }' ${others[@]+"${others[@]}"} "$2" > "$1" 2>/dev/null; then
+       { print }' ${others[@]+"${others[@]}"} "$2" > "$1"; } 2>/dev/null; then
     return 0
   fi
-  rm -f "${1:?}"; return 1
+  rm -f "${1:?}" 2>/dev/null; return 1
 }
 # The seeded lanes' entries ($@ = lane file pairs), logged against the last
 # logged lane state as `seeded: `, which then holds them — or the next bracket
@@ -9524,7 +9527,7 @@ _export_shadowrocket() { # $1 = output path, or - for stdout; $2 = 1 for rules o
     echo "wrote $sfile"
   fi
   {
-    echo "  $total rules: $proxy PROXY (escape), $reject REJECT (block), $direct DIRECT (corp, hotspot, ranges) + FINAL,DIRECT"
+    echo "  $total rules: $proxy PROXY (escape), $reject REJECT (block), $direct DIRECT (corp, direct, hotspot, ranges) + FINAL,DIRECT"
     if [ "$regex" -gt 0 ]; then echo "  $regex geosite regex entries left out (Shadowrocket has no domain-regex rule)"; fi
     if [ -n "$sfile" ]; then
       echo "  servers: $nlinks share link(s) + $nsubs subscription URL(s) in $sfile"
