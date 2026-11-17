@@ -39,16 +39,45 @@ case "${1:-}" in
     # category could not be decompiled. Both lookups (geosite.rs, the Python)
     # treat a failed decompile and a missing JSON alike, so nothing else moves.
     shift
-    [ "${1:-}" = decompile ] || exit 0
-    shift
-    srs="" outp=""
-    while [ "$#" -gt 0 ]; do
-      case "$1" in -o) outp="${2:-}"; shift ;; *) srs="$1" ;; esac
-      shift
-    done
-    name="$(basename "$srs" .srs)"
-    canned="${PARITY_ENV:-}/decompile-$name.json"
-    [ -f "$canned" ] && [ -n "$outp" ] || exit 1
-    cp "$canned" "$outp" ;;
+    case "${1:-}" in
+      decompile)
+        shift
+        srs="" outp=""
+        while [ "$#" -gt 0 ]; do
+          case "$1" in -o) outp="${2:-}"; shift ;; *) srs="$1" ;; esac
+          shift
+        done
+        name="$(basename "$srs" .srs)"
+        canned="${PARITY_ENV:-}/decompile-$name.json"
+        [ -f "$canned" ] && [ -n "$outp" ] || exit 1
+        cp "$canned" "$outp" ;;
+      match)
+        # `rule-set match -f binary <set>.srs <name>` — what explain and speed
+        # ask each cached geosite set (#s96). The real tool exits 0 either
+        # way, says "match rules.[N]: …" on stderr when the set lists the
+        # name, and fails only on a set it cannot read. This one answers from
+        # $PARITY_ENV/match-<set>, the names that set lists, one per line.
+        # Without that file it FAILS, as on a set sing-box cannot read, so a
+        # scenario that caches a set and ships no answer for it takes the
+        # "could not read it" path.
+        shift
+        srs="" name=""
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            -f) shift ;;
+            *) if [ -z "$srs" ]; then srs="$1"; else name="$1"; fi ;;
+          esac
+          shift
+        done
+        canned="${PARITY_ENV:-}/match-$(basename "$srs" .srs)"
+        if [ ! -f "$srs" ] || [ ! -f "$canned" ]; then
+          echo "FATAL[0000] read rule-set: $srs" >&2; exit 1
+        fi
+        if grep -qxF -- "$name" "$canned"; then
+          echo "match rules.[0]: domain/domain_suffix=<binary>" >&2
+        fi
+        exit 0 ;;
+      *) exit 0 ;;
+    esac ;;
   *) exit 0 ;;
 esac

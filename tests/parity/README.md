@@ -117,7 +117,10 @@ on both sides, which no shim touches. The sing-box both sides run is
 at once on `run` unless the scenario says otherwise, and decompiles a rule-set
 only from a canned `env/decompile-<set>.json` — exit 1 without one, as the
 real tool fails on a file it cannot read — which is what a `geosite:` lane
-entry becomes in `config export --to shadowrocket`.
+entry becomes in `config export --to shadowrocket`. Its `rule-set match`, which
+explain and speed ask each cached set (#s96), answers from `env/match-<set>`,
+the names that set lists, one per line; without one it fails the same way, so
+a cached set with no answer takes the "sing-box could not read it" path.
 
 A response is normally static: the same call always gets the same answer. A
 `<key>.seq` file is a sequence instead — each call gets its next line, and an

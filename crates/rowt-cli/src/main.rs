@@ -27,6 +27,7 @@ mod lanelog;
 mod onboard;
 mod pins;
 mod pool;
+mod route;
 mod shell;
 mod skill;
 mod port;
@@ -39,7 +40,7 @@ mod seeds {
     include!(concat!(env!("OUT_DIR"), "/seeds.rs"));
 }
 use lifecycle::Ctx;
-use rowt_core::classify::{classify, ClassifyInput, Lane};
+use rowt_core::classify::Lane;
 use rowt_core::lanes::{apply_to, dump, Lanes, Op, Target};
 use rowt_platform::{Mac, Platform};
 use serde_json::Value;
@@ -651,33 +652,9 @@ fn cmd_explain(cfg: &Path, dest: &str) -> String {
             return out;
         }
     }
-    let private: Vec<String> =
-        ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16"]
-            .iter().map(|s| s.to_string()).collect();
-    let final_route = Lane::parse(&env_or("ROWT_FINAL", "direct")).unwrap_or(Lane::Direct);
-    let pd = env_or("ROWT_PRIVATE_DEFAULT", "corp");
-    // The resolver the router uses for a name no rule matched (the direct lane's
-    // dns-direct: the public one in local mode), and only when the router
-    // resolves such names at all. Asked exactly as the shell asks it
-    // (`_captive_resolve_at`), and only on the branch that needs it.
-    let resolver = if rowt_core::classify::router_resolves(final_route, &lanes.corp, &pd) {
-        if mode == "local" { env_or("ROWT_DNS_LOCAL", "1.1.1.1") } else { env_or("ROWT_DNS_DIRECT", "223.5.5.5") }
-    } else {
-        String::new()
-    };
-    let ip = if !resolver.is_empty()
-        && rowt_core::classify::needs_resolution(dest, &lanes.escape, &lanes.corp, &lanes.block)
-    {
-        use rowt_platform::Platform;
-        rowt_platform::Mac.resolve_at(&resolver, &rowt_core::classify::normalize_dest(dest)).unwrap_or_default()
-    } else {
-        String::new()
-    };
-    let c = classify(dest, &ClassifyInput {
-        escape_list: &lanes.escape, corp_list: &lanes.corp, block_list: &lanes.block,
-        private_cidrs: &private, private_default: &pd, final_route,
-        local_mode: mode == "local", resolved_ip: &ip, prog: PROG, resolver: &resolver,
-    });
+    // The hand lists, then the cached geosite sets (asked through sing-box),
+    // then the router's lookup: `route` walks them in the router's order.
+    let (c, geo) = route::route(&ctx, &lanes, dest);
     let mut out = c.render();
     if !c.note.is_empty() {
         out.push_str(&format!("\n  note:    {}", c.note));
@@ -700,23 +677,12 @@ fn cmd_explain(cfg: &Path, dest: &str) -> String {
         }
     }
 
-    // The shell warns that opaque rule-sets may still match, whenever the ad set
-    // is cached or any lane names a geosite: category. Not shown for `block`,
-    // which is already the most restrictive answer.
-    if c.lane != Lane::Block {
-        let ads = cfg.join("cache/geosite-category-ads-all.srs").is_file();
-        let mut all: Vec<String> = geosites(&lanes.escape);
-        all.extend(geosites(&lanes.block));
-        all.sort();
-        all.dedup();
-        if ads || !all.is_empty() {
-            let gs = all.join(",");
-            out.push_str(&format!(
-                "\n  note:    a geosite rule-set may still match this (not shown — binary set){}{}",
-                if gs.is_empty() { String::new() } else { format!(": geosite:{gs}") },
-                if ads { " + ad-block" } else { "" }
-            ));
-        }
+    // What the sets could not say: one sing-box could not read, or one a lane
+    // names that is not cached (and so not in the router). Nothing for a name a
+    // hand list or a set already routed, or for an address.
+    for n in route::geosite_notes(&c, &geo) {
+        out.push('\n');
+        out.push_str(&n);
     }
     if c.lane == Lane::Block {
         out.push_str("\n  live:    (skipped — blocked by design)");

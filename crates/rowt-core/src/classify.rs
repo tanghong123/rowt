@@ -66,6 +66,11 @@ pub struct ClassifyInput<'a> {
     /// The resolver the router uses for a name no rule matched, "" when the
     /// router does not resolve such names at all (see `router_resolves`).
     pub resolver: &'a str,
+    /// The cached geosite rule-set that lists a name no hand list matched, and
+    /// the lane it routes to, when the caller asked sing-box (`rule-set match`)
+    /// and one did. The router checks the sets after the hand lists and BEFORE
+    /// it resolves, so a hit here takes the name with no lookup at all.
+    pub geosite: Option<(&'a str, Lane)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -352,6 +357,12 @@ pub fn classify(raw_dest: &str, i: &ClassifyInput) -> Classification {
             HitKind::Exact => format!("exact {}-domains match '{m}'", l.as_str()),
             HitKind::Suffix => format!("longest-match {}-domains suffix '{m}'", l.as_str()),
         };
+    } else if let Some((name, l)) = i.geosite {
+        // `render_host` puts the geosite rule-sets right after the hand lists
+        // and before the `resolve` rule: a set that lists the name routes it
+        // there, unresolved, and named ports share the rule.
+        lane = l;
+        why = format!("geosite:{name} rule-set ({} lane) — no hand-list entry names it", l.as_str());
     } else {
         // A name no rule matched. When the final route is direct and there are
         // address rules to feed, the router RESOLVES it (the `resolve` rule the
@@ -404,6 +415,7 @@ mod tests {
             resolved_ip: "",
             resolver: "",
             prog: "rowt",
+            geosite: None,
         }
     }
 
@@ -543,6 +555,37 @@ mod tests {
         let c = classify("example.com", &i);
         assert_eq!(c.lane, Lane::Direct);
         assert!(c.why.ends_with("local mode: the escape lane routes direct"));
+    }
+
+    #[test]
+    fn a_geosite_hit_routes_a_name_no_hand_list_names_and_skips_the_lookup() {
+        // #s96: the GitHub set lists npm's registry; explain said DIRECT.
+        let p = vec!["10.0.0.0/8".to_string()];
+        let mut i = resolving("198.51.100.0/24\n", &p, "198.51.100.7", "223.5.5.5");
+        i.geosite = Some(("github", Lane::Escape));
+        let c = classify("registry.pkg.example", &i);
+        assert_eq!(c.lane, Lane::Escape);
+        assert_eq!(c.why, "geosite:github rule-set (escape lane) — no hand-list entry names it");
+        // The router never resolves a name a set took, so no address shows and
+        // a named port has nothing different to say.
+        assert!(c.ip.is_empty());
+        assert!(c.note.is_empty());
+        assert!(!c.unmatched);
+        // Local mode routes the escape lane's sets direct, as it does its list.
+        i.local_mode = true;
+        let c = classify("registry.pkg.example", &i);
+        assert_eq!(c.lane, Lane::Direct);
+        assert_eq!(c.why, "geosite:github rule-set (escape lane) — no hand-list entry names it — local mode: the escape lane routes direct");
+    }
+
+    #[test]
+    fn a_hand_list_entry_beats_a_geosite_hit() {
+        let p: Vec<String> = vec![];
+        let mut i = input("", "", "pkg.example\n", &p);
+        i.geosite = Some(("github", Lane::Escape));
+        assert_eq!(classify("registry.pkg.example", &i).lane, Lane::Block);
+        // …and an address never reaches a domain set.
+        assert_eq!(classify("198.51.100.7", &i).lane, Lane::Direct);
     }
 
     #[test]

@@ -1,0 +1,3 @@
+# fixture (#s96): the escape lane carries a geosite set in local mode
+example.com
+geosite:github

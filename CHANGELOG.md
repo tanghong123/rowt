@@ -5,6 +5,15 @@ release is cut; everything under Unreleased ships with the next one.
 
 ## Unreleased
 
+- `rowt explain` and `rowt speed` name the lane the router really takes for a
+  host only a geosite rule-set lists. They used to stop at the hand lists, so
+  with `geosite:github` on the escape lane (rowt's default list has it),
+  `rowt explain registry.npmjs.org` said DIRECT while the router sent npm
+  through the escape server, because the GitHub set lists npm's domains. Both
+  now ask the bundled sing-box about each cached set, in the order the router
+  checks them, and explain names the set. explain also notes a set sing-box
+  could not read, and one a lane names that is not cached yet (`rowt fetch
+  host`, then `rowt reload`).
 - `rowt help` and `rowt onboard` say what 3.9.0 changed: rowt runs its Rust
   CLI, rowt-rs, and `ROWT_IMPL=bash` in front of a command runs the shell
   version instead. `ROWT_IMPL=bash rowt watch refresh` puts the watchdog on the

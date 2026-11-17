@@ -1,0 +1,6 @@
+A running router (host.pid.self), a cached geosite:github on the escape lane,
+and two canned throughput samples per column (#s96). speed's LANE column for a
+URL only that set lists must read escape, as explain says; an unlisted URL
+reads direct. Sample lines as in speed-samples: "<bytes> <B/s> <HTTP code>",
+one per call, the proxied fetches in curl_sS_x.seq and the bypassed ones in
+curl_sS_noproxy.seq.

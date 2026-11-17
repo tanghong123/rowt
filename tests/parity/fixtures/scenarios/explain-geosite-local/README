@@ -1,0 +1,3 @@
+Local mode (state from render-local) with a cached geosite:github on the escape
+lane (#s96). The escape lane routes direct in local mode, and its geosite sets
+with it, so explain names the set and says the lane routes direct.

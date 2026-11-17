@@ -557,9 +557,10 @@ entirely `v3.3.5` vs `v3.3.6` in the audit line.
 ### 6.3 Gating the render — and why `explain` cannot do it
 
 **`explain` is not a view of the rendered config.** `cmd_explain` walks the
-list files itself (`_list_hit`, `_longest_domain_hit`, `_private_hit`) and
-says so in its own output ("a geosite rule-set may still match this — not
-shown"). It is a *parallel model* of routing. A Rust render that dropped the
+list files itself (`_list_hit`, `_longest_domain_hit`, `_private_hit`) and,
+since #s96, asks sing-box's `rule-set match` about each cached geosite set in
+render order; until then it stopped at the hand lists and only noted that "a
+geosite rule-set may still match this". It is a *parallel model* of routing. A Rust render that dropped the
 corp outbound's `domain_resolver`, reordered rules, or lost a geosite would
 produce byte-identical `explain` output on both sides — the gate cannot fail
 for the bug class Phase 1 introduces. So:

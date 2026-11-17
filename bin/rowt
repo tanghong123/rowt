@@ -62,7 +62,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.9.1"
+ROWT_VERSION="3.9.2"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -3942,13 +3942,15 @@ cmd_speed() {
   info "$(( ${#urls[@]} * repeat * 2 )) fetches — ${#urls[@]} url(s) x $repeat x2 (through rowt, then bypassed), up to $cap and ${SPEED_TIMEOUT}s each; a stalled lane shows as a small number, not an error"
   echo
   printf '  %s %s %s %s\n' "$(_speed_pad URL 42)" "$(_speed_pad "VIA ROWT" 12)" "$(_speed_pad BYPASSED 12)" "LANE"
-  local u lane pr by prs bys prc byc shown hit prok prn byok byn
+  local u lane pr by prs bys prc byc shown prok prn byok byn
+  local why ip ip_note unmatched geo_hit geo_unread geo_uncached
   local -a rows=()
   for u in "${urls[@]}"; do
-    lane="$(printf '%s' "$u" | sed -E 's#^[a-zA-Z]+://##; s#/.*$##; s#:[0-9]+$##' | tr 'A-Z' 'a-z')"
-    # Same predictor `explain` uses, so the LANE column can never disagree with it.
-    if hit="$(_longest_domain_hit "$lane" 2>/dev/null)"; then lane="${hit%% *}"
-    else lane="$FINAL_ROUTE"; fi
+    # The lane `explain` names (_route_of): hand lists, then the cached geosite
+    # sets, then the router's lookup, with local mode's escape-as-direct. Read
+    # off the hand lists alone it called an escape-routed npm URL direct, and
+    # then its verdict that both columns are one path (#s96).
+    _route_of "$(printf '%s' "$u" | sed -E 's#^[a-zA-Z]+://##; s#/.*$##; s#:[0-9]+$##' | tr 'A-Z' 'a-z')"
     read -r prs prok prn prc <<EOF
 $(_speed_cell "$u" 0 "$repeat")
 EOF
@@ -6000,32 +6002,88 @@ _hotspot_hit() { # $1=domain
   printf '%s\n' "$best"
 }
 
-# Explain which lane a destination takes. Mirrors the render exactly: hand-list
-# domain suffixes win by LONGEST match across all three lanes (block/corp/escape),
-# then corp ip_cidr (on the resolved IP), then final. (The geosite ad rule-set
-# also blocks, but it's a binary .srs we can't cheaply inspect — a hit there won't
-# show below; it's consulted after the hand lists, so an explicit entry overrides.)
-cmd_explain() {
-  local dest="${1:-}"; [ -n "$dest" ] || die "usage: $PROG explain <domain|ip>"
-  dest="$(printf '%s' "$dest" | sed -E 's#^[a-zA-Z]+://##; s#/.*$##; s#:[0-9]+$##' | tr 'A-Z' 'a-z')"
-  local lane="" why="" ip="" ip_note="" m hit unmatched=0
-  # The hotspot lane is not a routing lane: macOS takes these names off the
-  # proxy before rowt is handed the connection, so no lane applies and a probe
-  # THROUGH the router would say nothing about them. Answered first for that
-  # reason, and its probe goes direct — which is what the OS does.
-  if ! is_ipv4 "$dest" && m="$(_hotspot_hit "$dest")"; then
-    printf '%s  ->  BYPASS   (hotspot lane — macOS keeps it off the proxy; the OS resolver answers it)\n' "$dest"
-    echo "  matched: hotspot-domains entry '$m' — on the OS proxy bypass list, so rowt is not in the path"
-    # No -x here, so --noproxy '*' is the point rather than the mistake it
-    # would be alongside one: the path worth probing is the OS's.
-    local hcode; hcode="$(curl -sS -m 8 --noproxy '*' -o /dev/null -w '%{http_code}' "https://$dest/" 2>/dev/null || true)"; hcode="${hcode:-000}"
-    if [ "$hcode" = 000 ]; then
-      echo "  live:    NOT reachable bypassing the proxy — no response"
-    else
-      echo "  live:    reachable bypassing the proxy — origin answered HTTP $hcode for https://$dest/ (the site root; not a verdict on the lane)"
-    fi
-    return 0
-  fi
+# The cached geosite sets in the order the router checks them, one per line:
+# "<name> <lane> <path>" — the escape lane's, then the block lane's, then the
+# ad set, as render_host emits them. Each name once: a repeat can only repeat
+# a miss. rowt-rs: route::sets.
+_geosite_route_sets() {
+  local n l seen=" "
+  while read -r n l; do
+    [ -n "$n" ] && [ -f "$CACHE/geosite-$n.srs" ] || continue
+    case "$seen" in *" $n "*) continue ;; esac
+    seen="$seen$n "
+    printf '%s %s %s\n' "$n" "$l" "$CACHE/geosite-$n.srs"
+  done <<EOF
+$(geosites_of "$DOMAINS" | sed 's/$/ escape/'; geosites_of "$BLOCK_DOMAINS" | sed 's/$/ block/')
+EOF
+  case "$seen" in
+    *" category-ads-all "*) ;;
+    *) if [ -f "$ADS_SRS" ]; then printf '%s %s %s\n' category-ads-all block "$ADS_SRS"; fi ;;
+  esac
+  return 0
+}
+
+# The sets a lane names that are not cached, in file order, once each. The
+# render leaves them out, so they route nothing until `fetch host`.
+_geosite_uncached() {
+  local n seen=" "
+  while read -r n; do
+    [ -n "$n" ] && [ ! -f "$CACHE/geosite-$n.srs" ] || continue
+    case "$seen" in *" $n "*) continue ;; esac
+    seen="$seen$n "
+    printf '%s\n' "$n"
+  done <<EOF
+$(geosites_of "$DOMAINS"; geosites_of "$BLOCK_DOMAINS")
+EOF
+  return 0
+}
+
+# Does the set at $1 list the name $2? rc 0 yes, 1 no, 2 sing-box could not
+# read it. `rule-set match` exits 0 either way and says which on stderr
+# ("match rules.[N]: …"); it fails only on a set it cannot read.
+_rule_set_match() {
+  local said
+  [ -x "$SB" ] || return 2
+  said="$("$SB" rule-set match -f binary "$1" "$2" 2>&1 >/dev/null </dev/null)" || return 2
+  case "$said" in *"match rules."*) return 0 ;; esac
+  return 1
+}
+
+# Ask each cached set, in the router's order, about a name no hand list
+# matched; the first that lists it is the router's answer. Sets the caller's
+# geo_hit ("<name> <lane>", or empty) and geo_unread (the sets sing-box could
+# not read, comma-joined, in the order tried). rowt-rs: route::geosite_route.
+_geosite_route() { # $1=name
+  local n l p rc
+  geo_hit=""; geo_unread=""
+  while read -r n l p; do
+    [ -n "$n" ] || continue
+    rc=0; _rule_set_match "$p" "$1" || rc=$?
+    case "$rc" in
+      0) geo_hit="$n $l"; return 0 ;;
+      2) geo_unread="${geo_unread:+$geo_unread,}$n" ;;
+    esac
+  done <<EOF
+$(_geosite_route_sets)
+EOF
+  return 0
+}
+
+# Which lane a destination takes. Mirrors the render: hand-list domain suffixes
+# win by LONGEST match across all three lanes (block/corp/escape), then the
+# cached geosite sets in render order (escape's, block's, the ad set), then
+# corp ip_cidr on the resolved IP, then final.
+#
+# The lane $1 (a normalized destination) takes on the main port, and why, as
+# the router decides it: what explain prints and speed labels a URL with.
+# rowt-rs's route::route. The hand lists, then the cached geosite sets (asked
+# through sing-box: until #s96 neither command looked, so a box whose escape
+# lane carries geosite:github was told npm went DIRECT while the router sent it
+# to escape), then the router's lookup. Sets the caller's lane, why, ip,
+# ip_note, unmatched, geo_hit, geo_unread and geo_uncached.
+_route_of() {
+  local dest="$1" m hit _rt_reached=0
+  lane=""; why=""; ip=""; ip_note=""; unmatched=0; geo_hit=""; geo_unread=""; geo_uncached=""
   if is_ipv4 "$dest"; then
     ip="$dest"
     if m="$(_list_hit "$dest" "$CORP_DOMAINS" cidr)"; then lane=corp; why="corp CIDR '$m'"
@@ -6038,6 +6096,16 @@ cmd_explain() {
       *)     why="longest-match ${lane}-domains suffix '$m'" ;;
     esac
   else
+    # A name no hand list matched reaches the cached geosite sets next, as it
+    # does in the router (render_host puts them before the resolve rule); a set
+    # that lists it routes it there, unresolved.
+    _rt_reached=1
+    _geosite_route "$dest"
+    geo_uncached="$(_geosite_uncached | paste -sd, - 2>/dev/null)"
+  fi
+  if [ -n "$geo_hit" ]; then
+    lane="${geo_hit#* }"; why="geosite:${geo_hit%% *} rule-set ($lane lane) — no hand-list entry names it"
+  elif [ "$_rt_reached" = 1 ]; then
     # A name no rule matched. When the final route is direct and there are
     # address rules to feed, the router RESOLVES it (the `resolve` rule the
     # renderer places after every name rule) at the direct lane's own resolver,
@@ -6066,6 +6134,30 @@ cmd_explain() {
   if [ "$xmode" = "local" ] && [ "$lane" = "escape" ]; then
     lane=direct; why="$why — local mode: the escape lane routes direct"
   fi
+}
+
+cmd_explain() {
+  local dest="${1:-}"; [ -n "$dest" ] || die "usage: $PROG explain <domain|ip>"
+  dest="$(printf '%s' "$dest" | sed -E 's#^[a-zA-Z]+://##; s#/.*$##; s#:[0-9]+$##' | tr 'A-Z' 'a-z')"
+  local lane="" why="" ip="" ip_note="" m unmatched=0 geo_hit="" geo_unread="" geo_uncached=""
+  # The hotspot lane is not a routing lane: macOS takes these names off the
+  # proxy before rowt is handed the connection, so no lane applies and a probe
+  # THROUGH the router would say nothing about them. Answered first for that
+  # reason, and its probe goes direct — which is what the OS does.
+  if ! is_ipv4 "$dest" && m="$(_hotspot_hit "$dest")"; then
+    printf '%s  ->  BYPASS   (hotspot lane — macOS keeps it off the proxy; the OS resolver answers it)\n' "$dest"
+    echo "  matched: hotspot-domains entry '$m' — on the OS proxy bypass list, so rowt is not in the path"
+    # No -x here, so --noproxy '*' is the point rather than the mistake it
+    # would be alongside one: the path worth probing is the OS's.
+    local hcode; hcode="$(curl -sS -m 8 --noproxy '*' -o /dev/null -w '%{http_code}' "https://$dest/" 2>/dev/null || true)"; hcode="${hcode:-000}"
+    if [ "$hcode" = 000 ]; then
+      echo "  live:    NOT reachable bypassing the proxy — no response"
+    else
+      echo "  live:    reachable bypassing the proxy — origin answered HTTP $hcode for https://$dest/ (the site root; not a verdict on the lane)"
+    fi
+    return 0
+  fi
+  _route_of "$dest"
   local desc
   case "$lane" in
     escape) desc="personal tunnel — through the proxy" ;;
@@ -6089,12 +6181,22 @@ cmd_explain() {
     [ "$pf" = escape ] || [ "$lane" = "$FINAL_ROUTE" ] || continue
     printf '  %-9s%s\n' "$pn:" "via 127.0.0.1:$pp -> $(printf '%s' "$pd" | tr 'a-z' 'A-Z') (no rule matched; this port's catch-all$([ "$pd" = escape ] && ! is_ipv4 "$dest" && echo ', the name resolved at the far end'))"
   done <<<"$(_ports_rows)"
-  # Opaque binary rule-sets (the ad-block set, and any `geosite:<name>` a lane
-  # pulls) can't be inspected here, so they may route/block this beyond what the
-  # hand lists show.
-  if [ "$lane" != block ] && { [ -f "$ADS_SRS" ] || [ -n "$(all_geosites)" ]; }; then
-    local gs; gs="$(all_geosites | paste -sd, - 2>/dev/null)"
-    echo "  note:    a geosite rule-set may still match this (not shown — binary set)${gs:+: geosite:$gs}$([ -f "$ADS_SRS" ] && echo ' + ad-block')"
+  # What the sets could not say. On a hit: the sets ahead of it sing-box could
+  # not read, which the router checks first. For a name none of them listed:
+  # one sing-box could not read, or one a lane names that is not cached (and so
+  # not in the router: 'fetch host' caches it, a reload renders it in). Nothing
+  # for a name a hand list routed, or an address.
+  if [ -n "$geo_hit" ]; then
+    if [ -n "$geo_unread" ]; then
+      echo "  note:    the router checks geosite:$geo_unread first, and sing-box could not read it: that set may take this name instead"
+    fi
+  else
+    if [ "$lane" != block ] && [ -n "$geo_unread" ]; then
+      echo "  note:    a geosite rule-set may still match this (sing-box could not read it): geosite:$geo_unread"
+    fi
+    if [ -n "$geo_uncached" ]; then
+      echo "  note:    the router skips geosite:$geo_uncached — named on a lane but not cached ('$PROG fetch host' fetches it, then '$PROG reload' puts it in the router)"
+    fi
   fi
   if [ "$lane" = block ]; then echo "  live:    (skipped — blocked by design)"
   elif host_running; then

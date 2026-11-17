@@ -97,6 +97,17 @@ PARITY_SCENARIO=render-local explain sub.example.net
 PARITY_SCENARIO=render-local explain ads.example
 PARITY_SCENARIO=render-local explain intranet.corp.example
 PARITY_SCENARIO=render-local-precedence explain api.foo.com
+# The cached geosite sets, asked through sing-box's `rule-set match` in render
+# order, after the hand lists and before the lookup (#s96; the scenarios'
+# READMEs): a set's hit, the ad set's, a name no set lists (with the unreadable
+# and the uncached set's notes), a hand-list hit and an address the sets never
+# see, and a set's hit in local mode.
+PARITY_SCENARIO=explain-geosite explain registry.pkg.example
+PARITY_SCENARIO=explain-geosite explain tracker.pixel.example
+PARITY_SCENARIO=explain-geosite explain unlisted.example
+PARITY_SCENARIO=explain-geosite explain example.com
+PARITY_SCENARIO=explain-geosite explain 198.51.100.7
+PARITY_SCENARIO=explain-geosite-local explain registry.pkg.example
 PARITY_SCENARIO=render-local escape list
 
 # newly ported: version, the proxy read paths, and lane import
@@ -979,6 +990,9 @@ PARITY_SCENARIO=speed-samples speed --repeat
 PARITY_SCENARIO=speed-samples speed --repeat x
 PARITY_SCENARIO=speed-samples speed --repeat 0
 PARITY_SCENARIO=speed-samples speed -z
+# The LANE column is explain's lane (#s96): a URL only a cached geosite set
+# lists reads escape, not the final route, and the roll-up follows it.
+PARITY_SCENARIO=speed-geosite speed https://registry.pkg.example/pkg.tgz https://unlisted.example/x
 report
 PARITY_SCENARIO=router-up report
 # The usage lines a die() emits reach the AUDIT log via ABORT, so a message that

@@ -81,6 +81,9 @@ fn run() -> Result<String, String> {
         // `basename $0` in the shell, and this gate always drives bin/rowt.
         prog: "rowt",
         resolver: &resolver,
+        // This gate classifies against the hand lists only; asking sing-box
+        // about the cached rule-sets is `rowt explain`'s job.
+        geosite: None,
     };
 
     if let Some(path) = corpus {
