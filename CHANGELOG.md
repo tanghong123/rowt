@@ -5,6 +5,39 @@ release is cut; everything under Unreleased ships with the next one.
 
 ## Unreleased
 
+- **A direct lane: `rowt direct add|rm|list|import|clear|dump`.** Names in
+  `direct-domains.txt` go straight out the physical network even where a
+  broader rule would take them elsewhere, above all a geosite set on the
+  escape lane. It ships with npm's domains (`npmjs.org`, `npmjs.com`,
+  `npm.community`): rowt's default escape list carries `geosite:github`, which
+  lists them, so npm went through the escape server; now it goes direct while
+  github.com stays on escape. `rowt direct rm npmjs.org npmjs.com
+  npm.community` puts npm back through the set. The lane's entries rank with
+  the other hand lists by longest match, ahead of every geosite set and the ad
+  set, and a tie with another lane goes to the other lane, so a box that
+  already routed npm by hand keeps its own entry. It declines `geosite:`
+  entries and addresses. The file is seeded at the first command after the
+  upgrade; the router uses it from the next `rowt reload` or lane edit. Bare
+  `rowt direct` is still `rowt direct errors`. The seeding leaves out an npm
+  entry another lane already holds, and the audit log records it as
+  `LANE seeded: …`. Around it:
+  - the audit's lane lines spell "in no lane" `none` (it was `direct`), so
+    `LANE escape -> direct` means the entry moved into the direct lane; older
+    lines keep the old spelling;
+  - `rowt status --json` gains `lanes.direct`, and the buckets line in
+    `status` and `report` gains `direct=N`;
+  - `config export` bundles `direct-domains.txt` and `config import` merges
+    it, ahead of the other lanes, so an entry a bundle holds twice keeps the
+    router's choice; `config export --to shadowrocket` writes its entries as `DIRECT` rules
+    ranked with the other hand lists;
+  - `explain` says "no block/corp/escape/direct rule" when no hand list
+    matches;
+  - `corp sync` leaves a direct entry alone, as it does the other lanes' hand
+    entries;
+  - the monitor's `d` takes the host out of the direct lane too, and says
+    "taken out of every lane" rather than "→ direct";
+  - the render's warning about one entry in two lanes no longer says "in
+    different case" when the case is the same.
 - `rowt explain` and `rowt speed` name the lane the router really takes for a
   host only a geosite rule-set lists. They used to stop at the hand lists, so
   with `geosite:github` on the escape lane (rowt's default list has it),

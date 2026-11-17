@@ -60,7 +60,7 @@ The one key a fleet check needs is `.escape.state`: alert on `down` and
       {"tag": "osaka-2", "type": "vless", "alive": true,  "last_delay_ms": 83,   "last_test_at": "2026-10-30 07:19:25"}
     ]                                   // alive false: its last test got no answer; alive null: never tested; empty when the router is down
   },
-  "lanes": {"escape": 212, "corp": 48, "block": 9, "ads": true, "geosites": ["google"], "final": "direct"},
+  "lanes": {"escape": 212, "corp": 48, "block": 9, "direct": 3, "ads": true, "geosites": ["google"], "final": "direct"},
   "ports": [{"name": "vm", "port": 7891, "unmatched": "direct", "rendered": true}]
 }
 ```

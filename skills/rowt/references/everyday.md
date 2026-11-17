@@ -104,8 +104,15 @@ foreground with output redirected to a file (see SKILL.md → Rules).
 
 ## Lanes
 
-- `rowt escape|corp|block|hotspot <list|add|rm|clear|import|dump>`; escape, corp and
-  block also have `errors`.
+- `rowt escape|corp|block|direct|hotspot <list|add|rm|clear|import|dump>`; escape,
+  corp, block and direct also have `errors` (a bare `rowt direct` is `direct errors`).
+- The **direct** lane is for names a broader rule would catch, above all a geosite
+  set: `rowt direct add <domain>` sends it straight out the physical NIC. It ships
+  with npm's domains (`npmjs.org`, `npmjs.com`, `npm.community`), which the default
+  escape list's `geosite:github` lists, so npm goes direct while github.com stays on
+  escape. It takes no `geosite:` entries and no addresses. A tie with another lane
+  goes to the other lane. After an upgrade that brings the lane, the router uses it
+  from the next `rowt reload` (or lane edit).
 - An entry lives in exactly one lane: adding it to one removes it from the others,
   hotspot included.
 - Entries are suffixes on a label boundary: `z.com` matches `z.com` and `a.z.com`, but
@@ -151,10 +158,12 @@ foreground with output redirected to a file (see SKILL.md → Rules).
 - `rowt metrics top [secs]`: the heaviest domains. The collector records per-domain
   bytes (`rowt metrics query "<SQL>"` is read-only).
 - `rowt audit`: who changed what, whether a person (`by=zsh`) or the watchdog
-  (`by=launchd`). Lane changes are itemised: `LANE block -> direct (1): x.com`
-  (the monitor routed it direct), `LANE direct -> block (336): …` (an import, in
-  full), `LANE outside rowt: …` (a lane file edited behind rowt's back, noticed at
-  the next command or tick). To find when something got blocked:
+  (`by=launchd`). Lane changes are itemised: `LANE block -> none (1): x.com`
+  (taken out of every lane, as the monitor's `d` does), `LANE none -> block (336): …`
+  (an import, in full), `LANE escape -> direct (1): npmjs.org` (into the direct
+  lane), `LANE outside rowt: …` (a lane file edited behind rowt's back, noticed at
+  the next command or tick). `none` is "in no lane"; lines written before rowt had
+  a direct lane spell that `direct`. To find when something got blocked:
   `grep -F 'x.com' ~/.config/rowt/log/audit.log`; to undo a line, re-add or
   remove the same entries in the lane on the other side of the arrow.
 - `rowt report`: a masked, shareable diagnostic file.
