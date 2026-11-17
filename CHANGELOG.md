@@ -5,6 +5,8 @@ release is cut; everything under Unreleased ships with the next one.
 
 ## Unreleased
 
+## 3.10.1 — 2026-11-18
+
 - **A direct lane: `rowt direct add|rm|list|import|clear|dump`.** Names in
   `direct-domains.txt` go straight out the physical network even where a
   broader rule would take them elsewhere, above all a geosite set on the
