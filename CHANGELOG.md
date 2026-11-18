@@ -5,6 +5,8 @@ release is cut; everything under Unreleased ships with the next one.
 
 ## Unreleased
 
+## 3.11.0 — 2026-11-18
+
 - **The watchdog reloads once after an upgrade, at a quiet moment.** A
   `brew upgrade` leaves the router running the config the old rowt rendered,
   so a fix that lives in that config did nothing until someone ran
