@@ -6,8 +6,10 @@ already synced, the bypass list right, the auto probe answering. So the tick
 reaches the healthy branch of the health check, the one place the spin heal
 runs. The clash API reports no byte totals, so the traffic sample is 0 B/s.
 watch.cpu names the stand-in router as @ROUTER_PID@ and its time as
-@NOW-<s>@; the harness fills both, and masks the epoch and pid fields when it
-compares the tree (snap_norm).
+@NOW-<s>@; the harness fills both. Its CPU seconds (5) and bytes (12345) are
+nonzero, which a fresh sample of the stand-in never is, so a sample left
+unwritten shows in the tree; the compare masks the pid and this run's own
+stamps only (snap_norm).
 
 As watch-spin-heal-held, without the 2100 recovery stamp, so the recovery
 runs: the evidence, "router spinning: 0% cpu with 0 B/s over about 600s …", then

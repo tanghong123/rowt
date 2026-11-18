@@ -333,13 +333,16 @@ run_one() {      # $1=outdir  rest=rowt args
 # The spin heal's records (#s105) carry the sandbox's own clock and stand-in
 # router: `watch.cpu` is "epoch cpusecs pid bytes" and `watch.cpuheal` the
 # epoch of the last heal, and the two runs of a case are seconds apart with two
-# different `sleep`s. Only those fields are masked, and only when they are
-# numbers: the file being there, its shape, the CPU and the byte count still
-# compare, so a side that stops writing it, or writes it wrong, still fails.
+# different `sleep`s. So the pid is masked, and an epoch only when it is this
+# run's own stamp (within five minutes of now): a value the tick should have
+# kept (a 2100 heal) or replaced (a seed ten minutes old) still compares. The
+# scenarios seed nonzero CPU and byte counts, which a fresh sample of the
+# stand-in never has, so a side that leaves the sample unwritten still fails.
 snap_norm() { # $1=file (relative, from snapshot_fs) $2=outdir
+  local near='function near(x) { return x ~ /^[0-9]+$/ && x - now <= 300 && now - x <= 300 }'
   case "$1" in
-    ./watch.cpu)     normalize "$1" "$2" | awk '$1 ~ /^[0-9]+$/ { $1 = "<EPOCH>" } $3 ~ /^[0-9]+$/ { $3 = "<PID>" } { print }' ;;
-    ./watch.cpuheal) normalize "$1" "$2" | awk '$1 ~ /^[0-9]+$/ { $1 = "<EPOCH>" } { print }' ;;
+    ./watch.cpu)     normalize "$1" "$2" | awk -v now="$(date +%s)" "$near"' near($1) { $1 = "<EPOCH>" } $3 ~ /^[0-9]+$/ { $3 = "<PID>" } { print }' ;;
+    ./watch.cpuheal) normalize "$1" "$2" | awk -v now="$(date +%s)" "$near"' near($1) { $1 = "<EPOCH>" } { print }' ;;
     *)               normalize "$1" "$2" ;;
   esac
 }

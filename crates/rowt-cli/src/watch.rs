@@ -158,10 +158,17 @@ fn spin_check(ctx: &Ctx) -> (Option<String>, Option<String>) {
     let Some((pct, bps, dt)) = st.heal else { return (st.log, None) };
     let cap = capture_spin(ctx, &pid, pct, &k);
     let sbv = crate::fetch::sb_version(&ctx.sb());
-    let why = crate::fetch::sb_known_bad(&sbv).map(|w| format!(" — KNOWN BAD: {w}")).unwrap_or_default();
-    let line = format!("router spinning: {pct}% cpu with {bps} B/s over {dt}s (sing-box {}{why}) — evidence in {}",
-                       if sbv.is_empty() { "?" } else { &sbv }, cap.display());
+    let line = spin_heal_line(pct, bps, dt, &sbv, crate::fetch::sb_known_bad(&sbv), &cap);
     (Some(line), Some(spin_reason(pct)))
+}
+
+/// The heal's line in the watch log, the shell's `_spin_say "router spinning:
+/// …"`: an unknown sing-box version reads `?`, and the known-bad reason is
+/// there only when there is one (`${why:+ — KNOWN BAD: $why}`).
+fn spin_heal_line(pct: i64, bps: i64, dt: i64, sbv: &str, why: Option<&str>, cap: &Path) -> String {
+    let why = why.filter(|w| !w.is_empty()).map(|w| format!(" — KNOWN BAD: {w}")).unwrap_or_default();
+    format!("router spinning: {pct}% cpu with {bps} B/s over {dt}s (sing-box {}{why}) — evidence in {}",
+            if sbv.is_empty() { "?" } else { sbv }, cap.display())
 }
 
 /// `_watch_capture_spin`: everything worth having about a spinning router,
@@ -1921,6 +1928,20 @@ fn tick(ctx: &Ctx, self_bin: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The heal's log line, word for word the shell's (#s105): no gate
+    /// compares rowt-rs's own watch log with the shell's, so this does.
+    #[test]
+    fn the_spin_heal_line_reads_as_the_shells() {
+        let cap = Path::new("/c/log/spin-20261118-101500.txt");
+        assert_eq!(spin_heal_line(97, 120, 300, "1.13.14", None, cap),
+                   "router spinning: 97% cpu with 120 B/s over 300s (sing-box 1.13.14) — evidence in /c/log/spin-20261118-101500.txt");
+        assert_eq!(spin_heal_line(97, 0, 300, "", None, cap),
+                   "router spinning: 97% cpu with 0 B/s over 300s (sing-box ?) — evidence in /c/log/spin-20261118-101500.txt");
+        assert_eq!(spin_heal_line(150, 0, 60, "1.14.2", Some("why"), cap),
+                   "router spinning: 150% cpu with 0 B/s over 60s (sing-box 1.14.2 — KNOWN BAD: why) — evidence in /c/log/spin-20261118-101500.txt");
+        assert_eq!(spin_heal_line(150, 0, 60, "1.14.2", Some(""), cap), spin_heal_line(150, 0, 60, "1.14.2", None, cap));
+    }
 
     /// `_watch_fresh_flows`'s filter: escape lane, opened at or after the stamp,
     /// and bytes RECEIVED — a connection still dialing can already count the
