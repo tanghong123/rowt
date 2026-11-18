@@ -1,0 +1,4 @@
+rowt #s104: `status` while an upgrade's reload waits. The router is up,
+host.running.by says 3.10.1 rendered what it runs, and cache/upgrade-pending
+holds the watchdog's verdict for this version (@ROWT_VERSION@), with no traffic
+sample yet. status prints its `upgrade:` line on both sides.

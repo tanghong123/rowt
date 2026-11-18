@@ -138,6 +138,12 @@ pub struct Observation {
     /// so both implementations stamp with the same program.
     pub hold_stamp: String,
     pub now: i64,
+    /// rowt #s104: the router runs a config an older rowt rendered, and this
+    /// rowt renders a different one, established by a dry render (nothing
+    /// written). `None` on every tick where that is not known, which is every
+    /// ordinary tick: the caller looks only when `host.running.by` names
+    /// another version, and never again for a version it reloaded for once.
+    pub upgrade: Option<Upgrade>,
     /// rowt #s105, the spin heal (`_watch_spin`): the one line the router's
     /// CPU and traffic sample had for the log on this healthy tick, if any
     /// (busy but idle, or spinning but healed once already, or the spin
@@ -147,6 +153,102 @@ pub struct Observation {
     /// …and the recovery reason when the sample asks for a heal
     /// (`spin_reason`). None on every tick that did not reach a healthy probe.
     pub spin: Option<String>,
+}
+
+/// A reload an upgrade is waiting for (#s104; Hong chose on #s102: "Watchdog
+/// reloads at a quiet moment, and status flags it until then").
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Upgrade {
+    /// The installed rowt, whose render differs from the running config.
+    pub version: String,
+    /// The rowt whose render the router runs (`host.running.by`); empty when
+    /// the router was started before that was recorded.
+    pub from: String,
+    /// Why now is a quiet moment: `woke` (within `UPGRADE_WAKE_SECS` of waking
+    /// from a sleep of `UPGRADE_SLEEP_SECS` or more) or `idle` (the router
+    /// moved under the byte-rate threshold from tick to tick for
+    /// `UPGRADE_QUIET_SECS`). Empty: not quiet, so nothing happens.
+    pub quiet: String,
+    /// This tick is the one that found it, so the wait is said once.
+    pub fresh: bool,
+}
+
+/// How long traffic has to stay under the threshold before an upgrade's
+/// reload counts the moment as quiet.
+pub const UPGRADE_QUIET_SECS: i64 = 600;
+/// The threshold, up plus down, in bytes a second, from tick to tick
+/// (`ROWT_RELOAD_QUIET_BPS` overrides it).
+pub const UPGRADE_QUIET_BPS: u64 = 2048;
+/// A sleep this long drops the connections a reload would: anything shorter
+/// can leave a call standing.
+pub const UPGRADE_SLEEP_SECS: i64 = 300;
+/// "Just after the Mac woke": the first ticks within this of the wake.
+pub const UPGRADE_WAKE_SECS: i64 = 600;
+
+/// What the last tick saw of the router's traffic while an upgrade waits:
+/// when, the clash API's `uploadTotal + downloadTotal` then, and since when
+/// every tick-to-tick step has stayed under the threshold (0: not quiet).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Sample {
+    pub epoch: i64,
+    pub total: u64,
+    pub quiet_since: i64,
+}
+
+/// Is now a quiet moment for an upgrade's reload, and what to remember for
+/// the next tick? `woke`/`sleep` are `kern.waketime`/`kern.sleeptime` in
+/// seconds (0 when unknown); `total` is the router's byte counter (None when
+/// the clash API did not answer). Pure, so the shell's `_upgrade_quiet` and the
+/// CLI make the same call from the same numbers.
+///
+/// - Woke: the Mac woke within `UPGRADE_WAKE_SECS` from a sleep of at least
+///   `UPGRADE_SLEEP_SECS`. A wake time before the sleep time, or either
+///   unknown, says nothing.
+/// - Idle: every step since `quiet_since` moved under `bps`, for
+///   `UPGRADE_QUIET_SECS`. A counter that went DOWN (the router restarted),
+///   a gap longer than the window (a missed tick, a sleep) or a clock that
+///   went back starts the window over: the bytes in between are unknown.
+pub fn upgrade_quiet(now: i64, woke: i64, sleep: i64, prev: Option<Sample>, total: Option<u64>, bps: u64) -> (&'static str, Option<Sample>) {
+    if woke_quiet(now, woke, sleep) {
+        return ("woke", prev);
+    }
+    let Some(total) = total else { return ("", None) };
+    let fresh = Sample { epoch: now, total, quiet_since: 0 };
+    let Some(p) = prev else { return ("", Some(fresh)) };
+    let gap = now - p.epoch;
+    if total < p.total || gap <= 0 || gap > UPGRADE_QUIET_SECS {
+        return ("", Some(fresh));
+    }
+    let quiet_since = if (total - p.total) < bps.saturating_mul(gap as u64) {
+        if p.quiet_since > 0 { p.quiet_since } else { p.epoch }
+    } else {
+        0
+    };
+    let idle = quiet_since > 0 && now - quiet_since >= UPGRADE_QUIET_SECS;
+    (if idle { "idle" } else { "" }, Some(Sample { epoch: now, total, quiet_since }))
+}
+
+/// The wake half of `upgrade_quiet`, on its own so the caller skips the clash
+/// API when the wake already answered (both sides, or the traces differ).
+pub fn woke_quiet(now: i64, woke: i64, sleep: i64) -> bool {
+    woke > 0 && sleep > 0 && woke >= sleep && woke - sleep >= UPGRADE_SLEEP_SECS && now >= woke && now - woke <= UPGRADE_WAKE_SECS
+}
+
+/// Netcheck's first question, shared with the caller so it observes an
+/// upgrade under the same condition the planner acts on: does this tick
+/// reload for the network's sake (the interface moved, or the system proxy
+/// no longer points at rowt)?
+pub fn reload_needed(obs: &Observation) -> bool {
+    let iface_moved = matches!((&obs.iface, &obs.bound_iface), (Some(i), b) if Some(i) != b.as_ref());
+    let proxy_wrong = obs.active_service.is_some() && !(obs.proxy_pointing_ok && obs.proxy_bypass_ok);
+    iface_moved || proxy_wrong
+}
+
+/// A tick with nothing wrong to fix, on a network that is there: the tunnel
+/// probe answered, or local mode (no tunnel to probe). Never without an
+/// interface: a render then has none to bind, and would differ for that alone.
+pub fn healthy(obs: &Observation) -> bool {
+    obs.iface.is_some() && (obs.mode == "local" || (!obs.probe_offline && obs.health_ok))
 }
 
 /// `watch.cpu`: the router's last CPU and traffic sample, one line
@@ -352,6 +454,10 @@ pub enum Action {
     CorpSync,
     WriteNetId(String),
     Reload(String),
+    /// Record that the watchdog reloads for this rowt version (#s104), BEFORE
+    /// the reload: whether the reload works or not, it is never tried again
+    /// for the same version.
+    MarkUpgrade(String),
 }
 
 /// What the caller should do after performing this phase's actions.
@@ -656,6 +762,38 @@ pub fn guard(obs: &Observation, st: &State, cfg: &Config) -> Outcome {
 
 /// Phase two, after the settle and `corp_sync`: has the network moved, and is
 /// the tunnel still carrying traffic?
+/// The third reason a watchdog reloads, beside a network change and a
+/// re-pointed proxy: the installed rowt renders a different config than the
+/// one the router runs. Said once while it waits for a quiet moment; at one,
+/// marked and reloaded, once per version. The shell's `_watch_upgrade` builds
+/// the same strings.
+fn upgrade_reload(a: &mut Vec<Action>, u: &Upgrade) {
+    let v = &u.version;
+    let from = if u.from.is_empty() { "an older rowt".to_string() } else { format!("rowt {}", u.from) };
+    let when = match u.quiet.as_str() {
+        "woke" => "just after the Mac woke from sleep",
+        "idle" => "traffic has stayed low for 10 minutes",
+        _ => {
+            if u.fresh {
+                a.push(Action::Log(format!(
+                    "rowt {v} renders a different config than the one the router runs (rendered by {from}) — \
+                     the watchdog reloads once at a quiet moment (just after the Mac wakes from sleep, or once \
+                     traffic has stayed low for 10 minutes); 'rowt reload' applies it now"
+                )));
+            }
+            return;
+        }
+    };
+    a.push(Action::Log(format!(
+        "rowt {v} renders a different config than the one the router runs (rendered by {from}) — reloading once, {when}"
+    )));
+    a.push(Action::Audit(format!(
+        "BEGIN watchdog reload — upgrade to rowt {v}: the router runs what {from} rendered; {when}"
+    )));
+    a.push(Action::MarkUpgrade(v.clone()));
+    a.push(Action::Reload(format!("upgrade to rowt {v}")));
+}
+
 pub fn netcheck(obs: &Observation, st: &State, cfg: &Config) -> Outcome {
     let mut a = vec![Action::CorpSync, Action::WriteNetId(obs.net_id.clone())];
     let mut s = st.clone();
@@ -667,8 +805,7 @@ pub fn netcheck(obs: &Observation, st: &State, cfg: &Config) -> Outcome {
     }
 
     let iface_moved = matches!((&obs.iface, &obs.bound_iface), (Some(i), b) if Some(i) != b.as_ref());
-    let proxy_wrong = obs.active_service.is_some() && !(obs.proxy_pointing_ok && obs.proxy_bypass_ok);
-    let need = iface_moved || proxy_wrong;
+    let need = reload_needed(obs);
 
     if !need {
         // Log a real network move (rare); stay silent for a bare timer tick so the
@@ -819,6 +956,16 @@ pub fn netcheck(obs: &Observation, st: &State, cfg: &Config) -> Outcome {
                 }
             }
         }
+        // rowt #s104: an upgrade changed what rowt renders, and the router
+        // still runs the old config. Only on a tick that is otherwise healthy
+        // (a failing tunnel takes the recovery path above, whose reload applies
+        // the new config anyway), and only at a quiet moment: just after a
+        // wake from sleep, or after ten minutes of low traffic. Not on a tick
+        // that heals a spin (#s105): that recovery reloads, which applies the
+        // new config too, and one tick never reloads twice.
+        if let Some(u) = obs.upgrade.as_ref().filter(|_| healthy(obs) && obs.spin.is_none()) {
+            upgrade_reload(&mut a, u);
+        }
         return Outcome { actions: a, state: s, next: Next::Stop };
     }
 
@@ -885,9 +1032,152 @@ mod tests {
             failover: false,
             hold_stamp: "2026-10-30 09:00:00".into(),
             now: 1_000_000,
+            upgrade: None,
             spin_log: None,
             spin: None,
         }
+    }
+
+    /// rowt #s104: a healthy tick after an upgrade changed the render, with
+    /// the router run from 3.10.1's and 3.11.0 installed.
+    fn upgraded(quiet: &str, fresh: bool) -> Observation {
+        let mut o = running();
+        o.upgrade = Some(Upgrade { version: "3.11.0".into(), from: "3.10.1".into(), quiet: quiet.into(), fresh });
+        o
+    }
+
+    fn netcheck_plan(o: &Observation, st: &State) -> Vec<Action> {
+        let st = State { last_net_id: Some(o.net_id.clone()), ..st.clone() };
+        netcheck(o, &st, &Config::default()).actions
+    }
+
+    /// At a quiet moment: said, audited, marked BEFORE the reload (the once
+    /// bound), then reloaded, in that order, after the netcheck openers.
+    #[test]
+    fn an_upgrade_reloads_once_at_a_quiet_moment() {
+        let p = netcheck_plan(&upgraded("idle", false), &State::default());
+        assert_eq!(p, vec![
+            Action::CorpSync,
+            Action::WriteNetId("Net 192.0.2.5/192.0.2.1".into()),
+            Action::Log("rowt 3.11.0 renders a different config than the one the router runs (rendered by rowt 3.10.1) — \
+                         reloading once, traffic has stayed low for 10 minutes".into()),
+            Action::Audit("BEGIN watchdog reload — upgrade to rowt 3.11.0: the router runs what rowt 3.10.1 rendered; \
+                           traffic has stayed low for 10 minutes".into()),
+            Action::MarkUpgrade("3.11.0".into()),
+            Action::Reload("upgrade to rowt 3.11.0".into()),
+        ]);
+        let p = netcheck_plan(&upgraded("woke", true), &State::default());
+        assert!(p.contains(&Action::Reload("upgrade to rowt 3.11.0".into())), "{p:?}");
+        assert!(p.iter().any(|a| matches!(a, Action::Log(m) if m.ends_with("reloading once, just after the Mac woke from sleep"))), "{p:?}");
+    }
+
+    /// Busy: nothing happens. The tick that found it says so once; the
+    /// ticks after it say nothing (the status row carries it from there).
+    #[test]
+    fn a_busy_router_is_never_reloaded_for_an_upgrade() {
+        let p = netcheck_plan(&upgraded("", true), &State::default());
+        assert!(!p.iter().any(|a| matches!(a, Action::Reload(_) | Action::MarkUpgrade(_) | Action::Audit(_))), "{p:?}");
+        assert!(p.iter().any(|a| matches!(a, Action::Log(m) if m.contains("the watchdog reloads once at a quiet moment"))), "{p:?}");
+        let p = netcheck_plan(&upgraded("", false), &State::default());
+        assert_eq!(p.len(), 2, "only the netcheck openers: {p:?}");
+    }
+
+    /// Not on a tick whose tunnel failed (recovery decides there, and its
+    /// reload applies the new config anyway), nor offline. Local mode has no
+    /// tunnel to probe, so there the quiet moment is enough. A router that
+    /// started before `host.running.by` existed reads "an older rowt".
+    #[test]
+    fn an_upgrade_reload_waits_for_a_healthy_tick() {
+        let mut o = upgraded("idle", false);
+        o.health_ok = false;
+        let p = netcheck_plan(&o, &State::default());
+        assert!(!p.iter().any(|a| matches!(a, Action::MarkUpgrade(_))), "{p:?}");
+        let mut o = upgraded("idle", false);
+        o.probe_offline = true;
+        assert!(!netcheck_plan(&o, &State::default()).iter().any(|a| matches!(a, Action::MarkUpgrade(_))));
+        let mut o = upgraded("idle", false);
+        o.mode = "local".into();
+        o.health_ok = false;
+        o.upgrade.as_mut().unwrap().from = String::new();
+        let p = netcheck_plan(&o, &State::default());
+        assert!(p.contains(&Action::MarkUpgrade("3.11.0".into())), "{p:?}");
+        assert!(p.iter().any(|a| matches!(a, Action::Log(m) if m.contains("(rendered by an older rowt)"))), "{p:?}");
+        // …but not without an interface, local mode or not: the Mac woke and
+        // the Wi-Fi has not associated yet.
+        o.iface = None;
+        o.bound_iface = None;
+        assert!(!netcheck_plan(&o, &State::default()).iter().any(|a| matches!(a, Action::MarkUpgrade(_))));
+    }
+
+    /// Woke: within ten minutes of a wake from a sleep of five or more. A
+    /// short nap, a stale wake, a wake time before the sleep time, or either
+    /// unknown says nothing, and the traffic window goes on as it was.
+    #[test]
+    fn a_wake_from_a_real_sleep_is_a_quiet_moment() {
+        let p = Some(Sample { epoch: 9_000, total: 50, quiet_since: 0 });
+        assert_eq!(upgrade_quiet(10_000, 9_700, 9_000, p, Some(60), 2048).0, "woke");
+        assert_eq!(upgrade_quiet(10_000, 9_400, 9_000, p, None, 2048).0, "woke", "exactly 600 s after the wake");
+        assert_eq!(upgrade_quiet(10_000, 9_700, 9_500, p, None, 2048), ("", None), "a 200 s nap");
+        assert_eq!(upgrade_quiet(10_000, 9_300, 9_000, p, None, 2048), ("", None), "woke 700 s ago");
+        assert_eq!(upgrade_quiet(10_000, 9_000, 9_700, p, None, 2048), ("", None), "wake before sleep");
+        assert_eq!(upgrade_quiet(10_000, 9_700, 0, p, None, 2048), ("", None));
+        assert_eq!(upgrade_quiet(10_000, 0, 9_000, p, None, 2048), ("", None));
+        assert_eq!(upgrade_quiet(10_000, 10_500, 9_000, p, None, 2048), ("", None), "a wake in the future");
+    }
+
+    /// Idle: ten minutes of tick-to-tick steps under the threshold, counted
+    /// from the first quiet step's start. One busy step starts it over.
+    #[test]
+    fn ten_quiet_minutes_of_traffic_are_a_quiet_moment() {
+        let bps = 2048;
+        let (q, s) = upgrade_quiet(1_000, 0, 0, None, Some(5_000_000), bps);
+        assert_eq!((q, s), ("", Some(Sample { epoch: 1_000, total: 5_000_000, quiet_since: 0 })), "the first sample only");
+        let (q, s) = upgrade_quiet(1_300, 0, 0, s, Some(5_000_000 + 300 * 1000), bps);
+        assert_eq!((q, s.unwrap().quiet_since), ("", 1_000), "quiet from the step's start");
+        let (q, s2) = upgrade_quiet(1_600, 0, 0, s, Some(5_300_000 + 300 * 2047), bps);
+        assert_eq!((q, s2.unwrap().quiet_since), ("idle", 1_000), "600 s under the threshold");
+        let (q, s3) = upgrade_quiet(1_600, 0, 0, s, Some(5_300_000 + 300 * 2048), bps);
+        assert_eq!((q, s3.unwrap().quiet_since), ("", 0), "a step AT the threshold is busy");
+        let (q, s4) = upgrade_quiet(1_900, 0, 0, s3, Some(5_300_000 + 300 * 2048), bps);
+        assert_eq!((q, s4.unwrap().quiet_since), ("", 1_600), "the window starts over");
+    }
+
+    /// What the bytes in between cannot be known from: the counter went down
+    /// (the router restarted), a gap longer than the window, a clock that
+    /// went back, or no answer from the clash API. Never quiet on that tick.
+    #[test]
+    fn an_unknown_stretch_starts_the_quiet_window_over() {
+        let p = Some(Sample { epoch: 1_000, total: 9_000, quiet_since: 100 });
+        assert_eq!(upgrade_quiet(1_060, 0, 0, p, Some(10), 2048), ("", Some(Sample { epoch: 1_060, total: 10, quiet_since: 0 })));
+        assert_eq!(upgrade_quiet(1_601, 0, 0, p, Some(9_000), 2048), ("", Some(Sample { epoch: 1_601, total: 9_000, quiet_since: 0 })));
+        assert_eq!(upgrade_quiet(1_000, 0, 0, p, Some(9_000), 2048).0, "");
+        assert_eq!(upgrade_quiet(900, 0, 0, p, Some(9_000), 2048).0, "");
+        assert_eq!(upgrade_quiet(1_060, 0, 0, p, None, 2048), ("", None));
+        // A gap of exactly the window still counts.
+        assert_eq!(upgrade_quiet(1_600, 0, 0, p, Some(9_000), 2048).0, "idle");
+    }
+
+    /// A tick that reloads for the network already renders anew: no second
+    /// reload, no mark (the reload records the version itself).
+    #[test]
+    fn a_network_reload_is_not_doubled_by_an_upgrade() {
+        let mut o = upgraded("idle", false);
+        o.iface = Some("en7".into());
+        let p = netcheck_plan(&o, &State::default());
+        assert_eq!(p.iter().filter(|a| matches!(a, Action::Reload(_))).count(), 1, "{p:?}");
+        assert!(!p.iter().any(|a| matches!(a, Action::MarkUpgrade(_))), "{p:?}");
+    }
+
+    /// …nor by a spin heal (#s105): its recovery reloads, so the quiet
+    /// moment's upgrade reload waits for a later tick, as the shell's hook
+    /// does when `_watch_spin` recovered.
+    #[test]
+    fn a_spin_heal_is_not_doubled_by_an_upgrade() {
+        let mut o = upgraded("idle", false);
+        o.spin = Some(spin_reason(100));
+        let p = netcheck_plan(&o, &State::default());
+        assert!(p.contains(&Action::Recover(spin_reason(100))), "{p:?}");
+        assert!(!p.iter().any(|a| matches!(a, Action::Reload(_) | Action::MarkUpgrade(_))), "{p:?}");
     }
 
     /// Under `use <tag> --failover` the hold is the same decision with the

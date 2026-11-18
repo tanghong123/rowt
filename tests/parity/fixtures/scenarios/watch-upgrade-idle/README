@@ -1,0 +1,11 @@
+rowt #s104: the pending path. host.running.by says 3.10.1 started the router,
+and cache/upgrade-pending (this version, through @ROWT_VERSION@) says an
+earlier tick found the render different and sampled 1000 bytes 300 s ago,
+quiet since 900 s ago. /connections now reads 1100 (downloadTotal 1000 +
+uploadTotal 100): 100 bytes in 300 s is under the threshold, so traffic has
+stayed low for 10 minutes. No dry render runs (the verdict is recorded); the
+tick marks this version and reloads.
+
+sing-box-run-stays and curl_http_127_0_0_1_9090_version (router-restart-ok's)
+let the restart come back, so the case runs with ROWT_METRICS=off
+ROWT_AUTO_FOLLOW=0, as router-restart-ok's cases do.

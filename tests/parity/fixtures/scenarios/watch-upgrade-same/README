@@ -1,0 +1,13 @@
+rowt #s104: the first watchdog tick after an upgrade, where this rowt renders
+exactly the config the router runs. use-auto-unchanged's machine (host.json is
+what this state renders) with the router up, `host.running.self` (the router
+runs that host.json), no `host.running.by` (an older rowt started it), and a
+steady-state tick: watch.net and the proxy getters unchanged, the auto probe
+answering. From watch-net-moved: the corp lane `corp sync` already wrote (else
+the sync rewrites it and its reload ends the tick before the network check),
+the proxy bypass list, and `intent=up` with the canned boot id. The upgrade
+cases' expected log lines in watch-shadow-cases.txt are what show a tick got
+that far: cli-diff passes on a tick that stopped earlier, as long as both
+sides stop at the same place. The tick renders dry, finds the same bytes, and records
+host.running.by as this version: nothing reloads and nothing is said, so the
+tree (host.running.by on both sides) is what a cli-diff case compares.

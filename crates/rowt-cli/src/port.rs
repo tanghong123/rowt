@@ -431,6 +431,7 @@ fn apply(ctx: &Ctx, had: &[String], without: &[String], want_open: Option<u64>, 
         let sum = lifecycle::host_cfg_cksum(ctx);
         if !sum.is_empty() {
             let _ = std::fs::write(lifecycle::router_cfg_sum(ctx), format!("{sum}\n"));
+            crate::upgrade::mark(ctx);
         }
         info(&format!("{msg} (router reloaded in place, pid {pid} — open connections were reset)"));
         return Ok(String::new());

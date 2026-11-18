@@ -298,7 +298,7 @@ reconcile and the watchdog's decision table. Each has a gate:
 | `watch-diff` | decisions, read back from watch.log + trace; a case file names its phase with `_phase` (`guard` unless it says `netcheck`) | 8 cases |
 | `platform-diff` | the argv the platform layer produces | 12 cases |
 | `cli-diff` | stdout, status, the config tree + rc files + LaunchAgent plist (content + mode), argv trace, audit log | 561 cases |
-| `live-fixtures` | each scenario whose committed host.json spells `@CFG@` is still a render of that scenario, byte for byte (vm.json too) | 10 scenarios |
+| `live-fixtures` | each scenario whose committed host.json spells `@CFG@` is still a render of that scenario, byte for byte (vm.json too) | 16 scenarios |
 
 `merge-diff` is the only gate whose primary artifact is a file written in
 place: `cmd_import` reads the accumulation straight back with jq, and a human
@@ -419,6 +419,13 @@ Three limits, stated rather than implied:
   alone (`lanes-live`, `corp-vpn-running`). That holds only while the committed
   host.json IS what the scenario renders; `parity live-fixtures` checks it, and
   `--update` regenerates it after a deliberate render change.
+* **"Now" and "this rowt" are filled in.** The watchdog's upgrade reload
+  (#s104) reads when the Mac woke (a canned `sysctl`) and its own traffic
+  sample (`cache/upgrade-pending`) against the clock, and the sample names the
+  installed version. A scenario writes `@NOW-<seconds>@` and `@ROWT_VERSION@`
+  in its `config/` or `env/` files, and `make_sandbox` fills in each sandbox's
+  own when it builds it (`watch-upgrade-woke`, `watch-upgrade-idle`,
+  `upgrade-pending-status`, `upgrade-failed-status`).
 * **The spin heal's records name the stand-in.** `watch.cpu` holds the
   router's last CPU and traffic sample, `epoch cpusecs pid bytes`, and a
   scenario that seeds one names the stand-in as `@ROUTER_PID@`, which

@@ -444,6 +444,12 @@ fn escape_outbounds(ctx: &Ctx) -> Result<(Value, String), String> {
 }
 
 pub fn build_host(ctx: &Ctx) -> Result<Value, String> {
+    build_host_with(ctx, true)
+}
+
+/// `warn` false: the watchdog's dry render (`upgrade::observe`), which would
+/// otherwise repeat the geosite warnings on every tick an upgrade waits.
+pub fn build_host_with(ctx: &Ctx, warn: bool) -> Result<Value, String> {
     // Order matters to the argv trace: `assemble_host "$(build_escape_outbounds
     // …)"` runs the substitution first, so the outbound builder's probe lands
     // before assemble's own.
@@ -459,15 +465,15 @@ pub fn build_host(ctx: &Ctx) -> Result<Value, String> {
     // `_warn_uncached_geosites`, then the corp-lane check: the shell says on
     // stderr which referenced categories this render skips. stderr only, so no
     // gate compares it; whoever runs `rowt reload` reads it.
-    for n in &all {
+    for n in all.iter().filter(|_| warn) {
         if !cached(n) {
             eprintln!("error: geosite:{n} not cached — run '{} fetch host' (skipping it in this render)", crate::PROG);
         }
     }
-    if !geosites_of(&corp_src).is_empty() {
+    if warn && !geosites_of(&corp_src).is_empty() {
         eprintln!("error: geosite: in corp-domains.txt is ignored — only the escape and block lanes support geosite:");
     }
-    if !geosites_of(&read(&ctx.cfg.join("direct-domains.txt"))).is_empty() {
+    if warn && !geosites_of(&read(&ctx.cfg.join("direct-domains.txt"))).is_empty() {
         eprintln!("error: geosite: in direct-domains.txt is ignored — only the escape and block lanes support geosite:");
     }
     let ads = cache.join("geosite-category-ads-all.srs");
@@ -568,6 +574,11 @@ pub fn cmd_render(ctx: &Ctx) -> Result<String, String> {
             return Err(format!("generated {} failed validation", path.display()));
         }
         fs::rename(&tmp, &path).map_err(|e| format!("mv: {e}"))?;
+        // rowt #s104: which rowt rendered this host.json, for the router
+        // that starts from it (`upgrade::mark`).
+        if path == ctx.host_cfg() {
+            crate::upgrade::stamp_render(ctx);
+        }
     }
     lanes_prev_clear(ctx);
     Ok(format!("  host: {}\n  vm:   {}", ctx.host_cfg().display(), ctx.vm_cfg().display()))
@@ -1221,10 +1232,12 @@ pub fn router_up(ctx: &Ctx) -> Result<String, String> {
     // What this router runs, for `corp_apply` — recorded only once it is up.
     let cfgsum = host_cfg_cksum(ctx);
     let _ = fs::remove_file(router_cfg_sum(ctx));
+    crate::upgrade::clear(ctx);
     let mut child = start_router(ctx, true)?;
     let pid = child.id();
     if router_ready(ctx, 5, &mut child) {
         let _ = fs::write(router_cfg_sum(ctx), format!("{cfgsum}\n"));
+        crate::upgrade::mark(ctx);
         start_collector(ctx);
         start_follow(ctx);
         return Ok(format!("  ✓ running (pid {pid})"));
@@ -1240,6 +1253,7 @@ pub fn router_up(ctx: &Ctx) -> Result<String, String> {
     let pid = child.id();
     if router_ready(ctx, 5, &mut child) {
         let _ = fs::write(router_cfg_sum(ctx), format!("{cfgsum}\n"));
+        crate::upgrade::mark(ctx);
         start_collector(ctx);
         start_follow(ctx);
         return Ok(format!("  ✓ running (pid {pid})  [plain log]"));

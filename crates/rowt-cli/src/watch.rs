@@ -299,7 +299,9 @@ fn plist_body(ctx: &Ctx, self_bin: &Path) -> String {
               // the live apply of a lane edit or corp sync on a watchdog tick,
               // so it honours ROWT_LANES_HOT=0 (ROWT_CORP_HOT: its first name).
               "ROWT_LANES_HOT", "ROWT_CORP_HOT",
-              "ROWT_AUTO_INTERVAL", "ROWT_AUTO_TOLERANCE", "ROWT_AUTO_INTERRUPT"] {
+              "ROWT_AUTO_INTERVAL", "ROWT_AUTO_TOLERANCE", "ROWT_AUTO_INTERRUPT",
+              // rowt #s104: the quiet threshold of an upgrade's reload.
+              "ROWT_RELOAD_QUIET_BPS"] {
         // bin/rowt defaults SINGBOX_VERSION into its own shell variable, so the
         // plist ALWAYS carries the pin; reading only the environment left it
         // out whenever the user had not exported one.
@@ -868,6 +870,7 @@ fn observe(ctx: &Ctx, cap: Option<CaptiveState>, portal: Option<String>, portal_
         // at that moment and not otherwise.
         hold_stamp: if pinned_reach == Some(false) { crate::best::utc(None) } else { String::new() },
         now: crate::sh_date("+%s").parse().unwrap_or(0),
+        upgrade: None,
         // Taken by the tick itself, where the shell takes it (`spin_check`).
         spin_log: None,
         spin: None,
@@ -1138,6 +1141,7 @@ fn perform(ctx: &Ctx, actions: &[Action]) {
             Action::WriteNetId(n) => {
                 let _ = std::fs::write(ctx.cfg.join("watch.net"), format!("{n}\n"));
             }
+            Action::MarkUpgrade(v) => crate::upgrade::mark_reloaded(ctx, v),
         }
     }
 }
@@ -1898,6 +1902,15 @@ fn tick(ctx: &Ctx, self_bin: &Path) {
             obs2.spin_log = log;
             obs2.spin = heal;
         }
+    }
+    // rowt #s104: does an upgrade wait for a reload? Asked only where the
+    // planner could act on it, as the shell asks right after `_watch_health`
+    // answered: nothing reloads for the network's sake and the tunnel answers
+    // (or local mode). The dry render, `sysctl` and the clash API are argv the
+    // shell runs under exactly this condition. Not on a tick that heals a
+    // spin (#s105): its recovery reloads, and the shell's hook skips it too.
+    if !rowt_core::watch::reload_needed(&obs2) && rowt_core::watch::healthy(&obs2) && obs2.spin.is_none() {
+        obs2.upgrade = crate::upgrade::observe(ctx, obs2.now);
     }
     let n = netcheck(&obs2, &st, &cfg);
     perform_planned(ctx, &n.actions);

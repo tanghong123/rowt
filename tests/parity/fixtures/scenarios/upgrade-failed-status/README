@@ -1,0 +1,5 @@
+rowt #s104: `status` after the watchdog's one reload for this version failed.
+upgrade-pending-status, except that no verdict waits: cache/upgrade-reloaded
+names this version (@ROWT_VERSION@), so the watchdog will not try again, while
+host.running.by still says 3.10.1. status says the reload failed and how to
+apply it, on both sides.

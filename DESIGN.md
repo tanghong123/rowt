@@ -759,6 +759,57 @@ field and would fail the whole config.
   same three strings; `parity watch-shadow`'s `watch-proxy-repoint` case holds
   them to it.
 
+  **A third cause: an upgrade changed the render (#s104).** A `brew upgrade`
+  swaps the binary and leaves the router running the config the old rowt
+  rendered, so a fix that lives in `host.json` (3.10's direct lane) does
+  nothing until someone runs `rowt reload`, and nobody is told. Hong chose the
+  answer on #s102: "Watchdog reloads at a quiet moment, and status flags it
+  until then". So:
+
+  - Every render that puts `host.json` in place stamps `host.json.by` with
+    its version, and wherever `host.running` is written, `host.running.by`
+    copies that stamp (and goes when it goes): it names the rowt whose render
+    the router runs. A copy, not the starting rowt's own version, because a
+    restart starts the file on disk without rendering it: after `rowt restart`
+    right after an upgrade, the router still runs the old render, and the
+    watchdog still finds it. A router running a render from before 3.11 has
+    no `host.running.by`, whoever started it.
+  - On a tick with nothing else to fix (no network move, the proxy pointing at
+    rowt, the tunnel answering, or local mode) and `host.running.by` naming
+    another version (or none), the watchdog renders **dry** (nothing written: no lane
+    sets, no DoH, no warnings) and compares the bytes with `host.running`.
+    The same: it records its own version (and stamps `host.json.by` too when
+    host.json is what runs, so a restart keeps it), and nothing more happens.
+    Different:
+    the verdict goes to `cache/upgrade-pending`, `watch.log` says once that the
+    reload waits, and `status` prints an `upgrade:` line (`status --json`:
+    `config.upgrade_reload` is `waiting`) until it happens. The verdict is not
+    checked again: if the difference goes away before the quiet moment, the
+    one reload still happens, and changes nothing.
+  - It reloads only at a **quiet moment**: within 10 minutes of the Mac waking
+    from a sleep of 5 minutes or more (`kern.waketime`/`kern.sleeptime`; a
+    sleep that long has already dropped what a reload would), or once the
+    router has moved under 2048 B/s from tick to tick for 10 minutes (the clash
+    API's byte totals; `ROWT_RELOAD_QUIET_BPS`). A counter that went down, a
+    gap longer than the window or a clock that went back starts the window
+    over. There is no deadline: a router that is never quiet keeps the flag,
+    and `rowt reload` applies it whenever its owner likes.
+  - **Once per version**, whatever happens: `cache/upgrade-reloaded` is written
+    before the reload (the planner's `mark-upgrade` action), so a reload that
+    fails is not retried; `status` then says the reload failed
+    (`upgrade_reload: failed`) until the router runs this version's render. Any
+    reload, by any route, settles it. A tick with no interface does not look at
+    all: a render with none to bind would differ for that alone.
+
+  A render can also differ for reasons that are not the upgrade: what
+  `build_host` reads may have moved while the router kept running (a launchd
+  environment unlike the shell that ran `up`, a guarded escape name, a
+  `geosite` set fetched since). The dry render cannot tell those apart, so the
+  one reload applies them too; it is still bounded to once per version. The
+  decision is `rowt_core::watch::upgrade_quiet` and `netcheck`'s
+  `upgrade_reload`; the shell's `_watch_upgrade` follows them, and `parity
+  watch-shadow` holds the two to it (`watch-upgrade-busy`, `-woke`, `-idle`).
+
 - **A lane that is reachable but far too slow (`rowt speed`).** Every other
   signal here is reachability — a small request completes or it does not — and
   that is structurally blind to a lane answering 200 on small responses while

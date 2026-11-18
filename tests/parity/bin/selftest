@@ -53,6 +53,8 @@
 #   54.  a shell side the front door hands to rowt-rs -> cli-diff must still see the shell
 #   52.  misspell a doctor FLAG in the shell          -> cli-diff must fire (doctor)
 #   55.  remove a dangling lane link in the shell    -> cli-diff must fire (config tree links)
+#   56.  stop recording an upgrade's same render     -> cli-diff must fire (host.running.by)
+#   57.  drop the shell's mark before an upgrade reload -> watch-shadow must fire
 #
 # Everything happens in a throwaway copy of the repo; the real tree is never
 # touched. Run it after changing the harness itself.
@@ -1588,6 +1590,51 @@ else
     ok "cli-diff caught the shell removing a dangling lane link"
   fi
   cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+fi
+
+echo "56. a watchdog that never records an upgrade's same render must be caught"
+cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+if [ ! -x "$ROOT/target/release/rowt-rs" ]; then
+  echo "  skip — no release build"
+else
+  # rowt #s104. The first tick after an upgrade renders dry; the same bytes as
+  # the running config are recorded as this version's (host.running.by), and
+  # only the tree shows it. A tick that never got that far on either side would
+  # agree just as well, so take the record out of the shell alone.
+  perl -0pi -e 's|if \[ "\$sum" = "\$run" \]; then _router_by_adopt; return 0; fi|if [ "\$sum" = "\$run" ]; then return 0; fi|' "$tmp/bin/rowt"
+  if grep -qF 'then _router_by_adopt; return 0; fi' "$tmp/bin/rowt"; then
+    bad "could not take the record out (_watch_upgrade moved?)"
+  elif PARITY_RUST_CLI="$ROOT/target/release/rowt-rs" \
+       PARITY_CASES="$(only 'PARITY_TIMEOUT=45 PARITY_NOTRACE=1 PARITY_SCENARIO=watch-upgrade-same ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick')" \
+       "$P" cli-diff >/dev/null 2>&1; then
+    bad "cli-diff passed with the shell not recording the same render"
+  else
+    ok "cli-diff caught a tick that did not record an upgrade's same render"
+  fi
+  cp "$ROOT/bin/rowt" "$tmp/bin/rowt"
+fi
+
+echo "57. an upgrade reload without its mark must be caught"
+if [ ! -x "$rwatch" ]; then
+  echo "  skip — no release build"
+else
+  # The mark is what keeps the reload to once per version, and it is an action
+  # of the plan's own: a shell that reloads without it still logs the line the
+  # case looks for, so only the comparison can see it.
+  command cp -f "$ROOT/bin/rowt" "$tmp/bin/rowt"
+  if ! "$P" watch-shadow upgrade-woke >/dev/null 2>&1; then
+    bad "watch-shadow's upgrade-woke case already fails before the mutation"
+  else
+    perl -0pi -e 's|  _wact "mark-upgrade \$ROWT_VERSION"\n||' "$tmp/bin/rowt"
+    if grep -qF '_wact "mark-upgrade' "$tmp/bin/rowt"; then
+      bad "could not drop the shell's mark-upgrade (_watch_upgrade moved?)"
+    elif "$P" watch-shadow upgrade-woke >/dev/null 2>&1; then
+      bad "watch-shadow passed with the shell reloading for an upgrade unmarked"
+    else
+      ok "watch-shadow caught an upgrade reload without its mark"
+    fi
+  fi
+  command cp -f "$ROOT/bin/rowt" "$tmp/bin/rowt"
 fi
 
 echo

@@ -78,3 +78,12 @@ PARITY_SCENARIO=watch-pin-dead-failover ROWT_CAPTIVE_URL=http://127.0.0.1:8099/s
 ROWT_CPU_SPIN_PCT=0 PARITY_SCENARIO=watch-spin-idle ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick | router busy but idle: 0% cpu, 0 B/s (1/2)
 ROWT_CPU_SPIN_PCT=0 PARITY_SCENARIO=watch-spin-latched ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick | but already healed once 1m ago
 ROWT_METRICS=off ROWT_AUTO_FOLLOW=0 ROWT_CPU_SPIN_PCT=0 PARITY_SCENARIO=watch-spin-heal ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick | router spinning (0% cpu, no traffic) — recovering (cmd_reload)
+# rowt #s104: an upgrade's reload. Busy: the dry render differs, nothing is
+# quiet, the tick says once that it waits. Woke: the Mac woke a minute ago from
+# an hour's sleep. Idle: a recorded verdict and ten low-traffic minutes. Both
+# quiet ticks mark the version and reload, the plan and the shell alike; the
+# sandbox's router comes back (router-restart-ok's two files), with the
+# sidecars a start would launch kept off.
+PARITY_SCENARIO=watch-upgrade-busy ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick | the watchdog reloads once at a quiet moment
+ROWT_METRICS=off ROWT_AUTO_FOLLOW=0 PARITY_SCENARIO=watch-upgrade-woke ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick | reloading once, just after the Mac woke from sleep
+ROWT_METRICS=off ROWT_AUTO_FOLLOW=0 PARITY_SCENARIO=watch-upgrade-idle ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick | reloading once, traffic has stayed low for 10 minutes

@@ -1,0 +1,5 @@
+rowt #s104: watch-upgrade-same, except the router runs another config
+(host.running is a static "1 1"). The dry render differs, so the reload waits
+for a quiet moment: no wake in the canned sysctl, and the clash API's
+/connections carries no byte totals, so the first traffic sample is all there
+is. The tick says once that it waits; nothing reloads.

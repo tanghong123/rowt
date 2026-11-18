@@ -36,6 +36,7 @@ mod speed;
 mod vm;
 mod watch;
 mod status;
+mod upgrade;
 mod seeds {
     include!(concat!(env!("OUT_DIR"), "/seeds.rs"));
 }
@@ -2442,6 +2443,11 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                     .status().map(|s| s.success()).unwrap_or(false);
                 o.push(format!("config:       host.json {}",
                     if ok { "OK".to_string() } else { format!("INVALID (run '{PROG} render')") }));
+            }
+            // rowt #s104: the watchdog found that this rowt renders a different
+            // config than the one the running router started from.
+            if let Some(l) = upgrade::status_line(&ctx) {
+                o.push(l);
             }
             // rowt #s41: the escape lane's health, from what the watchdog and
             // the follower last observed — the `via proxy:` fetch only on

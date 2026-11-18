@@ -5,6 +5,21 @@ release is cut; everything under Unreleased ships with the next one.
 
 ## Unreleased
 
+- **The watchdog reloads once after an upgrade, at a quiet moment.** A
+  `brew upgrade` leaves the router running the config the old rowt rendered,
+  so a fix that lives in that config did nothing until someone ran
+  `rowt reload`. Now the watchdog renders without writing anything and
+  compares: when the new rowt renders a different config, it reloads once,
+  just after the Mac wakes from a sleep of 5 minutes or more, or once traffic
+  has stayed under 2048 B/s for 10 minutes (`ROWT_RELOAD_QUIET_BPS`). It waits
+  for one of those however long it takes, and never reloads twice for one
+  version. Until it does, `rowt status` says so on an `upgrade:` line (and if
+  that one reload failed, says that), and `status --json` has
+  `config.upgrade_reload` and `config.running_by`; `rowt reload` applies it at
+  once. A render now records which rowt made it (`host.json.by`), and the
+  router which render it runs (`host.running.by`); a router an older rowt
+  started is checked by the checksum of the config it started from, so the
+  upgrade to this release is covered too.
 - **The watchdog restarts a spinning router again.** Since 3.9.0 the default
   watchdog (rowt-rs) never ran the spin check: a router that burns CPU while
   carrying no traffic, which the liveness probe cannot see, was left spinning,

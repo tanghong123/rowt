@@ -17,10 +17,15 @@ foreground with output redirected to a file (see SKILL.md → Rules).
   rule-set files under `~/.config/rowt/rule-sets/` that sing-box re-reads. The first
   edit after the upgrade restarts once and says so; a `geosite:` add/rm, servers,
   ports and mode changes still restart. `ROWT_LANES_HOT=0` restarts every time.
-- **After `brew upgrade rowt`**: run `rowt reload` once. The routing config
-  (`host.json`) is rendered by the binary, so a new version changes nothing on the
-  wire until the next render. The watchdog re-syncs its own LaunchAgent; if
-  `rowt status` says the agent is `NOT loaded` or STALE, run `rowt watch refresh`.
+- **After `brew upgrade rowt`**: the routing config (`host.json`) is rendered by
+  the binary, so a new version changes nothing on the wire until the next render.
+  Since 3.11 the watchdog checks: when the new rowt renders a different config, it
+  reloads once at a quiet moment (just after the Mac wakes from a sleep, or once
+  traffic has stayed low for 10 minutes), and until then `rowt status` shows an
+  `upgrade:` line (`status --json`: `.config.upgrade_reload`). `rowt reload` applies
+  it at once; without the watchdog, run it after every upgrade. The watchdog
+  re-syncs its own LaunchAgent; if `rowt status` says the agent is `NOT loaded` or
+  STALE, run `rowt watch refresh`.
 - **Abroad, or anywhere without a firewall**: `rowt up local` runs with no tunnel and
   contacts no server. The escape rules stay in place but point at direct, so they
   still out-rank broader block entries. The direct lane resolves through a public

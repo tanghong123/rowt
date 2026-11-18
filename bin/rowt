@@ -56,13 +56,16 @@
 #      ROWT_HEALTH_FAILS  consecutive probe failures before auto-recover (default 3)
 #      ROWT_HEALTH_COOLDOWN  min seconds between auto-recoveries (default 600)
 #      ROWT_HEALTH_TIMEOUT  per-probe delay-test timeout, seconds (default 8)
+#      ROWT_RELOAD_QUIET_BPS  after an upgrade changed the config, the watchdog reloads
+#                          once the router has moved under this many bytes/s for 10
+#                          minutes (or just after a wake from sleep) (default 2048)
 #      (named extra ports — each with its own catch-all for the clients on it — are a
 #      file, not env: 'rowt port add <N> <name> [--final …]' / 'port rm <name>' / 'port list')
 #      SINGBOX_VERSION  pinned sing-box release (default 1.13.14, >=1.12 AnyTLS)
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.10.3"
+ROWT_VERSION="3.11.0"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -1200,6 +1203,16 @@ AUTO_CORP_DOMAINS="${ROWT_AUTO_CORP_DOMAINS:-1}"
 LANE_SETS_DIR="$CFG/rule-sets"
 LANE_BANDS=8   # the deepest band holds this many labels or more
 ROUTER_CFG_SUM="$CFG/host.running"
+# rowt #s104 (Hong on #s102: "Watchdog reloads at a quiet moment, and status
+# flags it until then"): which rowt rendered host.json, and which rendered the
+# config the router runs (beside ROUTER_CFG_SUM); the watchdog's verdict that
+# this rowt renders a different one (with its traffic sample); and the version
+# it reloaded for once. rowt-rs's upgrade.rs is the reference; _watch_upgrade
+# follows it step for step.
+RENDER_BY="$CFG/host.json.by"
+ROUTER_BY="$CFG/host.running.by"
+UPGRADE_PENDING="$CFG/cache/upgrade-pending"
+UPGRADE_RELOADED="$CFG/cache/upgrade-reloaded"
 LANES_HOT="${ROWT_LANES_HOT:-${ROWT_CORP_HOT:-1}}"
 # corp sync ALSO learns the DNS zones that ONLY an overlay resolver answers — a
 # tailnet's MagicDNS zone (`ts.net`), or whatever base domain a self-hosted
@@ -1488,7 +1501,27 @@ _lane_sets_prev_clear() { # validated: the previous sets are done with
   return 0
 }
 # Remember what the running router was started from (see ROUTER_CFG_SUM).
-_router_cfg_mark() { cksum < "$HOST_CFG" > "$ROUTER_CFG_SUM" 2>/dev/null || true; }
+_router_cfg_mark() { cksum < "$HOST_CFG" > "$ROUTER_CFG_SUM" 2>/dev/null && _router_by_mark || true; }
+# A render put host.json in place: this rowt rendered it (RENDER_BY).
+_render_by_stamp() { printf '%s\n' "$ROWT_VERSION" > "$RENDER_BY" 2>/dev/null || true; }
+# The router now runs host.json, beside every write of ROUTER_CFG_SUM: it runs
+# whichever rowt's render that is (a restart starts the file on disk without
+# rendering). When that is this rowt, nothing waits any more. Removed with it.
+_router_by_mark() {
+  local r; r="$(cat "$RENDER_BY" 2>/dev/null || true)"
+  if [ -n "$r" ]; then printf '%s\n' "$r" > "$ROUTER_BY" 2>/dev/null || true; else rm -f "$ROUTER_BY"; fi
+  if [ "$r" = "$ROWT_VERSION" ]; then rm -f "$UPGRADE_PENDING"; fi
+  return 0
+}
+# The watchdog's dry render matched the running config: this rowt's render is
+# what runs, whoever rendered it. host.json too, when it is what runs: else the
+# next restart would copy its older stamp back.
+_router_by_adopt() {
+  printf '%s\n' "$ROWT_VERSION" > "$ROUTER_BY" 2>/dev/null || true; rm -f "$UPGRADE_PENDING"
+  if [ "$(cksum < "$HOST_CFG" 2>/dev/null || true)" = "$(cat "$ROUTER_CFG_SUM" 2>/dev/null || true)" ]; then _render_by_stamp; fi
+  return 0
+}
+_router_by_clear() { rm -f "$ROUTER_BY"; }
 # Apply a lane change: render — which rewrites the rule-sets the running router
 # watches — then nothing more when that router was started from exactly this
 # host.json. Otherwise the restart reload_if_running always did, saying why: an
@@ -2323,8 +2356,11 @@ assemble_host() {
   geo_sets="$(_geo_sets_json)"
   # The lane rules are rule-set files under LANE_SETS_DIR, written here as a
   # side effect of the render, the way host.json is (see LANE_SETS_DIR).
-  _lane_sets_write || die "could not write the lane rule-sets ($LANE_SETS_DIR)"
-  _lane_sets_warn
+  # Not in the watchdog's dry render (_render_dry): it writes nothing.
+  if [ -z "${_RENDER_DRY:-}" ]; then
+    _lane_sets_write || die "could not write the lane rule-sets ($LANE_SETS_DIR)"
+    _lane_sets_warn
+  fi
   jq -n \
     --arg sets_dir "$LANE_SETS_DIR" --argjson lane_sets "$(_lane_set_tags_json)" \
     --argjson esc_geo "$esc_geo" \
@@ -2544,7 +2580,7 @@ cmd_render() {
   assemble_vm "$(build_escape_outbounds vm-guest)" "0.0.0.0" "0.0.0.0:$VM_CLASH" > "$tv"
   "$SB" check -c "$th" || { rm -f "$th" "$tv"; _lane_sets_restore; die "generated host config failed validation"; }   # and the lane sets as they were
   "$SB" check -c "$tv" || { rm -f "$th" "$tv"; die "generated vm config failed validation"; }
-  mv -f "$th" "$HOST_CFG"
+  mv -f "$th" "$HOST_CFG"; _render_by_stamp   # which rowt rendered it (rowt #s104)
   mv -f "$tv" "$VM_CFG"
   _lane_sets_prev_clear   # validated: the previous lane sets are done with
   [ "${ROWT_RENDER_SHADOW:-$(sget shadow_render)}" = 1 ] && _render_shadow "$mode" || true
@@ -4323,9 +4359,9 @@ cmd_router() {
       [ -f "$HOST_CFG" ] || cmd_render
       ensure_singbox_host
       info "starting rule-router on 127.0.0.1:$PORT"
-      local _cfgsum; _cfgsum="$(cksum < "$HOST_CFG" 2>/dev/null || true)"; rm -f "$ROUTER_CFG_SUM"   # see ROUTER_CFG_SUM
+      local _cfgsum; _cfgsum="$(cksum < "$HOST_CFG" 2>/dev/null || true)"; rm -f "$ROUTER_CFG_SUM"; _router_by_clear   # see ROUTER_CFG_SUM
       _start_host_router 1
-      if _router_ready 5; then printf '%s\n' "$_cfgsum" > "$ROUTER_CFG_SUM"; _start_collector; _start_follow; echo "  ✓ running (pid $(cat "$(host_pidfile)"))"; return 0; fi
+      if _router_ready 5; then printf '%s\n' "$_cfgsum" > "$ROUTER_CFG_SUM"; _router_by_mark; _start_collector; _start_follow; echo "  ✓ running (pid $(cat "$(host_pidfile)"))"; return 0; fi
       # it didn't come up healthy (exited, or alive but the clash API never
       # answered = wedged). Show why, then retry ONCE after a settle, this time
       # with plain logging (rules out both a startup-network blip and the splitter).
@@ -4334,7 +4370,7 @@ cmd_router() {
       _router_stop   # clean up the failed process before retrying (proxy untouched)
       sleep 2
       _start_host_router 0
-      if _router_ready 5; then printf '%s\n' "$_cfgsum" > "$ROUTER_CFG_SUM"; _start_collector; _start_follow; echo "  ✓ running (pid $(cat "$(host_pidfile)"))  [plain log]"; return 0; fi
+      if _router_ready 5; then printf '%s\n' "$_cfgsum" > "$ROUTER_CFG_SUM"; _router_by_mark; _start_collector; _start_follow; echo "  ✓ running (pid $(cat "$(host_pidfile)"))  [plain log]"; return 0; fi
       err "router failed to come up healthy — see $HOST_LOG"; tail -8 "$HOST_LOG" >&2
       _ensure_no_limbo   # never leave the proxy pointing at a router that won't start
       return 1
@@ -6476,6 +6512,9 @@ cmd_status() {
   if [ -x "$SB" ] && [ -f "$HOST_CFG" ]; then
     "$SB" check -c "$HOST_CFG" >/dev/null 2>&1 && echo "config:       host.json OK" || echo "config:       host.json INVALID (run '$PROG render')"
   fi
+  # rowt #s104: the watchdog found that this rowt renders a different config
+  # than the one the running router started from.
+  _upgrade_status_line
   # rowt #s41: the escape lane's health, from what the watchdog and the
   # follower last observed — the `via proxy:` fetch only on --probe now
   # (Hong, #s42: passive by default).
@@ -6887,12 +6926,15 @@ _watch_shadow() {
       --argjson failover "${_SH2_FAILOVER:-false}" \
       --arg holdsince "${_SH_HOLDSINCE0:-}" --arg holdtag "${_SH_HOLDTAG0:-}" \
       --arg spinlog "${_SH2_SPINLOG:-}" --arg spin "${_SH2_SPIN:-}" \
+      --arg upgv "${_SH2_UPG_VER:-}" --arg upgfrom "${_SH2_UPG_FROM:-}" --arg upgq "${_SH2_UPG_QUIET:-}" \
+      --argjson upgfresh "${_SH2_UPG_FRESH:-false}" \
       '{obs:{proxy_intent:"", captive:$cap, captive_check_disabled:$capoff, active_service:$svc, proxy_any_on:true,
              host_running:true, intent:"up", boot_matches:true, iface:$ifc,
              proxy_pointing_ok:$pointing, proxy_bypass_ok:$bypass,
              bound_iface:$cur, net_id:$nid, health_ok:$health, probe_offline:$poff, health_slow:$slow, health_flows:$flows, now:$now, gateway_ok:$gwok,
              pinned:(if $pin == "" then null else $pin end), pinned_addr:$pinaddr, pinned_reach:$pinreach, hold_stamp:$holdstamp, failover:$failover,
              spin_log:(if $spinlog == "" then null else $spinlog end), spin:(if $spin == "" then null else $spin end),
+             upgrade:(if $upgv == "" then null else {version:$upgv, from:$upgfrom, quiet:$upgq, fresh:$upgfresh} end),
              mode:(if $mode == "" then "host" else $mode end)},
         state:{captive_flag:false, health_fails:$fails, last_net_id:$last,
                last_recovery:$lastrec, last_net_change:$lastnetchg,
@@ -7387,6 +7429,135 @@ _watch_hold_row() { # the `rowt status` row while a hold names the server still 
   printf '%-14s%s\n' "escape:" "$tag is dead since $since UTC — the watchdog holds instead of reloading; $rem"
 }
 
+# rowt #s104: after an upgrade the router keeps running what the old rowt
+# rendered. Follows rowt-rs's upgrade.rs and rowt_core::watch step for step:
+# the same files, the same sysctl and clash API calls, in the same order.
+#
+# The host.json `cmd_render` would write, on stdout, with nothing written and
+# nothing said: no lane sets, no DoH, no warnings (rowt-rs build_host_with).
+_render_dry() {
+  (
+    _RENDER_DRY=1; _AUDIT_OP=""
+    m="$(sget mode)"; m="${m:-host}"
+    case "$m" in
+      local) assemble_host "$(build_escape_outbounds local)" "127.0.0.1" "127.0.0.1:$CLASH_PORT" ;;
+      vm)    assemble_host "$(build_escape_outbounds vm-host)" "127.0.0.1" "" ;;
+      *)     assemble_host "$(build_escape_outbounds host)" "127.0.0.1" "127.0.0.1:$CLASH_PORT" ;;
+    esac
+  ) 2>/dev/null
+}
+
+# rowt_core::watch::woke_quiet: the Mac woke within 10 minutes, from a sleep
+# of 5 minutes or more.
+_upgrade_woke() { # $1=now $2=kern.waketime $3=kern.sleeptime (seconds; 0 unknown)
+  [ "$2" -gt 0 ] && [ "$3" -gt 0 ] && [ "$2" -ge "$3" ] && [ $(( $2 - $3 )) -ge 300 ] \
+    && [ "$1" -ge "$2" ] && [ $(( $1 - $2 )) -le 600 ]
+}
+
+# rowt_core::watch::upgrade_quiet, line for line: is now quiet, and the sample
+# to keep. Prints `reason|epoch|total|quiet_since` (reason woke, idle or empty;
+# the sample empty when there is none). A counter that went down, a gap longer
+# than the window or a clock that went back starts the window over.
+_upgrade_quiet() { # $1=now $2=woke $3=slept $4..6=previous sample (or empty) $7=total (or empty) $8=bps
+  local now="$1" pep="$4" ptot="$5" pqs="$6" total="$7" bps="$8" gap nq=0
+  if _upgrade_woke "$now" "$2" "$3"; then printf 'woke|%s|%s|%s\n' "$pep" "$ptot" "$pqs"; return 0; fi
+  [ -n "$total" ] || { printf '|||\n'; return 0; }
+  if [ -z "$pep" ]; then printf '|%s|%s|0\n' "$now" "$total"; return 0; fi
+  gap=$(( now - pep ))
+  if [ "$total" -lt "$ptot" ] || [ "$gap" -le 0 ] || [ "$gap" -gt 600 ]; then printf '|%s|%s|0\n' "$now" "$total"; return 0; fi
+  if [ $(( total - ptot )) -lt $(( bps * gap )) ]; then
+    if [ "$pqs" -gt 0 ]; then nq="$pqs"; else nq="$pep"; fi
+  fi
+  if [ "$nq" -gt 0 ] && [ $(( now - nq )) -ge 600 ]; then printf 'idle|%s|%s|%s\n' "$now" "$total" "$nq"
+  else printf '|%s|%s|%s\n' "$now" "$total" "$nq"; fi
+}
+
+# `status`'s line while an upgrade's reload waits (upgrade::report and
+# status_line): the watchdog found this rowt's render different and waits for
+# a quiet moment, or its one reload for this version failed.
+_upgrade_status_line() {
+  local by v what from
+  by="$(cat "$ROUTER_BY" 2>/dev/null || true)"
+  [ "$by" != "$ROWT_VERSION" ] || return 0
+  v="$(head -n 1 "$UPGRADE_PENDING" 2>/dev/null | cut -f1 || true)"
+  if [ -n "$v" ] && [ "$v" = "$ROWT_VERSION" ]; then
+    what="the watchdog reloads once at a quiet moment"
+  elif [ "$(cat "$UPGRADE_RELOADED" 2>/dev/null || true)" = "$ROWT_VERSION" ]; then
+    what="the watchdog's one reload for it failed (see watch.log)"
+  else
+    return 0
+  fi
+  host_running || return 0
+  if [ -n "$by" ]; then from="rowt $by"; else from="an older rowt"; fi
+  echo "upgrade:      rowt $ROWT_VERSION renders a different config than the running one ($from rendered it) — $what; '$PROG reload' applies it now"
+}
+
+# Does an upgrade wait for a reload, and is now the moment? Asked where rowt-rs
+# asks: nothing reloads for the network's sake and the tunnel answered, or
+# local mode. The first tick after an upgrade renders dry and compares the
+# bytes with ROUTER_CFG_SUM: the same, recorded as this version's; different,
+# pending, and from then on each tick asks only whether now is quiet. Busy,
+# nothing happens (said once); quiet, marked, then reloaded: once per version.
+_watch_upgrade() {
+  local now="${_SH2_NOW:-$(date +%s)}" by run pend fresh=false t sum ws woke slept bps total=""
+  local pep="" ptot="" pqs="" qv="" ne="" nt="" nq="" from when l
+  by="$(cat "$ROUTER_BY" 2>/dev/null || true)"
+  [ "$by" = "$ROWT_VERSION" ] && return 0
+  run="$(cat "$ROUTER_CFG_SUM" 2>/dev/null || true)"
+  [ -n "$run" ] || return 0
+  [ "$(cat "$UPGRADE_RELOADED" 2>/dev/null || true)" = "$ROWT_VERSION" ] && return 0
+  pend="$(head -n 1 "$UPGRADE_PENDING" 2>/dev/null || true)"
+  if [ -n "$pend" ] && [ "$(printf '%s\n' "$pend" | cut -f1)" = "$ROWT_VERSION" ]; then
+    pep="$(printf '%s\n' "$pend" | cut -f3)"; ptot="$(printf '%s\n' "$pend" | cut -f4)"; pqs="$(printf '%s\n' "$pend" | cut -f5)"
+    [[ "$pep" =~ ^-?[0-9]+$ && "$ptot" =~ ^[0-9]+$ && "$pqs" =~ ^-?[0-9]+$ ]] || { pep=""; ptot=""; pqs=""; }
+  else
+    t="$(mktemp)" || return 0
+    if ! _render_dry > "$t"; then rm -f "${t:?}"; return 0; fi
+    sum="$(cksum < "$t")"; rm -f "${t:?}"
+    if [ "$sum" = "$run" ]; then _router_by_adopt; return 0; fi
+    fresh=true
+  fi
+  ws="$(sysctl -n kern.waketime kern.sleeptime 2>/dev/null || true)"
+  woke="$(printf '%s\n' "$ws" | sed -n '1s/[^0-9]*\([0-9][0-9]*\).*/\1/p')"; woke="${woke:-0}"
+  slept="$(printf '%s\n' "$ws" | sed -n '2s/[^0-9]*\([0-9][0-9]*\).*/\1/p')"; slept="${slept:-0}"
+  # Digits only, at most nine (what rowt-rs takes); anything else is the default.
+  bps="${ROWT_RELOAD_QUIET_BPS:-}"; case "$bps" in ''|*[!0-9]*|??????????*) bps=2048 ;; *) bps=$(( 10#$bps )) ;; esac
+  # The clash API only when the wake has not already answered.
+  _upgrade_woke "$now" "$woke" "$slept" || total="$(_router_bytes_total)"
+  IFS='|' read -r qv ne nt nq < <(_upgrade_quiet "$now" "$woke" "$slept" "$pep" "$ptot" "$pqs" "${total:-}" "$bps") || true
+  mkdir -p "$CFG/cache" 2>/dev/null || true
+  printf '%s\t%s\t%s\t%s\t%s\n' "$ROWT_VERSION" "$by" "$ne" "$nt" "$nq" > "$UPGRADE_PENDING" 2>/dev/null || true
+  # What the shadow's netcheck observation carries (`upgrade`).
+  _SH2_UPG_VER="$ROWT_VERSION"; _SH2_UPG_FROM="$by"; _SH2_UPG_QUIET="$qv"; _SH2_UPG_FRESH="$fresh"
+  # The planner's upgrade_reload: the same strings.
+  if [ -n "$by" ]; then from="rowt $by"; else from="an older rowt"; fi
+  case "$qv" in
+    woke) when="just after the Mac woke from sleep" ;;
+    idle) when="traffic has stayed low for 10 minutes" ;;
+    *)
+      if [ "$fresh" = true ]; then
+        l="rowt $ROWT_VERSION renders a different config than the one the router runs (rendered by $from) — the watchdog reloads once at a quiet moment (just after the Mac wakes from sleep, or once traffic has stayed low for 10 minutes); 'rowt reload' applies it now"
+        _watch_log "$l"; _wact "log $l"
+      fi
+      return 0 ;;
+  esac
+  l="rowt $ROWT_VERSION renders a different config than the one the router runs (rendered by $from) — reloading once, $when"
+  _watch_log "$l"; _wact "log $l"
+  _AUDIT_OP="watchdog: reload (upgrade to rowt $ROWT_VERSION)"
+  l="BEGIN watchdog reload — upgrade to rowt $ROWT_VERSION: the router runs what $from rendered; $when"
+  _audit "$l"; _wact "audit $l"
+  # Marked BEFORE the reload: whether it works or not, never again for this version.
+  _wact "mark-upgrade $ROWT_VERSION"
+  printf '%s\n' "$ROWT_VERSION" > "$UPGRADE_RELOADED" 2>/dev/null || true; rm -f "$UPGRADE_PENDING"
+  _wact "reload upgrade to rowt $ROWT_VERSION"
+  # Recorded before the reload, as the network reload does: one that dies
+  # midway must not leave a plan the shell never finished.
+  _wact "next stop"
+  cmd_reload >>"$WATCH_LOG" 2>&1 && { _watch_log "reload ok"; rm -f "$WATCH_HEALTH" "$WATCH_HOLD"; _audit "END   watchdog reload — ok"; } || { _watch_log "reload FAILED"; _audit "END   watchdog reload — FAILED"; }
+  _AUDIT_OP=""
+  exit 0
+}
+
 _watch_health() { # $1=iface  $2=captive verdict
   # Offline (no interface IP) — a restart can't help and a returning network
   # fires its own resolver-change reload, so just reset the streak and bail.
@@ -7552,7 +7723,7 @@ _watch_plist_body() {
   local envxml v val
   envxml="    <key>PATH</key><string>$agent_path</string>"
   for v in XDG_CONFIG_HOME ROWT_PORT ROWT_CLASH_PORT ROWT_FINAL ROWT_IFACE ROWT_DNS_DIRECT ROWT_DNS_LOCAL ROWT_GFW_CANARIES ROWT_GFW_TIMEOUT SINGBOX_VERSION ROWT_LOG_LEVEL ROWT_WATCH_INTERVAL ROWT_HEALTH_FAILS ROWT_HEALTH_COOLDOWN ROWT_HEALTH_TIMEOUT ROWT_HEALTH_URL ROWT_CAPTIVE_CHECK ROWT_CAPTIVE_URL ROWT_CAPTIVE_TIMEOUT ROWT_CAPTIVE_RETRY ROWT_CAPTIVE_FALLBACK ROWT_WATCH_SHADOW ROWT_RENDER_SHADOW ROWT_PPROF ROWT_CPU_SPIN_PCT ROWT_CPU_SPIN_BYTES ROWT_CPU_SPIN_TICKS ROWT_CPU_HEAL_COOLDOWN ROWT_AUTO_FOLLOW ROWT_AUTO_FOLLOW_EVERY ROWT_ESCAPE_DNS_MAX_AGE ROWT_LANES_HOT ROWT_CORP_HOT \
-           ROWT_AUTO_INTERVAL ROWT_AUTO_TOLERANCE ROWT_AUTO_INTERRUPT; do
+           ROWT_AUTO_INTERVAL ROWT_AUTO_TOLERANCE ROWT_AUTO_INTERRUPT ROWT_RELOAD_QUIET_BPS; do
     val="${!v:-}"; [ -n "$val" ] && envxml="$envxml
     <key>$v</key><string>$val</string>"
   done
@@ -8043,6 +8214,10 @@ cmd_watch() {
         # local mode has no tunnel to probe; leaving this on would fail every
         # tick and drive _watch_recover into a permanent reload loop.
         [ "$(sget mode)" = "local" ] || _watch_health "$ifc" "$cap" || true
+        # rowt #s104: an upgrade's reload, at a quiet moment, on a tick with
+        # nothing else to fix and an interface (rowt_core::watch::healthy).
+        # Not on a tick that healed a spin (#s105): that recovery reloaded.
+        if [ -n "$ifc" ] && [ -z "${_SH2_SPIN:-}" ] && { [ "$(sget mode)" = local ] || [ "${_SH2_HEALTH:-}" = ok ]; }; then _watch_upgrade || true; fi
         _wact "next stop"
         exit 0
       fi
