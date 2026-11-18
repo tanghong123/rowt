@@ -203,6 +203,20 @@ make_sandbox() { # $1=outdir  [$2=scenario]
     cksum < "$cfg/host.json" > "$cfg/host.running"
     rm -f "$cfg/host.running.self"
   fi
+  # "Now" and "this rowt" cannot be static fixtures either. The watchdog's
+  # upgrade reload (#s104) asks when the Mac woke (a canned `sysctl`) and
+  # reads its own traffic sample (cache/upgrade-pending), both against the
+  # clock, and the sample names the installed version. A scenario writes
+  # `@NOW-<seconds>@` and `@ROWT_VERSION@` and each sandbox fills in its own,
+  # when it is built: the two runs of a case are built moments apart, so each
+  # sees the same distances from its own now.
+  local _now _ver _f
+  _now="$(date +%s)"; _ver="$(sed -n 's/^ROWT_VERSION="\(.*\)"$/\1/p' "$ROWT" | head -1)"
+  # `|| true`: under pipefail, a scenario with no template (most of them) is a
+  # grep that matched nothing, and would end the harness without a word.
+  { grep -rlE '@NOW-[0-9]+@|@ROWT_VERSION@' "$cfg" "$out/env" 2>/dev/null || true; } | while IFS= read -r _f; do
+    NOW="$_now" VER="$_ver" perl -pi -e 's/\@NOW-(\d+)\@/$ENV{NOW} - $1/ge; s/\@ROWT_VERSION\@/$ENV{VER}/g' "$_f"
+  done
   # "The router is running" cannot be a static fixture: `host_running` reads a
   # pidfile and then `kill -0`s it, so any pid committed to the repo is either
   # dead or, worse, someone else's. A scenario asks for it with an empty
