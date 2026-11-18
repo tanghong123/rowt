@@ -1,0 +1,14 @@
+watch-spin-new-router — rowt #s105, the spin heal's sample.
+
+The machine is use-auto-unchanged's with the router up (host.pid.self) and a
+steady-state tick: watch.net and the proxy getters unchanged, the corp lane
+already synced, the bypass list right, the auto probe answering. So the tick
+reaches the healthy branch of the health check, the one place the spin heal
+runs. The clash API reports no byte totals, so the traffic sample is 0 B/s.
+watch.cpu names the stand-in router as @ROUTER_PID@ and its time as
+@NOW-<s>@; the harness fills both, and masks the epoch and pid fields when it
+compares the tree (snap_norm).
+
+Here the last sample names another pid (1): the router was restarted since,
+so there is no interval to average over. Expected: watch.cpu rewritten with
+this router's sample, watch.cpustreak removed, nothing logged.

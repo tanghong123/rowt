@@ -5,6 +5,14 @@ release is cut; everything under Unreleased ships with the next one.
 
 ## Unreleased
 
+- **The watchdog restarts a spinning router again.** Since 3.9.0 the default
+  watchdog (rowt-rs) never ran the spin check: a router that burns CPU while
+  carrying no traffic, which the liveness probe cannot see, was left spinning,
+  and the `ROWT_CPU_SPIN_*` and `ROWT_CPU_HEAL_COOLDOWN` knobs did nothing.
+  It samples the router on every healthy tick again (`watch.cpu`), and after
+  two idle ticks at high CPU it writes the evidence to `log/spin-*.txt` and
+  reloads, once: a router still spinning after that is left alone for a day.
+  The shell always did this.
 - The shell (`ROWT_IMPL=bash`) leaves a lane file that is a dangling link as it
   is and lists that lane as empty, as rowt-rs does. It used to remove the link
   at the first command, and `rowt <lane> list` stopped with no output while a

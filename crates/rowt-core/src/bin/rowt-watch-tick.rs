@@ -106,6 +106,10 @@ fn run() -> Result<String, String> {
         failover: b(o, "failover"),
         hold_stamp: s(o, "hold_stamp"),
         now: o.get("now").and_then(|x| x.as_i64()).unwrap_or(0),
+        // rowt #s105. Absent (every case before it) or null: the spin check
+        // had nothing to say and no heal to ask for.
+        spin_log: opt(o, "spin_log"),
+        spin: opt(o, "spin"),
     };
     let empty = Value::Object(Default::default());
     let sv = v.get("state").unwrap_or(&empty);

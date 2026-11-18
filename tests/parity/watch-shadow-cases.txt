@@ -69,3 +69,12 @@ PARITY_SCENARIO=watch-pin-dead ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success wa
 PARITY_SCENARIO=watch-pin-dead-name ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick | 203.0.113.10:443 does not accept a TCP connection over en0
 PARITY_SCENARIO=watch-pin-held ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick | pinned server alpha still dead
 PARITY_SCENARIO=watch-pin-dead-failover ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick | with --failover the follower moves off alpha as soon as another server answers, and back when alpha does
+# rowt #s105: the spin heal. Each line the spin check writes is recorded for
+# the shadow, and the planner gets it with the heal's reason in the netcheck
+# observation (spin_log, spin). Idle: the first pathological tick. Latched:
+# healed a minute ago, so it leaves the router alone. Heal: the second tick
+# captures, says so, and recovers through the cooldown (the sandbox's router
+# comes back, the sidecars kept off). The cooldown-held heal is cli-diff only.
+ROWT_CPU_SPIN_PCT=0 PARITY_SCENARIO=watch-spin-idle ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick | router busy but idle: 0% cpu, 0 B/s (1/2)
+ROWT_CPU_SPIN_PCT=0 PARITY_SCENARIO=watch-spin-latched ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick | but already healed once 1m ago
+ROWT_METRICS=off ROWT_AUTO_FOLLOW=0 ROWT_CPU_SPIN_PCT=0 PARITY_SCENARIO=watch-spin-heal ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick | router spinning (0% cpu, no traffic) — recovering (cmd_reload)

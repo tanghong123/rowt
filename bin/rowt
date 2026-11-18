@@ -62,7 +62,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.10.2"
+ROWT_VERSION="3.10.3"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -6886,11 +6886,13 @@ _watch_shadow() {
       --argjson pinreach "${_SH2_PINREACH:-null}" --arg holdstamp "${_SH2_HOLDSTAMP:-}" \
       --argjson failover "${_SH2_FAILOVER:-false}" \
       --arg holdsince "${_SH_HOLDSINCE0:-}" --arg holdtag "${_SH_HOLDTAG0:-}" \
+      --arg spinlog "${_SH2_SPINLOG:-}" --arg spin "${_SH2_SPIN:-}" \
       '{obs:{proxy_intent:"", captive:$cap, captive_check_disabled:$capoff, active_service:$svc, proxy_any_on:true,
              host_running:true, intent:"up", boot_matches:true, iface:$ifc,
              proxy_pointing_ok:$pointing, proxy_bypass_ok:$bypass,
              bound_iface:$cur, net_id:$nid, health_ok:$health, probe_offline:$poff, health_slow:$slow, health_flows:$flows, now:$now, gateway_ok:$gwok,
              pinned:(if $pin == "" then null else $pin end), pinned_addr:$pinaddr, pinned_reach:$pinreach, hold_stamp:$holdstamp, failover:$failover,
+             spin_log:(if $spinlog == "" then null else $spinlog end), spin:(if $spin == "" then null else $spin end),
              mode:(if $mode == "" then "host" else $mode end)},
         state:{captive_flag:false, health_fails:$fails, last_net_id:$last,
                last_recovery:$lastrec, last_net_change:$lastnetchg,
@@ -7072,23 +7074,29 @@ _watch_spin() { # $1=pid
   local n; n="$(( $(cat "$WATCH_CPUSTREAK" 2>/dev/null || echo 0) + 1 ))"
   printf '%s\n' "$n" > "$WATCH_CPUSTREAK" 2>/dev/null || true
   if [ "$n" -lt "$CPU_SPIN_TICKS" ]; then
-    _watch_log "router busy but idle: ${pct}% cpu, ${bps} B/s ($n/$CPU_SPIN_TICKS)"
+    _spin_say "router busy but idle: ${pct}% cpu, ${bps} B/s ($n/$CPU_SPIN_TICKS)"
     return 0
   fi
   local last; last="$(cat "$WATCH_CPUHEAL" 2>/dev/null || echo 0)"
   if [ "$(( now - last ))" -lt "$CPU_HEAL_COOLDOWN" ]; then
-    _watch_log "router spinning (${pct}% cpu, ${bps} B/s) but already healed once $(( (now - last) / 60 ))m ago — leaving it (degraded beats flapping)"
+    _spin_say "router spinning (${pct}% cpu, ${bps} B/s) but already healed once $(( (now - last) / 60 ))m ago — leaving it (degraded beats flapping)"
     return 0
   fi
   printf '%s\n' "$now" > "$WATCH_CPUHEAL" 2>/dev/null || true
   local cap; cap="$(_watch_capture_spin "$pid" "$pct")"
   local sbv why; sbv="$(sb_version "$SB")"; why="$(sb_known_bad "$sbv" || true)"
-  _watch_log "router spinning: ${pct}% cpu with ${bps} B/s over ${dt}s (sing-box ${sbv:-?}${why:+ — KNOWN BAD: $why}) — evidence in $cap"
+  _spin_say "router spinning: ${pct}% cpu with ${bps} B/s over ${dt}s (sing-box ${sbv:-?}${why:+ — KNOWN BAD: $why}) — evidence in $cap"
   # reload, not restart: reload re-renders, and render re-validates the engine
   # (ensure_singbox_host) — so a spin on a known-bad sing-box gets the pinned
   # version swapped in, instead of a restart that is good for ten seconds.
-  _watch_recover "router spinning (${pct}% cpu, no traffic)" cmd_reload
+  _SH2_SPIN="router spinning (${pct}% cpu, no traffic)"
+  _watch_recover "$_SH2_SPIN" cmd_reload
 }
+
+# The spin check's one line for the log, also recorded for the watchdog
+# shadow (rowt #s105): rowt-rs takes the same sample and hands the planner the
+# same line (`spin_log`), so a tick that says it must say it on both sides.
+_spin_say() { _watch_log "$*"; _wact "log $*"; _SH2_SPINLOG="$*"; }
 
 # Liveness check, called by 'watch tick' when the network did NOT change (a
 # change already triggers a full reload). $1 = active physical interface.

@@ -238,6 +238,13 @@ make_sandbox() { # $1=outdir  [$2=scenario]
     # output the moment a case actually stops the router.
     disown 2>/dev/null || true
     rm -f "$cfg/host.pid.self"
+    # A record that names the router's pid (the spin heal's last sample,
+    # watch.cpu, #s105) can only be written once that pid exists: the
+    # scenario spells it `@ROUTER_PID@`. Guarded like the fill above.
+    local _rp; _rp="$(cat "$cfg/host.pid")"
+    { grep -rl '@ROUTER_PID@' "$cfg" 2>/dev/null || true; } | while IFS= read -r _f; do
+      RP="$_rp" perl -pi -e 's/\@ROUTER_PID\@/$ENV{RP}/g' "$_f"
+    done
   fi
   mkdir -p "$cfg/bin" "$cfg/log" "$cfg/cache"
   cp "$DIR/fixtures/bin/sing-box" "$cfg/bin/sing-box"
@@ -323,6 +330,20 @@ run_one() {      # $1=outdir  rest=rowt args
   snapshot_fs "$out"
 }
 
+# The spin heal's records (#s105) carry the sandbox's own clock and stand-in
+# router: `watch.cpu` is "epoch cpusecs pid bytes" and `watch.cpuheal` the
+# epoch of the last heal, and the two runs of a case are seconds apart with two
+# different `sleep`s. Only those fields are masked, and only when they are
+# numbers: the file being there, its shape, the CPU and the byte count still
+# compare, so a side that stops writing it, or writes it wrong, still fails.
+snap_norm() { # $1=file (relative, from snapshot_fs) $2=outdir
+  case "$1" in
+    ./watch.cpu)     normalize "$1" "$2" | awk '$1 ~ /^[0-9]+$/ { $1 = "<EPOCH>" } $3 ~ /^[0-9]+$/ { $3 = "<PID>" } { print }' ;;
+    ./watch.cpuheal) normalize "$1" "$2" | awk '$1 ~ /^[0-9]+$/ { $1 = "<EPOCH>" } { print }' ;;
+    *)               normalize "$1" "$2" ;;
+  esac
+}
+
 snapshot_fs() {  # $1=outdir — the config tree, minus what is volatile by design
   local out="$1" cfg="$1/home/rowt"
   ( cd "$cfg" 2>/dev/null || exit 0
@@ -337,7 +358,7 @@ snapshot_fs() {  # $1=outdir — the config tree, minus what is volatile by desi
           # cannot see a dropped chmod. A port that writes the right bytes with
           # the wrong permissions is a security regression, not a near-miss.
           printf '%s %s  %s\n' \
-            "$(normalize "$f" "$out" | cksum | awk '{print $1}')" \
+            "$(snap_norm "$f" "$out" | cksum | awk '{print $1}')" \
             "$(stat -f %Lp "$f" 2>/dev/null || stat -c %a "$f" 2>/dev/null || echo '?')" \
             "$f"
         done

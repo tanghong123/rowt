@@ -1,0 +1,17 @@
+watch-spin-heal-held — rowt #s105: the spin heal fires, inside the cooldown.
+
+The machine is use-auto-unchanged's with the router up (host.pid.self) and a
+steady-state tick: watch.net and the proxy getters unchanged, the corp lane
+already synced, the bypass list right, the auto probe answering. So the tick
+reaches the healthy branch of the health check, the one place the spin heal
+runs. The clash API reports no byte totals, so the traffic sample is 0 B/s.
+watch.cpu names the stand-in router as @ROUTER_PID@ and its time as
+@NOW-<s>@; the harness fills both, and masks the epoch and pid fields when it
+compares the tree (snap_norm).
+
+As watch-spin-idle (ROWT_CPU_SPIN_PCT=0) with a streak of 1 and no heal yet:
+this second pathological tick heals. The evidence is captured (log/spin-*.txt,
+with a 5 s `sample`), watch.cpuheal takes this tick's stamp and watch.cpustreak
+reads 2. watch.restart is seeded in 2100, so the recovery lands on the shared
+cooldown line and does not reload: the tree compares in cli-diff, where the
+stamp of a real recovery would differ between the two runs.

@@ -138,6 +138,144 @@ pub struct Observation {
     /// so both implementations stamp with the same program.
     pub hold_stamp: String,
     pub now: i64,
+    /// rowt #s105, the spin heal (`_watch_spin`): the one line the router's
+    /// CPU and traffic sample had for the log on this healthy tick, if any
+    /// (busy but idle, or spinning but healed once already, or the spin
+    /// itself with its evidence file). Taken by the caller, because the
+    /// sample, its records and the evidence are effects; `spin_step` decides.
+    pub spin_log: Option<String>,
+    /// …and the recovery reason when the sample asks for a heal
+    /// (`spin_reason`). None on every tick that did not reach a healthy probe.
+    pub spin: Option<String>,
+}
+
+/// `watch.cpu`: the router's last CPU and traffic sample, one line
+/// `epoch cpusecs pid bytes` (cumulative CPU seconds from `ps -o time=`, the
+/// clash API's `downloadTotal + uploadTotal`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CpuSample {
+    pub epoch: i64,
+    pub cpu: i64,
+    /// As the pidfile spells it: the shell compares the two as strings.
+    pub pid: String,
+    pub bytes: i64,
+}
+
+impl CpuSample {
+    /// The shell's `read -r last_e last_c last_p last_b`: the first line's
+    /// words, a missing one empty. No epoch is no sample, which is how a
+    /// missing or empty file reads.
+    pub fn parse(s: &str) -> Option<CpuSample> {
+        let mut w = s.lines().next().unwrap_or("").split_whitespace();
+        let epoch = w.next()?.parse().ok()?;
+        let num = |x: Option<&str>| x.and_then(|v| v.parse().ok()).unwrap_or(0);
+        let cpu = num(w.next());
+        let pid = w.next().unwrap_or("").to_string();
+        let bytes = num(w.next());
+        Some(CpuSample { epoch, cpu, pid, bytes })
+    }
+
+    /// The line the shell writes: `printf '%s %s %s %s\n'`.
+    pub fn line(&self) -> String {
+        format!("{} {} {} {}\n", self.epoch, self.cpu, self.pid, self.bytes)
+    }
+}
+
+/// The spin detector's knobs: `ROWT_CPU_SPIN_PCT` (interval-average CPU, in
+/// percent), `ROWT_CPU_SPIN_BYTES` (bytes a second under which the router is
+/// doing no work), `ROWT_CPU_SPIN_TICKS` (such ticks in a row before it acts)
+/// and `ROWT_CPU_HEAL_COOLDOWN` (seconds between two heals).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpinKnobs {
+    pub pct: i64,
+    pub bytes: i64,
+    pub ticks: i64,
+    pub cooldown: i64,
+}
+
+impl Default for SpinKnobs {
+    fn default() -> Self {
+        SpinKnobs { pct: 80, bytes: 65536, ticks: 2, cooldown: 86400 }
+    }
+}
+
+/// What a spin check does to one of its records.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Rec {
+    #[default]
+    Keep,
+    Remove,
+    Write(i64),
+}
+
+/// One spin check: its two records, its log line, and whether it heals.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpinStep {
+    /// `watch.cpustreak`: consecutive pathological ticks.
+    pub streak: Rec,
+    /// `watch.cpuheal`: when the last heal was, the one-shot latch.
+    pub healed: Rec,
+    /// The line for the watch log. The heal's own line is the caller's, since
+    /// it names the evidence file the caller writes.
+    pub log: Option<String>,
+    /// A heal is due: `(pct, bps, dt)`.
+    pub heal: Option<(i64, i64, i64)>,
+}
+
+/// The spin heal's decision (`_watch_spin`, rowt #s105). Restart a router that
+/// is up and answering but burns CPU doing nothing, and only that: the
+/// failure mode of a false positive is killing live connections.
+///
+/// - CPU is an interval average from cumulative CPU seconds, so a new pid (or
+///   no earlier sample) has no interval yet and starts the streak over.
+/// - "Sick" is both gates: at least `pct` CPU AND under `bytes` a second.
+///   Busy is not sick: a proxy burns CPU moving bytes.
+/// - It acts after `ticks` such ticks in a row, and then once: the latch
+///   clears only when a tick sees the CPU calm again, so a deterministic spin
+///   degrades instead of flapping the link every ten minutes.
+///
+/// `streak` and `healed` are the records' values now (0 when missing).
+/// Integer arithmetic as the shell's `$(( ))` does it, truncating.
+pub fn spin_step(now: i64, pid: &str, cpu: i64, bytes: i64, prev: Option<&CpuSample>, streak: i64, healed: i64, k: &SpinKnobs) -> SpinStep {
+    let Some(p) = prev.filter(|p| p.pid == pid) else {
+        return SpinStep { streak: Rec::Remove, ..Default::default() };
+    };
+    let dt = now - p.epoch;
+    if dt <= 0 {
+        return SpinStep::default();
+    }
+    let pct = (cpu - p.cpu) * 100 / dt;
+    let bps = ((bytes - p.bytes) / dt).max(0);
+    if pct < k.pct || bps >= k.bytes {
+        // A healthy tick clears the streak, and releases the latch when the
+        // CPU is calm, so a real recurrence weeks later gets its one attempt.
+        let healed = if pct < k.pct { Rec::Remove } else { Rec::Keep };
+        return SpinStep { streak: Rec::Remove, healed, ..Default::default() };
+    }
+    let n = streak + 1;
+    if n < k.ticks {
+        return SpinStep {
+            streak: Rec::Write(n),
+            log: Some(format!("router busy but idle: {pct}% cpu, {bps} B/s ({n}/{})", k.ticks)),
+            ..Default::default()
+        };
+    }
+    if now - healed < k.cooldown {
+        return SpinStep {
+            streak: Rec::Write(n),
+            log: Some(format!(
+                "router spinning ({pct}% cpu, {bps} B/s) but already healed once {}m ago — leaving it (degraded beats flapping)",
+                (now - healed) / 60
+            )),
+            ..Default::default()
+        };
+    }
+    SpinStep { streak: Rec::Write(n), healed: Rec::Write(now), log: None, heal: Some((pct, bps, dt)) }
+}
+
+/// The recovery reason a spin heal recovers with, in the shell's words.
+pub fn spin_reason(pct: i64) -> String {
+    format!("router spinning ({pct}% cpu, no traffic)")
 }
 
 /// How far back "a connection opened recently" reaches for `health_flows`:
@@ -563,6 +701,17 @@ pub fn netcheck(obs: &Observation, st: &State, cfg: &Config) -> Outcome {
                 s.health_fails = 0;
                 // The server answers again: the hold is over.
                 s.hold = None;
+                // rowt #s105: the probe answering proves the network AND the
+                // tunnel work, which is exactly the state a spin hides in, so
+                // this is the only place the spin heal may act: it can never
+                // be blamed on an uplink. Through the same cooldown as a
+                // wedged tunnel (`_watch_recover`).
+                if let Some(l) = &obs.spin_log {
+                    a.push(Action::Log(l.clone()));
+                }
+                if let Some(r) = &obs.spin {
+                    recover_or_hold(&mut a, &mut s, obs, cfg, r);
+                }
             } else {
                 s.health_fails += 1;
                 if s.health_fails < cfg.health_fails {
@@ -736,6 +885,8 @@ mod tests {
             failover: false,
             hold_stamp: "2026-10-30 09:00:00".into(),
             now: 1_000_000,
+            spin_log: None,
+            spin: None,
         }
     }
 
@@ -1392,5 +1543,82 @@ mod tests {
         let o = running();
         let st = State { health_fails: 2, last_net_id: Some(o.net_id.clone()), ..Default::default() };
         assert_eq!(netcheck(&o, &st, &Config::default()).state.health_fails, 0);
+    }
+
+    /// `watch.cpu` as the shell reads and writes it.
+    #[test]
+    fn the_cpu_sample_round_trips_and_a_missing_one_is_none() {
+        let s = CpuSample { epoch: 1_700_000_000, cpu: 42, pid: "4711".into(), bytes: 9000 };
+        assert_eq!(s.line(), "1700000000 42 4711 9000\n");
+        assert_eq!(CpuSample::parse(&s.line()), Some(s));
+        assert_eq!(CpuSample::parse(""), None);
+        assert_eq!(CpuSample::parse("\n"), None);
+        // `read` leaves the missing words empty; arithmetic reads them as 0.
+        assert_eq!(CpuSample::parse("1700000000 7"), Some(CpuSample { epoch: 1_700_000_000, cpu: 7, pid: String::new(), bytes: 0 }));
+    }
+
+    /// The streak, the both-gates rule and the one-shot latch, step by step,
+    /// at the defaults (80%, 64 KiB/s, two ticks, a day).
+    #[test]
+    fn a_spin_heals_once_after_two_idle_ticks_and_never_for_a_busy_router() {
+        let k = SpinKnobs::default();
+        let prev = |e: i64, c: i64, b: i64| CpuSample { epoch: e, cpu: c, pid: "77".into(), bytes: b };
+        let t = 1_000_000;
+        // No earlier sample, or one from another router: no interval yet.
+        assert_eq!(spin_step(t, "77", 500, 0, None, 1, 0, &k), SpinStep { streak: Rec::Remove, ..Default::default() });
+        let other = CpuSample { pid: "76".into(), ..prev(t - 120, 0, 0) };
+        assert_eq!(spin_step(t, "77", 500, 0, Some(&other), 1, 0, &k).streak, Rec::Remove);
+        // The clock did not move: nothing to average over, nothing changes.
+        assert_eq!(spin_step(t, "77", 500, 0, Some(&prev(t, 400, 0)), 1, 0, &k), SpinStep::default());
+        // Calm: 10 s of CPU over 120 s is 8%. The streak and the latch go.
+        let calm = spin_step(t, "77", 110, 0, Some(&prev(t - 120, 100, 0)), 1, t - 60, &k);
+        assert_eq!((calm.streak, calm.healed, calm.log, calm.heal), (Rec::Remove, Rec::Remove, None, None));
+        // Busy: 100% CPU while moving 1 MB/s is a proxy at work. The streak
+        // goes, the latch stays (the CPU is not calm).
+        let busy = spin_step(t, "77", 220, 120 * 1_000_000, Some(&prev(t - 120, 100, 0)), 1, t - 60, &k);
+        assert_eq!((busy.streak, busy.healed, busy.heal), (Rec::Remove, Rec::Keep, None));
+        // Sick, first tick: counted and said, not acted on.
+        let one = spin_step(t, "77", 220, 0, Some(&prev(t - 120, 100, 0)), 0, 0, &k);
+        assert_eq!(one.streak, Rec::Write(1));
+        assert_eq!(one.log.as_deref(), Some("router busy but idle: 100% cpu, 0 B/s (1/2)"));
+        assert_eq!(one.heal, None);
+        // Second tick: heal, and the latch takes this tick's stamp.
+        let two = spin_step(t, "77", 220, 0, Some(&prev(t - 120, 100, 0)), 1, 0, &k);
+        assert_eq!((two.streak, two.healed, two.log, two.heal), (Rec::Write(2), Rec::Write(t), None, Some((100, 0, 120))));
+        // Still spinning an hour after that heal: degraded beats flapping.
+        let held = spin_step(t + 3600, "77", 220, 0, Some(&prev(t + 3480, 100, 0)), 2, t, &k);
+        assert_eq!((held.streak, held.healed, held.heal), (Rec::Write(3), Rec::Keep, None));
+        assert_eq!(held.log.as_deref(), Some("router spinning (100% cpu, 0 B/s) but already healed once 60m ago — leaving it (degraded beats flapping)"));
+        // A counter that went down (the router restarted under the same pid
+        // record) reads as no traffic, not as negative traffic.
+        assert_eq!(spin_step(t, "77", 220, 0, Some(&prev(t - 120, 100, 5_000_000)), 1, 0, &k).heal, Some((100, 0, 120)));
+    }
+
+    /// A heal goes through the wedged tunnel's own cooldown, and a tick that
+    /// heals reloads once: the line first, then the recovery.
+    #[test]
+    fn a_spin_heal_recovers_through_the_cooldown() {
+        let cfg = Config::default();
+        let mut o = running();
+        o.spin_log = Some("router spinning: 100% cpu with 0 B/s over 120s (sing-box 1.13.14) — evidence in /x/spin.txt".into());
+        o.spin = Some(spin_reason(100));
+        let st = State { last_net_id: Some(o.net_id.clone()), ..Default::default() };
+        let n = netcheck(&o, &st, &cfg);
+        assert_eq!(&n.actions[2..], &[
+            Action::Log("router spinning: 100% cpu with 0 B/s over 120s (sing-box 1.13.14) — evidence in /x/spin.txt".into()),
+            Action::Log("router spinning (100% cpu, no traffic) — recovering (cmd_reload)".into()),
+            Action::Recover("router spinning (100% cpu, no traffic)".into()),
+        ]);
+        assert_eq!(n.state.last_recovery, o.now);
+        // Within the cooldown of another recovery: said, not done.
+        let st = State { last_recovery: o.now - 100, ..st };
+        let n = netcheck(&o, &st, &cfg);
+        assert!(!n.actions.iter().any(|a| matches!(a, Action::Recover(_))));
+        assert_eq!(logs(&n).last().unwrap(), "router spinning (100% cpu, no traffic) — last recovery 100s ago (< 600s cooldown), holding off");
+        // Only on a healthy probe: a failing one takes the wedged path, which
+        // never reads the spin.
+        o.health_ok = false;
+        let n = netcheck(&o, &State { last_net_id: Some(o.net_id.clone()), ..Default::default() }, &cfg);
+        assert!(!logs(&n).iter().any(|l| l.contains("spinning")));
     }
 }

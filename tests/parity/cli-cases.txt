@@ -242,6 +242,17 @@ PARITY_TIMEOUT=45 PARITY_NOTRACE=1 PARITY_SCENARIO=watch-pin-held-failover ROWT_
 PARITY_TIMEOUT=45 PARITY_NOTRACE=1 PARITY_SCENARIO=watch-offline-probe ROWT_IFACE=en0 ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
 # …and a Wi-Fi whose name networksetup will not give: no SSID, not the sentence.
 PARITY_TIMEOUT=45 PARITY_NOTRACE=1 PARITY_SCENARIO=watch-no-ssid ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
+# rowt #s105: the spin heal, which rowt-rs did not have until then. A healthy
+# tick samples the router's CPU and traffic (watch.cpu, its epoch and pid
+# masked), counts pathological ticks (watch.cpustreak) and heals once
+# (watch.cpuheal). ROWT_CPU_SPIN_PCT=0 makes the stand-in router's 0% count as
+# high. The heal that really reloads is a watch-shadow case: its recovery
+# stamp is each run's own clock.
+PARITY_TIMEOUT=45 PARITY_NOTRACE=1 PARITY_SCENARIO=watch-spin-new-router ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
+PARITY_TIMEOUT=45 PARITY_NOTRACE=1 ROWT_CPU_SPIN_PCT=0 PARITY_SCENARIO=watch-spin-idle ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
+PARITY_TIMEOUT=45 PARITY_NOTRACE=1 ROWT_CPU_SPIN_PCT=0 PARITY_SCENARIO=watch-spin-latched ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
+PARITY_TIMEOUT=45 PARITY_NOTRACE=1 PARITY_SCENARIO=watch-spin-calm ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
+PARITY_TIMEOUT=45 PARITY_NOTRACE=1 ROWT_CPU_SPIN_PCT=0 PARITY_SCENARIO=watch-spin-heal-held ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
 
 # static text and log readers, extracted from the shell at build time
 shell-init

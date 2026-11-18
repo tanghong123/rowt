@@ -11,7 +11,7 @@
 
 use crate::lifecycle::{self, Ctx};
 use crate::{die, env_or, read, PROG};
-use rowt_core::watch::{guard, netcheck, Action, CaptiveState, Config, Hold, Next, Observation, State};
+use rowt_core::watch::{guard, netcheck, spin_reason, spin_step, Action, CaptiveState, Config, CpuSample, Hold, Next, Observation, Rec, SpinKnobs, State};
 use rowt_platform::{Mac, Platform};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -86,6 +86,130 @@ fn cfg_of(ctx: &Ctx) -> Config {
 
 fn watch_log_path(ctx: &Ctx) -> PathBuf {
     ctx.logdir().join("watch.log")
+}
+
+/// The spin detector's knobs, as the shell reads them (`CPU_SPIN_PCT` …).
+fn spin_knobs() -> SpinKnobs {
+    let d = SpinKnobs::default();
+    SpinKnobs {
+        pct: env_or("ROWT_CPU_SPIN_PCT", "80").parse().unwrap_or(d.pct),
+        bytes: env_or("ROWT_CPU_SPIN_BYTES", "65536").parse().unwrap_or(d.bytes),
+        ticks: env_or("ROWT_CPU_SPIN_TICKS", "2").parse().unwrap_or(d.ticks),
+        cooldown: env_or("ROWT_CPU_HEAL_COOLDOWN", "86400").parse().unwrap_or(d.cooldown),
+    }
+}
+
+/// `_proc_cpu_secs`: a process's cumulative CPU seconds from `ps -o time=`
+/// (`[dd-][hh:]mm:ss.ss`), truncated as the shell's awk `%d` does. None when
+/// `ps` has no such process.
+fn proc_cpu_secs(pid: &str) -> Option<i64> {
+    let o = out("ps", &["-p", pid, "-o", "time="]);
+    let t = o.lines().find_map(|l| l.split_whitespace().next())?;
+    let (d, t) = match t.split_once('-') {
+        Some((d, r)) => (d.parse::<f64>().unwrap_or(0.0), r),
+        None => (0.0, t),
+    };
+    let b: Vec<f64> = t.split(':').map(|x| x.parse().unwrap_or(0.0)).collect();
+    let s = if b.len() == 3 { b[0] * 3600.0 + b[1] * 60.0 + b[2] } else { b[0] * 60.0 + b.get(1).copied().unwrap_or(0.0) };
+    Some((d * 86400.0 + s) as i64)
+}
+
+/// `_router_bytes_total`: the router's byte counter, up plus down, from the
+/// clash API (`(.downloadTotal // 0) + (.uploadTotal // 0) | floor`). None
+/// when the API did not answer.
+pub(crate) fn router_bytes_total(ctx: &Ctx) -> Option<u64> {
+    let v: serde_json::Value = serde_json::from_str(&lifecycle::clash_curl(ctx, "GET", "/connections", None)?).ok()?;
+    if !(v.is_object() || v.is_null()) {
+        return None;
+    }
+    let n = |k: &str| v.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0);
+    Some((n("downloadTotal") + n("uploadTotal")).max(0.0).floor() as u64)
+}
+
+/// `_watch_spin` (rowt #s105): on a healthy tick, sample the router's CPU and
+/// traffic, keep `watch.cpu`, `watch.cpustreak` and `watch.cpuheal` as the
+/// shell does, and let `rowt_core::watch::spin_step` decide. On a heal the
+/// evidence is written first (`_watch_capture_spin`), since the reload
+/// destroys it. Returns the line for the log and the heal's recovery reason,
+/// both for the planner. In the shell's order: `ps`, then the clash API, then
+/// the check that `ps` answered.
+fn spin_check(ctx: &Ctx) -> (Option<String>, Option<String>) {
+    let pid = read(&ctx.pidfile()).trim().to_string();
+    if pid.is_empty() {
+        return (None, None);
+    }
+    let now: i64 = crate::sh_date("+%s").parse().unwrap_or(0);
+    let cpu = proc_cpu_secs(&pid);
+    let bytes = router_bytes_total(ctx).unwrap_or(0) as i64;
+    let Some(cpu) = cpu else { return (None, None) };
+    let f = |n: &str| ctx.cfg.join(n);
+    let prev = CpuSample::parse(&read(&f("watch.cpu")));
+    let _ = std::fs::write(f("watch.cpu"), CpuSample { epoch: now, cpu, pid: pid.clone(), bytes }.line());
+    let num = |n: &str| read(&f(n)).trim().parse::<i64>().unwrap_or(0);
+    let k = spin_knobs();
+    let st = spin_step(now, &pid, cpu, bytes, prev.as_ref(), num("watch.cpustreak"), num("watch.cpuheal"), &k);
+    for (name, r) in [("watch.cpustreak", st.streak), ("watch.cpuheal", st.healed)] {
+        match r {
+            Rec::Keep => {}
+            Rec::Remove => { let _ = std::fs::remove_file(f(name)); }
+            Rec::Write(v) => { let _ = std::fs::write(f(name), format!("{v}\n")); }
+        }
+    }
+    let Some((pct, bps, dt)) = st.heal else { return (st.log, None) };
+    let cap = capture_spin(ctx, &pid, pct, &k);
+    let sbv = crate::fetch::sb_version(&ctx.sb());
+    let why = crate::fetch::sb_known_bad(&sbv).map(|w| format!(" — KNOWN BAD: {w}")).unwrap_or_default();
+    let line = format!("router spinning: {pct}% cpu with {bps} B/s over {dt}s (sing-box {}{why}) — evidence in {}",
+                       if sbv.is_empty() { "?" } else { &sbv }, cap.display());
+    (Some(line), Some(spin_reason(pct)))
+}
+
+/// `_watch_capture_spin`: everything worth having about a spinning router,
+/// written before the heal restarts it, or the self-heal destroys the only
+/// evidence and the bug stays unreportable. `sample` needs no configuration;
+/// the goroutine dump is far more useful but exists only when `ROWT_PPROF` was
+/// set at render time. Keeps the newest five.
+fn capture_spin(ctx: &Ctx, pid: &str, pct: i64, k: &SpinKnobs) -> PathBuf {
+    let dir = ctx.logdir();
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(format!("spin-{}.txt", crate::sh_date("+%Y%m%d-%H%M%S")));
+    let head = |s: &str, n: usize| s.lines().take(n).map(|l| format!("{l}\n")).collect::<String>();
+    let mut s = format!("rowt {} — router spin capture {}\n", env!("ROWT_SHELL_VERSION"), crate::sh_date("+%F %T %z"));
+    s += &format!("pid={pid}  interval-average cpu={pct}%  threshold={}%\n", k.pct);
+    s += "\n== ps ==\n";
+    s += &out("ps", &["-p", pid, "-o", "pid,pcpu,etime,time,rss,command"]);
+    s += "\n== clash connections ==\n";
+    if let Some(v) = lifecycle::clash_curl(ctx, "GET", "/connections", None)
+        .and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok()) {
+        let j = |k: &str| serde_json::to_string(v.get(k).unwrap_or(&serde_json::Value::Null)).unwrap_or_default();
+        let n = v.get("connections").map(|c| c.as_array().map(|a| a.len()).or(c.as_object().map(|o| o.len())).unwrap_or(0)).unwrap_or(0);
+        s += &format!("{{\"downloadTotal\":{},\"uploadTotal\":{},\"n\":{n}}}\n", j("downloadTotal"), j("uploadTotal"));
+    }
+    let pprof = env_or("ROWT_PPROF", "");
+    if pprof.is_empty() {
+        s += "\n== pprof: not enabled (render with ROWT_PPROF=<port> to name the spinning goroutine) ==\n";
+    } else {
+        s += "\n== pprof goroutine dump ==\n";
+        let o = Command::new("curl").args(["--noproxy", "*", "-sS", "-m", "10", &format!("http://127.0.0.1:{pprof}/debug/pprof/goroutine?debug=2")])
+            .output().map(|o| format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))).unwrap_or_default();
+        s += &head(&o, 400);
+    }
+    s += "\n== sample (native frames; Go stacks are invisible to it) ==\n";
+    s += &head(&out("sample", &[pid, "5", "-file", "/dev/stdout"]), 250);
+    let _ = std::fs::write(&path, s);
+    // The latch makes these rare, but a diagnostic dump must never grow the
+    // config tree without bound.
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        let mut caps: Vec<(std::time::SystemTime, PathBuf)> = rd.flatten()
+            .filter(|e| e.file_name().to_str().is_some_and(|n| n.starts_with("spin-") && n.ends_with(".txt")))
+            .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+            .collect();
+        caps.sort_by(|a, b| b.0.cmp(&a.0));
+        for (_, p) in caps.into_iter().skip(5) {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+    path
 }
 
 /// WHY a probe came back the way it did — the shell's `_captive_log`.
@@ -744,6 +868,9 @@ fn observe(ctx: &Ctx, cap: Option<CaptiveState>, portal: Option<String>, portal_
         // at that moment and not otherwise.
         hold_stamp: if pinned_reach == Some(false) { crate::best::utc(None) } else { String::new() },
         now: crate::sh_date("+%s").parse().unwrap_or(0),
+        // Taken by the tick itself, where the shell takes it (`spin_check`).
+        spin_log: None,
+        spin: None,
     }
 }
 
@@ -1742,7 +1869,7 @@ fn tick(ctx: &Ctx, self_bin: &Path) {
         let (ip, port) = a.rsplit_once(':').unwrap_or((a, ""));
         crate::diag::tcp_reaches(&ifc, ip, port)
     });
-    let obs2 = observe(ctx, Some(cap), portal, portal_host, hb, offline, slow, flows, pinned, paddr.unwrap_or_default(), reach);
+    let mut obs2 = observe(ctx, Some(cap), portal, portal_host, hb, offline, slow, flows, pinned, paddr.unwrap_or_default(), reach);
     // Where the shell enters `_watch_health` (phase two, nothing to reload for
     // the network's sake, a tunnel to probe), it also throws away a malformed
     // `watch.hold`; see `hold_file_malformed`.
@@ -1763,6 +1890,13 @@ fn tick(ctx: &Ctx, self_bin: &Path) {
                 else if slow { ("slow", slow_delay) }
                 else { ("fail", None) };
             obs_write(ctx, "watch.last", "watchdog", &probe_target(ctx), result, delay);
+        }
+        // rowt #s105: the spin heal's sample, where `_watch_health` takes it:
+        // the probe answered, so the network and the tunnel both work.
+        if !iface_moved && !proxy_wrong && obs2.mode != "local" && online && hb {
+            let (log, heal) = spin_check(ctx);
+            obs2.spin_log = log;
+            obs2.spin = heal;
         }
     }
     let n = netcheck(&obs2, &st, &cfg);

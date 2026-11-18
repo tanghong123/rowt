@@ -1,0 +1,16 @@
+{"connections":[
+ {"chains":["escape","auto"],"rule":"DomainSuffix(example.com)","upload":1024,"download":2097152,
+  "metadata":{"host":"www.example.com","destinationIP":"93.184.216.34","destinationPort":443}},
+ {"chains":["escape","auto"],"rule":"DomainSuffix(example.com)","upload":512,"download":1048576,
+  "metadata":{"host":"www.example.com","destinationIP":"93.184.216.34","destinationPort":443}},
+ {"chains":["corp"],"rule":"DomainSuffix(corp.example)","upload":100,"download":900,
+  "metadata":{"host":"intranet.corp.example","destinationPort":8080}},
+ {"chains":["direct"],"rule":"Match","upload":0,"download":1073741824,
+  "metadata":{"host":"","destinationIP":"198.51.100.10","destinationPort":80}},
+ {"chains":["block"],"rule":"RuleSet(geosite-category-ads-all)","upload":0,"download":0,
+  "metadata":{"host":"ads.example","destinationPort":443}},
+ {"chains":["direct"],"rule":"Match","upload":7,"download":900,
+  "metadata":{"host":"tie.example","destinationPort":443}},
+ {"chains":["escape","auto"],"rule":"","upload":3,"download":4,
+  "metadata":{"destinationIP":"203.0.113.9"}}
+]}

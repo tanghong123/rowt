@@ -298,7 +298,7 @@ reconcile and the watchdog's decision table. Each has a gate:
 | `watch-diff` | decisions, read back from watch.log + trace; a case file names its phase with `_phase` (`guard` unless it says `netcheck`) | 8 cases |
 | `platform-diff` | the argv the platform layer produces | 12 cases |
 | `cli-diff` | stdout, status, the config tree + rc files + LaunchAgent plist (content + mode), argv trace, audit log | 561 cases |
-| `live-fixtures` | each scenario whose committed host.json spells `@CFG@` is still a render of that scenario, byte for byte (vm.json too) | 4 scenarios |
+| `live-fixtures` | each scenario whose committed host.json spells `@CFG@` is still a render of that scenario, byte for byte (vm.json too) | 10 scenarios |
 
 `merge-diff` is the only gate whose primary artifact is a file written in
 place: `cmd_import` reads the accumulation straight back with jq, and a human
@@ -419,6 +419,14 @@ Three limits, stated rather than implied:
   alone (`lanes-live`, `corp-vpn-running`). That holds only while the committed
   host.json IS what the scenario renders; `parity live-fixtures` checks it, and
   `--update` regenerates it after a deliberate render change.
+* **The spin heal's records name the stand-in.** `watch.cpu` holds the
+  router's last CPU and traffic sample, `epoch cpusecs pid bytes`, and a
+  scenario that seeds one names the stand-in as `@ROUTER_PID@`, which
+  `make_sandbox` fills once the `sleep` runs (#s105). The two runs of a case
+  are seconds apart with two different stand-ins, so the tree compare
+  (`snap_norm`) masks `watch.cpu`'s epoch and pid fields and
+  `watch.cpuheal`'s epoch, when they are numbers; the file being there, the
+  CPU seconds and the byte count still compare.
 * **A scenario can take a base file away.** Its overlay can only add files, so
   a scenario's `absent` lists, one per line, the base fixture's config files
   `make_sandbox` removes after the overlay (`direct-seed`: no
