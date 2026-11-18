@@ -5,6 +5,14 @@ release is cut; everything under Unreleased ships with the next one.
 
 ## Unreleased
 
+- **A spin heal that has to wait no longer gives up for a day.** When the
+  watchdog had recovered the router less than 10 minutes before
+  (`ROWT_HEALTH_COOLDOWN`), a heal for a spinning router was held back, yet
+  it was recorded as done (`watch.cpuheal`), so the router spun on for a day
+  with the log saying "already healed once". Now the heal waits for the
+  cooldown without recording a heal, and the first tick past it heals.
+  Both watchdogs (rowt-rs and the shell) had this.
+
 ## 3.11.0 — 2026-11-18
 
 - **The watchdog reloads once after an upgrade, at a quiet moment.** A

@@ -336,9 +336,15 @@ pub struct SpinStep {
 ///   clears only when a tick sees the CPU calm again, so a deterministic spin
 ///   degrades instead of flapping the link every ten minutes.
 ///
+/// - A heal the restart cooldown would hold back waits for it (#s106): it
+///   neither stamps the latch nor captures, so the first tick past the
+///   cooldown heals. `held` is `recovery_hold`'s answer, from the numbers
+///   `recover_or_hold` will use, so the two never disagree.
+///
 /// `streak` and `healed` are the records' values now (0 when missing).
 /// Integer arithmetic as the shell's `$(( ))` does it, truncating.
-pub fn spin_step(now: i64, pid: &str, cpu: i64, bytes: i64, prev: Option<&CpuSample>, streak: i64, healed: i64, k: &SpinKnobs) -> SpinStep {
+#[allow(clippy::too_many_arguments)]
+pub fn spin_step(now: i64, pid: &str, cpu: i64, bytes: i64, prev: Option<&CpuSample>, streak: i64, healed: i64, held: Option<(i64, i64)>, k: &SpinKnobs) -> SpinStep {
     let Some(p) = prev.filter(|p| p.pid == pid) else {
         return SpinStep { streak: Rec::Remove, ..Default::default() };
     };
@@ -372,7 +378,25 @@ pub fn spin_step(now: i64, pid: &str, cpu: i64, bytes: i64, prev: Option<&CpuSam
             ..Default::default()
         };
     }
+    if let Some((since, cooldown)) = held {
+        return SpinStep {
+            streak: Rec::Write(n),
+            log: Some(format!(
+                "router spinning ({pct}% cpu, {bps} B/s) but the last recovery was {since}s ago (< {cooldown}s cooldown) — healing once that has passed"
+            )),
+            ..Default::default()
+        };
+    }
     SpinStep { streak: Rec::Write(n), healed: Rec::Write(now), log: None, heal: Some((pct, bps, dt)) }
+}
+
+/// Would a recovery now be held back by the cooldown? `Some((since,
+/// cooldown))` when the last one (`watch.restart`, 0 when there was none) was
+/// under `cooldown` seconds ago. `recover_or_hold`'s rule, and the spin
+/// heal's, so it waits instead of stamping a heal that never runs (#s106).
+pub fn recovery_hold(now: i64, last_recovery: i64, cooldown: i64) -> Option<(i64, i64)> {
+    let since = now - last_recovery;
+    (last_recovery != 0 && since < cooldown).then_some((since, cooldown))
 }
 
 /// The recovery reason a spin heal recovers with, in the shell's words.
@@ -609,12 +633,8 @@ fn recover_or_hold(
     cfg: &Config,
     reason: &str,
 ) {
-    let since = obs.now - st.last_recovery;
-    if st.last_recovery != 0 && since < cfg.health_cooldown {
-        actions.push(Action::Log(format!(
-            "{reason} — last recovery {since}s ago (< {}s cooldown), holding off",
-            cfg.health_cooldown
-        )));
+    if let Some((since, cooldown)) = recovery_hold(obs.now, st.last_recovery, cfg.health_cooldown) {
+        actions.push(Action::Log(format!("{reason} — last recovery {since}s ago (< {cooldown}s cooldown), holding off")));
         return;
     }
     st.last_recovery = obs.now;
@@ -1855,33 +1875,33 @@ mod tests {
         let prev = |e: i64, c: i64, b: i64| CpuSample { epoch: e, cpu: c, pid: "77".into(), bytes: b };
         let t = 1_000_000;
         // No earlier sample, or one from another router: no interval yet.
-        assert_eq!(spin_step(t, "77", 500, 0, None, 1, 0, &k), SpinStep { streak: Rec::Remove, ..Default::default() });
+        assert_eq!(spin_step(t, "77", 500, 0, None, 1, 0, None, &k), SpinStep { streak: Rec::Remove, ..Default::default() });
         let other = CpuSample { pid: "76".into(), ..prev(t - 120, 0, 0) };
-        assert_eq!(spin_step(t, "77", 500, 0, Some(&other), 1, 0, &k).streak, Rec::Remove);
+        assert_eq!(spin_step(t, "77", 500, 0, Some(&other), 1, 0, None, &k).streak, Rec::Remove);
         // The clock did not move: nothing to average over, nothing changes.
-        assert_eq!(spin_step(t, "77", 500, 0, Some(&prev(t, 400, 0)), 1, 0, &k), SpinStep::default());
+        assert_eq!(spin_step(t, "77", 500, 0, Some(&prev(t, 400, 0)), 1, 0, None, &k), SpinStep::default());
         // Calm: 10 s of CPU over 120 s is 8%. The streak and the latch go.
-        let calm = spin_step(t, "77", 110, 0, Some(&prev(t - 120, 100, 0)), 1, t - 60, &k);
+        let calm = spin_step(t, "77", 110, 0, Some(&prev(t - 120, 100, 0)), 1, t - 60, None, &k);
         assert_eq!((calm.streak, calm.healed, calm.log, calm.heal), (Rec::Remove, Rec::Remove, None, None));
         // Busy: 100% CPU while moving 1 MB/s is a proxy at work. The streak
         // goes, the latch stays (the CPU is not calm).
-        let busy = spin_step(t, "77", 220, 120 * 1_000_000, Some(&prev(t - 120, 100, 0)), 1, t - 60, &k);
+        let busy = spin_step(t, "77", 220, 120 * 1_000_000, Some(&prev(t - 120, 100, 0)), 1, t - 60, None, &k);
         assert_eq!((busy.streak, busy.healed, busy.heal), (Rec::Remove, Rec::Keep, None));
         // Sick, first tick: counted and said, not acted on.
-        let one = spin_step(t, "77", 220, 0, Some(&prev(t - 120, 100, 0)), 0, 0, &k);
+        let one = spin_step(t, "77", 220, 0, Some(&prev(t - 120, 100, 0)), 0, 0, None, &k);
         assert_eq!(one.streak, Rec::Write(1));
         assert_eq!(one.log.as_deref(), Some("router busy but idle: 100% cpu, 0 B/s (1/2)"));
         assert_eq!(one.heal, None);
         // Second tick: heal, and the latch takes this tick's stamp.
-        let two = spin_step(t, "77", 220, 0, Some(&prev(t - 120, 100, 0)), 1, 0, &k);
+        let two = spin_step(t, "77", 220, 0, Some(&prev(t - 120, 100, 0)), 1, 0, None, &k);
         assert_eq!((two.streak, two.healed, two.log, two.heal), (Rec::Write(2), Rec::Write(t), None, Some((100, 0, 120))));
         // Still spinning an hour after that heal: degraded beats flapping.
-        let held = spin_step(t + 3600, "77", 220, 0, Some(&prev(t + 3480, 100, 0)), 2, t, &k);
+        let held = spin_step(t + 3600, "77", 220, 0, Some(&prev(t + 3480, 100, 0)), 2, t, None, &k);
         assert_eq!((held.streak, held.healed, held.heal), (Rec::Write(3), Rec::Keep, None));
         assert_eq!(held.log.as_deref(), Some("router spinning (100% cpu, 0 B/s) but already healed once 60m ago — leaving it (degraded beats flapping)"));
         // A counter that went down (the router restarted under the same pid
         // record) reads as no traffic, not as negative traffic.
-        assert_eq!(spin_step(t, "77", 220, 0, Some(&prev(t - 120, 100, 5_000_000)), 1, 0, &k).heal, Some((100, 0, 120)));
+        assert_eq!(spin_step(t, "77", 220, 0, Some(&prev(t - 120, 100, 5_000_000)), 1, 0, None, &k).heal, Some((100, 0, 120)));
     }
 
     /// A heal goes through the wedged tunnel's own cooldown, and a tick that
@@ -1910,5 +1930,43 @@ mod tests {
         o.health_ok = false;
         let n = netcheck(&o, &State { last_net_id: Some(o.net_id.clone()), ..Default::default() }, &cfg);
         assert!(!logs(&n).iter().any(|l| l.contains("spinning")));
+    }
+
+    /// rowt #s106: a heal a recent recovery would hold back waits for it. The
+    /// latch stays as it was and nothing is captured, so the first tick past
+    /// the cooldown heals; the rule is `recover_or_hold`'s own.
+    #[test]
+    fn a_spin_heal_waits_for_the_recovery_cooldown_without_the_latch() {
+        let k = SpinKnobs::default();
+        let t = 1_000_000;
+        let p = CpuSample { epoch: t - 120, cpu: 100, pid: "77".into(), bytes: 0 };
+        let held = recovery_hold(t, t - 100, 600);
+        assert_eq!(held, Some((100, 600)));
+        let w = spin_step(t, "77", 220, 0, Some(&p), 1, 0, held, &k);
+        assert_eq!((w.streak, w.healed, w.heal), (Rec::Write(2), Rec::Keep, None));
+        assert_eq!(w.log.as_deref(), Some("router spinning (100% cpu, 0 B/s) but the last recovery was 100s ago (< 600s cooldown) — healing once that has passed"));
+        // Past the cooldown, or never recovered: it heals, and stamps the latch.
+        assert_eq!(recovery_hold(t, t - 600, 600), None);
+        assert_eq!(recovery_hold(t, 0, 600), None);
+        let h = spin_step(t, "77", 220, 0, Some(&p), 1, 0, recovery_hold(t, t - 600, 600), &k);
+        assert_eq!((h.healed, h.heal), (Rec::Write(t), Some((100, 0, 120))));
+        // A heal already done still says so first: the day's latch outranks
+        // the ten minutes.
+        let l = spin_step(t, "77", 220, 0, Some(&p), 1, t - 60, held, &k);
+        assert!(l.log.unwrap().contains("already healed once 1m ago"));
+        // The tick the caller then plans: the wait's line and no heal. Nothing
+        // recovers and the cooldown's stamp stays; with no heal on this tick,
+        // an upgrade waiting for a quiet moment reloads as on any healthy one.
+        let cfg = Config::default();
+        let mut o = upgraded("idle", false);
+        o.spin_log = w.log.clone();
+        o.spin = None;
+        let st = State { last_net_id: Some(o.net_id.clone()), last_recovery: o.now - 100, ..Default::default() };
+        assert_eq!(recovery_hold(o.now, st.last_recovery, cfg.health_cooldown), Some((100, 600)));
+        let n = netcheck(&o, &st, &cfg);
+        assert!(logs(&n).iter().any(|l| l.ends_with("— healing once that has passed")), "{:?}", n.actions);
+        assert!(!n.actions.iter().any(|a| matches!(a, Action::Recover(_))), "{:?}", n.actions);
+        assert_eq!(n.state.last_recovery, o.now - 100);
+        assert!(n.actions.contains(&Action::Reload("upgrade to rowt 3.11.0".into())), "{:?}", n.actions);
     }
 }

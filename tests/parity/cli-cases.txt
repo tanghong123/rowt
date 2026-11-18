@@ -246,13 +246,16 @@ PARITY_TIMEOUT=45 PARITY_NOTRACE=1 PARITY_SCENARIO=watch-no-ssid ROWT_CAPTIVE_UR
 # tick samples the router's CPU and traffic (watch.cpu, its epoch and pid
 # masked), counts pathological ticks (watch.cpustreak) and heals once
 # (watch.cpuheal). ROWT_CPU_SPIN_PCT=0 makes the stand-in router's 0% count as
-# high. The heal that really reloads is a watch-shadow case: its recovery
-# stamp is each run's own clock.
+# high. A heal inside the recovery cooldown waits and leaves the latch unset
+# (heal-held, #s106); one past it captures, stamps the latch and watch.restart
+# (this run's own stamps, masked) and reloads, and the router that comes back
+# (router-restart-ok's two files) runs with the sidecars kept off.
 PARITY_TIMEOUT=45 PARITY_NOTRACE=1 PARITY_SCENARIO=watch-spin-new-router ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
 PARITY_TIMEOUT=45 PARITY_NOTRACE=1 ROWT_CPU_SPIN_PCT=0 PARITY_SCENARIO=watch-spin-idle ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
 PARITY_TIMEOUT=45 PARITY_NOTRACE=1 ROWT_CPU_SPIN_PCT=0 PARITY_SCENARIO=watch-spin-latched ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
 PARITY_TIMEOUT=45 PARITY_NOTRACE=1 PARITY_SCENARIO=watch-spin-calm ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
 PARITY_TIMEOUT=45 PARITY_NOTRACE=1 ROWT_CPU_SPIN_PCT=0 PARITY_SCENARIO=watch-spin-heal-held ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
+PARITY_TIMEOUT=45 PARITY_NOTRACE=1 ROWT_METRICS=off ROWT_AUTO_FOLLOW=0 ROWT_CPU_SPIN_PCT=0 PARITY_SCENARIO=watch-spin-heal ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
 # rowt #s104: the first tick after an upgrade. Where this rowt renders what the
 # router runs, both sides record host.running.by as this version (the tree
 # shows it); where it renders something else, neither records it and nothing

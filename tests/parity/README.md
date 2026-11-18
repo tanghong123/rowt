@@ -431,14 +431,16 @@ Three limits, stated rather than implied:
   scenario that seeds one names the stand-in as `@ROUTER_PID@`, which
   `make_sandbox` fills once the `sleep` runs (#s105). The two runs of a case
   are seconds apart with two different stand-ins, so the tree compare
-  (`snap_norm`) masks `watch.cpu`'s pid, and an epoch in `watch.cpu` or
-  `watch.cpuheal` only when it is the run's own stamp (within five minutes
-  of now). The seeds carry nonzero CPU seconds and bytes, which a fresh
-  sample of the stand-in never has, and a heal already done is stamped in
-  2100, the same in both runs: so a sample left unwritten, or a latch
-  rewritten, still shows. A heal held by the recovery cooldown is cli-diff
-  only: the shell reads its clock for that cooldown after the 5 s evidence
-  capture, the planner before it.
+  (`snap_norm`) masks `watch.cpu`'s pid, and an epoch in `watch.cpu`,
+  `watch.cpuheal` or `watch.restart` only when it is the run's own stamp
+  (within five minutes of now). The seeds carry nonzero CPU seconds and
+  bytes, which a fresh sample of the stand-in never has, and a heal or a
+  recovery already done is stamped in 2100, the same in both runs: so a
+  sample left unwritten, or a latch rewritten, still shows, and a heal that
+  really recovers compares in cli-diff too (`watch-spin-heal`). So a case
+  that seeds one of these stamps seeds it outside that window (2100, or
+  `@NOW-600@` and older): a seed inside it would be masked, and a side that
+  wrongly re-stamped it would compare equal.
 * **A scenario can take a base file away.** Its overlay can only add files, so
   a scenario's `absent` lists, one per line, the base fixture's config files
   `make_sandbox` removes after the overlay (`direct-seed`: no

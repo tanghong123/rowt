@@ -65,7 +65,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.11.0"
+ROWT_VERSION="3.11.1"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -7122,6 +7122,16 @@ _watch_spin() { # $1=pid
   local last; last="$(cat "$WATCH_CPUHEAL" 2>/dev/null || echo 0)"
   if [ "$(( now - last ))" -lt "$CPU_HEAL_COOLDOWN" ]; then
     _spin_say "router spinning (${pct}% cpu, ${bps} B/s) but already healed once $(( (now - last) / 60 ))m ago — leaving it (degraded beats flapping)"
+    return 0
+  fi
+  # A heal the recovery cooldown would hold back waits for it (#s106): no
+  # latch, no capture, so the first tick past the cooldown heals. The rule is
+  # _watch_recover's (rowt_core::watch::recovery_hold), asked with the
+  # observation's clock as the planner asks it, so the shadow replays the same
+  # numbers; _watch_recover reads a later clock and so never holds what passed.
+  local lr ln="${_SH2_NOW:-$now}"; lr="$(cat "$WATCH_RESTART" 2>/dev/null || echo 0)"
+  if [ "${lr:-0}" != 0 ] && [ "$(( ln - lr ))" -lt "$HEALTH_COOLDOWN" ]; then
+    _spin_say "router spinning (${pct}% cpu, ${bps} B/s) but the last recovery was $(( ln - lr ))s ago (< ${HEALTH_COOLDOWN}s cooldown) — healing once that has passed"
     return 0
   fi
   printf '%s\n' "$now" > "$WATCH_CPUHEAL" 2>/dev/null || true

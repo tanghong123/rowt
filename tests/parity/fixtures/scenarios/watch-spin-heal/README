@@ -15,5 +15,7 @@ As watch-spin-heal-held, without the 2100 recovery stamp, so the recovery
 runs: the evidence, "router spinning: 0% cpu with 0 B/s over about 600s …", then
 "router spinning (0% cpu, no traffic) — recovering (cmd_reload)" and the
 reload. The sandbox's router comes back (router-restart-ok's two files), with
-the sidecars a start would launch kept off. A watch-shadow case only: the
-recovery stamps watch.restart with each run's own clock.
+the sidecars a start would launch kept off. watch.cpuheal and watch.restart
+take this run's stamps, which the tree compare masks (snap_norm), so the case
+runs in cli-diff (the latch is stamped by a heal that runs, #s106) as well as
+the watch shadow.

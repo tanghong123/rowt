@@ -74,11 +74,12 @@ PARITY_SCENARIO=watch-pin-dead-failover ROWT_CAPTIVE_URL=http://127.0.0.1:8099/s
 # observation (spin_log, spin). Idle: the first pathological tick. Latched:
 # healed already (stamped in 2100), so it leaves the router alone. Heal: the
 # second tick captures, says so, and recovers through the cooldown (the
-# sandbox's router comes back, the sidecars kept off). The cooldown-held heal
-# is cli-diff only: the shell reads its clock for the cooldown after the 5 s
-# capture, the planner before it, so its "N s ago" can differ.
+# sandbox's router comes back, the sidecars kept off). Held: a recovery ran
+# (stamped in 2100), so the heal waits for the cooldown without the latch
+# (#s106), and the planner gets no heal to hold.
 ROWT_CPU_SPIN_PCT=0 PARITY_SCENARIO=watch-spin-idle ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick | router busy but idle: 0% cpu, 0 B/s (1/2)
 ROWT_CPU_SPIN_PCT=0 PARITY_SCENARIO=watch-spin-latched ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick | ago — leaving it (degraded beats flapping)
+ROWT_CPU_SPIN_PCT=0 PARITY_SCENARIO=watch-spin-heal-held ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick | (< 600s cooldown) — healing once that has passed
 ROWT_METRICS=off ROWT_AUTO_FOLLOW=0 ROWT_CPU_SPIN_PCT=0 PARITY_SCENARIO=watch-spin-heal ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick | router spinning (0% cpu, no traffic) — recovering (cmd_reload)
 # rowt #s104: an upgrade's reload. Busy: the dry render differs, nothing is
 # quiet, the tick says once that it waits. Woke: the Mac woke a minute ago from

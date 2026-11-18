@@ -331,9 +331,9 @@ run_one() {      # $1=outdir  rest=rowt args
 }
 
 # The spin heal's records (#s105) carry the sandbox's own clock and stand-in
-# router: `watch.cpu` is "epoch cpusecs pid bytes" and `watch.cpuheal` the
-# epoch of the last heal, and the two runs of a case are seconds apart with two
-# different `sleep`s. So the pid is masked, and an epoch only when it is this
+# router: `watch.cpu` is "epoch cpusecs pid bytes", `watch.cpuheal` the epoch
+# of the last heal and `watch.restart` that of the last recovery (#s106), and
+# the two runs of a case are seconds apart with two different `sleep`s. So the pid is masked, and an epoch only when it is this
 # run's own stamp (within five minutes of now): a value the tick should have
 # kept (a 2100 heal) or replaced (a seed ten minutes old) still compares. The
 # scenarios seed nonzero CPU and byte counts, which a fresh sample of the
@@ -342,7 +342,7 @@ snap_norm() { # $1=file (relative, from snapshot_fs) $2=outdir
   local near='function near(x) { return x ~ /^[0-9]+$/ && x - now <= 300 && now - x <= 300 }'
   case "$1" in
     ./watch.cpu)     normalize "$1" "$2" | awk -v now="$(date +%s)" "$near"' near($1) { $1 = "<EPOCH>" } $3 ~ /^[0-9]+$/ { $3 = "<PID>" } { print }' ;;
-    ./watch.cpuheal) normalize "$1" "$2" | awk -v now="$(date +%s)" "$near"' near($1) { $1 = "<EPOCH>" } { print }' ;;
+    ./watch.cpuheal|./watch.restart) normalize "$1" "$2" | awk -v now="$(date +%s)" "$near"' near($1) { $1 = "<EPOCH>" } { print }' ;;
     *)               normalize "$1" "$2" ;;
   esac
 }

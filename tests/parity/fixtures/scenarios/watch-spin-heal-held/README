@@ -1,4 +1,4 @@
-watch-spin-heal-held — rowt #s105: the spin heal fires, inside the cooldown.
+watch-spin-heal-held — rowt #s106: a spin heal waits out the recovery cooldown.
 
 The machine is use-auto-unchanged's with the router up (host.pid.self) and a
 steady-state tick: watch.net and the proxy getters unchanged, the corp lane
@@ -12,8 +12,13 @@ unwritten shows in the tree; the compare masks the pid and this run's own
 stamps only (snap_norm).
 
 As watch-spin-idle (ROWT_CPU_SPIN_PCT=0) with a streak of 1 and no heal yet:
-this second pathological tick heals. The evidence is captured (log/spin-*.txt,
-with a 5 s `sample`), watch.cpuheal takes this tick's stamp and watch.cpustreak
-reads 2. watch.restart is seeded in 2100, so the recovery lands on the shared
-cooldown line and does not reload: the tree compares in cli-diff, where the
-stamp of a real recovery would differ between the two runs.
+this second pathological tick would heal. But watch.restart is seeded in 2100,
+inside the recovery cooldown on any clock, so the heal waits: watch.cpustreak
+reads 2, watch.cpuheal stays unwritten (the latch is left for the heal that
+runs), nothing is captured and the spin heal does not reload. The log says
+"… but the last recovery was -…s ago (< 600s cooldown) — healing once that
+has passed". With no heal on this tick, the upgrade check (#s104) runs as on
+any healthy tick: this rowt renders what the router runs, so both sides adopt
+the version (host.json.by, host.running.by).
+Until #s106 both sides stamped watch.cpuheal here, and the router then spun
+on for a day after a heal that never ran.

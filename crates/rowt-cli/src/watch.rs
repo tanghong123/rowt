@@ -132,8 +132,9 @@ pub(crate) fn router_bytes_total(ctx: &Ctx) -> Option<u64> {
 /// evidence is written first (`_watch_capture_spin`), since the reload
 /// destroys it. Returns the line for the log and the heal's recovery reason,
 /// both for the planner. In the shell's order: `ps`, then the clash API, then
-/// the check that `ps` answered.
-fn spin_check(ctx: &Ctx) -> (Option<String>, Option<String>) {
+/// the check that `ps` answered. `held` is whether the recovery cooldown would
+/// hold a heal back (`recovery_hold`, #s106), from the planner's own numbers.
+fn spin_check(ctx: &Ctx, held: Option<(i64, i64)>) -> (Option<String>, Option<String>) {
     let pid = read(&ctx.pidfile()).trim().to_string();
     if pid.is_empty() {
         return (None, None);
@@ -147,7 +148,7 @@ fn spin_check(ctx: &Ctx) -> (Option<String>, Option<String>) {
     let _ = std::fs::write(f("watch.cpu"), CpuSample { epoch: now, cpu, pid: pid.clone(), bytes }.line());
     let num = |n: &str| read(&f(n)).trim().parse::<i64>().unwrap_or(0);
     let k = spin_knobs();
-    let st = spin_step(now, &pid, cpu, bytes, prev.as_ref(), num("watch.cpustreak"), num("watch.cpuheal"), &k);
+    let st = spin_step(now, &pid, cpu, bytes, prev.as_ref(), num("watch.cpustreak"), num("watch.cpuheal"), held, &k);
     for (name, r) in [("watch.cpustreak", st.streak), ("watch.cpuheal", st.healed)] {
         match r {
             Rec::Keep => {}
@@ -1903,9 +1904,12 @@ fn tick(ctx: &Ctx, self_bin: &Path) {
             obs_write(ctx, "watch.last", "watchdog", &probe_target(ctx), result, delay);
         }
         // rowt #s105: the spin heal's sample, where `_watch_health` takes it:
-        // the probe answered, so the network and the tunnel both work.
+        // the probe answered, so the network and the tunnel both work. The
+        // cooldown is asked with netcheck's clock and state, so a heal it lets
+        // through is never held by `recover_or_hold` (#s106).
         if !iface_moved && !proxy_wrong && obs2.mode != "local" && online && hb {
-            let (log, heal) = spin_check(ctx);
+            let held = rowt_core::watch::recovery_hold(obs2.now, st.last_recovery, cfg.health_cooldown);
+            let (log, heal) = spin_check(ctx, held);
             obs2.spin_log = log;
             obs2.spin = heal;
         }
