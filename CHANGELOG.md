@@ -17,7 +17,7 @@ release is cut; everything under Unreleased ships with the next one.
   "false", and the importer read any non-empty string as on, so AnyTLS,
   Trojan and TUIC servers imported that way skipped certificate checks. Now
   only 1 or true (an int, a bool, or a string in any case) turns them off.
-  Hysteria2 has the same fix in contributor PR #7. A server imported before
+  Hysteria2 has the same fix, from junhuaw (PR #7). A server imported before
   keeps what it was given, and so does a `server dump` or config bundle made
   from it. To import one again from Shadowrocket: run `rowt server import`
   while it is still in the pool (that clears its old copy from the review
