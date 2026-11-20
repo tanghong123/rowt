@@ -5,6 +5,8 @@ release is cut; everything under Unreleased ships with the next one.
 
 ## Unreleased
 
+## 3.11.2 — 2026-11-20
+
 - **A spin heal that has to wait no longer gives up for a day.** When the
   watchdog had recovered the router less than 10 minutes before
   (`ROWT_HEALTH_COOLDOWN`), a heal for a spinning router was held back, yet
