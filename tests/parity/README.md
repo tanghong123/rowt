@@ -327,9 +327,12 @@ places the Rust is deliberately narrower than the Python, both named in
 `rowt-core::bplist`: XML plists are not read, only `bplist00`, which is what
 Shadowrocket writes and all `bin/rowt` can produce; and an integer wider than
 16 bytes, which Apple's writer never emits, is refused where `plistlib` hands
-back a bignum. The corpus contains no XML plist, and its byte flips never write
-the `0x15`–`0x1f` markers, because a corpus that avoids a gap is not evidence
-the gap is closed — the module doc is.
+back a bignum. The corpus contains no XML plist, and no store in it has
+`plistlib` read a `0x15`–`0x1f` marker: its byte flips never write one, and
+damage that would still send the reader to one already in the file (a flipped
+offset or ref, or a truncation that makes the trailer out of other bytes; a ref
+to objects 21–31 is such a byte) is drawn again. A corpus that avoids a gap is
+not evidence the gap is closed — the module doc is.
 
 `vless-diff`, `merge-diff`, `foreign-diff` and `sr-diff` are the gates that
 compare stderr, because it is where stderr is a result: `server add` and the
