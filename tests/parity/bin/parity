@@ -139,6 +139,49 @@ exit 142 if $timedout;
 exit($s & 127 ? 128 + ($s & 127) : $s >> 8);
 '
 
+# The same wrapper, timed by progress instead of by the clock (rowt #s112).
+# Used as: perl -e "$TMO_STALL" <cap> <quiet> <heartbeat file> <cmd> [args…]
+#
+# A total alarm measures the box as much as the case. A watch tick is a few
+# dozen shimmed calls and a few real sleeps; on a loaded box every call is a
+# slow child, and a tick that was only slow was killed at 25 s, half-way, with
+# nothing logged. watch-diff then reported the shell as deciding nothing: a
+# behaviour change, made by the box. Every shimmed call appends to the trace,
+# so the trace is a heartbeat, and this kills the case only when it has not
+# grown for <quiet> seconds (no single step of a tick comes near that), or
+# when the case has run <cap> seconds, the backstop for a loop that calls
+# shims forever. Session, group kill and exit status as $TMO, 142 included.
+TMO_STALL='
+use POSIX ();
+use Time::HiRes ();
+my ($cap, $quiet, $beat) = (shift, shift, shift);
+POSIX::setsid() > 0 or POSIX::setpgid(0, 0);
+$SIG{TERM} = "IGNORE";
+my $pid = fork();
+defined $pid or exit 127;
+if ($pid == 0) { $SIG{TERM} = "DEFAULT"; exec { $ARGV[0] } @ARGV; exit 127 }
+my $start = Time::HiRes::time();
+my ($last, $size, $timedout, $s) = ($start, -1, 0, 0);
+while (1) {
+  my $got = waitpid($pid, POSIX::WNOHANG());
+  if ($got == $pid) { $s = $?; last }
+  last if $got < 0;
+  my $now = Time::HiRes::time();
+  my $sz = (stat $beat)[7]; $sz = -1 unless defined $sz;
+  ($size, $last) = ($sz, $now) if $sz != $size;
+  if ($now - $last >= $quiet || $now - $start >= $cap) {
+    $timedout = 1; kill "TERM", -$$; waitpid($pid, 0); last;
+  }
+  Time::HiRes::sleep(0.05);
+}
+kill "TERM", -$$;
+exit 142 if $timedout;
+exit($s & 127 ? 128 + ($s & 127) : $s >> 8);
+'
+# watch-diff and watch-shadow opt in by setting _stall=1 around run_one;
+# PARITY_TIMEOUT is then the quiet time, and this the cap.
+STALL_CAP="${PARITY_STALL_CAP:-600}"
+
 # ---------------------------------------------------------------- matrix
 
 matrix_rows() {  # id<TAB>flags<TAB>args…
@@ -312,6 +355,9 @@ run_one() {      # $1=outdir  rest=rowt args
   # moves between the two runs. Inside the sandbox it exists only when the
   # scenario ships env/corp-health. Before ENVS, so a case can still override.
   # ROWT_IMPL: the shell unless asked, never the caller's — see run_in.
+  # _stall: the caller's opt-in to `$TMO_STALL` (see there).
+  local -a tmo=(perl -e "$TMO" "$TIMEOUT")
+  [ "${_stall:-0}" = 1 ] && tmo=(perl -e "$TMO_STALL" "$STALL_CAP" "$TIMEOUT" "$out/trace")
   env -i \
     ROWT_CAPTIVE_RETRY= \
     ROWT_CORP_HEALTH="$out/env/corp-health" \
@@ -323,7 +369,7 @@ run_one() {      # $1=outdir  rest=rowt args
     TERM=dumb LC_ALL=C TZ=UTC \
     PARITY_TRACE="$out/trace" \
     PARITY_ENV="$out/env" \
-    perl -e "$TMO" "$TIMEOUT" \
+    "${tmo[@]}" \
     bash "$ROWT" "$@" >"$out/stdout" 2>"$out/stderr" || rc=$?
   echo "$rc" > "$out/rc"
   [ -f "$out/trace" ] || : > "$out/trace"   # exists even when nothing was shimmed
@@ -1213,7 +1259,7 @@ cmd_lanes_diff() {
 cmd_watch_diff() {
   local rust="${PARITY_RUST_WATCH:-$ROOT/target/release/rowt-watch-tick}"
   [ -x "$rust" ] || die "no rust planner at $rust — cargo build --release -p rowt-core"
-  local fails=0 total=0 case
+  local fails=0 total=0 case _stall=1
   for case in "$DIR"/watch-cases/*.json; do
     total=$((total + 1))
     local name; name="$(basename "$case" .json)"
@@ -1221,6 +1267,15 @@ cmd_watch_diff() {
     local out; out="$(mktemp -d "${TMPDIR:-/tmp}/parity-watch.XXXXXX")"
     # shellcheck disable=SC2086 — the recorded invocation is intentionally split
     run_one "$out" $run
+    # A tick the harness killed decided nothing anyone can compare; read as
+    # actions it is an empty list, which differs from any plan the way a real
+    # behaviour change would. Say which it was.
+    if [ "$(cat "$out/rc" 2>/dev/null)" = 142 ]; then
+      fails=$((fails + 1))
+      echo "[$name] DID NOT FINISH — no progress for ${TIMEOUT}s, or past ${STALL_CAP}s in all; nothing compared"
+      echo "    artifacts: $out"
+      continue
+    fi
 
     # bash's decisions, as effects
     sed -e 's/^[0-9-]* [0-9:]*  //' "$out/home/rowt/log/watch.log" 2>/dev/null | sed 's/^/log /' > "$out/bash.acts" || : > "$out/bash.acts"
@@ -1275,7 +1330,7 @@ cmd_watch_shadow() {
   # An optional substring picks one case — selftest mutates one decision at a
   # time and has no reason to pay for the whole list per mutation.
   local only="${1:-}"
-  local fails=0 total=0 line
+  local fails=0 total=0 line _stall=1
   while IFS= read -r line; do
     case "$line" in ''|'#'*) continue ;; esac
     [ -n "$only" ] && case "$line" in *"$only"*) ;; *) continue ;; esac
@@ -1310,7 +1365,11 @@ cmd_watch_shadow() {
     run_one "$out" ROWT_WATCH_SHADOW=1 $line
     local log="$out/home/rowt/log/parity.log"
     local id; id="$(printf '%s' "$line" | sed -e 's/ *watch tick$//' -e 's/[A-Z_]*=//g' -e 's|http://127.0.0.1:8099/||' -e 's|http://127.0.0.1:9/x|unreachable|' -e 's/  */-/g')"
-    if [ ! -s "$log" ]; then
+    if [ "$(cat "$out/rc" 2>/dev/null)" = 142 ]; then
+      # Killed by the harness, not stopped by the shell: see watch-diff.
+      fails=$((fails + 1)); echo "[$id] DID NOT FINISH — no progress for ${TIMEOUT}s, or past ${STALL_CAP}s in all"
+      echo "    artifacts: $out"
+    elif [ ! -s "$log" ]; then
       # Silence is the failure mode this gate exists to catch: an unarmed shadow,
       # a missing planner, a tick that exited before the comparator ran.
       fails=$((fails + 1)); echo "[$id] NO VERDICT — the shadow never ran"

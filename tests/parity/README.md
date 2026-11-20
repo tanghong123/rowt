@@ -177,6 +177,17 @@ cron job would get, not a test-only path. The wrapper that arranges this also
 signals the whole process group on timeout, so a `<lane> log` case's `tail -f`
 dies with the case instead of outliving the run.
 
+That timeout is a total, `PARITY_TIMEOUT` seconds (25), except in `watch-diff`
+and `watch-shadow`. There a tick is killed only when the trace, which every
+shimmed call appends to, has not grown for `PARITY_TIMEOUT` seconds, or after
+`PARITY_STALL_CAP` seconds in all (600), the backstop for a loop. A total
+measured the box as much as the tick: on a loaded box each shimmed call is a
+slow child, and a tick that was only slow was killed half-way with nothing
+logged, which `watch-diff` reported as a behaviour change (rowt #s112). Both
+gates now report a killed tick as `DID NOT FINISH`, never as a difference, and
+`selftest` keeps the report of a pre-mutation run that fails, printing its
+path.
+
 ### The bundle fixtures
 
 Five `.tgz` files under `fixtures/` are what `config import` is pointed at:

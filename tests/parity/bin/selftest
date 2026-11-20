@@ -75,8 +75,20 @@ tmp="$(mktemp -d "${TMPDIR:-/tmp}/parity-selftest.XXXXXX")"
 # copy's root to <REPO>, and a sandbox path nested under it would be rewritten
 # by that rule before the run-scoped one could claim it.
 sandboxes="$(mktemp -d "${TMPDIR:-/tmp}/parity-selftest-tmp.XXXXXX")"
-trap 'rm -rf "$tmp" "$sandboxes"' EXIT
+# The other way round for a gate expected to PASS (the pristine run before a
+# mutation): when it fails, its report is the evidence, so it is kept outside
+# both directories above, which the trap removes. Selftest 9 failed once on a
+# loaded box with its report sent to /dev/null, and nothing said which case or
+# why (rowt #s112).
+kept="$(mktemp -d "${TMPDIR:-/tmp}/parity-selftest-kept.XXXXXX")"
+trap 'rm -rf "$tmp" "$sandboxes"; rmdir "$kept" 2>/dev/null || true' EXIT
 export TMPDIR="$sandboxes"
+# keep <name> <cmd…>: run it, its report in $kept/<name>.log, kept only when it fails.
+keep() {
+  local f="$kept/$1.log"; shift
+  if "$@" > "$f" 2>&1; then rm -f "$f"; return 0; fi
+  return 1
+}
 # A cli-diff over just the cases a mutation can reach.
 #
 # Twice over, this is the right shape. It is faster — the sweep now brings a
@@ -306,8 +318,8 @@ else
   # trace, which this gate compares — 6/8 before anything here was touched.
   # 10b says the same about the shadow, and starts from a fresh copy too.
   command cp -f "$ROOT/bin/rowt" "$tmp/bin/rowt"
-  if ! "$P" watch-diff >/dev/null 2>&1; then
-    bad "watch-diff already fails before the mutation"
+  if ! keep watch-diff "$P" watch-diff; then
+    bad "watch-diff already fails before the mutation (its report: $kept/watch-diff.log)"
   else
     sed -i.bak 's/captive portal detected — proxy already off; waiting for login/captive portal detected — proxy already off; awaiting login/' "$tmp/bin/rowt"
     if ! grep -q 'awaiting login' "$tmp/bin/rowt"; then
@@ -361,8 +373,8 @@ else
   # than either case below is written for. 10c passed on that once — the mutation
   # was in place, the gate was green, and the tick never reached netcheck.
   command cp -f "$ROOT/bin/rowt" "$tmp/bin/rowt"
-  if ! "$P" watch-shadow portal >/dev/null 2>&1; then
-    bad "watch-shadow already fails before the mutation"
+  if ! keep shadow-portal "$P" watch-shadow portal; then
+    bad "watch-shadow already fails before the mutation (its report: $kept/shadow-portal.log)"
   else
     sed -i.bak2 's|^  obs="\${_SH_OBS:-}"|  _wobs "$_SH_CAP" "$_SH_INTENT" "$_SH_PROXY_INTENT"; obs="${_SH_OBS:-}"|' "$tmp/bin/rowt"
     if ! grep -q '_wobs "\$_SH_CAP"' "$tmp/bin/rowt"; then
@@ -385,8 +397,8 @@ if [ ! -x "$rwatch" ]; then
   echo "  skip — no release build"
 else
   command cp -f "$ROOT/bin/rowt" "$tmp/bin/rowt"
-  if ! "$P" watch-shadow net-moved >/dev/null 2>&1; then
-    bad "watch-shadow's net-moved case already fails before the mutation"
+  if ! keep shadow-net-moved "$P" watch-shadow net-moved; then
+    bad "watch-shadow's net-moved case already fails before the mutation (its report: $kept/shadow-net-moved.log)"
   else
     sed -i.bak3 's|--arg last "\$_SH2_LAST"|--arg last ""|' "$tmp/bin/rowt"
     if ! grep -q -- '--arg last ""' "$tmp/bin/rowt"; then
@@ -408,8 +420,8 @@ if [ ! -x "$rwatch" ]; then
   echo "  skip — no release build"
 else
   command cp -f "$ROOT/bin/rowt" "$tmp/bin/rowt"
-  if ! "$P" watch-shadow offline-probe >/dev/null 2>&1; then
-    bad "watch-shadow's offline-probe case already fails before the mutation"
+  if ! keep shadow-offline-probe "$P" watch-shadow offline-probe; then
+    bad "watch-shadow's offline-probe case already fails before the mutation (its report: $kept/shadow-offline-probe.log)"
   else
     sed -i.bak4 's|probe_offline:\$poff, ||' "$tmp/bin/rowt"
     if grep -q 'probe_offline:\$poff' "$tmp/bin/rowt"; then
@@ -944,8 +956,8 @@ else
   # shadow case is that check; here the retry gate is turned off and the gate
   # must notice.
   ln -sf "$rwatch" "$tmp/bin/rowt-watch-tick"
-  if ! "$P" watch-shadow 'ROWT_CAPTIVE_RETRY=0,0' >/dev/null 2>&1; then
-    bad "watch-shadow's burst case already fails before the mutation"
+  if ! keep shadow-burst "$P" watch-shadow 'ROWT_CAPTIVE_RETRY=0,0'; then
+    bad "watch-shadow's burst case already fails before the mutation (its report: $kept/shadow-burst.log)"
   else
     perl -0pi -e 's/if \[ "\$moved" = 1 \]; then/if [ "\$moved" = 2 ]; then/' "$tmp/bin/rowt"
     if grep -qF 'if [ "$moved" = 1 ]; then' "$tmp/bin/rowt"; then
@@ -1005,8 +1017,8 @@ else
   # the fallback concede and the case must go red — otherwise something else is
   # detecting the portal and the fallback is not being tested at all.
   ln -sf "$rwatch" "$tmp/bin/rowt-watch-tick"
-  if ! "$P" watch-shadow 'captive-no-dns' >/dev/null 2>&1; then
-    bad "the no-DNS case already fails before the mutation"
+  if ! keep shadow-captive-no-dns "$P" watch-shadow 'captive-no-dns'; then
+    bad "the no-DNS case already fails before the mutation (its report: $kept/shadow-captive-no-dns.log)"
   else
     # Anchor on the line's SHAPE, not its exact text: the previous version
     # pinned every character, so adding telemetry inside the `*)` arm made the
@@ -1622,8 +1634,8 @@ else
   # of the plan's own: a shell that reloads without it still logs the line the
   # case looks for, so only the comparison can see it.
   command cp -f "$ROOT/bin/rowt" "$tmp/bin/rowt"
-  if ! "$P" watch-shadow upgrade-woke >/dev/null 2>&1; then
-    bad "watch-shadow's upgrade-woke case already fails before the mutation"
+  if ! keep shadow-upgrade-woke "$P" watch-shadow upgrade-woke; then
+    bad "watch-shadow's upgrade-woke case already fails before the mutation (its report: $kept/shadow-upgrade-woke.log)"
   else
     perl -0pi -e 's|  _wact "mark-upgrade \$ROWT_VERSION"\n||' "$tmp/bin/rowt"
     if grep -qF '_wact "mark-upgrade' "$tmp/bin/rowt"; then
