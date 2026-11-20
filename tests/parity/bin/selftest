@@ -859,7 +859,10 @@ for n in $claimed; do
   # preroute first, and `grep -x --` after: several of these names begin with a
   # dash, which grep would otherwise read as its own flags.
   case " $preroute " in *" $n "*) continue ;; esac
-  printf '%s\n' "$answered" | grep -qxF -- "$n" && continue
+  # A here-string, not `printf | grep -q`: grep quits at the first match, the
+  # printf still writing gets a closed pipe, and pipefail reads the match as a
+  # miss. Fifth appearance of this trap; it only showed on a busy box (#s115).
+  grep -qxF -- "$n" <<<"$answered" && continue
   missing="$missing $n"
 done
 if [ -n "$missing" ]; then

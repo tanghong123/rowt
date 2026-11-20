@@ -1829,7 +1829,9 @@ cmd_cli_ledger() {
     for c in $arms; do
       total=$((total + 1))
       local has="legacy" g="—"
-      printf '%s\n' "$impl" | grep -qx "$c" && { has="**native**"; done_n=$((done_n + 1)); }
+      # A here-string, not `printf | grep -q`: under pipefail, grep quitting at
+      # the match while printf still writes reads the match as a miss (#s115).
+      grep -qx "$c" <<<"$impl" && { has="**native**"; done_n=$((done_n + 1)); }
       # The command must be the FIRST word of a case (after any leading
       # VAR=VALUE), or `status` matches the line `proxy status` and reports
       # itself covered by someone else's test.
