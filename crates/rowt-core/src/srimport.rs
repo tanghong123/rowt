@@ -195,6 +195,14 @@ fn str_or(a: Option<&PlVal>, default: &str) -> String {
     }
 }
 
+/// `_explicit_true`: `allowInsecure` turns certificate checks off only when it
+/// says so, as 1 or true (an int, a bool, or a string in any case). It used to
+/// be truthiness, ported from the Python's `bool()`, under which the string
+/// "0" or "false" a store can hold meant on.
+fn explicit_true(a: Option<&PlVal>) -> bool {
+    matches!(str_or(a, "0").to_lowercase().as_str(), "1" | "true")
+}
+
 /// `str(x)` — PRESENCE, so a missing key is the text `None` and a present empty
 /// string stays empty. The distinction matters at `str(s.get("type"))`, where a
 /// `type` of `""` must not read as `None`.
@@ -467,9 +475,7 @@ pub fn to_anytls(s: &Entry, tag: &str) -> R<Option<Value>> {
     out.insert("server".into(), Value::String(py_str_top(host)));
     out.insert("server_port".into(), Value::from(port_of(s)?));
     out.insert("password".into(), Value::String(py_str_top(pw.unwrap())));
-    // `bool("0")` is True — a string flag in the store means "on" whatever it
-    // says.
-    out.insert("tls".into(), tls_block(&sni, None, Some(truthy(get(s, "allowInsecure")))));
+    out.insert("tls".into(), tls_block(&sni, None, Some(explicit_true(get(s, "allowInsecure")))));
     Ok(Some(Value::Object(out)))
 }
 
@@ -672,7 +678,7 @@ pub fn to_trojan(s: &Entry, tag: &str) -> R<Option<Value>> {
     let mut tls = Map::new();
     tls.insert("enabled".into(), Value::Bool(true));
     tls.insert("server_name".into(), Value::String(sni));
-    tls.insert("insecure".into(), Value::Bool(truthy(get(s, "allowInsecure"))));
+    tls.insert("insecure".into(), Value::Bool(explicit_true(get(s, "allowInsecure"))));
     let alpn = str_or(get(s, "alpn"), "");
     if !alpn.is_empty() {
         tls.insert("alpn".into(), alpn_list(&alpn));
@@ -770,7 +776,7 @@ pub fn to_tuic(s: &Entry, tag: &str) -> R<Option<Value>> {
     let mut tls = Map::new();
     tls.insert("enabled".into(), Value::Bool(true));
     tls.insert("server_name".into(), Value::String(sni));
-    tls.insert("insecure".into(), Value::Bool(truthy(get(s, "allowInsecure"))));
+    tls.insert("insecure".into(), Value::Bool(explicit_true(get(s, "allowInsecure"))));
     tls.insert("alpn".into(), alpn_list(&str_or(get(s, "alpn"), "h3")));
     let mut out = Map::new();
     out.insert("type".into(), Value::String("tuic".into()));
@@ -1443,11 +1449,20 @@ mod tests {
     }
 
     #[test]
-    fn allow_insecure_is_truthiness_so_the_string_zero_means_yes() {
-        let e = entry(&[("host", s("h")), ("password", s("p")), ("allowInsecure", s("0"))]);
-        assert_eq!(to_anytls(&e, "T").unwrap().unwrap()["tls"]["insecure"], json!(true));
-        let e = entry(&[("host", s("h")), ("password", s("p")), ("allowInsecure", PlVal::Int(0))]);
-        assert_eq!(to_anytls(&e, "T").unwrap().unwrap()["tls"]["insecure"], json!(false));
+    fn allow_insecure_turns_checks_off_only_when_it_says_so() {
+        // The string "0" a store can hold used to read as on, through `bool()`.
+        for (flag, expected) in [(s("0"), false), (s("false"), false), (s("False"), false), (s(""), false), (s("unknown"), false),
+            (PlVal::Int(0), false), (PlVal::Bool(false), false), (PlVal::None, false), (PlVal::Int(2), false), (PlVal::Real(1.0), false),
+            (s("1"), true), (s("true"), true), (s("TRUE"), true), (PlVal::Int(1), true), (PlVal::Bool(true), true)] {
+            let e = entry(&[("host", s("h")), ("password", s("p")), ("allowInsecure", flag.clone())]);
+            assert_eq!(to_anytls(&e, "T").unwrap().unwrap()["tls"]["insecure"], json!(expected), "anytls {flag:?}");
+            let mut e = trojan_entry();
+            set(&mut e, "allowInsecure", flag.clone());
+            assert_eq!(to_trojan(&e, "T").unwrap().unwrap()["tls"]["insecure"], json!(expected), "trojan {flag:?}");
+            let mut e = tuic_entry();
+            set(&mut e, "allowInsecure", flag.clone());
+            assert_eq!(to_tuic(&e, "T").unwrap().unwrap()["tls"]["insecure"], json!(expected), "tuic {flag:?}");
+        }
     }
 
     #[test]
