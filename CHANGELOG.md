@@ -12,6 +12,19 @@ release is cut; everything under Unreleased ships with the next one.
   with the log saying "already healed once". Now the heal waits for the
   cooldown without recording a heal, and the first tick past it heals.
   Both watchdogs (rowt-rs and the shell) had this.
+- **A Shadowrocket import keeps certificate checks on unless the entry turns
+  them off.** Shadowrocket can store `allowInsecure` as the string "0" or
+  "false", and the importer read any non-empty string as on, so AnyTLS,
+  Trojan and TUIC servers imported that way skipped certificate checks. Now
+  only 1 or true (an int, a bool, or a string in any case) turns them off.
+  Hysteria2 has the same fix in contributor PR #7. A server imported before
+  keeps what it was given, and so does a `server dump` or config bundle made
+  from it. To import one again from Shadowrocket: run `rowt server import`
+  while it is still in the pool (that clears its old copy from the review
+  file), then `rowt server rm <tag>` and `rowt server import`, edit
+  `~/.config/rowt/import-review.json` down to the servers you mean to bring
+  in (`--apply` takes everything left in it), and run
+  `rowt server import --apply`.
 
 ## 3.11.0 — 2026-11-18
 

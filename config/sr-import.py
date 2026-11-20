@@ -114,6 +114,13 @@ def _load_servers(store: str) -> list[dict]:
     return out
 
 
+def _explicit_true(v: object) -> bool:
+    """`allowInsecure` turns certificate checks off only when it says so, as 1
+    or true (an int, a bool, or a string in any case). It used to be `bool()`,
+    under which the string "0" or "false" a store can hold meant on."""
+    return str(v or "0").lower() in ("1", "true")
+
+
 def _to_vless(s: dict, tag: str) -> dict | None:
     host, port = s.get("host"), s.get("port")
     # Shadowrocket stores the real VLESS id in its generic `password` field (the
@@ -201,7 +208,7 @@ def _to_anytls(s: dict, tag: str) -> dict | None:
         "tls": {
             "enabled": True,
             "server_name": sni,
-            "insecure": bool(s.get("allowInsecure")),
+            "insecure": _explicit_true(s.get("allowInsecure")),
             "utls": {"enabled": True, "fingerprint": "chrome"},
         },
     }
@@ -363,7 +370,7 @@ def _to_trojan(s: dict, tag: str) -> dict | None:
     tls: dict = {
         "enabled": True,
         "server_name": str(s.get("peer") or host),
-        "insecure": bool(s.get("allowInsecure")),
+        "insecure": _explicit_true(s.get("allowInsecure")),
     }
     alpn = str(s.get("alpn") or "")
     if alpn:
@@ -439,7 +446,7 @@ def _to_tuic(s: dict, tag: str) -> dict | None:
     tls: dict = {
         "enabled": True,
         "server_name": str(s.get("peer") or host),
-        "insecure": bool(s.get("allowInsecure")),
+        "insecure": _explicit_true(s.get("allowInsecure")),
     }
     alpn = str(s.get("alpn") or "h3")
     if alpn:
