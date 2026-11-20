@@ -186,7 +186,12 @@ slow child, and a tick that was only slow was killed half-way with nothing
 logged, which `watch-diff` reported as a behaviour change (rowt #s112). Both
 gates now report a killed tick as `DID NOT FINISH`, never as a difference, and
 `selftest` keeps the report of a pre-mutation run that fails, printing its
-path.
+path. The shell side of `golden`, `classify-matrix`, `lanes-diff`,
+`render-matrix`, `live-fixtures` and `replay-bundle` has no short timeout at
+all, only the `PARITY_STALL_CAP` backstop: a render, an explain or a lane edit
+waits on nothing, so 25 s only measured the box, and on a busy one it cut a
+render off half-written (rowt #s116). `cli-diff` keeps `PARITY_TIMEOUT`,
+because its cases that wait on a router rely on it.
 
 ### The bundle fixtures
 

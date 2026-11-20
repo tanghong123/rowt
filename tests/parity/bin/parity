@@ -179,7 +179,8 @@ exit 142 if $timedout;
 exit($s & 127 ? 128 + ($s & 127) : $s >> 8);
 '
 # watch-diff and watch-shadow opt in by setting _stall=1 around run_one;
-# PARITY_TIMEOUT is then the quiet time, and this the cap.
+# PARITY_TIMEOUT is then the quiet time, and this the cap. run_in, the shell
+# side of the gates that never wait on anything, is bounded by this alone.
 STALL_CAP="${PARITY_STALL_CAP:-600}"
 
 # ---------------------------------------------------------------- matrix
@@ -323,6 +324,10 @@ run_in() {       # $1=outdir (sandbox already built)  rest=rowt args — stdout 
   # on both sides of every gate built on this function — passing whatever
   # rowt-rs did. PARITY_BASH_IMPL is the deliberate way in, as for cli-diff;
   # a case's own ROWT_IMPL= still wins, being in ENVS after it. selftest 50.
+  # Bounded by the cap, not PARITY_TIMEOUT: nothing run here waits on anything
+  # (a render, an explain, a lane edit take seconds), so the alarm is only
+  # there for a hang. At 25 s it cut a render off half-written on a busy box,
+  # and render-matrix read that as "no host.json" (rowt #s116).
   env -i \
     ROWT_CAPTIVE_RETRY= \
     ROWT_CORP_HEALTH="$out/env/corp-health" \
@@ -334,7 +339,7 @@ run_in() {       # $1=outdir (sandbox already built)  rest=rowt args — stdout 
     TERM=dumb LC_ALL=C TZ=UTC \
     PARITY_TRACE="$out/trace" \
     PARITY_ENV="$out/env" \
-    perl -e "$TMO" "$TIMEOUT" \
+    perl -e "$TMO" "$STALL_CAP" \
     bash "$ROWT" "$@" 2>/dev/null || true
 }
 
