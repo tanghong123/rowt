@@ -78,7 +78,7 @@ PARITY_SCENARIO=corp-synced corp add new.corp.example
 PARITY_SCENARIO=corp-synced corp add 192.0.2.0/24
 PARITY_SCENARIO=corp-synced corp add new.corp.example second.corp.example
 PARITY_SCENARIO=corp-synced escape add new.example
-# Every lane rule renders as a rule-set file under rule-sets/ (48 banded lane
+# Every lane rule renders as a rule-set file under rule-sets/ (64 banded lane
 # sets and corp-cidr.json), which fsstate compares byte for byte, modes too.
 # The synced DHCP domains rank by depth with the hand entries, in the router
 # and in explain alike (see the corp-sync-shadowed README).
@@ -97,6 +97,34 @@ PARITY_SCENARIO=render-local explain sub.example.net
 PARITY_SCENARIO=render-local explain ads.example
 PARITY_SCENARIO=render-local explain intranet.corp.example
 PARITY_SCENARIO=render-local-precedence explain api.foo.com
+# The cached geosite sets, asked through sing-box's `rule-set match` in render
+# order, after the hand lists and before the lookup (#s96; the scenarios'
+# READMEs): a set's hit, the ad set's, a name no set lists (with the unreadable
+# and the uncached set's notes), a hand-list hit and an address the sets never
+# see, and a set's hit in local mode.
+PARITY_SCENARIO=explain-geosite explain registry.pkg.example
+PARITY_SCENARIO=explain-geosite explain tracker.pixel.example
+PARITY_SCENARIO=explain-geosite explain unlisted.example
+PARITY_SCENARIO=explain-geosite explain example.com
+PARITY_SCENARIO=explain-geosite explain 198.51.100.7
+PARITY_SCENARIO=explain-geosite-local explain registry.pkg.example
+# The direct lane (#s98): a hand list, so ahead of the geosite sets — a name
+# geosite:github lists goes direct by it — and ranked with the other hand lists
+# by depth (dl.example.com under escape's example.com; an exact host under
+# escape's sub.example.net, and what is under that host); a tie with escape
+# goes to escape, the router's set order.
+PARITY_SCENARIO=explain-geosite explain registry.npm.example
+explain dl.example.com
+explain mirror.sub.example.net
+explain sub.mirror.sub.example.net
+explain direct.example
+PARITY_SCENARIO=direct-tie explain www.example.com
+PARITY_SCENARIO=render-local explain dl.example.com
+# …and under a router started before the lane existed: a note says it does not
+# route by the entry until a reload; a name the lane does not hold gets none.
+PARITY_SCENARIO=direct-router-old explain dl.example.com
+PARITY_SCENARIO=direct-router-old explain example.com
+PARITY_SCENARIO=lanes-live explain dl.example.com
 PARITY_SCENARIO=render-local escape list
 
 # newly ported: version, the proxy read paths, and lane import
@@ -214,6 +242,36 @@ PARITY_TIMEOUT=45 PARITY_NOTRACE=1 PARITY_SCENARIO=watch-pin-held-failover ROWT_
 PARITY_TIMEOUT=45 PARITY_NOTRACE=1 PARITY_SCENARIO=watch-offline-probe ROWT_IFACE=en0 ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
 # …and a Wi-Fi whose name networksetup will not give: no SSID, not the sentence.
 PARITY_TIMEOUT=45 PARITY_NOTRACE=1 PARITY_SCENARIO=watch-no-ssid ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
+# rowt #s105: the spin heal, which rowt-rs did not have until then. A healthy
+# tick samples the router's CPU and traffic (watch.cpu, its epoch and pid
+# masked), counts pathological ticks (watch.cpustreak) and heals once
+# (watch.cpuheal). ROWT_CPU_SPIN_PCT=0 makes the stand-in router's 0% count as
+# high. A heal inside the recovery cooldown waits and leaves the latch unset
+# (heal-held, #s106); one past it captures, stamps the latch and watch.restart
+# (this run's own stamps, masked) and reloads, and the router that comes back
+# (router-restart-ok's two files) runs with the sidecars kept off.
+PARITY_TIMEOUT=45 PARITY_NOTRACE=1 PARITY_SCENARIO=watch-spin-new-router ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
+PARITY_TIMEOUT=45 PARITY_NOTRACE=1 ROWT_CPU_SPIN_PCT=0 PARITY_SCENARIO=watch-spin-idle ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
+PARITY_TIMEOUT=45 PARITY_NOTRACE=1 ROWT_CPU_SPIN_PCT=0 PARITY_SCENARIO=watch-spin-latched ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
+PARITY_TIMEOUT=45 PARITY_NOTRACE=1 PARITY_SCENARIO=watch-spin-calm ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
+PARITY_TIMEOUT=45 PARITY_NOTRACE=1 ROWT_CPU_SPIN_PCT=0 PARITY_SCENARIO=watch-spin-heal-held ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
+PARITY_TIMEOUT=45 PARITY_NOTRACE=1 ROWT_METRICS=off ROWT_AUTO_FOLLOW=0 ROWT_CPU_SPIN_PCT=0 PARITY_SCENARIO=watch-spin-heal ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
+# rowt #s104: the first tick after an upgrade. Where this rowt renders what the
+# router runs, both sides record host.running.by as this version (the tree
+# shows it); where it renders something else, neither records it and nothing
+# reloads (busy: no wake, no traffic sample yet). At a quiet moment (idle: a
+# recorded verdict and ten low-traffic minutes) both reload, and the router
+# that comes back (router-restart-ok's two files) runs this version's render.
+PARITY_TIMEOUT=45 PARITY_NOTRACE=1 PARITY_SCENARIO=watch-upgrade-same ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
+PARITY_TIMEOUT=45 PARITY_NOTRACE=1 PARITY_SCENARIO=watch-upgrade-busy ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
+PARITY_TIMEOUT=45 PARITY_NOTRACE=1 ROWT_METRICS=off ROWT_AUTO_FOLLOW=0 PARITY_SCENARIO=watch-upgrade-idle ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
+# …and the first tick that finds it different, a minute after a wake: the dry
+# render, then the reload, in one tick.
+PARITY_TIMEOUT=45 PARITY_NOTRACE=1 ROWT_METRICS=off ROWT_AUTO_FOLLOW=0 PARITY_SCENARIO=watch-upgrade-woke ROWT_CAPTIVE_URL=http://127.0.0.1:8099/success watch tick
+# …and `status` while that reload waits says so, in one line; after the one
+# reload failed, it says that instead.
+PARITY_SCENARIO=upgrade-pending-status status
+PARITY_SCENARIO=upgrade-failed-status status
 
 # static text and log readers, extracted from the shell at build time
 shell-init
@@ -325,6 +383,34 @@ escape errors
 corp errors 1h
 block errors
 direct errors
+direct
+# The direct lane's edits (#s98), like the other lanes': the audit's LANE lines
+# say `none` for "in no lane", so `none -> direct` and `escape -> direct` read
+# apart from an unroute. A geosite set and an address are declined.
+direct list
+direct dump
+direct add new.example
+direct add example.com
+direct add --domain exact.direct.example
+direct add geosite:github
+direct add 198.51.100.0/24 ok.example
+direct add 203.0.113.5
+direct add com
+direct add --no-reload batched.example
+direct rm direct.example
+direct rm absent.example
+direct import tests/parity/fixtures/import-list.txt
+direct clear
+escape add dl.example.com
+block rm ads.example
+PARITY_SCENARIO=direct-seed direct list
+PARITY_SCENARIO=direct-seed escape list
+PARITY_SCENARIO=direct-seed escape add new.example
+# A lane file that is a dangling link: the seed cannot write through it, both
+# sides leave the link, and every lane lists, the dangling one as empty.
+PARITY_SCENARIO=direct-dangling direct list
+PARITY_SCENARIO=direct-dangling escape list
+PARITY_SCENARIO=direct-tie render
 # `log` is `tail -f`: both sides are expected to be killed by the alarm, so
 # it gets a short one rather than a minute of proving they hang alike.
 PARITY_TIMEOUT=3 direct log
@@ -663,6 +749,9 @@ PARITY_SCENARIO=lanes-live corp add 192.0.2.0/24
 PARITY_SCENARIO=lanes-live escape clear
 PARITY_SCENARIO=lanes-live escape add --no-reload batched.example
 PARITY_SCENARIO=lanes-live escape add present.example present.example
+PARITY_SCENARIO=lanes-live direct add new.example
+PARITY_SCENARIO=lanes-live direct add example.com
+PARITY_SCENARIO=lanes-live direct rm dl.example.com
 ROWT_LANES_HOT=0 PARITY_SCENARIO=lanes-live escape add new.example
 ROWT_CORP_HOT=0 PARITY_SCENARIO=lanes-live escape add new.example
 # A CIDR-looking line in the escape lane is not a suffix: both renders leave it
@@ -979,6 +1068,9 @@ PARITY_SCENARIO=speed-samples speed --repeat
 PARITY_SCENARIO=speed-samples speed --repeat x
 PARITY_SCENARIO=speed-samples speed --repeat 0
 PARITY_SCENARIO=speed-samples speed -z
+# The LANE column is explain's lane (#s96): a URL only a cached geosite set
+# lists reads escape, not the final route, and the roll-up follows it.
+PARITY_SCENARIO=speed-geosite speed https://registry.pkg.example/pkg.tgz https://unlisted.example/x
 report
 PARITY_SCENARIO=router-up report
 # The usage lines a die() emits reach the AUDIT log via ABORT, so a message that
@@ -1204,7 +1296,17 @@ ROWT_PARITY_SUDO=no-tty watch install
 # Which implementation the watchdog's tick runs (rowt #s65). A watchdog already
 # switched to rowt-rs keeps it through a refresh with an empty environment (what
 # an upgrade does) — the plist carries ROWT_IMPL=rust, from state — and
-# ROWT_IMPL=bash is the way back: state says bash and the key goes. The plain
-# `watch install` above is the third case: nobody chose, so no key at all.
+# ROWT_IMPL=bash is the way back: state says bash, and so does the key (rowt
+# #s92: with rowt-rs the front door's default, a missing key no longer means
+# the shell). A watchdog put back on the shell keeps its key through the same
+# empty-environment refresh. The plain `watch install` above is the last case:
+# nobody chose, so no key at all, and the agent follows the default.
 PARITY_SCENARIO=watch-impl-rust watch refresh
 PARITY_SCENARIO=watch-impl-rust ROWT_IMPL=bash watch refresh
+PARITY_SCENARIO=watch-impl-bash watch refresh
+# Back to rowt-rs by name records rust; a word that names neither records
+# nothing, because the front door reads it as the default. On the rust
+# scenario, so a side that still turned any other word into bash would flip
+# both the state and the plist's key.
+PARITY_SCENARIO=watch-impl-bash ROWT_IMPL=rust watch refresh
+PARITY_SCENARIO=watch-impl-rust ROWT_IMPL=yes watch refresh

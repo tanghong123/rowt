@@ -299,6 +299,7 @@ pub fn json(ctx: &Ctx, probe: bool) -> String {
     let esc = read(&cfg.join("escape-domains.txt"));
     let corp = read(&cfg.join("corp-domains.txt"));
     let blk = read(&cfg.join("block-domains.txt"));
+    let dir = read(&cfg.join("direct-domains.txt"));
     let n = |src: &str, f| rowt_core::render::parse_list(src, f).len();
     let mut geo: Vec<String> = rowt_core::render::geosites_of(&esc);
     geo.extend(rowt_core::render::geosites_of(&blk));
@@ -330,6 +331,9 @@ pub fn json(ctx: &Ctx, probe: bool) -> String {
     let last_probe = h.obs.as_ref().map(|o| obs_json(o, &o.source));
     let last_switch = h.last_switch.as_ref().map(|(at, from, to, by)| json!({"at": at, "from": from, "to": to, "by": by}));
     let hold = h.hold.as_ref().map(|(since, tag)| json!({"since": since, "tag": tag}));
+    let (by, state) = crate::upgrade::report(ctx);
+    let running_by = if h.router_pid.is_some() && !by.is_empty() { Value::String(by) } else { Value::Null };
+    let upgrade_reload = if h.router_pid.is_some() && !state.is_empty() { Value::String(state.into()) } else { Value::Null };
     let v = json!({
         "schema": SCHEMA,
         "rowt": env!("ROWT_SHELL_VERSION"),
@@ -345,6 +349,15 @@ pub fn json(ctx: &Ctx, probe: bool) -> String {
         },
         "proxy": { "system": proxy_on, "service": svc, "pac": pac },
         "captive": h.captive,
+        // rowt #s104: which rowt rendered the config the router runs (null
+        // when the router is stopped or an older rowt rendered it), and
+        // whether this rowt's different render waits for a reload: "waiting"
+        // (for a quiet moment), "failed" (the watchdog's one reload did not
+        // take), or null.
+        "config": {
+            "running_by": running_by,
+            "upgrade_reload": upgrade_reload,
+        },
         "watchdog": {
             "loaded": loaded,
             "installed": plist.is_file(),
@@ -376,6 +389,7 @@ pub fn json(ctx: &Ctx, probe: bool) -> String {
             "escape": n(&esc, rowt_core::render::Filter::All) + n(&esc, rowt_core::render::Filter::Exact),
             "corp": n(&corp, rowt_core::render::Filter::Domain) + n(&corp, rowt_core::render::Filter::Cidr) + n(&corp, rowt_core::render::Filter::Exact),
             "block": n(&blk, rowt_core::render::Filter::All) + n(&blk, rowt_core::render::Filter::Exact),
+            "direct": n(&dir, rowt_core::render::Filter::Domain) + n(&dir, rowt_core::render::Filter::Exact),
             "ads": cfg.join("cache/geosite-category-ads-all.srs").is_file(),
             "geosites": geo,
             "final": env_or("ROWT_FINAL", "direct"),

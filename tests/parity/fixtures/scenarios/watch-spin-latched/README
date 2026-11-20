@@ -1,0 +1,19 @@
+watch-spin-latched — rowt #s105: still spinning, healed once already.
+
+The machine is use-auto-unchanged's with the router up (host.pid.self) and a
+steady-state tick: watch.net and the proxy getters unchanged, the corp lane
+already synced, the bypass list right, the auto probe answering. So the tick
+reaches the healthy branch of the health check, the one place the spin heal
+runs. The clash API reports no byte totals, so the traffic sample is 0 B/s.
+watch.cpu names the stand-in router as @ROUTER_PID@ and its time as
+@NOW-<s>@; the harness fills both. Its CPU seconds (5) and bytes (12345) are
+nonzero, which a fresh sample of the stand-in never is, so a sample left
+unwritten shows in the tree; the compare masks the pid and this run's own
+stamps only (snap_norm).
+
+As watch-spin-idle (ROWT_CPU_SPIN_PCT=0), with a streak of 1 and a heal
+stamped in 2100 (watch.cpuheal), inside the day's cooldown on any clock and
+the same in both runs, so the tree compares it as kept. Expected:
+watch.cpustreak 2, the latch unchanged, and "router spinning (0% cpu, 0 B/s)
+but already healed once -…m ago — leaving it (degraded beats flapping)"; no
+capture, no reload.

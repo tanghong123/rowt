@@ -71,15 +71,15 @@ pub fn cmd_speed(ctx: &Ctx, args: &[String]) -> Result<String, String> {
     out.push(format!("  {} {} {} LANE", pad("URL", 42), pad("VIA ROWT", 12), pad("BYPASSED", 12)));
 
     let lanes = crate::load_lanes(&ctx.cfg);
-    let final_route = lifecycle::env_or("ROWT_FINAL", "direct");
     // lane, proxied B/s, bypassed B/s, ratio (-1: no ratio)
     let mut rows: Vec<(String, i64, i64, i64)> = Vec::new();
     for u in &urls {
         let host = host_of(u);
-        let lane = match rowt_core::classify::longest_domain_hit(&host, &lanes.escape, &lanes.corp, &lanes.block) {
-            Some((l, _, _)) => l.as_str().to_string(),
-            None => final_route.clone(),
-        };
+        // The lane `rowt explain` names: hand lists, then the cached geosite
+        // sets, then the router's lookup, with local mode's escape-as-direct.
+        // Read off the hand lists alone it called an escape-routed npm URL
+        // direct, and then its verdict that both columns are one path (#s96).
+        let lane = crate::route::route(ctx, &lanes, &host).0.lane.as_str().to_string();
         let p = cell(ctx, u, false, n, &bytes, &timeout);
         let y = cell(ctx, u, true, n, &bytes, &timeout);
         let shown: String = u.chars().take(42).collect();

@@ -19,11 +19,15 @@ pub struct Lists {
     pub corp_domains: Vec<String>,
     pub corp_cidrs: Vec<String>,
     pub block_domains: Vec<String>,
+    /// The direct lane's suffixes: names sent straight out even where a
+    /// broader rule (a geosite set, the ad set) would take them elsewhere.
+    pub direct_domains: Vec<String>,
     // `--domain` entries (`domain:<host>` lines), rendered as sing-box `domain`
     // rules ahead of every suffix rule.
     pub escape_exact: Vec<String>,
     pub corp_exact: Vec<String>,
     pub block_exact: Vec<String>,
+    pub direct_exact: Vec<String>,
 }
 
 /// Cached `geosite:<name>` rule-sets, split the way the render uses them.
@@ -103,7 +107,7 @@ pub struct HostInput {
 /// watches a local set's DIRECTORY, and on macOS the watcher (kqueue) holds a
 /// descriptor for every file in it — 49 sets in one directory cost 49² of them
 /// (measured on 1.13.14: 2,550 open files on the directory; one directory per
-/// set: 100).
+/// set: 100). There are 65 since the direct lane (#s98), each in its own.
 pub const RULE_SETS_DIR: &str = "rule-sets";
 /// The corp lane's CIDRs, hand-added and synced alike — one set, since they
 /// were one rule (the `ip_cidr` set contributor PR #5 introduced, kept).
@@ -112,8 +116,11 @@ pub const CORP_SET_CIDR: &str = "corp-cidr";
 pub const BANDS: usize = 8;
 /// The lanes whose rules are rule-sets, in the order their rules are emitted
 /// within a band. That order decides only a tie the single-lane rule already
-/// forbids, and it matches `classify`'s tie convention.
-pub const SET_LANES: [&str; 3] = ["escape", "corp", "block"];
+/// forbids, and it matches `classify`'s tie convention. The direct lane comes
+/// last: the one tie it can meet in practice is its seeded default (npm's
+/// domains) on a box whose owner already put the same entry in another lane,
+/// and the owner's entry should win.
+pub const SET_LANES: [&str; 4] = ["escape", "corp", "block", "direct"];
 
 /// One lane set: the `domain` entries, or the `domain_suffix` entries of one
 /// split count, bare (`z.example`: the name and what is under it) or dot-led
@@ -146,9 +153,9 @@ impl Band {
 
 /// Every (lane, band) in route order: the exact sets in lane order, then for
 /// each band from the deepest down, the bare sets in lane order, then the dot
-/// sets. 48 in all — `3 + 3×8 + 3×7` — and always all present, empty or not.
+/// sets. 64 in all — `4 + 4×8 + 4×7` — and always all present, empty or not.
 pub fn lane_bands() -> Vec<(&'static str, Band)> {
-    let mut out = Vec::with_capacity(48);
+    let mut out = Vec::with_capacity(64);
     out.extend(SET_LANES.iter().map(|l| (*l, Band::Exact)));
     for n in (1..=BANDS).rev() {
         out.extend(SET_LANES.iter().map(|l| (*l, Band::Bare(n))));
@@ -172,7 +179,7 @@ pub fn rule_set_json(key: &str, values: &[String]) -> String {
     format!("{{\"version\":1,\"rules\":{rules}}}\n")
 }
 
-/// The 48 lane sets, `(tag, bytes)`, in `lane_bands` order. Entries keep the
+/// The 64 lane sets, `(tag, bytes)`, in `lane_bands` order. Entries keep the
 /// lane file's order and are ASCII-lowercased: sing-box lowercases the name it
 /// matches but not the rule, so a mixed-case entry matched nothing inline
 /// (measured on 1.13.14 with `rule-set match`), and lowercased, an entry spelled
@@ -200,18 +207,22 @@ fn lane_lists<'a>(lists: &'a Lists, lane: &str) -> (&'a [String], &'a [String]) 
     match lane {
         "escape" => (&lists.escape_domains, &lists.escape_exact),
         "corp" => (&lists.corp_domains, &lists.corp_exact),
-        _ => (&lists.block_domains, &lists.block_exact),
+        "block" => (&lists.block_domains, &lists.block_exact),
+        "direct" => (&lists.direct_domains, &lists.direct_exact),
+        other => unreachable!("not a set lane: {other}"),
     }
 }
 
 /// The pairs band 8 gets WRONG: an entry of more than `BANDS` labels in one
 /// lane, and a suffix of it with `BANDS` labels or more in another lane whose
 /// set the router consults first — within the band the order is the bare sets
-/// and then the dot-led ones, escape / corp / block in each, where inline it
+/// and then the dot-led ones, escape / corp / block / direct in each, where inline it
 /// was length. Each is `(deeper entry, its lane, the shallower suffix, its
 /// lane)`; the render warns on them. Compared lowercased, as the sets hold them.
 pub fn overflow_pairs(lists: &Lists) -> Vec<(String, &'static str, String, &'static str)> {
-    let rank = |s: &str, lane: &str| usize::from(s.starts_with('.')) * 3 + SET_LANES.iter().position(|l| *l == lane).unwrap_or(0);
+    let rank = |s: &str, lane: &str| {
+        usize::from(s.starts_with('.')) * SET_LANES.len() + SET_LANES.iter().position(|l| *l == lane).unwrap_or(0)
+    };
     let deep: Vec<(String, &str)> = SET_LANES
         .iter()
         .flat_map(|l| lane_lists(lists, l).0.iter().map(move |s| (s.to_ascii_lowercase(), *l)))
@@ -238,9 +249,10 @@ pub fn overflow_pairs(lists: &Lists) -> Vec<(String, &'static str, String, &'sta
     out
 }
 
-/// Two lanes holding the same entry in different spellings of case: lowercased
-/// they are one entry in two sets, and lane order decides. `add` keeps this from
-/// happening; a hand-edited file can still do it. `(entry, first lane, second lane)`.
+/// Two lanes holding the same entry, in any spelling of case: lowercased they
+/// are one entry in two sets, and lane order decides. `add` keeps this from
+/// happening; a hand-edited file or a bundle can still do it.
+/// `(entry, first lane, second lane)`.
 pub fn case_twins(lists: &Lists) -> Vec<(String, &'static str, &'static str)> {
     let mut out = Vec::new();
     for (i, la) in SET_LANES.iter().enumerate() {
@@ -827,19 +839,21 @@ mod tests {
     #[test]
     fn the_bands_are_emitted_deepest_first_bare_before_dot_exact_ahead() {
         let b = lane_bands();
-        assert_eq!(b.len(), 48);
+        assert_eq!(b.len(), 64);
         let tags: Vec<String> = b.iter().map(|(l, band)| band.tag(l)).collect();
-        assert_eq!(&tags[..6], ["escape-exact", "corp-exact", "block-exact", "escape-8", "corp-8", "block-8"]);
-        assert_eq!(&tags[6..9], ["escape-8-dot", "corp-8-dot", "block-8-dot"]);
-        assert_eq!(&tags[45..], ["escape-1", "corp-1", "block-1"], "no dot set for one label");
+        assert_eq!(&tags[..8], ["escape-exact", "corp-exact", "block-exact", "direct-exact",
+                                "escape-8", "corp-8", "block-8", "direct-8"]);
+        assert_eq!(&tags[8..12], ["escape-8-dot", "corp-8-dot", "block-8-dot", "direct-8-dot"]);
+        assert_eq!(&tags[60..], ["escape-1", "corp-1", "block-1", "direct-1"], "no dot set for one label");
         let mut seen = std::collections::BTreeSet::new();
         assert!(tags.iter().all(|t| seen.insert(t.clone())), "every tag once");
     }
 
-    /// How the former inline render ordered the three lanes' suffixes, kept
-    /// here as the oracle: jq sorted by `[split count, length]` and reversed,
-    /// stable over block, corp, escape — so escape, corp, block on a tie — with
-    /// the exact entries first in lane order. First match wins.
+    /// How the former inline render ordered the lanes' suffixes, kept here as
+    /// the oracle: jq sorted by `[split count, length]` and reversed, stable
+    /// over direct, block, corp, escape — so escape, corp, block, direct on a
+    /// tie — with the exact entries first in lane order. First match wins.
+    /// (The inline render had three lanes; the direct lane joins it last.)
     fn inline_lane(host: &str, lists: &Lists) -> Option<&'static str> {
         for lane in SET_LANES {
             if lane_lists(lists, lane).1.iter().any(|e| e == host) {
@@ -847,7 +861,7 @@ mod tests {
             }
         }
         let mut pairs: Vec<(&str, &'static str)> = Vec::new();
-        for lane in ["block", "corp", "escape"] {
+        for lane in ["direct", "block", "corp", "escape"] {
             pairs.extend(lane_lists(lists, lane).0.iter().map(|s| (s.as_str(), lane)));
         }
         pairs.sort_by_key(|(s, _)| (s.split('.').count(), s.chars().count()));
@@ -890,16 +904,20 @@ mod tests {
             escape_domains: vec!["x.z.example".into(), "api.foo.example".into(), "aaa.example".into(), "deep.q.x.z.example".into()],
             corp_domains: vec![".z.example".into(), "foo.example".into(), "bbb.example".into(), "hq.corp.example".into(), "corp.example".into()],
             block_domains: vec!["z.example".into(), "a.example".into(), ".q.x.z.example".into(), "ccc.example".into(), "ads.hq.corp.example".into()],
+            direct_domains: vec!["pkg.z.example".into(), ".cdn.foo.example".into(), "ddd.example".into(), "aaa.example".into()],
             escape_exact: vec!["only.a.example".into()],
             corp_exact: vec!["foo.example".into()],
             block_exact: vec!["x.z.example".into()],
+            direct_exact: vec!["dl.ccc.example".into()],
             ..Default::default()
         };
         let hosts = ["x.z.example", "a.x.z.example", "z.example", "www.z.example", "q.x.z.example", "t.q.x.z.example",
                      "deep.q.x.z.example", "m.deep.q.x.z.example", "foo.example", "b.foo.example", "api.foo.example",
                      "v2.api.foo.example", "a.example", "only.a.example", "x.only.a.example", "aaa.example", "bbb.example",
                      "ccc.example", "corp.example", "hq.corp.example", "w.hq.corp.example", "ads.hq.corp.example",
-                     "pixel.ads.hq.corp.example", "unlisted.example", "example", "xz.example"];
+                     "pixel.ads.hq.corp.example", "unlisted.example", "example", "xz.example", "pkg.z.example",
+                     "r.pkg.z.example", "cdn.foo.example", "e.cdn.foo.example", "ddd.example", "dl.ccc.example",
+                     "x.dl.ccc.example"];
         for h in hosts {
             assert_eq!(set_lane(h, &lists), inline_lane(h, &lists), "{h}");
         }
@@ -910,6 +928,14 @@ mod tests {
         assert_eq!(set_lane("a.x.z.example", &lists), Some("escape"));
         assert_eq!(set_lane("www.z.example", &lists), Some("corp"));
         assert_eq!(set_lane("z.example", &lists), Some("block"));
+        // The direct lane ranks by depth like the others: its 3-label entry
+        // beats block's 2-label apex, its exact host beats block's suffix, and
+        // a tie (aaa.example in escape and direct) goes to the other lane.
+        assert_eq!(set_lane("r.pkg.z.example", &lists), Some("direct"));
+        assert_eq!(set_lane("dl.ccc.example", &lists), Some("direct"));
+        assert_eq!(set_lane("x.dl.ccc.example", &lists), Some("block"), "an exact host does not cover what is under it");
+        assert_eq!(set_lane("e.cdn.foo.example", &lists), Some("direct"));
+        assert_eq!(set_lane("aaa.example", &lists), Some("escape"), "a tie goes to the owner's other lane");
     }
 
     #[test]
@@ -924,7 +950,8 @@ mod tests {
         assert_eq!(sets["escape-3-dot"], "{\"version\":1,\"rules\":[{\"domain_suffix\":[\".sub.example\"]}]}\n");
         assert_eq!(sets["escape-exact"], "{\"version\":1,\"rules\":[{\"domain\":[\"host.example\"]}]}\n");
         assert_eq!(sets["corp-2"], "{\"version\":1,\"rules\":[]}\n", "an empty set is still a file");
-        assert_eq!(sets.len(), 48);
+        assert_eq!(sets["direct-2"], "{\"version\":1,\"rules\":[]}\n");
+        assert_eq!(sets.len(), 64);
     }
 
     #[test]
@@ -949,6 +976,15 @@ mod tests {
             ..Default::default()
         };
         assert!(overflow_pairs(&fine).is_empty());
+        // A deeper direct entry against escape's eight-label suffix: direct-8
+        // comes after escape-8, so the shallower escape entry wins there.
+        let direct_deep = Lists {
+            escape_domains: vec!["c.d.e.f.g.h.i.example".into()],
+            direct_domains: vec!["a.b.c.d.e.f.g.h.i.example".into()],
+            ..Default::default()
+        };
+        assert_eq!(overflow_pairs(&direct_deep),
+                   vec![("a.b.c.d.e.f.g.h.i.example".into(), "direct", "c.d.e.f.g.h.i.example".into(), "escape")]);
         assert_eq!(case_twins(&lists), vec![("twin.example".into(), "escape", "corp"),
                                             ("domain:host.example".into(), "escape", "block")]);
     }

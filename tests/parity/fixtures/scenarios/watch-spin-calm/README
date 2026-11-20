@@ -1,0 +1,16 @@
+watch-spin-calm — rowt #s105: the CPU is calm again.
+
+The machine is use-auto-unchanged's with the router up (host.pid.self) and a
+steady-state tick: watch.net and the proxy getters unchanged, the corp lane
+already synced, the bypass list right, the auto probe answering. So the tick
+reaches the healthy branch of the health check, the one place the spin heal
+runs. The clash API reports no byte totals, so the traffic sample is 0 B/s.
+watch.cpu names the stand-in router as @ROUTER_PID@ and its time as
+@NOW-<s>@; the harness fills both. Its CPU seconds (5) and bytes (12345) are
+nonzero, which a fresh sample of the stand-in never is, so a sample left
+unwritten shows in the tree; the compare masks the pid and this run's own
+stamps only (snap_norm).
+
+The same streak of 1 and heal stamped in 2100, at the default threshold (80%):
+the sleep's 0% is calm. Expected: watch.cpustreak and watch.cpuheal removed,
+so a recurrence weeks later gets its one heal again; nothing logged.

@@ -70,9 +70,12 @@ pub struct LiveSource {
 
     // Per-domain cumulative bytes carried over from CLOSED connections, so the
     // table can total a domain across short-lived connections. `conn_last` is the
-    // last-seen state of each live connection, used to detect closes.
-    conn_history: HashMap<parse::ConnKey, parse::ConnHist>,
-    conn_last: HashMap<String, (parse::ConnKey, u64, u64, String)>,
+    // last-seen state of each live connection, used to detect closes. Both are
+    // kept per port (`RawConn::inbound`), so a port scope totals only its own.
+    conn_history: ConnHistory,
+    conn_last: HashMap<String, (String, parse::ConnKey, u64, u64, String)>,
+    /// The port scope (`Source::set_port`); None = every port.
+    port: Option<String>,
 
     // Errors pane: a bounded rolling buffer of parsed events for the sparse
     // non-block lanes, plus per-minute per-domain counts for the high-volume
@@ -162,6 +165,7 @@ impl LiveSource {
             monitor_stale: None,
             conn_history: HashMap::new(),
             conn_last: HashMap::new(),
+            port: None,
             errors_buf: Vec::new(),
             block_buckets: BlockBuckets::new(),
             newest_secs: 0,
@@ -221,7 +225,7 @@ impl LiveSource {
             .name("rowt-monitor-ctl".into())
             .spawn(move || {
                 let _in_flight = in_flight;
-                let bin = std::env::var("ROWT_BIN").unwrap_or_else(|_| "rowt".to_string());
+                let bin = ctl_bin();
                 let outcome = match std::process::Command::new(&bin).args(&args).output() {
                     Ok(o) if o.status.success() => crate::source::CtlOutcome::Ok(if subscriptions {
                         subscription_message(&String::from_utf8_lossy(&o.stdout)).unwrap_or(ok)
@@ -350,6 +354,7 @@ impl LiveSource {
             members: escape.iter().filter(|t| is_pool_member(t)).cloned().collect(),
             escape,
             iface: host_bind_iface(&host),
+            ports: parse::ports_of_host(&host),
         };
         if let Some(mt) = mtime {
             self.host_cache = Some((mt, info.clone()));
@@ -383,32 +388,27 @@ impl LiveSource {
     /// after each short-lived connection drops out of the live set. Call once per
     /// poll *before* building rows so freshly-closed bytes appear this frame.
     fn accumulate_history(&mut self, raw: &[RawConn], escape: &HashSet<String>) {
-        let mut current: HashMap<String, (parse::ConnKey, u64, u64, String)> = HashMap::with_capacity(raw.len());
+        let mut current: HashMap<String, (String, parse::ConnKey, u64, u64, String)> = HashMap::with_capacity(raw.len());
         for c in raw {
             let lane = parse::classify_lane(&c.chains, escape);
             if lane == Lane::Block {
                 continue; // block traffic is excluded from the connections view
             }
-            current.insert(c.id.clone(), ((lane, c.host.clone(), c.port), c.up, c.down, c.rule.clone()));
+            current.insert(c.id.clone(), (c.inbound.clone(), (lane, c.host.clone(), c.port), c.up, c.down, c.rule.clone()));
         }
         // A connection present last tick but gone now has closed — add its
         // last-seen cumulative bytes to that domain's history.
-        let closed: Vec<(parse::ConnKey, u64, u64, String)> =
+        let closed: Vec<(String, parse::ConnKey, u64, u64, String)> =
             self.conn_last.iter().filter(|(id, _)| !current.contains_key(*id)).map(|(_, v)| v.clone()).collect();
-        for (key, up, down, rule) in closed {
-            let e = self.conn_history.entry(key).or_default();
+        for (port, key, up, down, rule) in closed {
+            let e = self.conn_history.entry((port, key)).or_default();
             e.up += up;
             e.down += down;
             e.rule = rule;
         }
         self.conn_last = current;
-        // Bound memory/rows: keep the top-N domains by total bytes.
-        if self.conn_history.len() > CONN_HISTORY_CAP {
-            let mut v: Vec<_> = std::mem::take(&mut self.conn_history).into_iter().collect();
-            v.sort_by_key(|(_, h)| std::cmp::Reverse(h.up + h.down));
-            v.truncate(CONN_HISTORY_CAP);
-            self.conn_history = v.into_iter().collect();
-        }
+        // Bound memory/rows: keep the top-N domains by total bytes, per port.
+        cap_per_port(&mut self.conn_history, CONN_HISTORY_CAP);
     }
 
     /// Incrementally read the newly-appended bytes of each lane log into the
@@ -614,6 +614,7 @@ struct HostInfo {
     escape: HashSet<String>,
     members: Vec<String>,
     iface: Option<String>,
+    ports: Vec<String>,
 }
 
 /// Server-health summary returned by `LiveSource::servers`.
@@ -645,7 +646,11 @@ impl Source for LiveSource {
         };
         let now = SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
         let lane_s = lane.map(|l| l.label());
-        crate::metrics::history_map(&conn, now, spans, lane_s).unwrap_or_default()
+        crate::metrics::history_map(&conn, now, spans, lane_s, self.port.as_deref()).unwrap_or_default()
+    }
+
+    fn set_port(&mut self, port: Option<&str>) {
+        self.port = port.map(str::to_string);
     }
 
     fn force_probe(&self) -> Result<(), &'static str> {
@@ -683,24 +688,32 @@ impl Source for LiveSource {
 
     fn unroute(&self, domain: &str) {
         // Single-lane invariant means the domain is in at most one lane, but we
-        // don't track which from an errors row — remove from all four (a miss is
-        // a harmless "not found"), so the result is always "back to direct".
+        // don't track which from an errors row — remove from all five (a miss is
+        // a harmless "not found"), so the result is always "back to the default
+        // route", which is direct unless ROWT_FINAL says otherwise.
         //
-        // Hotspot only when its file exists: the three routing lanes are seeded
-        // from templates, that one is created by the first `hotspot add`, and
-        // `rm` on a lane that has no file dies ("hotspot list is empty") — which
-        // writes an ABORT audit line, one per `d` press, on every machine that
-        // never touched the lane.
+        // Hotspot only when its file exists: the routing lanes are seeded from
+        // templates, that one is created by the first `hotspot add`, and `rm` on
+        // a lane that has no file dies ("hotspot list is empty") — which writes
+        // an ABORT audit line, one per `d` press, on every machine that never
+        // touched the lane. The direct lane (#s98) the same way: seeded since it
+        // existed, but a config last touched by an older rowt has no file yet.
         let out = Arc::clone(&self.ctl_out);
-        let (bin_domain, ok) = (domain.to_string(), format!("{domain} → direct"));
+        // Not "→ direct": with the direct lane, a host that lane held (npm) goes
+        // back to whatever the rules below the hand lists say, a geosite set's
+        // escape included (#s98).
+        let (bin_domain, ok) = (domain.to_string(), format!("{domain} taken out of every lane"));
         let mut lanes = vec!["escape", "corp", "block"];
+        if self.cfg.join("direct-domains.txt").is_file() {
+            lanes.push("direct");
+        }
         if self.cfg.join("hotspot-domains.txt").is_file() {
             lanes.push("hotspot");
         }
         std::thread::Builder::new()
             .name("rowt-monitor-ctl".into())
             .spawn(move || {
-                let bin = std::env::var("ROWT_BIN").unwrap_or_else(|_| "rowt".to_string());
+                let bin = ctl_bin();
                 let mut err: Option<String> = None;
                 for lane in lanes {
                     let r = std::process::Command::new(&bin)
@@ -746,7 +759,7 @@ impl Source for LiveSource {
             .name("rowt-monitor-ctl".into())
             .spawn(move || {
                 let _in_flight = in_flight;
-                let bin = std::env::var("ROWT_BIN").unwrap_or_else(|_| "rowt".to_string());
+                let bin = ctl_bin();
                 let render = std::process::Command::new(&bin).arg("render").output();
                 let outcome = match render {
                     Ok(o) if o.status.success() && router_runs_rendered(&cfg) => {
@@ -795,8 +808,13 @@ impl Source for LiveSource {
             }
         }
         // No rowt config at all -> demo fixture so we always render something.
+        // Its ports are not this router's, so it lists none: a port scope then
+        // survives a host.json that is missing for a moment, and `P` does not
+        // offer the demo's ports as if they were real.
         let Some(info) = self.host_info() else {
-            return self.fallback.poll(window, lane);
+            let mut s = self.fallback.poll(window, lane);
+            s.ports.clear();
+            return s;
         };
         let escape = info.escape;
         self.escape_members = info.members;
@@ -839,12 +857,19 @@ impl Source for LiveSource {
             self.last_conns_json = None;
         }
         let raw = conns_json.as_ref().map(parse::parse_connections).unwrap_or_default();
+        // Rates and the closed-connection history follow every port, whatever
+        // the scope, so changing it shows the new port's numbers at once.
         let rates = self.rates(&raw);
         self.accumulate_history(&raw, &escape);
+        // The health override below asks whether escape moves bytes at all, so
+        // it reads every port, not the scoped one.
+        let escape_rate = escape_rate_all_ports(&raw, &rates, &escape);
+        let shown = scope_to_port(raw, self.port.as_deref());
         // Aggregate throughput is the sum of per-connection rates (deltas since
         // the last tick). We intentionally do NOT read the streaming /traffic
         // endpoint here — it blocks the UI thread up to ~1s per poll.
-        let (conns, lanes, all) = parse::build_conn_rows(&raw, &rates, &escape, &self.conn_history);
+        let (conns, lanes, all) =
+            parse::build_conn_rows(&shown, &rates, &escape, &history_for_port(&self.conn_history, self.port.as_deref()));
         if router_up {
             self.ensure_prober();
             // Pool changed (server add/rm, sub update) -> probe now rather than
@@ -872,7 +897,6 @@ impl Source for LiveSource {
         // escape lane has throughput and treat that as "live" for a short window
         // (so a lull between requests doesn't flip the dot), then let it override a
         // *failed* probe. Pending (None) and healthy (Some(true)) are left alone.
-        let escape_rate = lanes.iter().find(|l| l.lane == Lane::Escape).map(|l| l.up + l.down).unwrap_or(0.0);
         if escape_rate > 0.0 {
             self.last_active_traffic = Some(Instant::now());
         }
@@ -987,7 +1011,148 @@ impl Source for LiveSource {
             active_server: h.active,
             auto_now: h.auto_now,
             chips: h.chips,
+            ports: info.ports,
         }
+    }
+}
+
+// ---------------- port scope ----------------
+
+/// The closed-connection carry-over, keyed by the port a connection came in on
+/// (`RawConn::inbound`) and its row.
+type ConnHistory = HashMap<(String, parse::ConnKey), parse::ConnHist>;
+
+/// The connections a port scope shows: those that came in on `port`, or all.
+fn scope_to_port(raw: Vec<RawConn>, port: Option<&str>) -> Vec<RawConn> {
+    match port {
+        Some(p) => raw.into_iter().filter(|c| c.inbound == p).collect(),
+        None => raw,
+    }
+}
+
+/// The carry-over the rows fold in: the scoped port's own, or every port's
+/// summed per row when unscoped (the same totals the history had before it
+/// was kept per port).
+fn history_for_port(history: &ConnHistory, port: Option<&str>) -> HashMap<parse::ConnKey, parse::ConnHist> {
+    let mut out: HashMap<parse::ConnKey, parse::ConnHist> = HashMap::new();
+    for ((p, key), h) in history {
+        if port.is_some_and(|want| want != p) {
+            continue;
+        }
+        let e = out.entry(key.clone()).or_default();
+        e.up += h.up;
+        e.down += h.down;
+        e.rule = h.rule.clone();
+    }
+    out
+}
+
+/// Keep the `cap` heaviest carry-over rows of EACH port, so a busy port cannot
+/// evict a quiet one's totals. With main the only port this is the single cap
+/// it always was.
+fn cap_per_port(history: &mut ConnHistory, cap: usize) {
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for (port, _) in history.keys() {
+        *counts.entry(port.as_str()).or_default() += 1;
+    }
+    if counts.values().all(|n| *n <= cap) {
+        return;
+    }
+    let mut v: Vec<_> = std::mem::take(history).into_iter().collect();
+    v.sort_by(|a, b| a.0 .0.cmp(&b.0 .0).then((b.1.up + b.1.down).cmp(&(a.1.up + a.1.down))));
+    let mut kept: HashMap<String, usize> = HashMap::new();
+    for (k, h) in v {
+        let n = kept.entry(k.0.clone()).or_default();
+        if *n < cap {
+            *n += 1;
+            history.insert(k, h);
+        }
+    }
+}
+
+/// Escape's rate across every port, whatever the scope: the health override
+/// asks whether the escape lane moves bytes at all.
+fn escape_rate_all_ports(raw: &[RawConn], rates: &HashMap<String, (f64, f64)>, escape: &HashSet<String>) -> f64 {
+    raw.iter()
+        .filter(|c| parse::classify_lane(&c.chains, escape) == Lane::Escape)
+        .filter_map(|c| rates.get(&c.id))
+        .map(|(u, d)| u + d)
+        .sum()
+}
+
+#[cfg(test)]
+mod port_scope_tests {
+    use super::*;
+
+    fn rc(id: &str, inbound: &str, host: &str, chains: &[&str], up: u64, down: u64) -> RawConn {
+        RawConn {
+            id: id.into(),
+            host: host.into(),
+            port: 443,
+            up,
+            down,
+            chains: chains.iter().map(|s| s.to_string()).collect(),
+            rule: String::new(),
+            inbound: inbound.into(),
+        }
+    }
+
+    #[test]
+    fn a_scope_keeps_only_that_ports_connections() {
+        let raw = vec![rc("a", "main", "x.example", &["direct"], 1, 1), rc("b", "vm", "y.example", &["direct"], 1, 1)];
+        let ids = |v: Vec<RawConn>| v.into_iter().map(|c| c.id).collect::<Vec<_>>();
+        assert_eq!(ids(scope_to_port(raw.clone(), Some("vm"))), vec!["b"]);
+        assert_eq!(ids(scope_to_port(raw.clone(), Some("main"))), vec!["a"]);
+        assert_eq!(ids(scope_to_port(raw.clone(), Some("gone"))), Vec::<String>::new());
+        assert_eq!(ids(scope_to_port(raw, None)), vec!["a", "b"], "no scope, every port, in order");
+    }
+
+    #[test]
+    fn closed_bytes_are_carried_per_port_and_summed_unscoped() {
+        // Drive the real accumulator: one host, one connection on each port,
+        // both close; then read the carry-over the way poll does.
+        let mut src = LiveSource::new();
+        let esc = HashSet::new();
+        src.accumulate_history(
+            &[rc("a", "main", "x.example", &["direct"], 10, 100), rc("b", "vm", "x.example", &["direct"], 3, 30)],
+            &esc,
+        );
+        src.accumulate_history(&[], &esc); // both closed
+        let key = (Lane::Direct, "x.example".to_string(), 443u16);
+        let main = history_for_port(&src.conn_history, Some("main"));
+        let vm = history_for_port(&src.conn_history, Some("vm"));
+        let all = history_for_port(&src.conn_history, None);
+        assert_eq!((main[&key].up, main[&key].down), (10, 100));
+        assert_eq!((vm[&key].up, vm[&key].down), (3, 30));
+        assert_eq!((all[&key].up, all[&key].down), (13, 130), "unscoped is the old single total");
+    }
+
+    #[test]
+    fn the_cap_is_per_port_so_a_quiet_port_keeps_its_rows() {
+        let mut h: ConnHistory = HashMap::new();
+        for i in 0..5u64 {
+            let key = (Lane::Direct, format!("busy{i}.example"), 443u16);
+            h.insert(("main".into(), key), parse::ConnHist { up: 1000 + i, down: 0, rule: String::new() });
+        }
+        let quiet = (Lane::Direct, "quiet.example".to_string(), 443u16);
+        h.insert(("vm".into(), quiet.clone()), parse::ConnHist { up: 1, down: 0, rule: String::new() });
+        cap_per_port(&mut h, 3);
+        assert!(h.contains_key(&("vm".to_string(), quiet)), "vm's one row survives main's traffic");
+        let main: Vec<u64> = {
+            let mut v: Vec<u64> = h.iter().filter(|((p, _), _)| p == "main").map(|(_, c)| c.up).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(main, vec![1002, 1003, 1004], "main keeps its three heaviest");
+    }
+
+    #[test]
+    fn health_reads_escape_on_every_port() {
+        let esc: HashSet<String> = ["Hong-Server".to_string()].into_iter().collect();
+        let raw = vec![rc("a", "vm", "x.example", &["Hong-Server", "escape"], 1, 1), rc("b", "main", "y.example", &["direct"], 1, 1)];
+        let rates: HashMap<String, (f64, f64)> = [("a".to_string(), (5.0, 7.0)), ("b".to_string(), (100.0, 100.0))].into_iter().collect();
+        // Even with the pane scoped to main, escape moving bytes on vm counts.
+        assert_eq!(escape_rate_all_ports(&raw, &rates, &esc), 12.0);
     }
 }
 
@@ -1564,6 +1729,35 @@ fn monitor_paths() -> Option<(PathBuf, Option<PathBuf>, Option<PathBuf>)> {
 /// The version in a Cellar path (`…/Cellar/rowt/3.6.1/libexec/bin/…` → `3.6.1`).
 pub fn cellar_version(p: &Path) -> Option<String> {
     p.to_string_lossy().split("/Cellar/rowt/").nth(1).and_then(|s| s.split('/').next()).map(|s| s.to_string())
+}
+
+/// The CLI the control keys run: `$ROWT_BIN`, which `rowt monitor` exports so
+/// the keys drive the CLI and config the monitor was launched from.
+///
+/// rowt-rs before 3.8.40 exported its own Cellar path, and a monitor outlives
+/// that path: `brew upgrade` deletes the old Cellar folder, and the monitor
+/// re-execs into the new build with its env unchanged. Every key then failed
+/// with "…/rowt-rs: No such file or directory" (rowt #s89). So a path in
+/// another install's Cellar than this monitor's means the same file in ours,
+/// and a path that is gone means `rowt` on PATH, the front door the install
+/// links. A bare name is left to PATH, as it always was.
+pub fn ctl_bin() -> String {
+    let me = std::env::current_exe().ok();
+    ctl_bin_for(std::env::var("ROWT_BIN").ok().as_deref(), me.as_deref())
+}
+
+fn ctl_bin_for(handed: Option<&str>, me: Option<&Path>) -> String {
+    let Some(h) = handed.filter(|h| !h.is_empty()) else { return "rowt".into() };
+    if !h.contains('/') {
+        return h.to_string();
+    }
+    if let (Some(theirs), Some(ours)) = (cellar_version(Path::new(h)), me.and_then(cellar_version)) {
+        if theirs != ours {
+            let moved = h.replacen(&format!("/Cellar/rowt/{theirs}/"), &format!("/Cellar/rowt/{ours}/"), 1);
+            return if Path::new(&moved).is_file() { moved } else { "rowt".into() };
+        }
+    }
+    if Path::new(h).is_file() { h.to_string() } else { "rowt".into() }
 }
 
 /// The top-rule label for a monitor that has outlived its install; None when
@@ -2188,6 +2382,41 @@ mod stale_monitor_tests {
         assert_eq!(stale_label(&dev, Some(&dev), Some(&new)).as_deref(), Some("monitor is not the installed one \u{00b7} restart"));
         // …unless its file is gone (a cargo clean under it): then the install is all there is
         assert_eq!(reexec_target(None, Some(&new)), Some(new.clone()));
+    }
+
+    /// #s89: the control keys outlive the install that launched the monitor.
+    #[test]
+    fn control_keys_follow_the_install_not_the_launchers_cellar() {
+        let root = std::env::temp_dir().join(format!("rowt-monitor-s89-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let bin = |v: &str, name: &str| root.join(format!("Cellar/rowt/{v}/libexec/bin/{name}"));
+        for v in ["3.8.39", "3.8.40"] {
+            std::fs::create_dir_all(bin(v, "")).unwrap();
+            std::fs::write(bin(v, "rowt-rs"), v).unwrap();
+        }
+        let s = |p: PathBuf| p.to_string_lossy().into_owned();
+        let me = bin("3.8.40", "rowt-monitor");
+        // Launched by this install: kept.
+        assert_eq!(ctl_bin_for(Some(&s(bin("3.8.40", "rowt-rs"))), Some(&me)), s(bin("3.8.40", "rowt-rs")));
+        // Launched by the install before, still on disk: the same file in ours.
+        assert_eq!(ctl_bin_for(Some(&s(bin("3.8.39", "rowt-rs"))), Some(&me)), s(bin("3.8.40", "rowt-rs")));
+        // …and already cleaned up: the same answer, from the path alone.
+        assert_eq!(ctl_bin_for(Some(&s(bin("3.8.35", "rowt-rs"))), Some(&me)), s(bin("3.8.40", "rowt-rs")));
+        // Our install has no such file: the front door on PATH.
+        assert_eq!(ctl_bin_for(Some(&s(bin("3.8.35", "rowt-old"))), Some(&me)), "rowt");
+        // A path outside any Cellar that is gone: the front door on PATH.
+        assert_eq!(ctl_bin_for(Some(&s(root.join("gone/bin/rowt"))), Some(&me)), "rowt");
+        // The front door the shell hands over (`/opt/homebrew/bin/rowt`), or
+        // rowt-rs's `opt/rowt` path: outside any Cellar, so kept while it exists.
+        let door = root.join("bin/rowt");
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(&door, "").unwrap();
+        assert_eq!(ctl_bin_for(Some(&s(door.clone())), Some(&me)), s(door));
+        // Nothing handed, or a bare name: PATH decides, as before.
+        assert_eq!(ctl_bin_for(None, Some(&me)), "rowt");
+        assert_eq!(ctl_bin_for(Some(""), Some(&me)), "rowt");
+        assert_eq!(ctl_bin_for(Some("rowt"), Some(&me)), "rowt");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

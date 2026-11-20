@@ -53,6 +53,9 @@ pub struct ClassifyInput<'a> {
     pub escape_list: &'a str,
     pub corp_list: &'a str,
     pub block_list: &'a str,
+    /// The direct lane's hand list: names sent straight out even where a
+    /// geosite set or the ad set would take them elsewhere.
+    pub direct_list: &'a str,
     pub private_cidrs: &'a [String],
     /// `ROWT_PRIVATE_DEFAULT` — private ranges only fall to corp when this is "corp".
     pub private_default: &'a str,
@@ -66,6 +69,11 @@ pub struct ClassifyInput<'a> {
     /// The resolver the router uses for a name no rule matched, "" when the
     /// router does not resolve such names at all (see `router_resolves`).
     pub resolver: &'a str,
+    /// The cached geosite rule-set that lists a name no hand list matched, and
+    /// the lane it routes to, when the caller asked sing-box (`rule-set match`)
+    /// and one did. The router checks the sets after the hand lists and BEFORE
+    /// it resolves, so a hit here takes the name with no lookup at all.
+    pub geosite: Option<(&'a str, Lane)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -227,11 +235,12 @@ pub enum HitKind {
 }
 
 /// `_longest_domain_hit` — an exact hit if there is one, else the longest suffix
-/// ACROSS the three lists.
+/// ACROSS the four lists.
 ///
 /// **Exact beats every suffix, at any length**, because the render emits the
 /// `domain` rules first and sing-box is first-match-wins. Among exacts the first
-/// lane seen wins, matching that emission order (escape → corp → block).
+/// lane seen wins, matching that emission order (escape → corp → block →
+/// direct).
 ///
 /// The suffix comparison is `suffix_matches` — a LABEL-BOUNDARY test, matching
 /// what sing-box actually does. Ranking stays byte length: for two entries that
@@ -245,10 +254,12 @@ pub enum HitKind {
 /// Entries are compared ASCII-lowercased, as the sets hold them: sing-box
 /// lowercases the name it matches, so a mixed-case entry reaches the router
 /// lowercased or not at all — and `explain` lowercases the name it is asked.
-pub fn longest_domain_hit(dest: &str, escape: &str, corp: &str, block: &str) -> Option<(Lane, HitKind, String)> {
+pub fn longest_domain_hit(dest: &str, escape: &str, corp: &str, block: &str, direct: &str) -> Option<(Lane, HitKind, String)> {
     let mut best: Option<(Lane, String)> = None;
     let mut exact: Option<(Lane, String)> = None;
-    for (lane, list) in [(Lane::Escape, escape), (Lane::Corp, corp), (Lane::Block, block)] {
+    // The direct lane last, as `render::SET_LANES` has it: a tie goes to the
+    // other lane.
+    for (lane, list) in [(Lane::Escape, escape), (Lane::Corp, corp), (Lane::Block, block), (Lane::Direct, direct)] {
         for e in entries(list).map(|e| e.to_ascii_lowercase()) {
             if let Some(host) = e.strip_prefix(crate::render::EXACT_PREFIX) {
                 if !host.is_empty() && dest == host && exact.is_none() {
@@ -318,9 +329,9 @@ pub fn router_resolves(final_route: Lane, corp: &str, private_default: &str) -> 
 /// destinations the shell never looks up, and `cli-diff` compares the argv
 /// trace, so that difference is a failure. Hence the question is asked here,
 /// where the branch structure lives, rather than guessed at the call site.
-pub fn needs_resolution(raw_dest: &str, escape: &str, corp: &str, block: &str) -> bool {
+pub fn needs_resolution(raw_dest: &str, escape: &str, corp: &str, block: &str, direct: &str) -> bool {
     let dest = normalize_dest(raw_dest);
-    !is_ipv4(&dest) && longest_domain_hit(&dest, escape, corp, block).is_none()
+    !is_ipv4(&dest) && longest_domain_hit(&dest, escape, corp, block, direct).is_none()
 }
 
 pub fn classify(raw_dest: &str, i: &ClassifyInput) -> Classification {
@@ -346,12 +357,18 @@ pub fn classify(raw_dest: &str, i: &ClassifyInput) -> Classification {
             );
             unmatched = true;
         }
-    } else if let Some((l, k, m)) = longest_domain_hit(&dest, i.escape_list, i.corp_list, i.block_list) {
+    } else if let Some((l, k, m)) = longest_domain_hit(&dest, i.escape_list, i.corp_list, i.block_list, i.direct_list) {
         lane = l;
         why = match k {
             HitKind::Exact => format!("exact {}-domains match '{m}'", l.as_str()),
             HitKind::Suffix => format!("longest-match {}-domains suffix '{m}'", l.as_str()),
         };
+    } else if let Some((name, l)) = i.geosite {
+        // `render_host` puts the geosite rule-sets right after the hand lists
+        // and before the `resolve` rule: a set that lists the name routes it
+        // there, unresolved, and named ports share the rule.
+        lane = l;
+        why = format!("geosite:{name} rule-set ({} lane) — no hand-list entry names it", l.as_str());
     } else {
         // A name no rule matched. When the final route is direct and there are
         // address rules to feed, the router RESOLVES it (the `resolve` rule the
@@ -363,7 +380,7 @@ pub fn classify(raw_dest: &str, i: &ClassifyInput) -> Classification {
         ip = i.resolved_ip.to_string();
         lane = i.final_route;
         why = format!(
-            "no block/corp/escape rule; final route = {}",
+            "no block/corp/escape/direct rule; final route = {}",
             i.final_route.as_str()
         );
         unmatched = true;
@@ -397,6 +414,7 @@ mod tests {
             escape_list: escape,
             corp_list: corp,
             block_list: block,
+            direct_list: "",
             private_cidrs: priv_cidrs,
             private_default: "corp",
             final_route: Lane::Direct,
@@ -404,6 +422,7 @@ mod tests {
             resolved_ip: "",
             resolver: "",
             prog: "rowt",
+            geosite: None,
         }
     }
 
@@ -543,6 +562,59 @@ mod tests {
         let c = classify("example.com", &i);
         assert_eq!(c.lane, Lane::Direct);
         assert!(c.why.ends_with("local mode: the escape lane routes direct"));
+    }
+
+    #[test]
+    fn a_geosite_hit_routes_a_name_no_hand_list_names_and_skips_the_lookup() {
+        // #s96: the GitHub set lists npm's registry; explain said DIRECT.
+        let p = vec!["10.0.0.0/8".to_string()];
+        let mut i = resolving("198.51.100.0/24\n", &p, "198.51.100.7", "223.5.5.5");
+        i.geosite = Some(("github", Lane::Escape));
+        let c = classify("registry.pkg.example", &i);
+        assert_eq!(c.lane, Lane::Escape);
+        assert_eq!(c.why, "geosite:github rule-set (escape lane) — no hand-list entry names it");
+        // The router never resolves a name a set took, so no address shows and
+        // a named port has nothing different to say.
+        assert!(c.ip.is_empty());
+        assert!(c.note.is_empty());
+        assert!(!c.unmatched);
+        // Local mode routes the escape lane's sets direct, as it does its list.
+        i.local_mode = true;
+        let c = classify("registry.pkg.example", &i);
+        assert_eq!(c.lane, Lane::Direct);
+        assert_eq!(c.why, "geosite:github rule-set (escape lane) — no hand-list entry names it — local mode: the escape lane routes direct");
+    }
+
+    #[test]
+    fn a_hand_list_entry_beats_a_geosite_hit() {
+        let p: Vec<String> = vec![];
+        let mut i = input("", "", "pkg.example\n", &p);
+        i.geosite = Some(("github", Lane::Escape));
+        assert_eq!(classify("registry.pkg.example", &i).lane, Lane::Block);
+        // …and an address never reaches a domain set.
+        assert_eq!(classify("198.51.100.7", &i).lane, Lane::Direct);
+    }
+
+    #[test]
+    fn a_direct_lane_entry_beats_a_geosite_hit_and_loses_a_tie() {
+        let p: Vec<String> = vec![];
+        let mut i = input("github.example\n", "", "", &p);
+        i.direct_list = "npm.example\ndomain:dl.github.example\n";
+        i.geosite = Some(("github", Lane::Escape));
+        let c = classify("registry.npm.example", &i);
+        assert_eq!((c.lane, c.why.as_str()), (Lane::Direct, "longest-match direct-domains suffix 'npm.example'"));
+        assert!(!c.unmatched, "a direct-lane hit is a rule, not the final route");
+        assert_eq!(classify("dl.github.example", &i).lane, Lane::Direct, "an exact host beats a shallower suffix");
+        assert_eq!(classify("api.github.example", &i).lane, Lane::Escape);
+        // The same entry in escape and direct (a seeded default the owner had
+        // already routed): the router's set order gives it to escape.
+        i.direct_list = "github.example\n";
+        assert_eq!(classify("api.github.example", &i).lane, Lane::Escape);
+        // Local mode leaves a direct hit as it is.
+        i.local_mode = true;
+        i.direct_list = "npm.example\n";
+        assert_eq!(classify("registry.npm.example", &i).why, "longest-match direct-domains suffix 'npm.example'");
+        assert!(!needs_resolution("registry.npm.example", "", "", "", "npm.example\n"));
     }
 
     #[test]

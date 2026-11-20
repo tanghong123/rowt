@@ -1,0 +1,30 @@
+╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│   _ __ _____      __| |_   MONITOR                                                                                                  uptime  3h 15m │
+│  | '__/ _ \ \ /\ / /| __|  ● LIVE  mode      host · en0     server  JP-Tokyo 42 ms                                                                 │
+│  | | | (_) \ V  V / | |_           sys proxy on             router  running · 3%                                                                   │
+│  |_|  \___/ \_/\_/   \__|          collector on             watch   on                                                                             │
+│                                                                                                                                                    │
+├─┤ live connections · port vm ├─────────────────────────────────────────────────────────────┬─┤ errors & blocked · all ports ├──────────────────────┤
+│ all    ↑ 401 KB/s   ↓ 601 KB/s                       2     120.5M    224.6M                │ aggregated over                       5m [10m] 1h 24h │
+│ escape ↑ 400 KB/s   ↓ 600 KB/s                       1     120.0M     96.0M                │ transient    12 · 1 dom                               │
+│ corp   ↑ —          ↓ —                              0         0B        0B                │ persistent   50 · 5 dom                               │
+│ direct ↑ 1 KB/s     ↓ 1 KB/s                         1       509K    128.6M                │ blocked      57 · 5 dom                               │
+├────────────────────────────────────────────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+│ LANE   HOST:PORT                                     #         UP      DOWN  RULE          │ COUNT   TYPE        DOMAIN                            │
+│ escape api.anthropic.com:443                         1     120.0M     96.0M  domain_suffix │    15   timeout     vpn.corp.example.com              │
+│ direct mirrors.debian.org:443                        1       509K    128.6M  final         │    13   blocked     googlesyndication.com             │
+│                                                                                            │    13   blocked     doubleclick.net                   │
+│                                                                                            │    12   dns         gateway.icloud.com                │
+│                                                                                            │    11   timeout     dl.google.com                     │
+│                                                                                            │    11   blocked     criteo.com                        │
+│                                                                                            │    10   blocked     adnxs.com                         │
+│                                                                                            │    10   blocked     google-analytics.com              │
+│                                                                                            │    10   reset       x.com                             │
+│                                                                                            │     8   timeout     rr5.googlevideo.com               │
+│                                                                                            │                                                       │
+│                                                                                            │                                                       │
+│                                                                                            │                                                       │
+├────────────────────────────────────────────────────────────────────────────────────────────┴─┤ server health ├─────────────────────────────────────┤
+│ auto off   10 servers · 9 up · 1 down                                                                                                              │
+│ ▶ JP-Tokyo  42 ms   JP-Osaka 175 ms   KR-Seoul  72 ms   DE-Frankfurt 195 ms   HK-1  82 ms   SG-1  81 ms   TW-Taipei 110 ms   US-LA 151 ms          │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

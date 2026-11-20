@@ -1,0 +1,5 @@
+# fixture (#s96): cached geosite sets explain asks through sing-box, one unreadable, one uncached
+example.com
+geosite:apple
+geosite:github
+geosite:nocache

@@ -41,6 +41,7 @@ LANES = {
     "escape-domains.txt": "escape",
     "corp-domains.txt": "corp",
     "block-domains.txt": "block",
+    "direct-domains.txt": "direct",
 }
 
 
@@ -85,6 +86,14 @@ def domain_cases(suffix: str, lane: str) -> list[tuple[str, str]]:
     ]
 
 
+def exact_cases(host: str, lane: str) -> list[tuple[str, str]]:
+    """(destination, why) pairs around one `domain:` (whole-host) entry."""
+    return [
+        (host, f"{lane}: exact host (--domain)"),
+        (f"sub.{host}", f"not {lane}: an exact host does not cover the names under it"),
+    ]
+
+
 def in_private(addr: str) -> bool:
     ip = ipaddress.ip_address(addr)
     return any(ip in ipaddress.ip_network(c) for c in PRIVATE_CIDRS)
@@ -126,7 +135,9 @@ def main() -> int:
     rows: list[tuple[str, str]] = []
     for fname, lane in LANES.items():
         for entry in read_list(os.path.join(args.lists, fname)):
-            if "/" in entry:
+            if entry.startswith("domain:"):
+                rows.extend(exact_cases(entry[len("domain:"):], lane))
+            elif "/" in entry:
                 rows.extend(cidr_cases(entry, lane))
             else:
                 rows.extend(domain_cases(entry, lane))

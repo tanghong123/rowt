@@ -27,6 +27,7 @@ mod lanelog;
 mod onboard;
 mod pins;
 mod pool;
+mod route;
 mod shell;
 mod skill;
 mod port;
@@ -35,11 +36,12 @@ mod speed;
 mod vm;
 mod watch;
 mod status;
+mod upgrade;
 mod seeds {
     include!(concat!(env!("OUT_DIR"), "/seeds.rs"));
 }
 use lifecycle::Ctx;
-use rowt_core::classify::{classify, ClassifyInput, Lane};
+use rowt_core::classify::Lane;
 use rowt_core::lanes::{apply_to, dump, Lanes, Op, Target};
 use rowt_platform::{Mac, Platform};
 use serde_json::Value;
@@ -391,6 +393,30 @@ pub fn watch_self() -> PathBuf {
     here_dir().join("bin/rowt")
 }
 
+/// What `rowt monitor` hands the TUI as `$ROWT_BIN`, the CLI its control keys
+/// run: this binary, so the keys drive the same CLI and config, but never by
+/// its Cellar path. `brew upgrade` deletes `Cellar/rowt/<old>/`, and a monitor
+/// outlives that (it re-execs into the new build, env and all), so a Cellar
+/// path left every key failing with "…/rowt-rs: No such file or directory"
+/// after the first upgrade (rowt #s89). Homebrew's `opt/rowt` link names the
+/// same file and follows each upgrade; it is used only when it does resolve to
+/// this file. A cargo build is handed over as it is. The shell hands over the
+/// front door as invoked (`/opt/homebrew/bin/rowt`), which never had this.
+pub(crate) fn monitor_ctl_bin(exe: &Path) -> PathBuf {
+    let s = exe.to_string_lossy();
+    if let Some((prefix, rest)) = s.split_once("/Cellar/rowt/") {
+        if let Some((_version, tail)) = rest.split_once('/') {
+            let opt = PathBuf::from(format!("{prefix}/opt/rowt/{tail}"));
+            if let (Ok(a), Ok(b)) = (opt.canonicalize(), exe.canonicalize()) {
+                if a == b {
+                    return opt;
+                }
+            }
+        }
+    }
+    exe.to_path_buf()
+}
+
 /// `cmd_probe` — which escape mode works here?
 ///
 /// Reaches every server BOTH via the default route and bound to the physical
@@ -552,6 +578,7 @@ fn load_lanes(cfg: &Path) -> Lanes {
         escape: read(&lane_file(cfg, Lane::Escape)),
         corp: read(&lane_file(cfg, Lane::Corp)),
         block: read(&lane_file(cfg, Lane::Block)),
+        direct: read(&lane_file(cfg, Lane::Direct)),
         hotspot: read(&hotspot_file(cfg)),
     }
 }
@@ -627,33 +654,9 @@ fn cmd_explain(cfg: &Path, dest: &str) -> String {
             return out;
         }
     }
-    let private: Vec<String> =
-        ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16"]
-            .iter().map(|s| s.to_string()).collect();
-    let final_route = Lane::parse(&env_or("ROWT_FINAL", "direct")).unwrap_or(Lane::Direct);
-    let pd = env_or("ROWT_PRIVATE_DEFAULT", "corp");
-    // The resolver the router uses for a name no rule matched (the direct lane's
-    // dns-direct: the public one in local mode), and only when the router
-    // resolves such names at all. Asked exactly as the shell asks it
-    // (`_captive_resolve_at`), and only on the branch that needs it.
-    let resolver = if rowt_core::classify::router_resolves(final_route, &lanes.corp, &pd) {
-        if mode == "local" { env_or("ROWT_DNS_LOCAL", "1.1.1.1") } else { env_or("ROWT_DNS_DIRECT", "223.5.5.5") }
-    } else {
-        String::new()
-    };
-    let ip = if !resolver.is_empty()
-        && rowt_core::classify::needs_resolution(dest, &lanes.escape, &lanes.corp, &lanes.block)
-    {
-        use rowt_platform::Platform;
-        rowt_platform::Mac.resolve_at(&resolver, &rowt_core::classify::normalize_dest(dest)).unwrap_or_default()
-    } else {
-        String::new()
-    };
-    let c = classify(dest, &ClassifyInput {
-        escape_list: &lanes.escape, corp_list: &lanes.corp, block_list: &lanes.block,
-        private_cidrs: &private, private_default: &pd, final_route,
-        local_mode: mode == "local", resolved_ip: &ip, prog: PROG, resolver: &resolver,
-    });
+    // The hand lists, then the cached geosite sets (asked through sing-box),
+    // then the router's lookup: `route` walks them in the router's order.
+    let (c, geo) = route::route(&ctx, &lanes, dest);
     let mut out = c.render();
     if !c.note.is_empty() {
         out.push_str(&format!("\n  note:    {}", c.note));
@@ -676,27 +679,27 @@ fn cmd_explain(cfg: &Path, dest: &str) -> String {
         }
     }
 
-    // The shell warns that opaque rule-sets may still match, whenever the ad set
-    // is cached or any lane names a geosite: category. Not shown for `block`,
-    // which is already the most restrictive answer.
-    if c.lane != Lane::Block {
-        let ads = cfg.join("cache/geosite-category-ads-all.srs").is_file();
-        let mut all: Vec<String> = geosites(&lanes.escape);
-        all.extend(geosites(&lanes.block));
-        all.sort();
-        all.dedup();
-        if ads || !all.is_empty() {
-            let gs = all.join(",");
-            out.push_str(&format!(
-                "\n  note:    a geosite rule-set may still match this (not shown — binary set){}{}",
-                if gs.is_empty() { String::new() } else { format!(": geosite:{gs}") },
-                if ads { " + ad-block" } else { "" }
-            ));
-        }
+    // What the sets could not say: one sing-box could not read, or one a lane
+    // names that is not cached (and so not in the router). Nothing for a name a
+    // hand list or a set already routed, or for an address.
+    for n in route::geosite_notes(&c, &geo) {
+        out.push('\n');
+        out.push_str(&n);
+    }
+    let running = c.lane != Lane::Block && lifecycle::host_running(&ctx).is_some();
+    // #s98: an upgrade seeds the direct lane, but the router keeps running the
+    // host.json it started from until a reload or a lane edit renders the
+    // lane's sets in, so until then it routes the name by the rules below the
+    // hand lists (npm's names by geosite:github, to escape). Every render since
+    // names `direct-exact`, empty or not.
+    if running && c.lane == Lane::Direct && c.why.contains(" direct-domains ") && ctx.host_cfg().is_file()
+        && !read(&ctx.host_cfg()).contains("\"direct-exact\"")
+    {
+        out.push_str(&format!("\n  note:    the running router started before rowt had a direct lane, so it does not route by this entry yet: '{PROG} reload' puts the lane in"));
     }
     if c.lane == Lane::Block {
         out.push_str("\n  live:    (skipped — blocked by design)");
-    } else if lifecycle::host_running(&ctx).is_some() {
+    } else if running {
         // Deliberately no `--noproxy '*'` — that would override -x and send the
         // probe DIRECT, which is exactly not the path being tested.
         let code = lifecycle::curl_code(&format!("http://127.0.0.1:{}", ctx.port),
@@ -1057,8 +1060,9 @@ fn cmd_lane(cfg: &Path, target: Target, action: &str, args: &[String]) -> Result
     let body = match target {
         Target::Lane(Lane::Escape) => &lanes.escape,
         Target::Lane(Lane::Corp) => &lanes.corp,
+        Target::Lane(Lane::Block) => &lanes.block,
+        Target::Lane(Lane::Direct) => &lanes.direct,
         Target::Hotspot => &lanes.hotspot,
-        _ => &lanes.block,
     }
     .clone();
 
@@ -1140,23 +1144,25 @@ fn cmd_lane(cfg: &Path, target: Target, action: &str, args: &[String]) -> Result
                 _ => Op::Rm(mark(args)),
             };
             let e = apply_to(&lanes, target, &op);
-            // `edit_list`'s snapshot of the three routing lanes, the way it
-            // takes it — `$(cat "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS")`,
-            // one string, trailing newlines gone — so the router is reloaded
-            // below only when that string changed.
+            // `edit_list`'s snapshot of the four routing lanes, the way it
+            // takes it — `$(cat "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS"
+            // "$DIRECT_DOMAINS")`, one string, trailing newlines gone — so the
+            // router is reloaded below only when that string changed.
             let routed = |l: &Lanes| {
-                let mut s = String::with_capacity(l.escape.len() + l.corp.len() + l.block.len());
+                let mut s = String::with_capacity(l.escape.len() + l.corp.len() + l.block.len() + l.direct.len());
                 s.push_str(&l.escape);
                 s.push_str(&l.corp);
                 s.push_str(&l.block);
+                s.push_str(&l.direct);
                 s.trim_end_matches('\n').to_string()
             };
             let routed_changed = routed(&lanes) != routed(&e.lanes);
-            for l in [Lane::Escape, Lane::Corp, Lane::Block] {
+            for l in Lanes::editable() {
                 let (before, after) = match l {
                     Lane::Escape => (&lanes.escape, &e.lanes.escape),
                     Lane::Corp => (&lanes.corp, &e.lanes.corp),
-                    _ => (&lanes.block, &e.lanes.block),
+                    Lane::Block => (&lanes.block, &e.lanes.block),
+                    Lane::Direct => (&lanes.direct, &e.lanes.direct),
                 };
                 if before != after {
                     let p = lane_file(cfg, l);
@@ -1185,7 +1191,7 @@ fn cmd_lane(cfg: &Path, target: Target, action: &str, args: &[String]) -> Result
             // `have` comes from the POST-edit lane, matching `_geosite_hint`'s
             // position after `_lane_append` and `_lane_dedupe` — so it includes
             // the entry just added and excludes whatever dedupe pulled out of
-            // the other two lanes.
+            // the other lanes.
             let mut out = e.messages.clone();
             if let Op::Add { entries, .. } = &op {
                 // `geosite:` is escape/block only — corp routes internal names,
@@ -1873,8 +1879,8 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
             // in either, but both name servers, so they sit in POOL below.
             let src = ["servers.json", "manual.json", "import-review.json", "subs.txt",
                        "outbound.json", "escape-domains.txt", "corp-domains.txt",
-                       "block-domains.txt", "hotspot-domains.txt", "escape-dns.txt",
-                       "manual-sources.tsv"];
+                       "block-domains.txt", "direct-domains.txt", "hotspot-domains.txt",
+                       "escape-dns.txt", "manual-sources.tsv"];
             match rest.first().map(|s| s.as_str()).unwrap_or("list") {
                 "list" => {
                     let mut o = format!("config bundle — '{PROG} config export' packs the present ones:");
@@ -2224,16 +2230,25 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                 other => Ok(connections_show(&ctx, other.unwrap_or(""))),
             }
         }
-        // 'direct' is not an editable lane — it is the pass-through default, so
-        // only the diagnostics exist. What FAILED going direct is the useful
-        // question: those are the escape-lane candidates.
-        "direct" => match rest.first().map(|s| s.as_str()).unwrap_or("errors") {
-            "errors" | "stats" => {
-                cmd_lane_errors(&cfg, "direct", rest.get(1).map(|s| s.as_str()).unwrap_or("10m"))
+        // 'direct' is the pass-through default AND, since #s98, a hand lane:
+        // names sent straight out even where a broader rule (a geosite set,
+        // the ad set) would take them elsewhere. Bare `direct` stays the
+        // diagnostics — what FAILED going direct is the useful question:
+        // those are the escape-lane candidates.
+        "direct" => {
+            let action = rest.first().cloned().unwrap_or_else(|| "errors".into());
+            let args = &rest[1.min(rest.len())..];
+            match action.as_str() {
+                "errors" | "stats" => {
+                    cmd_lane_errors(&cfg, "direct", args.first().map(|s| s.as_str()).unwrap_or("10m"))
+                }
+                "log" => cmd_lane_log(&cfg, "direct"),
+                "list" | "dump" | "add" | "rm" | "remove" | "clear" | "import" => {
+                    cmd_lane(&cfg, Target::Lane(Lane::Direct), &action, args)
+                }
+                _ => die(&cfg, &format!("usage: {PROG} direct [errors [5m|10m|1h|…|all] | log | list | add [--domain] [--force] <e>… | rm [--domain] <e>… | import <file> | clear | dump [file]]")),
             }
-            "log" => cmd_lane_log(&cfg, "direct"),
-            _ => die(&cfg, &format!("usage: {PROG} direct [errors [5m|10m|1h|…|all] | log]")),
-        },
+        }
         "version" | "--version" | "-V" => Ok(format!("{PROG} {}", env!("ROWT_SHELL_VERSION"))),
         // hidden: the log splitter re-execs this binary so sing-box's output is
         // classified by a process that outlives the CLI
@@ -2401,6 +2416,7 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
             let esc = read(&cfg.join("escape-domains.txt"));
             let corp = read(&cfg.join("corp-domains.txt"));
             let blk = read(&cfg.join("block-domains.txt"));
+            let dir = read(&cfg.join("direct-domains.txt"));
             // `--domain` entries count too — they are entries the operator put
             // there, and omitting them makes `status` read as "the flag did
             // nothing" right when they'd check.
@@ -2410,12 +2426,13 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                        + n(&corp, rowt_core::render::Filter::Cidr)
                        + n(&corp, rowt_core::render::Filter::Exact);
             let n_blk = n(&blk, rowt_core::render::Filter::All) + n(&blk, rowt_core::render::Filter::Exact);
+            let n_dir = n(&dir, rowt_core::render::Filter::Domain) + n(&dir, rowt_core::render::Filter::Exact);
             let ads = if cfg.join("cache/geosite-category-ads-all.srs").is_file() { "+ads" } else { "" };
             let mut geo: Vec<String> = rowt_core::render::geosites_of(&esc);
             geo.extend(rowt_core::render::geosites_of(&blk));
             geo.sort(); geo.dedup();
             let geo_s = if geo.is_empty() { String::new() } else { format!(" +geosite:{}", geo.join(",")) };
-            o.push(format!("buckets:      escape={n_esc} corp={n_corp} block={n_blk}{ads}{geo_s} final={}",
+            o.push(format!("buckets:      escape={n_esc} corp={n_corp} block={n_blk}{ads}{geo_s} direct={n_dir} final={}",
                            env_or("ROWT_FINAL", "direct")));
             // What rowt's corp lane sees, and a checker's verdict — never rowt's
             // own call on the VPN (rowt_core::corpview, the shell's _corp_view).
@@ -2426,6 +2443,11 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
                     .status().map(|s| s.success()).unwrap_or(false);
                 o.push(format!("config:       host.json {}",
                     if ok { "OK".to_string() } else { format!("INVALID (run '{PROG} render')") }));
+            }
+            // rowt #s104: the watchdog found that this rowt renders a different
+            // config than the one the running router started from.
+            if let Some(l) = upgrade::status_line(&ctx) {
+                o.push(l);
             }
             // rowt #s41: the escape lane's health, from what the watchdog and
             // the follower last observed — the `via proxy:` fetch only on
@@ -2499,7 +2521,7 @@ fn run(cfg: &Path, cmd: &str, rest: &[String]) -> Result<String, String> {
             let bin = cands.into_iter().find(|c| c.is_file())
                 .ok_or("rowt-monitor not found — build it, or set ROWT_MONITOR")?;
             let err = std::process::Command::new(bin)
-                .args(&rest).env("ROWT_BIN", &here).exec_replace();
+                .args(&rest).env("ROWT_BIN", monitor_ctl_bin(&here)).exec_replace();
             Err(err)
         }
         "render" => {
@@ -2816,5 +2838,31 @@ mod tests {
         assert_eq!(human_bytes(1_048_575), "1024K");
         assert_eq!(human_bytes(1_048_576), "1.0M");
         assert_eq!(human_bytes(1_073_741_823), "1024.0M");
+    }
+
+    /// #s89: the monitor is handed `opt/rowt`, which follows `brew upgrade`,
+    /// never the Cellar folder the upgrade deletes; and only when that link
+    /// really names this file.
+    #[test]
+    fn the_monitor_is_handed_a_path_that_survives_an_upgrade() {
+        let root = std::env::temp_dir().join(format!("rowt-s89-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for v in ["3.8.39", "3.8.40"] {
+            let d = root.join(format!("Cellar/rowt/{v}/libexec/bin"));
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("rowt-rs"), v).unwrap();
+        }
+        std::fs::create_dir_all(root.join("opt")).unwrap();
+        std::os::unix::fs::symlink("../Cellar/rowt/3.8.39", root.join("opt/rowt")).unwrap();
+        let current = root.join("Cellar/rowt/3.8.39/libexec/bin/rowt-rs");
+        let other = root.join("Cellar/rowt/3.8.40/libexec/bin/rowt-rs");
+        // The installed version: its stable name.
+        assert_eq!(monitor_ctl_bin(&current), root.join("opt/rowt/libexec/bin/rowt-rs"));
+        // A Cellar version opt/rowt does not point at: as it is.
+        assert_eq!(monitor_ctl_bin(&other), other);
+        // A cargo build: as it is.
+        let dev = root.join("code/rowt/target/release/rowt-rs");
+        assert_eq!(monitor_ctl_bin(&dev), dev);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

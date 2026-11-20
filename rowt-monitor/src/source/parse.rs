@@ -39,6 +39,48 @@ pub struct RawConn {
     pub down: u64, // cumulative bytes
     pub chains: Vec<String>,
     pub rule: String,
+    /// The rowt port it came in on (`port_of_inbound`): `main`, a named port's
+    /// name, or `-` when the feed names no inbound. Not `port`, which is the
+    /// destination's.
+    pub inbound: String,
+}
+
+/// The rowt port a connection came in on, from the feed's `metadata.type`,
+/// `<inbound type>/<inbound tag>`. rowt tags main `in` and a named port
+/// `<name>-in` (`rowt_core::render`), so `mixed/in` is `main` and
+/// `mixed/vm-in` is `vm`, the names `rowt port list` prints. A tag rowt did
+/// not render is kept as it is; no tag at all is `-`.
+pub fn port_of_inbound(ty: &str) -> String {
+    port_of_tag(ty.split_once('/').map(|(_, tag)| tag).unwrap_or(""))
+}
+
+/// The rowt port an inbound tag stands for (see `port_of_inbound`).
+pub fn port_of_tag(tag: &str) -> String {
+    match tag {
+        "" => crate::metrics::NO_PORT.to_string(),
+        "in" => crate::metrics::MAIN_PORT.to_string(),
+        // A port named `-` (tag `--in`) keeps its tag, so it is not taken
+        // for the "port not known" marker.
+        tag => tag.strip_suffix("-in").filter(|n| !n.is_empty() && *n != crate::metrics::NO_PORT).unwrap_or(tag).to_string(),
+    }
+}
+
+/// The ports a rendered `host.json` listens on, as `rowt port list` names
+/// them: main first, then each named port in the order rowt rendered them.
+pub fn ports_of_host(host: &Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for ib in host.get("inbounds").and_then(|v| v.as_array()).into_iter().flatten() {
+        let Some(tag) = ib.get("tag").and_then(|t| t.as_str()) else { continue };
+        let port = port_of_tag(tag);
+        if port != crate::metrics::NO_PORT && !out.contains(&port) {
+            out.push(port);
+        }
+    }
+    if let Some(i) = out.iter().position(|p| p == crate::metrics::MAIN_PORT) {
+        let main = out.remove(i);
+        out.insert(0, main);
+    }
+    out
 }
 
 /// Identity of a connections-table row: its lane, host, and port.
@@ -87,6 +129,7 @@ pub fn parse_connections(v: &Value) -> Vec<RawConn> {
             down: c.get("download").and_then(u64_of).unwrap_or(0),
             chains,
             rule: normalize_rule(c.get("rule").and_then(|s| s.as_str()).unwrap_or("")),
+            inbound: port_of_inbound(meta.get("type").and_then(|s| s.as_str()).unwrap_or("")),
         });
     }
     out
@@ -229,8 +272,19 @@ pub fn build_conn_rows(
     }
 
     // Live rows first, then dormant rows; within each group, by throughput
-    // (down+up) desc for a stable, useful ordering.
-    groups.sort_by(|a, b| (a.conns == 0).cmp(&(b.conns == 0)).then((b.down + b.up).total_cmp(&(a.down + a.up))));
+    // (down+up) desc for a stable, useful ordering. Dormant rows come from a
+    // map built afresh each poll, so equal totals are ordered by host and port
+    // rather than by that map's random order, which would swap them every
+    // tick. Live rows keep the feed's order on a tie, as they always did.
+    groups.sort_by(|a, b| {
+        (a.conns == 0).cmp(&(b.conns == 0)).then((b.down + b.up).total_cmp(&(a.down + a.up))).then_with(|| {
+            if a.conns == 0 && b.conns == 0 {
+                (&a.host, a.port).cmp(&(&b.host, b.port))
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+    });
     let conns: Vec<Conn> = groups
         .into_iter()
         .map(|g| Conn {
@@ -577,6 +631,55 @@ mod tests {
         assert_eq!(esc_lane.conns, 2);
         assert_eq!(all.conns, 3); // escape 2 + direct 1, block excluded
         assert_eq!(all.down, 2205.0);
+    }
+
+    #[test]
+    fn inbound_names_the_rowt_port() {
+        // The shapes sing-box 1.13's clash feed was seen to carry, plus the edges.
+        assert_eq!(port_of_inbound("mixed/in"), "main");
+        assert_eq!(port_of_inbound("mixed/vm-in"), "vm");
+        assert_eq!(port_of_inbound("mixed/guest-net-in"), "guest-net");
+        assert_eq!(port_of_inbound("mixed/other"), "other", "a tag rowt did not render is kept");
+        assert_eq!(port_of_inbound("mixed/-in"), "-in", "an empty name is not a port");
+        assert_eq!(port_of_inbound("mixed/--in"), "--in", "a port named - is not the no-port marker");
+        assert_eq!(port_of_inbound("mixed"), "-");
+        assert_eq!(port_of_inbound(""), "-");
+        let v = json!({"connections": [
+            {"id":"a","metadata":{"host":"x.example","destinationPort":"443","type":"mixed/vm-in"},"upload":1,"download":2,"chains":["direct"]},
+            {"id":"b","metadata":{"host":"x.example","destinationPort":"443"},"upload":1,"download":2,"chains":["direct"]}
+        ]});
+        let raw = parse_connections(&v);
+        assert_eq!(raw[0].inbound, "vm");
+        assert_eq!(raw[1].inbound, "-", "no type in the feed");
+    }
+
+    #[test]
+    fn dormant_rows_with_equal_totals_keep_one_order() {
+        // Two closed connections with the same totals, handed over in either
+        // order (a HashMap's), come out the same way round.
+        let k = |h: &str| (Lane::Direct, h.to_string(), 443u16);
+        let h = |n: u64| ConnHist { up: n, down: n, rule: String::new() };
+        let a: HashMap<ConnKey, ConnHist> = [(k("b.example"), h(5)), (k("a.example"), h(5))].into_iter().collect();
+        let b: HashMap<ConnKey, ConnHist> = [(k("a.example"), h(5)), (k("b.example"), h(5))].into_iter().collect();
+        let esc = HashSet::new();
+        let hosts = |m: &HashMap<ConnKey, ConnHist>| {
+            build_conn_rows(&[], &HashMap::new(), &esc, m).0.into_iter().map(|c| c.host).collect::<Vec<_>>()
+        };
+        assert_eq!(hosts(&a), vec!["a.example", "b.example"]);
+        assert_eq!(hosts(&b), hosts(&a));
+    }
+
+    #[test]
+    fn ports_of_host_lists_main_then_named_ports() {
+        // The inbounds rowt_core::render writes: main's `in`, then `<name>-in`.
+        let host = json!({"inbounds": [
+            {"type":"mixed","tag":"in","listen":"127.0.0.1","listen_port":7890},
+            {"type":"mixed","tag":"vm-in","listen":"127.0.0.1","listen_port":7891},
+            {"type":"mixed","tag":"guest-in","listen":"127.0.0.1","listen_port":7892}
+        ]});
+        assert_eq!(ports_of_host(&host), vec!["main", "vm", "guest"]);
+        assert_eq!(ports_of_host(&json!({"inbounds": [{"tag":"in"}]})), vec!["main"]);
+        assert!(ports_of_host(&json!({})).is_empty(), "no inbounds, no ports");
     }
 
     #[test]

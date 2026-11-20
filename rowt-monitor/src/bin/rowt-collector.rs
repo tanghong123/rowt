@@ -1,9 +1,9 @@
 //! rowt-collector — the always-on traffic-metrics sidecar (see METRICS.md).
 //!
 //! Holds the clash `/connections` websocket, diffs each connection's cumulative
-//! byte counters into 5-second per-`(domain, lane)` buckets, reconciles the
-//! remainder against the monotonic grand totals, and writes the tiered SQLite
-//! store. `bin/rowt` runs it as a sidecar tied to the router's lifecycle; it is
+//! byte counters into 5-second per-`(domain, lane, port)` buckets, reconciles
+//! the remainder against the monotonic grand totals, and writes the tiered
+//! SQLite store. `bin/rowt` runs it as a sidecar tied to the router's lifecycle; it is
 //! never launched from inside the TUI.
 //!
 //! Env: `ROWT_COLLECT_EP` (controller host:port, default 127.0.0.1:9090),
@@ -195,20 +195,21 @@ impl State {
                 continue;
             }
             let domain = if c.host.is_empty() { "?" } else { c.host.as_str() };
-            metrics::bucket_add(&mut self.bucket, domain, lane.label(), d_up, d_dn);
+            metrics::bucket_add(&mut self.bucket, domain, lane.label(), &c.inbound, d_up, d_dn);
             sum_up += d_up;
             sum_dn += d_dn;
         }
         self.last = seen; // drop cursors for closed connections
 
         // Reconcile the remainder (sub-frame-lived connections, block lane, etc.)
-        // against the monotonic grand totals so the books balance.
+        // against the monotonic grand totals so the books balance. The totals
+        // are not split by port, so neither is the remainder.
         if let Some((pu, pd)) = self.last_total {
             let g_up = up_total.saturating_sub(pu);
             let g_dn = dn_total.saturating_sub(pd);
             let un_up = g_up.saturating_sub(sum_up);
             let un_dn = g_dn.saturating_sub(sum_dn);
-            metrics::bucket_add(&mut self.bucket, "(unattributed)", "-", un_up, un_dn);
+            metrics::bucket_add(&mut self.bucket, "(unattributed)", "-", metrics::NO_PORT, un_up, un_dn);
         }
         self.last_total = Some((up_total, dn_total));
 

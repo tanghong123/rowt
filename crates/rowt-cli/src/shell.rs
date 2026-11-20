@@ -155,18 +155,32 @@ fn set_mode(p: &Path, mode: u32) -> std::io::Result<()> {
     fs::set_permissions(p, fs::Permissions::from_mode(mode))
 }
 
-/// `seed_lists` — create the four lane files with their headers if missing.
+/// `seed_lists` — create the four routing lane files from their templates if
+/// missing (the hotspot lane has none).
 /// The headers are the shell's, extracted at build time for the same reason the
 /// help text is: they are text, and two copies of text diverge.
 fn seed_lists(cfg: &Path) {
     let _ = fs::create_dir_all(cfg.join("log"));
     let _ = fs::create_dir_all(cfg.join("cache"));
+    // A lane the config lacks comes from its template, less the entries another
+    // lane already holds (`lanestate::seed_body`), and is logged as seeded.
+    let mut seeded: Vec<(&str, String)> = vec![];
     for (name, hdr) in crate::seeds::SEEDS {
         let p = cfg.join(name);
         if !p.exists() {
-            let _ = fs::write(&p, hdr);
+            let others: Vec<String> = rowt_core::lanestate::LANES.iter()
+                .filter(|(_, f)| *f != name)
+                .map(|(_, f)| crate::read(&cfg.join(f)))
+                .collect();
+            let body = rowt_core::lanestate::seed_body(hdr, &others);
+            if fs::write(&p, &body).is_ok() {
+                if let Some((lane, _)) = rowt_core::lanestate::LANES.iter().find(|(_, f)| *f == name) {
+                    seeded.push((*lane, body));
+                }
+            }
         }
     }
+    crate::lanelog::seeded(cfg, &seeded);
 }
 
 // ---------------------------------------------------------------- the bracket

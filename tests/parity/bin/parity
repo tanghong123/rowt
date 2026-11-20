@@ -173,6 +173,17 @@ make_sandbox() { # $1=outdir  [$2=scenario]
     # to add a second copy, and there is no way to reach it from a config
     # fixture.
     [ -d "$DIR/fixtures/scenarios/$scenario/home" ]   && cp -R "$DIR/fixtures/scenarios/$scenario/home/." "$out/home/"
+    # …and `absent`, one config file name per line, for a base fixture the
+    # scenario must NOT have: an overlay can add files but not take one away,
+    # and the path that creates a missing file (seeding a lane template) is
+    # only reached without it.
+    if [ -f "$DIR/fixtures/scenarios/$scenario/absent" ]; then
+      local _gone
+      while IFS= read -r _gone; do
+        case "$_gone" in ''|'#'*|*/*|..*) continue ;; esac
+        rm -f "${cfg:?}/$_gone"
+      done < "$DIR/fixtures/scenarios/$scenario/absent"
+    fi
   fi
   # A rendered config names files inside the config dir — the corp lane's two
   # rule-sets — so a committed host.json/vm.json that has to equal a fresh render
@@ -192,6 +203,20 @@ make_sandbox() { # $1=outdir  [$2=scenario]
     cksum < "$cfg/host.json" > "$cfg/host.running"
     rm -f "$cfg/host.running.self"
   fi
+  # "Now" and "this rowt" cannot be static fixtures either. The watchdog's
+  # upgrade reload (#s104) asks when the Mac woke (a canned `sysctl`) and
+  # reads its own traffic sample (cache/upgrade-pending), both against the
+  # clock, and the sample names the installed version. A scenario writes
+  # `@NOW-<seconds>@` and `@ROWT_VERSION@` and each sandbox fills in its own,
+  # when it is built: the two runs of a case are built moments apart, so each
+  # sees the same distances from its own now.
+  local _now _ver _f
+  _now="$(date +%s)"; _ver="$(sed -n 's/^ROWT_VERSION="\(.*\)"$/\1/p' "$ROWT" | head -1)"
+  # `|| true`: under pipefail, a scenario with no template (most of them) is a
+  # grep that matched nothing, and would end the harness without a word.
+  { grep -rlE '@NOW-[0-9]+@|@ROWT_VERSION@' "$cfg" "$out/env" 2>/dev/null || true; } | while IFS= read -r _f; do
+    NOW="$_now" VER="$_ver" perl -pi -e 's/\@NOW-(\d+)\@/$ENV{NOW} - $1/ge; s/\@ROWT_VERSION\@/$ENV{VER}/g' "$_f"
+  done
   # "The router is running" cannot be a static fixture: `host_running` reads a
   # pidfile and then `kill -0`s it, so any pid committed to the repo is either
   # dead or, worse, someone else's. A scenario asks for it with an empty
@@ -213,6 +238,13 @@ make_sandbox() { # $1=outdir  [$2=scenario]
     # output the moment a case actually stops the router.
     disown 2>/dev/null || true
     rm -f "$cfg/host.pid.self"
+    # A record that names the router's pid (the spin heal's last sample,
+    # watch.cpu, #s105) can only be written once that pid exists: the
+    # scenario spells it `@ROUTER_PID@`. Guarded like the fill above.
+    local _rp; _rp="$(cat "$cfg/host.pid")"
+    { grep -rl '@ROUTER_PID@' "$cfg" 2>/dev/null || true; } | while IFS= read -r _f; do
+      RP="$_rp" perl -pi -e 's/\@ROUTER_PID\@/$ENV{RP}/g' "$_f"
+    done
   fi
   mkdir -p "$cfg/bin" "$cfg/log" "$cfg/cache"
   cp "$DIR/fixtures/bin/sing-box" "$cfg/bin/sing-box"
@@ -298,6 +330,23 @@ run_one() {      # $1=outdir  rest=rowt args
   snapshot_fs "$out"
 }
 
+# The spin heal's records (#s105) carry the sandbox's own clock and stand-in
+# router: `watch.cpu` is "epoch cpusecs pid bytes", `watch.cpuheal` the epoch
+# of the last heal and `watch.restart` that of the last recovery (#s106), and
+# the two runs of a case are seconds apart with two different `sleep`s. So the pid is masked, and an epoch only when it is this
+# run's own stamp (within five minutes of now): a value the tick should have
+# kept (a 2100 heal) or replaced (a seed ten minutes old) still compares. The
+# scenarios seed nonzero CPU and byte counts, which a fresh sample of the
+# stand-in never has, so a side that leaves the sample unwritten still fails.
+snap_norm() { # $1=file (relative, from snapshot_fs) $2=outdir
+  local near='function near(x) { return x ~ /^[0-9]+$/ && x - now <= 300 && now - x <= 300 }'
+  case "$1" in
+    ./watch.cpu)     normalize "$1" "$2" | awk -v now="$(date +%s)" "$near"' near($1) { $1 = "<EPOCH>" } $3 ~ /^[0-9]+$/ { $3 = "<PID>" } { print }' ;;
+    ./watch.cpuheal|./watch.restart) normalize "$1" "$2" | awk -v now="$(date +%s)" "$near"' near($1) { $1 = "<EPOCH>" } { print }' ;;
+    *)               normalize "$1" "$2" ;;
+  esac
+}
+
 snapshot_fs() {  # $1=outdir — the config tree, minus what is volatile by design
   local out="$1" cfg="$1/home/rowt"
   ( cd "$cfg" 2>/dev/null || exit 0
@@ -312,9 +361,19 @@ snapshot_fs() {  # $1=outdir — the config tree, minus what is volatile by desi
           # cannot see a dropped chmod. A port that writes the right bytes with
           # the wrong permissions is a security regression, not a near-miss.
           printf '%s %s  %s\n' \
-            "$(normalize "$f" "$out" | cksum | awk '{print $1}')" \
+            "$(snap_norm "$f" "$out" | cksum | awk '{print $1}')" \
             "$(stat -f %Lp "$f" 2>/dev/null || stat -c %a "$f" 2>/dev/null || echo '?')" \
             "$f"
+        done
+    # A link is not a file to `-type f`, so one side removing a lane's dangling
+    # link and the other keeping it would read as agreement (direct-dangling).
+    # Its target is recorded as written, the sandbox's own root spelled @OUT@.
+    find . -type l \
+      ! -path './log/*' ! -path './cache/*' ! -path './bin/*' \
+      | sort | while read -r f; do
+          t="$(readlink "$f")"
+          case "$t" in "$out"/*) t="@OUT@/${t#"$out"/}" ;; esac
+          printf 'link %s  %s\n' "$t" "$f"
         done
   ) > "$out/fsstate"
   # The rc files are NOT in the config tree — they live in $HOME beside it — and
@@ -1094,7 +1153,7 @@ cmd_splitter_diff() { # [count]
   echo "  $fails/$n cases differ — artifacts: $work"; return 1
 }
 
-# Lane-list edits, bash vs Rust: the three files afterwards, and the lines the
+# Lane-list edits, bash vs Rust: the four files afterwards, and the lines the
 # user is told. The shell's surrounding effects (geosite fetch, the coverage
 # hint, the router reload) are filtered out — they are not set logic.
 cmd_lanes_diff() {
@@ -1119,7 +1178,7 @@ cmd_lanes_diff() {
     "$rust" --config-dir "$B/home/rowt" $line > "$B/out.raw" 2>/dev/null || true
     grep -iE "$core" "$B/out.raw" > "$B/out" 2>/dev/null || : > "$B/out"
     local bad="" f
-    for f in escape-domains.txt corp-domains.txt block-domains.txt; do
+    for f in escape-domains.txt corp-domains.txt block-domains.txt direct-domains.txt; do
       diff -q "$A/home/rowt/$f" "$B/home/rowt/$f" >/dev/null 2>&1 || bad="$bad $f"
     done
     diff -q "$A/out" "$B/out" >/dev/null 2>&1 || bad="$bad messages"
@@ -1307,10 +1366,12 @@ cmd_platform_diff() {
     # Source rowt with `version` so main() is a cheap no-op, truncate the trace,
     # then call the helper itself. Running it through `rowt run` would exec a NEW
     # shell where rowt's functions do not exist — which silently compared two
-    # unrelated traces the first time this was written.
+    # unrelated traces the first time this was written. ROWT_IMPL=bash: since
+    # 3.9.0 main() hands every command to rowt-rs by default, and an exec there
+    # would replace this shell before the helper ran (rowt #s92).
     env -i HOME="$A/home" XDG_CONFIG_HOME="$A/home" \
         PATH="$A/shims:/usr/bin:/bin:/usr/sbin:/sbin" TERM=dumb LC_ALL=C TZ=UTC \
-        PARITY_TRACE="$A/trace" PARITY_ENV="$A/env" \
+        PARITY_TRACE="$A/trace" PARITY_ENV="$A/env" ROWT_IMPL=bash \
         bash -c 'source "$0" version >/dev/null 2>&1; : > "$PARITY_TRACE"; '"$shell_expr"' >/dev/null 2>&1 || true' \
         "$ROWT" || true
     # shellcheck disable=SC2086
@@ -1449,6 +1510,18 @@ cmd_cli_diff() {
     # PARITY_BASH_IMPL=rust deliberately wins over it: that mode is asking for
     # the wrapper, and the wrapper execs a binary that has no Pythons to go back
     # to. selftest 28 requires this to be the way round it is.
+    #
+    # ROWT_DELEGATED=1 holds this side on the shell whatever the front door
+    # would pick (rowt #s92: rowt-rs is the default, so an unset ROWT_IMPL no
+    # longer means the shell). Not ROWT_IMPL=bash: `watch install|refresh`
+    # writes an explicit ROWT_IMPL into state as watch_impl, so pinning it here
+    # would record bash on this side of every watch case while rowt-rs, run
+    # directly, records nothing — and the case every upgraded Mac takes, no
+    # choice made, would never be compared. The marker is what rowt-rs sets when
+    # it hands a command to the shell; the front door reads it as "already
+    # chosen" and nothing else in the shell reads it. selftest 54.
+    local -a shell_side=(ROWT_DELEGATED=1)
+    [ -n "${PARITY_BASH_IMPL:-}" ] && shell_side=(ROWT_IMPL="$PARITY_BASH_IMPL")
     ( env -i HOME="$A/home" XDG_CONFIG_HOME="$A/home" \
         PATH="$A/shims:/usr/bin:/bin:/usr/sbin:/sbin" TERM=dumb LC_ALL=C TZ=UTC \
         PARITY_TRACE="$A/trace" PARITY_ENV="$A/env" \
@@ -1456,7 +1529,7 @@ cmd_cli_diff() {
         ROWT_CORP_HEALTH="$A/env/corp-health" \
         ${cenv[@]+"${cenv[@]}"} \
         ROWT_PY="${PARITY_BASH_PY:-1}" \
-        ${PARITY_BASH_IMPL:+ROWT_IMPL="$PARITY_BASH_IMPL"} \
+        "${shell_side[@]}" \
         perl -e "$TMO" "$tmo" \
         bash "$ROWT" $cmdline > "$A/out" 2>/dev/null < /dev/null ) 2>/dev/null || arc=$?
     # shellcheck disable=SC2086
@@ -1481,7 +1554,7 @@ cmd_cli_diff() {
     normalize "$A/out" "$A" > "$A/out.n"; normalize "$B/out" "$B" > "$B/out.n"
     diff -q "$A/out.n" "$B/out.n" >/dev/null 2>&1 || bad="$bad stdout"
     [ "$arc" = "$brc" ] || bad="$bad rc($arc/$brc)"
-    for f in escape-domains.txt corp-domains.txt block-domains.txt; do
+    for f in escape-domains.txt corp-domains.txt block-domains.txt direct-domains.txt; do
       # `diff -q` on two ABSENT files exits 2, which reads here as "differs" —
       # and after `uninstall --purge` both sides are absent, which is agreement.
       # So compare presence first: identical only when both are gone. One side

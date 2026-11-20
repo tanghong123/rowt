@@ -138,6 +138,270 @@ pub struct Observation {
     /// so both implementations stamp with the same program.
     pub hold_stamp: String,
     pub now: i64,
+    /// rowt #s104: the router runs a config an older rowt rendered, and this
+    /// rowt renders a different one, established by a dry render (nothing
+    /// written). `None` on every tick where that is not known, which is every
+    /// ordinary tick: the caller looks only when `host.running.by` names
+    /// another version, and never again for a version it reloaded for once.
+    pub upgrade: Option<Upgrade>,
+    /// rowt #s105, the spin heal (`_watch_spin`): the one line the router's
+    /// CPU and traffic sample had for the log on this healthy tick, if any
+    /// (busy but idle, or spinning but healed once already, or the spin
+    /// itself with its evidence file). Taken by the caller, because the
+    /// sample, its records and the evidence are effects; `spin_step` decides.
+    pub spin_log: Option<String>,
+    /// …and the recovery reason when the sample asks for a heal
+    /// (`spin_reason`). None on every tick that did not reach a healthy probe.
+    pub spin: Option<String>,
+}
+
+/// A reload an upgrade is waiting for (#s104; Hong chose on #s102: "Watchdog
+/// reloads at a quiet moment, and status flags it until then").
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Upgrade {
+    /// The installed rowt, whose render differs from the running config.
+    pub version: String,
+    /// The rowt whose render the router runs (`host.running.by`); empty when
+    /// the router was started before that was recorded.
+    pub from: String,
+    /// Why now is a quiet moment: `woke` (within `UPGRADE_WAKE_SECS` of waking
+    /// from a sleep of `UPGRADE_SLEEP_SECS` or more) or `idle` (the router
+    /// moved under the byte-rate threshold from tick to tick for
+    /// `UPGRADE_QUIET_SECS`). Empty: not quiet, so nothing happens.
+    pub quiet: String,
+    /// This tick is the one that found it, so the wait is said once.
+    pub fresh: bool,
+}
+
+/// How long traffic has to stay under the threshold before an upgrade's
+/// reload counts the moment as quiet.
+pub const UPGRADE_QUIET_SECS: i64 = 600;
+/// The threshold, up plus down, in bytes a second, from tick to tick
+/// (`ROWT_RELOAD_QUIET_BPS` overrides it).
+pub const UPGRADE_QUIET_BPS: u64 = 2048;
+/// A sleep this long drops the connections a reload would: anything shorter
+/// can leave a call standing.
+pub const UPGRADE_SLEEP_SECS: i64 = 300;
+/// "Just after the Mac woke": the first ticks within this of the wake.
+pub const UPGRADE_WAKE_SECS: i64 = 600;
+
+/// What the last tick saw of the router's traffic while an upgrade waits:
+/// when, the clash API's `uploadTotal + downloadTotal` then, and since when
+/// every tick-to-tick step has stayed under the threshold (0: not quiet).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Sample {
+    pub epoch: i64,
+    pub total: u64,
+    pub quiet_since: i64,
+}
+
+/// Is now a quiet moment for an upgrade's reload, and what to remember for
+/// the next tick? `woke`/`sleep` are `kern.waketime`/`kern.sleeptime` in
+/// seconds (0 when unknown); `total` is the router's byte counter (None when
+/// the clash API did not answer). Pure, so the shell's `_upgrade_quiet` and the
+/// CLI make the same call from the same numbers.
+///
+/// - Woke: the Mac woke within `UPGRADE_WAKE_SECS` from a sleep of at least
+///   `UPGRADE_SLEEP_SECS`. A wake time before the sleep time, or either
+///   unknown, says nothing.
+/// - Idle: every step since `quiet_since` moved under `bps`, for
+///   `UPGRADE_QUIET_SECS`. A counter that went DOWN (the router restarted),
+///   a gap longer than the window (a missed tick, a sleep) or a clock that
+///   went back starts the window over: the bytes in between are unknown.
+pub fn upgrade_quiet(now: i64, woke: i64, sleep: i64, prev: Option<Sample>, total: Option<u64>, bps: u64) -> (&'static str, Option<Sample>) {
+    if woke_quiet(now, woke, sleep) {
+        return ("woke", prev);
+    }
+    let Some(total) = total else { return ("", None) };
+    let fresh = Sample { epoch: now, total, quiet_since: 0 };
+    let Some(p) = prev else { return ("", Some(fresh)) };
+    let gap = now - p.epoch;
+    if total < p.total || gap <= 0 || gap > UPGRADE_QUIET_SECS {
+        return ("", Some(fresh));
+    }
+    let quiet_since = if (total - p.total) < bps.saturating_mul(gap as u64) {
+        if p.quiet_since > 0 { p.quiet_since } else { p.epoch }
+    } else {
+        0
+    };
+    let idle = quiet_since > 0 && now - quiet_since >= UPGRADE_QUIET_SECS;
+    (if idle { "idle" } else { "" }, Some(Sample { epoch: now, total, quiet_since }))
+}
+
+/// The wake half of `upgrade_quiet`, on its own so the caller skips the clash
+/// API when the wake already answered (both sides, or the traces differ).
+pub fn woke_quiet(now: i64, woke: i64, sleep: i64) -> bool {
+    woke > 0 && sleep > 0 && woke >= sleep && woke - sleep >= UPGRADE_SLEEP_SECS && now >= woke && now - woke <= UPGRADE_WAKE_SECS
+}
+
+/// Netcheck's first question, shared with the caller so it observes an
+/// upgrade under the same condition the planner acts on: does this tick
+/// reload for the network's sake (the interface moved, or the system proxy
+/// no longer points at rowt)?
+pub fn reload_needed(obs: &Observation) -> bool {
+    let iface_moved = matches!((&obs.iface, &obs.bound_iface), (Some(i), b) if Some(i) != b.as_ref());
+    let proxy_wrong = obs.active_service.is_some() && !(obs.proxy_pointing_ok && obs.proxy_bypass_ok);
+    iface_moved || proxy_wrong
+}
+
+/// A tick with nothing wrong to fix, on a network that is there: the tunnel
+/// probe answered, or local mode (no tunnel to probe). Never without an
+/// interface: a render then has none to bind, and would differ for that alone.
+pub fn healthy(obs: &Observation) -> bool {
+    obs.iface.is_some() && (obs.mode == "local" || (!obs.probe_offline && obs.health_ok))
+}
+
+/// `watch.cpu`: the router's last CPU and traffic sample, one line
+/// `epoch cpusecs pid bytes` (cumulative CPU seconds from `ps -o time=`, the
+/// clash API's `downloadTotal + uploadTotal`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CpuSample {
+    pub epoch: i64,
+    pub cpu: i64,
+    /// As the pidfile spells it: the shell compares the two as strings.
+    pub pid: String,
+    pub bytes: i64,
+}
+
+impl CpuSample {
+    /// The shell's `read -r last_e last_c last_p last_b`: the first line's
+    /// words, a missing one empty. No epoch is no sample, which is how a
+    /// missing or empty file reads.
+    pub fn parse(s: &str) -> Option<CpuSample> {
+        let mut w = s.lines().next().unwrap_or("").split_whitespace();
+        let epoch = w.next()?.parse().ok()?;
+        let num = |x: Option<&str>| x.and_then(|v| v.parse().ok()).unwrap_or(0);
+        let cpu = num(w.next());
+        let pid = w.next().unwrap_or("").to_string();
+        let bytes = num(w.next());
+        Some(CpuSample { epoch, cpu, pid, bytes })
+    }
+
+    /// The line the shell writes: `printf '%s %s %s %s\n'`.
+    pub fn line(&self) -> String {
+        format!("{} {} {} {}\n", self.epoch, self.cpu, self.pid, self.bytes)
+    }
+}
+
+/// The spin detector's knobs: `ROWT_CPU_SPIN_PCT` (interval-average CPU, in
+/// percent), `ROWT_CPU_SPIN_BYTES` (bytes a second under which the router is
+/// doing no work), `ROWT_CPU_SPIN_TICKS` (such ticks in a row before it acts)
+/// and `ROWT_CPU_HEAL_COOLDOWN` (seconds between two heals).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpinKnobs {
+    pub pct: i64,
+    pub bytes: i64,
+    pub ticks: i64,
+    pub cooldown: i64,
+}
+
+impl Default for SpinKnobs {
+    fn default() -> Self {
+        SpinKnobs { pct: 80, bytes: 65536, ticks: 2, cooldown: 86400 }
+    }
+}
+
+/// What a spin check does to one of its records.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Rec {
+    #[default]
+    Keep,
+    Remove,
+    Write(i64),
+}
+
+/// One spin check: its two records, its log line, and whether it heals.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpinStep {
+    /// `watch.cpustreak`: consecutive pathological ticks.
+    pub streak: Rec,
+    /// `watch.cpuheal`: when the last heal was, the one-shot latch.
+    pub healed: Rec,
+    /// The line for the watch log. The heal's own line is the caller's, since
+    /// it names the evidence file the caller writes.
+    pub log: Option<String>,
+    /// A heal is due: `(pct, bps, dt)`.
+    pub heal: Option<(i64, i64, i64)>,
+}
+
+/// The spin heal's decision (`_watch_spin`, rowt #s105). Restart a router that
+/// is up and answering but burns CPU doing nothing, and only that: the
+/// failure mode of a false positive is killing live connections.
+///
+/// - CPU is an interval average from cumulative CPU seconds, so a new pid (or
+///   no earlier sample) has no interval yet and starts the streak over.
+/// - "Sick" is both gates: at least `pct` CPU AND under `bytes` a second.
+///   Busy is not sick: a proxy burns CPU moving bytes.
+/// - It acts after `ticks` such ticks in a row, and then once: the latch
+///   clears only when a tick sees the CPU calm again, so a deterministic spin
+///   degrades instead of flapping the link every ten minutes.
+///
+/// - A heal the restart cooldown would hold back waits for it (#s106): it
+///   neither stamps the latch nor captures, so the first tick past the
+///   cooldown heals. `held` is `recovery_hold`'s answer, from the numbers
+///   `recover_or_hold` will use, so the two never disagree.
+///
+/// `streak` and `healed` are the records' values now (0 when missing).
+/// Integer arithmetic as the shell's `$(( ))` does it, truncating.
+#[allow(clippy::too_many_arguments)]
+pub fn spin_step(now: i64, pid: &str, cpu: i64, bytes: i64, prev: Option<&CpuSample>, streak: i64, healed: i64, held: Option<(i64, i64)>, k: &SpinKnobs) -> SpinStep {
+    let Some(p) = prev.filter(|p| p.pid == pid) else {
+        return SpinStep { streak: Rec::Remove, ..Default::default() };
+    };
+    let dt = now - p.epoch;
+    if dt <= 0 {
+        return SpinStep::default();
+    }
+    let pct = (cpu - p.cpu) * 100 / dt;
+    let bps = ((bytes - p.bytes) / dt).max(0);
+    if pct < k.pct || bps >= k.bytes {
+        // A healthy tick clears the streak, and releases the latch when the
+        // CPU is calm, so a real recurrence weeks later gets its one attempt.
+        let healed = if pct < k.pct { Rec::Remove } else { Rec::Keep };
+        return SpinStep { streak: Rec::Remove, healed, ..Default::default() };
+    }
+    let n = streak + 1;
+    if n < k.ticks {
+        return SpinStep {
+            streak: Rec::Write(n),
+            log: Some(format!("router busy but idle: {pct}% cpu, {bps} B/s ({n}/{})", k.ticks)),
+            ..Default::default()
+        };
+    }
+    if now - healed < k.cooldown {
+        return SpinStep {
+            streak: Rec::Write(n),
+            log: Some(format!(
+                "router spinning ({pct}% cpu, {bps} B/s) but already healed once {}m ago — leaving it (degraded beats flapping)",
+                (now - healed) / 60
+            )),
+            ..Default::default()
+        };
+    }
+    if let Some((since, cooldown)) = held {
+        return SpinStep {
+            streak: Rec::Write(n),
+            log: Some(format!(
+                "router spinning ({pct}% cpu, {bps} B/s) but the last recovery was {since}s ago (< {cooldown}s cooldown) — healing once that has passed"
+            )),
+            ..Default::default()
+        };
+    }
+    SpinStep { streak: Rec::Write(n), healed: Rec::Write(now), log: None, heal: Some((pct, bps, dt)) }
+}
+
+/// Would a recovery now be held back by the cooldown? `Some((since,
+/// cooldown))` when the last one (`watch.restart`, 0 when there was none) was
+/// under `cooldown` seconds ago. `recover_or_hold`'s rule, and the spin
+/// heal's, so it waits instead of stamping a heal that never runs (#s106).
+pub fn recovery_hold(now: i64, last_recovery: i64, cooldown: i64) -> Option<(i64, i64)> {
+    let since = now - last_recovery;
+    (last_recovery != 0 && since < cooldown).then_some((since, cooldown))
+}
+
+/// The recovery reason a spin heal recovers with, in the shell's words.
+pub fn spin_reason(pct: i64) -> String {
+    format!("router spinning ({pct}% cpu, no traffic)")
 }
 
 /// How far back "a connection opened recently" reaches for `health_flows`:
@@ -214,6 +478,10 @@ pub enum Action {
     CorpSync,
     WriteNetId(String),
     Reload(String),
+    /// Record that the watchdog reloads for this rowt version (#s104), BEFORE
+    /// the reload: whether the reload works or not, it is never tried again
+    /// for the same version.
+    MarkUpgrade(String),
 }
 
 /// What the caller should do after performing this phase's actions.
@@ -365,12 +633,8 @@ fn recover_or_hold(
     cfg: &Config,
     reason: &str,
 ) {
-    let since = obs.now - st.last_recovery;
-    if st.last_recovery != 0 && since < cfg.health_cooldown {
-        actions.push(Action::Log(format!(
-            "{reason} — last recovery {since}s ago (< {}s cooldown), holding off",
-            cfg.health_cooldown
-        )));
+    if let Some((since, cooldown)) = recovery_hold(obs.now, st.last_recovery, cfg.health_cooldown) {
+        actions.push(Action::Log(format!("{reason} — last recovery {since}s ago (< {cooldown}s cooldown), holding off")));
         return;
     }
     st.last_recovery = obs.now;
@@ -518,6 +782,38 @@ pub fn guard(obs: &Observation, st: &State, cfg: &Config) -> Outcome {
 
 /// Phase two, after the settle and `corp_sync`: has the network moved, and is
 /// the tunnel still carrying traffic?
+/// The third reason a watchdog reloads, beside a network change and a
+/// re-pointed proxy: the installed rowt renders a different config than the
+/// one the router runs. Said once while it waits for a quiet moment; at one,
+/// marked and reloaded, once per version. The shell's `_watch_upgrade` builds
+/// the same strings.
+fn upgrade_reload(a: &mut Vec<Action>, u: &Upgrade) {
+    let v = &u.version;
+    let from = if u.from.is_empty() { "an older rowt".to_string() } else { format!("rowt {}", u.from) };
+    let when = match u.quiet.as_str() {
+        "woke" => "just after the Mac woke from sleep",
+        "idle" => "traffic has stayed low for 10 minutes",
+        _ => {
+            if u.fresh {
+                a.push(Action::Log(format!(
+                    "rowt {v} renders a different config than the one the router runs (rendered by {from}) — \
+                     the watchdog reloads once at a quiet moment (just after the Mac wakes from sleep, or once \
+                     traffic has stayed low for 10 minutes); 'rowt reload' applies it now"
+                )));
+            }
+            return;
+        }
+    };
+    a.push(Action::Log(format!(
+        "rowt {v} renders a different config than the one the router runs (rendered by {from}) — reloading once, {when}"
+    )));
+    a.push(Action::Audit(format!(
+        "BEGIN watchdog reload — upgrade to rowt {v}: the router runs what {from} rendered; {when}"
+    )));
+    a.push(Action::MarkUpgrade(v.clone()));
+    a.push(Action::Reload(format!("upgrade to rowt {v}")));
+}
+
 pub fn netcheck(obs: &Observation, st: &State, cfg: &Config) -> Outcome {
     let mut a = vec![Action::CorpSync, Action::WriteNetId(obs.net_id.clone())];
     let mut s = st.clone();
@@ -529,8 +825,7 @@ pub fn netcheck(obs: &Observation, st: &State, cfg: &Config) -> Outcome {
     }
 
     let iface_moved = matches!((&obs.iface, &obs.bound_iface), (Some(i), b) if Some(i) != b.as_ref());
-    let proxy_wrong = obs.active_service.is_some() && !(obs.proxy_pointing_ok && obs.proxy_bypass_ok);
-    let need = iface_moved || proxy_wrong;
+    let need = reload_needed(obs);
 
     if !need {
         // Log a real network move (rare); stay silent for a bare timer tick so the
@@ -563,6 +858,17 @@ pub fn netcheck(obs: &Observation, st: &State, cfg: &Config) -> Outcome {
                 s.health_fails = 0;
                 // The server answers again: the hold is over.
                 s.hold = None;
+                // rowt #s105: the probe answering proves the network AND the
+                // tunnel work, which is exactly the state a spin hides in, so
+                // this is the only place the spin heal may act: it can never
+                // be blamed on an uplink. Through the same cooldown as a
+                // wedged tunnel (`_watch_recover`).
+                if let Some(l) = &obs.spin_log {
+                    a.push(Action::Log(l.clone()));
+                }
+                if let Some(r) = &obs.spin {
+                    recover_or_hold(&mut a, &mut s, obs, cfg, r);
+                }
             } else {
                 s.health_fails += 1;
                 if s.health_fails < cfg.health_fails {
@@ -670,6 +976,16 @@ pub fn netcheck(obs: &Observation, st: &State, cfg: &Config) -> Outcome {
                 }
             }
         }
+        // rowt #s104: an upgrade changed what rowt renders, and the router
+        // still runs the old config. Only on a tick that is otherwise healthy
+        // (a failing tunnel takes the recovery path above, whose reload applies
+        // the new config anyway), and only at a quiet moment: just after a
+        // wake from sleep, or after ten minutes of low traffic. Not on a tick
+        // that heals a spin (#s105): that recovery reloads, which applies the
+        // new config too, and one tick never reloads twice.
+        if let Some(u) = obs.upgrade.as_ref().filter(|_| healthy(obs) && obs.spin.is_none()) {
+            upgrade_reload(&mut a, u);
+        }
         return Outcome { actions: a, state: s, next: Next::Stop };
     }
 
@@ -736,7 +1052,152 @@ mod tests {
             failover: false,
             hold_stamp: "2026-10-30 09:00:00".into(),
             now: 1_000_000,
+            upgrade: None,
+            spin_log: None,
+            spin: None,
         }
+    }
+
+    /// rowt #s104: a healthy tick after an upgrade changed the render, with
+    /// the router run from 3.10.1's and 3.11.0 installed.
+    fn upgraded(quiet: &str, fresh: bool) -> Observation {
+        let mut o = running();
+        o.upgrade = Some(Upgrade { version: "3.11.0".into(), from: "3.10.1".into(), quiet: quiet.into(), fresh });
+        o
+    }
+
+    fn netcheck_plan(o: &Observation, st: &State) -> Vec<Action> {
+        let st = State { last_net_id: Some(o.net_id.clone()), ..st.clone() };
+        netcheck(o, &st, &Config::default()).actions
+    }
+
+    /// At a quiet moment: said, audited, marked BEFORE the reload (the once
+    /// bound), then reloaded, in that order, after the netcheck openers.
+    #[test]
+    fn an_upgrade_reloads_once_at_a_quiet_moment() {
+        let p = netcheck_plan(&upgraded("idle", false), &State::default());
+        assert_eq!(p, vec![
+            Action::CorpSync,
+            Action::WriteNetId("Net 192.0.2.5/192.0.2.1".into()),
+            Action::Log("rowt 3.11.0 renders a different config than the one the router runs (rendered by rowt 3.10.1) — \
+                         reloading once, traffic has stayed low for 10 minutes".into()),
+            Action::Audit("BEGIN watchdog reload — upgrade to rowt 3.11.0: the router runs what rowt 3.10.1 rendered; \
+                           traffic has stayed low for 10 minutes".into()),
+            Action::MarkUpgrade("3.11.0".into()),
+            Action::Reload("upgrade to rowt 3.11.0".into()),
+        ]);
+        let p = netcheck_plan(&upgraded("woke", true), &State::default());
+        assert!(p.contains(&Action::Reload("upgrade to rowt 3.11.0".into())), "{p:?}");
+        assert!(p.iter().any(|a| matches!(a, Action::Log(m) if m.ends_with("reloading once, just after the Mac woke from sleep"))), "{p:?}");
+    }
+
+    /// Busy: nothing happens. The tick that found it says so once; the
+    /// ticks after it say nothing (the status row carries it from there).
+    #[test]
+    fn a_busy_router_is_never_reloaded_for_an_upgrade() {
+        let p = netcheck_plan(&upgraded("", true), &State::default());
+        assert!(!p.iter().any(|a| matches!(a, Action::Reload(_) | Action::MarkUpgrade(_) | Action::Audit(_))), "{p:?}");
+        assert!(p.iter().any(|a| matches!(a, Action::Log(m) if m.contains("the watchdog reloads once at a quiet moment"))), "{p:?}");
+        let p = netcheck_plan(&upgraded("", false), &State::default());
+        assert_eq!(p.len(), 2, "only the netcheck openers: {p:?}");
+    }
+
+    /// Not on a tick whose tunnel failed (recovery decides there, and its
+    /// reload applies the new config anyway), nor offline. Local mode has no
+    /// tunnel to probe, so there the quiet moment is enough. A router that
+    /// started before `host.running.by` existed reads "an older rowt".
+    #[test]
+    fn an_upgrade_reload_waits_for_a_healthy_tick() {
+        let mut o = upgraded("idle", false);
+        o.health_ok = false;
+        let p = netcheck_plan(&o, &State::default());
+        assert!(!p.iter().any(|a| matches!(a, Action::MarkUpgrade(_))), "{p:?}");
+        let mut o = upgraded("idle", false);
+        o.probe_offline = true;
+        assert!(!netcheck_plan(&o, &State::default()).iter().any(|a| matches!(a, Action::MarkUpgrade(_))));
+        let mut o = upgraded("idle", false);
+        o.mode = "local".into();
+        o.health_ok = false;
+        o.upgrade.as_mut().unwrap().from = String::new();
+        let p = netcheck_plan(&o, &State::default());
+        assert!(p.contains(&Action::MarkUpgrade("3.11.0".into())), "{p:?}");
+        assert!(p.iter().any(|a| matches!(a, Action::Log(m) if m.contains("(rendered by an older rowt)"))), "{p:?}");
+        // …but not without an interface, local mode or not: the Mac woke and
+        // the Wi-Fi has not associated yet.
+        o.iface = None;
+        o.bound_iface = None;
+        assert!(!netcheck_plan(&o, &State::default()).iter().any(|a| matches!(a, Action::MarkUpgrade(_))));
+    }
+
+    /// Woke: within ten minutes of a wake from a sleep of five or more. A
+    /// short nap, a stale wake, a wake time before the sleep time, or either
+    /// unknown says nothing, and the traffic window goes on as it was.
+    #[test]
+    fn a_wake_from_a_real_sleep_is_a_quiet_moment() {
+        let p = Some(Sample { epoch: 9_000, total: 50, quiet_since: 0 });
+        assert_eq!(upgrade_quiet(10_000, 9_700, 9_000, p, Some(60), 2048).0, "woke");
+        assert_eq!(upgrade_quiet(10_000, 9_400, 9_000, p, None, 2048).0, "woke", "exactly 600 s after the wake");
+        assert_eq!(upgrade_quiet(10_000, 9_700, 9_500, p, None, 2048), ("", None), "a 200 s nap");
+        assert_eq!(upgrade_quiet(10_000, 9_300, 9_000, p, None, 2048), ("", None), "woke 700 s ago");
+        assert_eq!(upgrade_quiet(10_000, 9_000, 9_700, p, None, 2048), ("", None), "wake before sleep");
+        assert_eq!(upgrade_quiet(10_000, 9_700, 0, p, None, 2048), ("", None));
+        assert_eq!(upgrade_quiet(10_000, 0, 9_000, p, None, 2048), ("", None));
+        assert_eq!(upgrade_quiet(10_000, 10_500, 9_000, p, None, 2048), ("", None), "a wake in the future");
+    }
+
+    /// Idle: ten minutes of tick-to-tick steps under the threshold, counted
+    /// from the first quiet step's start. One busy step starts it over.
+    #[test]
+    fn ten_quiet_minutes_of_traffic_are_a_quiet_moment() {
+        let bps = 2048;
+        let (q, s) = upgrade_quiet(1_000, 0, 0, None, Some(5_000_000), bps);
+        assert_eq!((q, s), ("", Some(Sample { epoch: 1_000, total: 5_000_000, quiet_since: 0 })), "the first sample only");
+        let (q, s) = upgrade_quiet(1_300, 0, 0, s, Some(5_000_000 + 300 * 1000), bps);
+        assert_eq!((q, s.unwrap().quiet_since), ("", 1_000), "quiet from the step's start");
+        let (q, s2) = upgrade_quiet(1_600, 0, 0, s, Some(5_300_000 + 300 * 2047), bps);
+        assert_eq!((q, s2.unwrap().quiet_since), ("idle", 1_000), "600 s under the threshold");
+        let (q, s3) = upgrade_quiet(1_600, 0, 0, s, Some(5_300_000 + 300 * 2048), bps);
+        assert_eq!((q, s3.unwrap().quiet_since), ("", 0), "a step AT the threshold is busy");
+        let (q, s4) = upgrade_quiet(1_900, 0, 0, s3, Some(5_300_000 + 300 * 2048), bps);
+        assert_eq!((q, s4.unwrap().quiet_since), ("", 1_600), "the window starts over");
+    }
+
+    /// What the bytes in between cannot be known from: the counter went down
+    /// (the router restarted), a gap longer than the window, a clock that
+    /// went back, or no answer from the clash API. Never quiet on that tick.
+    #[test]
+    fn an_unknown_stretch_starts_the_quiet_window_over() {
+        let p = Some(Sample { epoch: 1_000, total: 9_000, quiet_since: 100 });
+        assert_eq!(upgrade_quiet(1_060, 0, 0, p, Some(10), 2048), ("", Some(Sample { epoch: 1_060, total: 10, quiet_since: 0 })));
+        assert_eq!(upgrade_quiet(1_601, 0, 0, p, Some(9_000), 2048), ("", Some(Sample { epoch: 1_601, total: 9_000, quiet_since: 0 })));
+        assert_eq!(upgrade_quiet(1_000, 0, 0, p, Some(9_000), 2048).0, "");
+        assert_eq!(upgrade_quiet(900, 0, 0, p, Some(9_000), 2048).0, "");
+        assert_eq!(upgrade_quiet(1_060, 0, 0, p, None, 2048), ("", None));
+        // A gap of exactly the window still counts.
+        assert_eq!(upgrade_quiet(1_600, 0, 0, p, Some(9_000), 2048).0, "idle");
+    }
+
+    /// A tick that reloads for the network already renders anew: no second
+    /// reload, no mark (the reload records the version itself).
+    #[test]
+    fn a_network_reload_is_not_doubled_by_an_upgrade() {
+        let mut o = upgraded("idle", false);
+        o.iface = Some("en7".into());
+        let p = netcheck_plan(&o, &State::default());
+        assert_eq!(p.iter().filter(|a| matches!(a, Action::Reload(_))).count(), 1, "{p:?}");
+        assert!(!p.iter().any(|a| matches!(a, Action::MarkUpgrade(_))), "{p:?}");
+    }
+
+    /// …nor by a spin heal (#s105): its recovery reloads, so the quiet
+    /// moment's upgrade reload waits for a later tick, as the shell's hook
+    /// does when `_watch_spin` recovered.
+    #[test]
+    fn a_spin_heal_is_not_doubled_by_an_upgrade() {
+        let mut o = upgraded("idle", false);
+        o.spin = Some(spin_reason(100));
+        let p = netcheck_plan(&o, &State::default());
+        assert!(p.contains(&Action::Recover(spin_reason(100))), "{p:?}");
+        assert!(!p.iter().any(|a| matches!(a, Action::Reload(_) | Action::MarkUpgrade(_))), "{p:?}");
     }
 
     /// Under `use <tag> --failover` the hold is the same decision with the
@@ -1392,5 +1853,120 @@ mod tests {
         let o = running();
         let st = State { health_fails: 2, last_net_id: Some(o.net_id.clone()), ..Default::default() };
         assert_eq!(netcheck(&o, &st, &Config::default()).state.health_fails, 0);
+    }
+
+    /// `watch.cpu` as the shell reads and writes it.
+    #[test]
+    fn the_cpu_sample_round_trips_and_a_missing_one_is_none() {
+        let s = CpuSample { epoch: 1_700_000_000, cpu: 42, pid: "4711".into(), bytes: 9000 };
+        assert_eq!(s.line(), "1700000000 42 4711 9000\n");
+        assert_eq!(CpuSample::parse(&s.line()), Some(s));
+        assert_eq!(CpuSample::parse(""), None);
+        assert_eq!(CpuSample::parse("\n"), None);
+        // `read` leaves the missing words empty; arithmetic reads them as 0.
+        assert_eq!(CpuSample::parse("1700000000 7"), Some(CpuSample { epoch: 1_700_000_000, cpu: 7, pid: String::new(), bytes: 0 }));
+    }
+
+    /// The streak, the both-gates rule and the one-shot latch, step by step,
+    /// at the defaults (80%, 64 KiB/s, two ticks, a day).
+    #[test]
+    fn a_spin_heals_once_after_two_idle_ticks_and_never_for_a_busy_router() {
+        let k = SpinKnobs::default();
+        let prev = |e: i64, c: i64, b: i64| CpuSample { epoch: e, cpu: c, pid: "77".into(), bytes: b };
+        let t = 1_000_000;
+        // No earlier sample, or one from another router: no interval yet.
+        assert_eq!(spin_step(t, "77", 500, 0, None, 1, 0, None, &k), SpinStep { streak: Rec::Remove, ..Default::default() });
+        let other = CpuSample { pid: "76".into(), ..prev(t - 120, 0, 0) };
+        assert_eq!(spin_step(t, "77", 500, 0, Some(&other), 1, 0, None, &k).streak, Rec::Remove);
+        // The clock did not move: nothing to average over, nothing changes.
+        assert_eq!(spin_step(t, "77", 500, 0, Some(&prev(t, 400, 0)), 1, 0, None, &k), SpinStep::default());
+        // Calm: 10 s of CPU over 120 s is 8%. The streak and the latch go.
+        let calm = spin_step(t, "77", 110, 0, Some(&prev(t - 120, 100, 0)), 1, t - 60, None, &k);
+        assert_eq!((calm.streak, calm.healed, calm.log, calm.heal), (Rec::Remove, Rec::Remove, None, None));
+        // Busy: 100% CPU while moving 1 MB/s is a proxy at work. The streak
+        // goes, the latch stays (the CPU is not calm).
+        let busy = spin_step(t, "77", 220, 120 * 1_000_000, Some(&prev(t - 120, 100, 0)), 1, t - 60, None, &k);
+        assert_eq!((busy.streak, busy.healed, busy.heal), (Rec::Remove, Rec::Keep, None));
+        // Sick, first tick: counted and said, not acted on.
+        let one = spin_step(t, "77", 220, 0, Some(&prev(t - 120, 100, 0)), 0, 0, None, &k);
+        assert_eq!(one.streak, Rec::Write(1));
+        assert_eq!(one.log.as_deref(), Some("router busy but idle: 100% cpu, 0 B/s (1/2)"));
+        assert_eq!(one.heal, None);
+        // Second tick: heal, and the latch takes this tick's stamp.
+        let two = spin_step(t, "77", 220, 0, Some(&prev(t - 120, 100, 0)), 1, 0, None, &k);
+        assert_eq!((two.streak, two.healed, two.log, two.heal), (Rec::Write(2), Rec::Write(t), None, Some((100, 0, 120))));
+        // Still spinning an hour after that heal: degraded beats flapping.
+        let held = spin_step(t + 3600, "77", 220, 0, Some(&prev(t + 3480, 100, 0)), 2, t, None, &k);
+        assert_eq!((held.streak, held.healed, held.heal), (Rec::Write(3), Rec::Keep, None));
+        assert_eq!(held.log.as_deref(), Some("router spinning (100% cpu, 0 B/s) but already healed once 60m ago — leaving it (degraded beats flapping)"));
+        // A counter that went down (the router restarted under the same pid
+        // record) reads as no traffic, not as negative traffic.
+        assert_eq!(spin_step(t, "77", 220, 0, Some(&prev(t - 120, 100, 5_000_000)), 1, 0, None, &k).heal, Some((100, 0, 120)));
+    }
+
+    /// A heal goes through the wedged tunnel's own cooldown, and a tick that
+    /// heals reloads once: the line first, then the recovery.
+    #[test]
+    fn a_spin_heal_recovers_through_the_cooldown() {
+        let cfg = Config::default();
+        let mut o = running();
+        o.spin_log = Some("router spinning: 100% cpu with 0 B/s over 120s (sing-box 1.13.14) — evidence in /x/spin.txt".into());
+        o.spin = Some(spin_reason(100));
+        let st = State { last_net_id: Some(o.net_id.clone()), ..Default::default() };
+        let n = netcheck(&o, &st, &cfg);
+        assert_eq!(&n.actions[2..], &[
+            Action::Log("router spinning: 100% cpu with 0 B/s over 120s (sing-box 1.13.14) — evidence in /x/spin.txt".into()),
+            Action::Log("router spinning (100% cpu, no traffic) — recovering (cmd_reload)".into()),
+            Action::Recover("router spinning (100% cpu, no traffic)".into()),
+        ]);
+        assert_eq!(n.state.last_recovery, o.now);
+        // Within the cooldown of another recovery: said, not done.
+        let st = State { last_recovery: o.now - 100, ..st };
+        let n = netcheck(&o, &st, &cfg);
+        assert!(!n.actions.iter().any(|a| matches!(a, Action::Recover(_))));
+        assert_eq!(logs(&n).last().unwrap(), "router spinning (100% cpu, no traffic) — last recovery 100s ago (< 600s cooldown), holding off");
+        // Only on a healthy probe: a failing one takes the wedged path, which
+        // never reads the spin.
+        o.health_ok = false;
+        let n = netcheck(&o, &State { last_net_id: Some(o.net_id.clone()), ..Default::default() }, &cfg);
+        assert!(!logs(&n).iter().any(|l| l.contains("spinning")));
+    }
+
+    /// rowt #s106: a heal a recent recovery would hold back waits for it. The
+    /// latch stays as it was and nothing is captured, so the first tick past
+    /// the cooldown heals; the rule is `recover_or_hold`'s own.
+    #[test]
+    fn a_spin_heal_waits_for_the_recovery_cooldown_without_the_latch() {
+        let k = SpinKnobs::default();
+        let t = 1_000_000;
+        let p = CpuSample { epoch: t - 120, cpu: 100, pid: "77".into(), bytes: 0 };
+        let held = recovery_hold(t, t - 100, 600);
+        assert_eq!(held, Some((100, 600)));
+        let w = spin_step(t, "77", 220, 0, Some(&p), 1, 0, held, &k);
+        assert_eq!((w.streak, w.healed, w.heal), (Rec::Write(2), Rec::Keep, None));
+        assert_eq!(w.log.as_deref(), Some("router spinning (100% cpu, 0 B/s) but the last recovery was 100s ago (< 600s cooldown) — healing once that has passed"));
+        // Past the cooldown, or never recovered: it heals, and stamps the latch.
+        assert_eq!(recovery_hold(t, t - 600, 600), None);
+        assert_eq!(recovery_hold(t, 0, 600), None);
+        let h = spin_step(t, "77", 220, 0, Some(&p), 1, 0, recovery_hold(t, t - 600, 600), &k);
+        assert_eq!((h.healed, h.heal), (Rec::Write(t), Some((100, 0, 120))));
+        // A heal already done still says so first: the day's latch outranks
+        // the ten minutes.
+        let l = spin_step(t, "77", 220, 0, Some(&p), 1, t - 60, held, &k);
+        assert!(l.log.unwrap().contains("already healed once 1m ago"));
+        // The tick the caller then plans: the wait's line and no heal. Nothing
+        // recovers and the cooldown's stamp stays; with no heal on this tick,
+        // an upgrade waiting for a quiet moment reloads as on any healthy one.
+        let cfg = Config::default();
+        let mut o = upgraded("idle", false);
+        o.spin_log = w.log.clone();
+        o.spin = None;
+        let st = State { last_net_id: Some(o.net_id.clone()), last_recovery: o.now - 100, ..Default::default() };
+        assert_eq!(recovery_hold(o.now, st.last_recovery, cfg.health_cooldown), Some((100, 600)));
+        let n = netcheck(&o, &st, &cfg);
+        assert!(logs(&n).iter().any(|l| l.ends_with("— healing once that has passed")), "{:?}", n.actions);
+        assert!(!n.actions.iter().any(|a| matches!(a, Action::Recover(_))), "{:?}", n.actions);
+        assert_eq!(n.state.last_recovery, o.now - 100);
+        assert!(n.actions.contains(&Action::Reload("upgrade to rowt 3.11.0".into())), "{:?}", n.actions);
     }
 }

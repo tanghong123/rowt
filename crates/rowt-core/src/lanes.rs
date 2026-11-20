@@ -6,17 +6,20 @@
 //! shell; they are network and process work, not set logic.
 //!
 //! The invariant this exists to enforce: **a domain lives in exactly one lane**.
-//! Adding to one lane pulls it out of the other two.
+//! Adding to one lane pulls it out of the others.
 
 use crate::classify::Lane;
 use crate::render::unwildcard;
 
-/// The three editable lane lists, as file contents — plus the hotspot lane.
+/// The four editable lane lists, as file contents — plus the hotspot lane.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Lanes {
     pub escape: String,
     pub corp: String,
     pub block: String,
+    /// Names sent straight out even where a broader rule would take them
+    /// elsewhere (a geosite set, the ad set). `direct-domains.txt`.
+    pub direct: String,
     /// Not a `Lane` — nothing in it is routed — but edited through the same
     /// `edit_list` (`Target::Hotspot`), and `_lane_dedupe` walks it last, so an
     /// entry added to a routing lane is pulled out of it like out of any other
@@ -30,7 +33,7 @@ impl Lanes {
             Lane::Escape => &self.escape,
             Lane::Corp => &self.corp,
             Lane::Block => &self.block,
-            Lane::Direct => "",
+            Lane::Direct => &self.direct,
         }
     }
     fn set(&mut self, lane: Lane, v: String) {
@@ -38,12 +41,12 @@ impl Lanes {
             Lane::Escape => self.escape = v,
             Lane::Corp => self.corp = v,
             Lane::Block => self.block = v,
-            Lane::Direct => {}
+            Lane::Direct => self.direct = v,
         }
     }
     /// Editable lanes, in the order `_lane_dedupe` walks them.
-    fn editable() -> [Lane; 3] {
-        [Lane::Escape, Lane::Corp, Lane::Block]
+    pub fn editable() -> [Lane; 4] {
+        [Lane::Escape, Lane::Corp, Lane::Block, Lane::Direct]
     }
     fn body(&self, t: Target) -> &str {
         match t {
@@ -350,15 +353,22 @@ pub fn apply_to(lanes: &Lanes, target: Target, op: &Op) -> Edit {
                     continue;
                 }
                 // `geosite:` is escape/block only — corp routes internal
-                // domains and CIDRs, and neither they nor the OS bypass list
-                // can hold a rule-set.
+                // domains and CIDRs, the direct lane exists to send names
+                // past the sets, and the OS bypass list cannot hold one.
                 if !importing
-                    && matches!(target, Target::Lane(Lane::Corp) | Target::Hotspot)
+                    && matches!(target, Target::Lane(Lane::Corp | Lane::Direct) | Target::Hotspot)
                     && e.starts_with("geosite:")
                 {
                     msgs.push(format!(
                         "  skipped {e} — geosite: is only for the escape and block lanes"
                     ));
+                    continue;
+                }
+                // The direct lane routes names; an address already goes
+                // direct unless a corp CIDR claims it, and the render would
+                // drop the entry without a word, as it does on escape.
+                if !importing && target == Target::Lane(Lane::Direct) && (crate::render::is_cidr(&e) || crate::classify::is_ipv4(&e)) {
+                    msgs.push(format!("  skipped {e} — the direct lane takes names, not addresses"));
                     continue;
                 }
                 let body = out.body(target).to_string();
@@ -463,8 +473,36 @@ mod tests {
             escape: "# hdr\nexample.com\n".into(),
             corp: "# hdr\ncorp.example\n".into(),
             block: "# hdr\nads.example\n".into(),
+            direct: "# hdr\nnpm.example\n".into(),
             hotspot: "# hdr\nportal.example\n".into(),
         }
+    }
+
+    #[test]
+    fn the_direct_lane_is_edited_like_the_others_and_refuses_sets_and_addresses() {
+        // An add pulls the entry out of every other lane, the direct lane
+        // included, and the direct lane's own add pulls it out of the rest.
+        let e = apply(&lanes(), Lane::Escape, &Op::Add { entries: vec!["npm.example".into()], force: false });
+        assert!(!e.lanes.direct.contains("npm.example"));
+        assert_eq!(e.tightened, vec![Lane::Direct]);
+        assert!(e.messages.contains(&"  moved out of direct lane: npm.example".to_string()));
+        let e = apply(&lanes(), Lane::Direct, &Op::Add { entries: vec!["example.com".into()], force: false });
+        assert!(e.lanes.direct.ends_with("npm.example\nexample.com\n"));
+        assert!(!e.lanes.escape.contains("example.com"));
+        let e = apply(&lanes(), Lane::Direct, &Op::Add {
+            entries: vec!["geosite:github".into(), "198.51.100.0/24".into(), "203.0.113.5".into()], force: false });
+        assert_eq!(e.lanes, lanes(), "nothing stored");
+        assert_eq!(e.messages, [
+            "  skipped geosite:github — geosite: is only for the escape and block lanes",
+            "  skipped 198.51.100.0/24 — the direct lane takes names, not addresses",
+            "  skipped 203.0.113.5 — the direct lane takes names, not addresses",
+        ]);
+        // The walk order puts the direct lane after block.
+        let mut l = lanes();
+        l.block.push_str("both.example\n");
+        l.direct.push_str("both.example\n");
+        let e = apply(&l, Lane::Escape, &Op::Add { entries: vec!["both.example".into()], force: false });
+        assert_eq!(&e.messages[1..], ["  moved out of block lane: both.example", "  moved out of direct lane: both.example"]);
     }
 
     #[test]

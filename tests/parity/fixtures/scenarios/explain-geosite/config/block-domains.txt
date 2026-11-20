@@ -1,0 +1,2 @@
+# fixture
+ads.example

@@ -247,23 +247,26 @@ fn lanes_hot() -> String {
     }
 }
 
-/// The three lane files, parsed as the render reads them (`list_json`).
+/// The four lane files, parsed as the render reads them (`list_json`).
 pub fn read_lists(ctx: &Ctx) -> Lists {
     let esc = read(&ctx.cfg.join("escape-domains.txt"));
     let corp = read(&ctx.cfg.join("corp-domains.txt"));
     let blk = read(&ctx.cfg.join("block-domains.txt"));
+    let dir = read(&ctx.cfg.join("direct-domains.txt"));
     Lists {
         escape_domains: parse_list(&esc, Filter::Domain),
         corp_domains: parse_list(&corp, Filter::Domain),
         corp_cidrs: parse_list(&corp, Filter::Cidr),
         block_domains: parse_list(&blk, Filter::Domain),
+        direct_domains: parse_list(&dir, Filter::Domain),
         escape_exact: parse_list(&esc, Filter::Exact),
         corp_exact: parse_list(&corp, Filter::Exact),
         block_exact: parse_list(&blk, Filter::Exact),
+        direct_exact: parse_list(&dir, Filter::Exact),
     }
 }
 
-/// Every rule-set file the render owns, `(tag, bytes)`: the 48 lane sets and
+/// Every rule-set file the render owns, `(tag, bytes)`: the 64 lane sets and
 /// the corp CIDR set (`render::RULE_SETS_DIR`).
 fn rule_set_files(ctx: &Ctx) -> Vec<(String, String)> {
     let lists = read_lists(ctx);
@@ -333,13 +336,13 @@ fn lanes_write(ctx: &Ctx) -> Result<(), String> {
 }
 
 /// `_lane_sets_warn` — what the bands cannot rank, said once per render on
-/// stderr: a case twin a hand edit left in two lanes (one entry to the router,
+/// stderr: a twin a hand edit or a bundle left in two lanes (one entry to the router,
 /// which takes the first lane's rule), and a band-8 pair the band ranks by
 /// lane order where inline ranked by length (`render::overflow_pairs`).
 fn lanes_warn(ctx: &Ctx) {
     let lists = read_lists(ctx);
     for (e, la, lb) in case_twins(&lists) {
-        eprintln!("warning: {e} is in both the {la} and {lb} lanes in different case — one entry to the router, which takes the {la} lane; remove one");
+        eprintln!("warning: {e} is in both the {la} and {lb} lanes — one entry to the router, which takes the {la} lane; remove one");
     }
     for (a, la, b, lb) in overflow_pairs(&lists) {
         eprintln!("warning: {a} ({la}) ranks below {b} ({lb}): both have {BANDS} labels or more, and the deepest band ranks by lane order, not length — move one, or expect names under {a} to take the {lb} lane");
@@ -441,6 +444,12 @@ fn escape_outbounds(ctx: &Ctx) -> Result<(Value, String), String> {
 }
 
 pub fn build_host(ctx: &Ctx) -> Result<Value, String> {
+    build_host_with(ctx, true)
+}
+
+/// `warn` false: the watchdog's dry render (`upgrade::observe`), which would
+/// otherwise repeat the geosite warnings on every tick an upgrade waits.
+pub fn build_host_with(ctx: &Ctx, warn: bool) -> Result<Value, String> {
     // Order matters to the argv trace: `assemble_host "$(build_escape_outbounds
     // …)"` runs the substitution first, so the outbound builder's probe lands
     // before assemble's own.
@@ -456,13 +465,16 @@ pub fn build_host(ctx: &Ctx) -> Result<Value, String> {
     // `_warn_uncached_geosites`, then the corp-lane check: the shell says on
     // stderr which referenced categories this render skips. stderr only, so no
     // gate compares it; whoever runs `rowt reload` reads it.
-    for n in &all {
+    for n in all.iter().filter(|_| warn) {
         if !cached(n) {
             eprintln!("error: geosite:{n} not cached — run '{} fetch host' (skipping it in this render)", crate::PROG);
         }
     }
-    if !geosites_of(&corp_src).is_empty() {
+    if warn && !geosites_of(&corp_src).is_empty() {
         eprintln!("error: geosite: in corp-domains.txt is ignored — only the escape and block lanes support geosite:");
+    }
+    if warn && !geosites_of(&read(&ctx.cfg.join("direct-domains.txt"))).is_empty() {
+        eprintln!("error: geosite: in direct-domains.txt is ignored — only the escape and block lanes support geosite:");
     }
     let ads = cache.join("geosite-category-ads-all.srs");
     let local = ctx.mode() == "local";
@@ -562,6 +574,11 @@ pub fn cmd_render(ctx: &Ctx) -> Result<String, String> {
             return Err(format!("generated {} failed validation", path.display()));
         }
         fs::rename(&tmp, &path).map_err(|e| format!("mv: {e}"))?;
+        // rowt #s104: which rowt rendered this host.json, for the router
+        // that starts from it (`upgrade::mark`).
+        if path == ctx.host_cfg() {
+            crate::upgrade::stamp_render(ctx);
+        }
     }
     lanes_prev_clear(ctx);
     Ok(format!("  host: {}\n  vm:   {}", ctx.host_cfg().display(), ctx.vm_cfg().display()))
@@ -1215,10 +1232,12 @@ pub fn router_up(ctx: &Ctx) -> Result<String, String> {
     // What this router runs, for `corp_apply` — recorded only once it is up.
     let cfgsum = host_cfg_cksum(ctx);
     let _ = fs::remove_file(router_cfg_sum(ctx));
+    crate::upgrade::clear(ctx);
     let mut child = start_router(ctx, true)?;
     let pid = child.id();
     if router_ready(ctx, 5, &mut child) {
         let _ = fs::write(router_cfg_sum(ctx), format!("{cfgsum}\n"));
+        crate::upgrade::mark(ctx);
         start_collector(ctx);
         start_follow(ctx);
         return Ok(format!("  ✓ running (pid {pid})"));
@@ -1234,6 +1253,7 @@ pub fn router_up(ctx: &Ctx) -> Result<String, String> {
     let pid = child.id();
     if router_ready(ctx, 5, &mut child) {
         let _ = fs::write(router_cfg_sum(ctx), format!("{cfgsum}\n"));
+        crate::upgrade::mark(ctx);
         start_collector(ctx);
         start_follow(ctx);
         return Ok(format!("  ✓ running (pid {pid})  [plain log]"));

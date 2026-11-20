@@ -56,13 +56,16 @@
 #      ROWT_HEALTH_FAILS  consecutive probe failures before auto-recover (default 3)
 #      ROWT_HEALTH_COOLDOWN  min seconds between auto-recoveries (default 600)
 #      ROWT_HEALTH_TIMEOUT  per-probe delay-test timeout, seconds (default 8)
+#      ROWT_RELOAD_QUIET_BPS  after an upgrade changed the config, the watchdog reloads
+#                          once the router has moved under this many bytes/s for 10
+#                          minutes (or just after a wake from sleep) (default 2048)
 #      (named extra ports — each with its own catch-all for the clients on it — are a
 #      file, not env: 'rowt port add <N> <name> [--final …]' / 'port rm <name>' / 'port list')
 #      SINGBOX_VERSION  pinned sing-box release (default 1.13.14, >=1.12 AnyTLS)
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.8.40"
+ROWT_VERSION="3.11.1"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -103,9 +106,11 @@ SB="$BIN/sing-box"                   # pinned host binary
 DOMAINS_TMPL="$HERE/config/escape-domains.txt"
 CORP_TMPL="$HERE/config/corp-domains.txt"
 BLOCK_TMPL="$HERE/config/block-domains.txt"
+DIRECT_TMPL="$HERE/config/direct-domains.txt"
 DOMAINS="$CFG/escape-domains.txt"                # -> escape (VLESS tunnel)
 CORP_DOMAINS="$CFG/corp-domains.txt"             # -> corp (into the corp VPN)
 BLOCK_DOMAINS="$CFG/block-domains.txt"           # -> block (ad/telemetry sinkhole)
+DIRECT_DOMAINS="$CFG/direct-domains.txt"         # -> direct, ahead of the geosite sets and the ad set
 HOTSPOT_DOMAINS="$CFG/hotspot-domains.txt"       # -> OS proxy bypass (captive-portal hosts; never rendered)
 # Pre-compiled geosite ad/tracker rule-set (blocks thousands of domains). Cached
 # like the other artifacts so 'up' works offline; rendered in only when present.
@@ -280,10 +285,12 @@ _audit() { # $* = message
 # ran, not which entries it added: on 2026-10-06 tracing why one site's
 # bot-defence host was blocked meant finding a month-old import file on disk and
 # grepping it, and a lane file written outside rowt left no trace at all. So the
-# bracket diffs membership too — every (lane, entry) pair across the four lane
-# files — and logs each change as a transition, `block -> direct` for a host the
-# monitor routed direct, `escape -> block` for one an add pulled out of escape,
-# `direct -> block` for every line of an import. One line per transition, the
+# bracket diffs membership too — every (lane, entry) pair across the five lane
+# files — and logs each change as a transition, `block -> none` for a host the
+# monitor took out of every lane, `escape -> block` for one an add pulled out of
+# escape, `none -> block` for every line of an import, `escape -> direct` for
+# one moved into the direct lane. `none` is "in no lane"; before the direct lane
+# (#s98) that was spelled `direct`. One line per transition, the
 # entries in full: a 300-entry import is one long line (AUDIT_MAX counts lines),
 # and the full list is what makes it reversible. Entries are kept AS WRITTEN
 # (`domain:x`, `*.x`), so undoing a line re-adds the identical text.
@@ -300,8 +307,8 @@ _audit() { # $* = message
 LANE_STATE="$CACHE/lane-state.tsv"
 _lane_snapshot() { # every lane entry as "<lane>\t<entry>", byte-sorted, unique
   local l f
-  for l in block corp escape hotspot; do
-    case "$l" in block) f="$BLOCK_DOMAINS" ;; corp) f="$CORP_DOMAINS" ;; escape) f="$DOMAINS" ;; *) f="$HOTSPOT_DOMAINS" ;; esac
+  for l in block corp direct escape hotspot; do
+    case "$l" in block) f="$BLOCK_DOMAINS" ;; corp) f="$CORP_DOMAINS" ;; direct) f="$DIRECT_DOMAINS" ;; escape) f="$DOMAINS" ;; *) f="$HOTSPOT_DOMAINS" ;; esac
     [ -f "$f" ] || continue
     LC_ALL=C awk -v l="$l" '{ gsub(/[[:space:]]/, "") } $0 != "" && substr($0, 1, 1) != "#" { print l "\t" $0 }' "$f"
   done | LC_ALL=C sort -u
@@ -312,7 +319,7 @@ _lane_diff() { # $1=before $2=after (snapshot files)  $3=prefix -> "LANE …" li
       l = substr($0, 1, t - 1); e = substr($0, t + 1) }
     FILENAME == ARGV[1] { b[e] = (e in b) ? b[e] "+" l : l; s[e] = 1; next }
     { a[e] = (e in a) ? a[e] "+" l : l; s[e] = 1 }
-    END { for (e in s) { f = (e in b) ? b[e] : "direct"; t = (e in a) ? a[e] : "direct"
+    END { for (e in s) { f = (e in b) ? b[e] : "none"; t = (e in a) ? a[e] : "none"
                          if (f != t) print f " -> " t "\t" e } }
   ' <(LC_ALL=C sort -u "$1") <(LC_ALL=C sort -u "$2") | LC_ALL=C sort | LC_ALL=C awk -F'\t' -v pre="${3:-}" '
     $1 != k { if (k != "") print "LANE " pre k " (" n "): " list; k = $1; n = 0; list = "" }
@@ -454,10 +461,58 @@ sub_count() {
 }
 
 # Seed the user-editable routing lists from the repo templates on first use.
+# A lane the config lacks, from its template — less each entry another lane
+# already holds (whitespace removed, ASCII case folded), so seeding the direct
+# lane's npm entries beside an escape lane that holds npmjs.org leaves no twin
+# (#s98). rowt_core::lanestate::seed_body, byte for byte. Succeeds only when it
+# wrote the file.
+_seed_lane() { # $1=lane file $2=template
+  # Anything already at the path is left alone, a directory included, and a
+  # write that fails (a config folder rowt cannot write) says nothing: rowt-cli
+  # checks `exists()` and ignores the write's error, as the old `cp` did. A
+  # write that could not even open leaves the path as it was, so a dangling
+  # link stays, as rowt-cli's does; only a file the failed write left is removed.
+  if [ -e "$1" ] || [ ! -f "$2" ]; then return 1; fi
+  local -a others=(); local f
+  for f in "$BLOCK_DOMAINS" "$CORP_DOMAINS" "$DIRECT_DOMAINS" "$DOMAINS" "$HOTSPOT_DOMAINS"; do
+    # An unreadable lane reads as empty, as rowt-cli's `read` has it.
+    if [ "$f" != "$1" ] && [ -f "$f" ] && [ -r "$f" ]; then others+=("$f"); fi
+  done
+  if { LC_ALL=C awk -v t="$2" '
+       { e = $0; gsub(/[[:space:]]/, "", e) }
+       FILENAME != t { if (e != "" && substr(e, 1, 1) != "#") have[tolower(e)] = 1; next }
+       e != "" && substr(e, 1, 1) != "#" && (tolower(e) in have) { next }
+       { print }' ${others[@]+"${others[@]}"} "$2" > "$1"; } 2>/dev/null; then
+    return 0
+  fi
+  if [ -e "$1" ]; then rm -f "${1:?}" 2>/dev/null; fi
+  return 1
+}
+# The seeded lanes' entries ($@ = lane file pairs), logged against the last
+# logged lane state as `seeded: `, which then holds them — or the next bracket
+# would log the upgrade's own seeding as an edit made outside rowt. No state yet
+# logs nothing. rowt-cli's lanelog::seeded.
+_lane_seed_audit() {
+  if [ ! -f "$LANE_STATE" ] || [ ! -r "$LANE_STATE" ]; then return 0; fi
+  local now; now="$(mktemp 2>/dev/null)" || return 0
+  {
+    cat "$LANE_STATE"
+    while [ "$#" -ge 2 ]; do
+      LC_ALL=C awk -v l="$1" '{ gsub(/[[:space:]]/, "") } $0 != "" && substr($0, 1, 1) != "#" { print l "\t" $0 }' "$2"
+      shift 2
+    done
+  } 2>/dev/null | LC_ALL=C sort -u > "$now"
+  _lane_audit_lines "$LANE_STATE" "$now" "seeded: "
+  _lane_state_keep "$now"
+}
 seed_lists() {
-  [ -f "$DOMAINS" ]       || { cp "$DOMAINS_TMPL" "$DOMAINS" 2>/dev/null || true; }
-  [ -f "$CORP_DOMAINS" ]  || { cp "$CORP_TMPL" "$CORP_DOMAINS" 2>/dev/null || true; }
-  [ -f "$BLOCK_DOMAINS" ] || { cp "$BLOCK_TMPL" "$BLOCK_DOMAINS" 2>/dev/null || true; }
+  local -a seeded=()
+  if _seed_lane "$DOMAINS" "$DOMAINS_TMPL"; then seeded+=(escape "$DOMAINS"); fi
+  if _seed_lane "$CORP_DOMAINS" "$CORP_TMPL"; then seeded+=(corp "$CORP_DOMAINS"); fi
+  if _seed_lane "$BLOCK_DOMAINS" "$BLOCK_TMPL"; then seeded+=(block "$BLOCK_DOMAINS"); fi
+  if _seed_lane "$DIRECT_DOMAINS" "$DIRECT_TMPL"; then seeded+=(direct "$DIRECT_DOMAINS"); fi
+  if [ "${#seeded[@]}" -gt 0 ]; then _lane_seed_audit "${seeded[@]}"; fi
+  return 0
 }
 
 # Migrations to the current multi-source server model.
@@ -752,6 +807,7 @@ domains_json()    { list_json "$DOMAINS" domain; }          # escape suffixes (a
 corp_domains_json() { list_json "$CORP_DOMAINS" domain; }   # corp suffixes
 corp_cidrs_json()   { list_json "$CORP_DOMAINS" cidr; }     # corp IP ranges
 block_domains_json() { list_json "$BLOCK_DOMAINS" domain; } # block suffixes (extra, on top of the geosite set)
+direct_domains_json() { list_json "$DIRECT_DOMAINS" domain; } # direct suffixes (ahead of the geosite sets)
 hotspot_domains_json() { list_json "$HOTSPOT_DOMAINS" domain; } # hotspot suffixes (OS bypass; corp sync leaves them alone)
 # `--domain` entries per lane — sing-box `domain` (whole-host) rules. The
 # `buckets:` counts in status/report add these to the suffix counts: they are
@@ -761,6 +817,7 @@ hotspot_domains_json() { list_json "$HOTSPOT_DOMAINS" domain; } # hotspot suffix
 escape_exact_json() { list_json "$DOMAINS" exact; }
 corp_exact_json()   { list_json "$CORP_DOMAINS" exact; }
 block_exact_json()  { list_json "$BLOCK_DOMAINS" exact; }
+direct_exact_json() { list_json "$DIRECT_DOMAINS" exact; }
 
 # Re-render and restart the router if it is currently running.
 reload_if_running() {
@@ -771,17 +828,19 @@ reload_if_running() {
   if host_running; then info "reloading router"; cmd_render >/dev/null; cmd_router restart; fi
 }
 
-# The three editable routing lanes, plus hotspot. A domain lives in AT MOST one
-# of them: the route rules are first-match-wins (block → corp → escape), so a
-# domain sitting in two lists is silently shadowed by the earliest lane — and a
-# hotspot entry never reaches the router at all (the OS skips the proxy for it),
-# so a routing-lane twin of it would be dead. Adding to one lane therefore
-# removes the exact entry from the other three (see _lane_dedupe).
+# The four editable routing lanes, plus hotspot. A domain lives in AT MOST one
+# of them: the route rules are first-match-wins (escape → corp → block → direct
+# within a band), so a domain sitting in two lists is silently shadowed by the
+# earlier lane — and a hotspot entry never reaches the router at all (the OS
+# skips the proxy for it), so a routing-lane twin of it would be dead. Adding to
+# one lane therefore removes the exact entry from the other four (see
+# _lane_dedupe).
 _lane_label() {
   case "$1" in
     "$DOMAINS")         echo escape ;;
     "$CORP_DOMAINS")    echo corp ;;
     "$BLOCK_DOMAINS")   echo block ;;
+    "$DIRECT_DOMAINS")  echo direct ;;
     "$HOTSPOT_DOMAINS") echo hotspot ;;
     *)                  echo "$1" ;;
   esac
@@ -817,7 +876,7 @@ _lane_without() { # $1=file $2=entry
 # ends up in a single lane. Echoes a note per lane it was pulled out of.
 _lane_dedupe() { # $1=keep-file $2=entry
   local keep="$1" e="$2" f tmp
-  for f in "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" "$HOTSPOT_DOMAINS"; do
+  for f in "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" "$DIRECT_DOMAINS" "$HOTSPOT_DOMAINS"; do
     [ "$f" = "$keep" ] && continue
     [ -f "$f" ] || continue
     if _lane_has "$f" "$e"; then
@@ -959,10 +1018,12 @@ edit_list() {
   # already-present entry, or removing a missing one, is a no-op — no restart).
   # Snapshot ALL lanes, not just the target: an `add` may also pull the entry out
   # of a sibling lane (single-lane invariant), which likewise needs a reload.
-  local _before; _before="$(cat "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" 2>/dev/null)"
+  # A lane that cannot be read (a seed that failed, a dangling link) reads as
+  # empty, as rowt-cli's `read` has it, rather than ending a read-only `list`.
+  local _before; _before="$(cat "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" "$DIRECT_DOMAINS" 2>/dev/null || true)"
   # The hotspot lane is tracked apart: nothing in it is rendered, so a change
   # there re-applies the OS bypass list (_hotspot_apply) instead of bouncing
-  # the router — the three routing lanes alone decide whether sing-box restarts.
+  # the router — the four routing lanes alone decide whether sing-box restarts.
   # And --no-reload does not gate that refresh: it means "don't bounce the
   # router", and the TUI's batched reload is a render + restart that never
   # touches the proxy, so a refresh skipped here would not happen at all.
@@ -1007,11 +1068,19 @@ edit_list() {
           hotspot:*) ;;
           *'*'*) echo "  skipped $e — '*' matches nothing in a routing lane; for the names under z.com, add .z.com (or *.z.com) without --domain"; continue ;;
         esac
-        # geosite: is escape/block only (corp routes internal domains/CIDRs, and
-        # the OS bypass list cannot hold a rule-set).
+        # geosite: is escape/block only (corp routes internal domains/CIDRs, the
+        # direct lane exists to send names past the sets, and the OS bypass list
+        # cannot hold a rule-set).
         case "$e" in
-          geosite:*) case "$label" in corp|hotspot) echo "  skipped $e — geosite: is only for the escape and block lanes"; continue ;; esac ;;
+          geosite:*) case "$label" in corp|direct|hotspot) echo "  skipped $e — geosite: is only for the escape and block lanes"; continue ;; esac ;;
         esac
+        # The direct lane routes names: an address goes direct already unless a
+        # corp CIDR claims it, and the render would drop the entry without a
+        # word, as it does on escape. Mirrors rowt_core::render::is_cidr and
+        # classify::is_ipv4 (a bare address).
+        if [ "$label" = direct ] && { [[ "$e" =~ /[0-9]+$ ]] || [[ "$e" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }; then
+          echo "  skipped $e — the direct lane takes names, not addresses"; continue
+        fi
         if _lane_has "$file" "$e"; then echo "  already present: $e"
         else _lane_append "$file" "$e"; echo "  added: $e"; fi
         _lane_dedupe "$file" "$e"  # single-lane invariant: pull it from the other lanes
@@ -1056,7 +1125,7 @@ edit_list() {
     *) die "usage: $PROG $label [list | add [--domain] [--force] <e>… | rm [--domain] <e>… | import <file> | clear | dump [file]]" ;;
   esac
   # only re-render/restart if some lane changed (and reload wasn't suppressed)
-  local _after _hafter; _after="$(cat "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" 2>/dev/null)"
+  local _after _hafter; _after="$(cat "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" "$DIRECT_DOMAINS" 2>/dev/null)"
   _hafter="$(cat "$HOTSPOT_DOMAINS" 2>/dev/null || true)"
   [ "$_hbefore" != "$_hafter" ] && _hotspot_apply || true
   # …live through the lane rule-sets when the router runs this host.json, a
@@ -1117,7 +1186,7 @@ AUTO_CORP_DOMAINS="${ROWT_AUTO_CORP_DOMAINS:-1}"
 # at them, and a lane edit leaves host.json byte-identical: the running router
 # picks the change up with no restart (_lanes_apply), where every edit used to
 # be a render plus `router restart` that reset every connection on the Mac.
-# Precedence — longest suffix wins across the three lanes — is kept by BANDS:
+# Precedence — longest suffix wins across the four lanes — is kept by BANDS:
 # one set per lane per label count, a bare set and a dot-led set each, the
 # exact entries ahead; _lane_set_tags has the order and
 # rowt_core::render::RULE_SETS_DIR the argument. The corp CIDRs stay one set
@@ -1125,6 +1194,7 @@ AUTO_CORP_DOMAINS="${ROWT_AUTO_CORP_DOMAINS:-1}"
 # own, rule-sets/<tag>/<tag>.json: sing-box watches a set's DIRECTORY, and on
 # macOS the watcher (kqueue) holds a descriptor for every file in it — 49 sets
 # in one directory cost 49² of them (measured: 2,550; one directory each: 100).
+# There are 65 since the direct lane (#s98), each still in its own directory.
 # ROUTER_CFG_SUM is the cksum of the host.json the running router was started
 # (or SIGHUP-reloaded) from: an edit applies live only when the fresh render is
 # that same file; anything else (an older rowt started it, a geosite: came or
@@ -1133,6 +1203,16 @@ AUTO_CORP_DOMAINS="${ROWT_AUTO_CORP_DOMAINS:-1}"
 LANE_SETS_DIR="$CFG/rule-sets"
 LANE_BANDS=8   # the deepest band holds this many labels or more
 ROUTER_CFG_SUM="$CFG/host.running"
+# rowt #s104 (Hong on #s102: "Watchdog reloads at a quiet moment, and status
+# flags it until then"): which rowt rendered host.json, and which rendered the
+# config the router runs (beside ROUTER_CFG_SUM); the watchdog's verdict that
+# this rowt renders a different one (with its traffic sample); and the version
+# it reloaded for once. rowt-rs's upgrade.rs is the reference; _watch_upgrade
+# follows it step for step.
+RENDER_BY="$CFG/host.json.by"
+ROUTER_BY="$CFG/host.running.by"
+UPGRADE_PENDING="$CFG/cache/upgrade-pending"
+UPGRADE_RELOADED="$CFG/cache/upgrade-reloaded"
 LANES_HOT="${ROWT_LANES_HOT:-${ROWT_CORP_HOT:-1}}"
 # corp sync ALSO learns the DNS zones that ONLY an overlay resolver answers — a
 # tailnet's MagicDNS zone (`ts.net`), or whatever base domain a self-hosted
@@ -1278,8 +1358,8 @@ _corp_block_domains() {
 }
 
 # The lane sets as "lane<TAB>tag" lines in ROUTE order: the exact sets in lane
-# order escape/corp/block, then for each band from the deepest down the bare
-# sets in lane order, then the dot-led sets. 48 lines. Why this order keeps
+# order escape/corp/block/direct, then for each band from the deepest down the
+# bare sets in lane order, then the dot-led sets. 64 lines. Why this order keeps
 # longest-suffix-wins: for a host and a label count there is exactly one
 # candidate suffix (its last N labels — matching is on a label boundary), so two
 # entries of one band can both match a host only when they are the same entry,
@@ -1289,11 +1369,11 @@ _corp_block_domains() {
 # band. Mirrors rowt_core::render::lane_bands.
 _lane_set_tags() {
   local l n
-  for l in escape corp block; do printf '%s\t%s-exact\n' "$l" "$l"; done
+  for l in escape corp block direct; do printf '%s\t%s-exact\n' "$l" "$l"; done
   n=$LANE_BANDS
   while [ "$n" -ge 1 ]; do
-    for l in escape corp block; do printf '%s\t%s-%s\n' "$l" "$l" "$n"; done
-    if [ "$n" -ge 2 ]; then for l in escape corp block; do printf '%s\t%s-%s-dot\n' "$l" "$l" "$n"; done; fi
+    for l in escape corp block direct; do printf '%s\t%s-%s\n' "$l" "$l" "$n"; done
+    if [ "$n" -ge 2 ]; then for l in escape corp block direct; do printf '%s\t%s-%s-dot\n' "$l" "$l" "$n"; done; fi
     n=$((n - 1))
   done
 }
@@ -1338,7 +1418,7 @@ _lane_set_count() { # $1=file, or - for stdin
   if [ "$1" = - ]; then jq '[.rules[]? | .[] | length] | add // 0' 2>/dev/null || echo 0
   else jq '[.rules[]? | .[] | length] | add // 0' "$1" 2>/dev/null || echo 0; fi
 }
-# Every rule-set file under LANE_SETS_DIR, from the lane files: the 48 lane
+# Every rule-set file under LANE_SETS_DIR, from the lane files: the 64 lane
 # sets and the corp CIDR set. Unchanged bytes are left alone (a rewrite would
 # make sing-box reload the set for nothing). Sets that GAINED entries are
 # written before sets that lost them: a lane move touches two files, sing-box
@@ -1355,6 +1435,7 @@ _lane_sets_write() {
   { _lane_set_bodies escape "$(domains_json)" "$(escape_exact_json)" \
     && _lane_set_bodies corp "$(corp_domains_json)" "$(corp_exact_json)" \
     && _lane_set_bodies block "$(block_domains_json)" "$(block_exact_json)" \
+    && _lane_set_bodies direct "$(direct_domains_json)" "$(direct_exact_json)" \
     && printf 'corp-cidr\t%s\n' "$(corp_cidrs_json | jq -c '{version:1, rules:(if length > 0 then [{ip_cidr:.}] else [] end)}')"
   } > "$all" || { rm -f "$all" "$grew" "$rest"; return 1; }
   while IFS=$'\t' read -r tag body; do
@@ -1374,28 +1455,31 @@ _lane_sets_write() {
   rm -f "$all" "$grew" "$rest"
   return "$rc"
 }
-# What the bands cannot rank, said once per render on stderr. A case twin: the
-# same entry in two lanes spelled in different case (a hand-edited file; `add`
-# declines it), one entry to the router, which takes the first lane's rule. A
+# What the bands cannot rank, said once per render on stderr. A twin: the same
+# entry in two lanes, in any case (a hand-edited file or a bundle; `add` pulls
+# it out of the other lanes), one entry to the router, which takes the first
+# lane's rule. A
 # band-8 pair: an entry of more than LANE_BANDS labels whose suffix of
 # LANE_BANDS labels or more sits in another lane AND in a set the router
 # consults first — band 8 keeps lane order (bare sets, then dot-led, escape /
-# corp / block in each), not length. Mirrors rowt_core::render::case_twins and
+# corp / block / direct in each), not length. Mirrors rowt_core::render::case_twins and
 # overflow_pairs.
 _lane_sets_warn() {
   jq -r -n --argjson bands "$LANE_BANDS" \
     --argjson es "$(domains_json)" --argjson cs "$(corp_domains_json)" --argjson bs "$(block_domains_json)" \
-    --argjson ee "$(escape_exact_json)" --argjson ce "$(corp_exact_json)" --argjson be "$(block_exact_json)" '
-    def lanes: [["escape", $es, $ee], ["corp", $cs, $ce], ["block", $bs, $be]];
+    --argjson ds "$(direct_domains_json)" \
+    --argjson ee "$(escape_exact_json)" --argjson ce "$(corp_exact_json)" --argjson be "$(block_exact_json)" \
+    --argjson de "$(direct_exact_json)" '
+    def lanes: [["escape", $es, $ee], ["corp", $cs, $ce], ["block", $bs, $be], ["direct", $ds, $de]];
     def twins: [ lanes | combinations(2) | select(.[0][0] != .[1][0]) | . as [$a, $b]
                  | select(([lanes[] | .[0]] | index($a[0])) < ([lanes[] | .[0]] | index($b[0])))
                  | ( $a[1][] as $e | select(($b[1] | map(ascii_downcase) | index($e | ascii_downcase)) != null)
-                     | "warning: \($e | ascii_downcase) is in both the \($a[0]) and \($b[0]) lanes in different case — one entry to the router, which takes the \($a[0]) lane; remove one" ),
+                     | "warning: \($e | ascii_downcase) is in both the \($a[0]) and \($b[0]) lanes — one entry to the router, which takes the \($a[0]) lane; remove one" ),
                    ( $a[2][] as $e | select(($b[2] | map(ascii_downcase) | index($e | ascii_downcase)) != null)
-                     | "warning: domain:\($e | ascii_downcase) is in both the \($a[0]) and \($b[0]) lanes in different case — one entry to the router, which takes the \($a[0]) lane; remove one" ) ];
+                     | "warning: domain:\($e | ascii_downcase) is in both the \($a[0]) and \($b[0]) lanes — one entry to the router, which takes the \($a[0]) lane; remove one" ) ];
     def deep: [ lanes | to_entries[] | .key as $li | .value[0] as $l | .value[1][] | ascii_downcase
                 | select((split(".") | length) >= $bands)
-                | {e: ., lane: $l, n: (split(".") | length), rank: ((if startswith(".") then 3 else 0 end) + $li)} ];
+                | {e: ., lane: $l, n: (split(".") | length), rank: ((if startswith(".") then (lanes | length) else 0 end) + $li)} ];
     def under($a; $b): if ($b | startswith(".")) then ($a | endswith($b)) and (($a | length) > ($b | length)) or ($a == ($b | ltrimstr(".")))
                        else ($a | endswith("." + $b)) end;
     def overflow: [ deep[] as $a | deep[] as $b
@@ -1417,7 +1501,27 @@ _lane_sets_prev_clear() { # validated: the previous sets are done with
   return 0
 }
 # Remember what the running router was started from (see ROUTER_CFG_SUM).
-_router_cfg_mark() { cksum < "$HOST_CFG" > "$ROUTER_CFG_SUM" 2>/dev/null || true; }
+_router_cfg_mark() { cksum < "$HOST_CFG" > "$ROUTER_CFG_SUM" 2>/dev/null && _router_by_mark || true; }
+# A render put host.json in place: this rowt rendered it (RENDER_BY).
+_render_by_stamp() { printf '%s\n' "$ROWT_VERSION" > "$RENDER_BY" 2>/dev/null || true; }
+# The router now runs host.json, beside every write of ROUTER_CFG_SUM: it runs
+# whichever rowt's render that is (a restart starts the file on disk without
+# rendering). When that is this rowt, nothing waits any more. Removed with it.
+_router_by_mark() {
+  local r; r="$(cat "$RENDER_BY" 2>/dev/null || true)"
+  if [ -n "$r" ]; then printf '%s\n' "$r" > "$ROUTER_BY" 2>/dev/null || true; else rm -f "$ROUTER_BY"; fi
+  if [ "$r" = "$ROWT_VERSION" ]; then rm -f "$UPGRADE_PENDING"; fi
+  return 0
+}
+# The watchdog's dry render matched the running config: this rowt's render is
+# what runs, whoever rendered it. host.json too, when it is what runs: else the
+# next restart would copy its older stamp back.
+_router_by_adopt() {
+  printf '%s\n' "$ROWT_VERSION" > "$ROUTER_BY" 2>/dev/null || true; rm -f "$UPGRADE_PENDING"
+  if [ "$(cksum < "$HOST_CFG" 2>/dev/null || true)" = "$(cat "$ROUTER_CFG_SUM" 2>/dev/null || true)" ]; then _render_by_stamp; fi
+  return 0
+}
+_router_by_clear() { rm -f "$ROUTER_BY"; }
 # Apply a lane change: render — which rewrites the rule-sets the running router
 # watches — then nothing more when that router was started from exactly this
 # host.json. Otherwise the restart reload_if_running always did, saying why: an
@@ -1497,7 +1601,7 @@ EOF
 # hotspot file (_esc_block_suffixes counts it) and drops its own copy in the
 # same pass: one rewrite, then stable.
 _overlay_claimed_lanes() {
-  { { domains_json; block_domains_json; } 2>/dev/null | jq -r '.[]?' 2>/dev/null
+  { { domains_json; block_domains_json; direct_domains_json; } 2>/dev/null | jq -r '.[]?' 2>/dev/null
     _corp_head | grep -vE "^[[:space:]]*(#|$)|$_CIDR_RE" 2>/dev/null | sed 's/[[:space:]]//g'
   } | awk 'NF' | tr 'A-Z' 'a-z' | sort -u || true
 }
@@ -1509,12 +1613,12 @@ _overlay_claimed_bypass() {
     | sed 's/[[:space:]]//g' | tr 'A-Z' 'a-z' | awk 'NF' | sort -u || true
 }
 
-# Domain suffixes the user has explicitly put in escape, block or hotspot —
-# their choice wins over an auto-discovered corp domain (a network must not
-# de-tunnel them, and a venue's own domain is exactly what the venue advertises
-# over DHCP while it is the one that has to bypass the proxy).
+# Domain suffixes the user has explicitly put in escape, block, direct or
+# hotspot — their choice wins over an auto-discovered corp domain (a network must
+# not de-tunnel them, and a venue's own domain is exactly what the venue
+# advertises over DHCP while it is the one that has to bypass the proxy).
 _esc_block_suffixes() {
-  { domains_json; block_domains_json; hotspot_domains_json; } 2>/dev/null | jq -r '.[]?' 2>/dev/null | sort -u || true
+  { domains_json; block_domains_json; direct_domains_json; hotspot_domains_json; } 2>/dev/null | jq -r '.[]?' 2>/dev/null | sort -u || true
 }
 
 # Rewrite $CORP_DOMAINS = head + DHCP-domain block + CIDR block (either may be empty).
@@ -1563,7 +1667,7 @@ _overlay_bypass_sync() { # $1=dry-run  $2=quiet
     rm -f "$want"; return 0
   fi
   [ -n "$dropped" ] && [ "$quiet" != 1 ] && while IFS= read -r d; do
-    [ -n "$d" ] && err "corp sync: '$d' is answered only by an overlay resolver, which no lane can reach — but you keep it in escape/block/corp, so your rule wins"
+    [ -n "$d" ] && err "corp sync: '$d' is answered only by an overlay resolver, which no lane can reach — but you keep it in escape/block/corp/direct, so your rule wins"
   done <<< "$dropped"
   # Truncate in place rather than mv: the hotspot file is not 0600 like the corp
   # one (it holds no route table), and a rename would hand it mktemp's mode.
@@ -1778,15 +1882,18 @@ cmd_hotspot() {
     *)                edit_list "$HOTSPOT_DOMAINS" hotspot "$a" "$@" ;;
   esac
 }
-# 'direct' isn't an editable lane (it's the pass-through default) — only diagnostics.
-# 'direct errors' surfaces the domains that FAILED going out directly: the ones a
-# web app needs but that are blocked/unreachable → your escape (or corp) candidates.
+# 'direct' is the pass-through default AND, since #s98, a hand lane: names sent
+# straight out even where a broader rule (a geosite set, the ad set) would take
+# them elsewhere. Bare 'direct' stays the diagnostics: 'direct errors' surfaces
+# the domains that FAILED going out directly — the ones a web app needs but that
+# are blocked/unreachable → your escape (or corp) candidates.
 cmd_direct() {
   local a="${1:-errors}"; [ "$#" -gt 0 ] && shift
   case "$a" in
     errors|stats) lane_errors direct "${1:-10m}" ;;
     log)          _lane_log_tail direct ;;
-    *)            die "usage: $PROG direct [errors [5m|10m|1h|…|all] | log]" ;;
+    list|dump|add|rm|remove|clear|import) edit_list "$DIRECT_DOMAINS" direct "$a" "$@" ;;
+    *)            die "usage: $PROG direct [errors [5m|10m|1h|…|all] | log | list | add [--domain] [--force] <e>… | rm [--domain] <e>… | import <file> | clear | dump [file]]" ;;
   esac
 }
 _lane_log_tail() { local f; f="$(lane_log "$1")"; [ -f "$f" ] || die "no $1 log yet — start the router first: $PROG up"; tail -f "$f"; }
@@ -2242,14 +2349,18 @@ assemble_host() {
   # discipline as ads). A geosite: line hand-added to corp is ignored + flagged.
   _warn_uncached_geosites
   [ -n "$(geosites_of "$CORP_DOMAINS")" ] && err "geosite: in corp-domains.txt is ignored — only the escape and block lanes support geosite:"
+  if [ -n "$(geosites_of "$DIRECT_DOMAINS")" ]; then err "geosite: in direct-domains.txt is ignored — only the escape and block lanes support geosite:"; fi
   local esc_geo block_geo geo_sets
   esc_geo="$(_lane_geo_json "$DOMAINS")"
   block_geo="$(_lane_geo_json "$BLOCK_DOMAINS")"
   geo_sets="$(_geo_sets_json)"
   # The lane rules are rule-set files under LANE_SETS_DIR, written here as a
   # side effect of the render, the way host.json is (see LANE_SETS_DIR).
-  _lane_sets_write || die "could not write the lane rule-sets ($LANE_SETS_DIR)"
-  _lane_sets_warn
+  # Not in the watchdog's dry render (_render_dry): it writes nothing.
+  if [ -z "${_RENDER_DRY:-}" ]; then
+    _lane_sets_write || die "could not write the lane rule-sets ($LANE_SETS_DIR)"
+    _lane_sets_warn
+  fi
   jq -n \
     --arg sets_dir "$LANE_SETS_DIR" --argjson lane_sets "$(_lane_set_tags_json)" \
     --argjson esc_geo "$esc_geo" \
@@ -2278,8 +2389,9 @@ assemble_host() {
     # _lane_set_tags emits them — the exact sets first (whole-host equality
     # beats every suffix), then the bands from the deepest down, bare before
     # dot-led. First match wins, so that order IS longest-suffix-wins across
-    # the three lanes: an explicit api.foo.com in escape still beats a foo.com
-    # in block. The escape lane rules point at $esc_out (direct in local mode).
+    # the four lanes: an explicit api.foo.com in escape still beats a foo.com
+    # in block, and a direct-lane npmjs.org beats geosite:github below. The
+    # escape lane rules point at $esc_out (direct in local mode).
     ($lane_sets | map({rule_set:[.tag], outbound:(if .lane == "escape" then $esc_out else .lane end)})) as $lane_rules
     |
     # Per-lane `geosite:<name>` rule-sets (e.g. `geosite:google` in escape) sit after
@@ -2468,7 +2580,7 @@ cmd_render() {
   assemble_vm "$(build_escape_outbounds vm-guest)" "0.0.0.0" "0.0.0.0:$VM_CLASH" > "$tv"
   "$SB" check -c "$th" || { rm -f "$th" "$tv"; _lane_sets_restore; die "generated host config failed validation"; }   # and the lane sets as they were
   "$SB" check -c "$tv" || { rm -f "$th" "$tv"; die "generated vm config failed validation"; }
-  mv -f "$th" "$HOST_CFG"
+  mv -f "$th" "$HOST_CFG"; _render_by_stamp   # which rowt rendered it (rowt #s104)
   mv -f "$tv" "$VM_CFG"
   _lane_sets_prev_clear   # validated: the previous lane sets are done with
   [ "${ROWT_RENDER_SHADOW:-$(sget shadow_render)}" = 1 ] && _render_shadow "$mode" || true
@@ -3942,13 +4054,15 @@ cmd_speed() {
   info "$(( ${#urls[@]} * repeat * 2 )) fetches — ${#urls[@]} url(s) x $repeat x2 (through rowt, then bypassed), up to $cap and ${SPEED_TIMEOUT}s each; a stalled lane shows as a small number, not an error"
   echo
   printf '  %s %s %s %s\n' "$(_speed_pad URL 42)" "$(_speed_pad "VIA ROWT" 12)" "$(_speed_pad BYPASSED 12)" "LANE"
-  local u lane pr by prs bys prc byc shown hit prok prn byok byn
+  local u lane pr by prs bys prc byc shown prok prn byok byn
+  local why ip ip_note unmatched geo_hit geo_unread geo_uncached
   local -a rows=()
   for u in "${urls[@]}"; do
-    lane="$(printf '%s' "$u" | sed -E 's#^[a-zA-Z]+://##; s#/.*$##; s#:[0-9]+$##' | tr 'A-Z' 'a-z')"
-    # Same predictor `explain` uses, so the LANE column can never disagree with it.
-    if hit="$(_longest_domain_hit "$lane" 2>/dev/null)"; then lane="${hit%% *}"
-    else lane="$FINAL_ROUTE"; fi
+    # The lane `explain` names (_route_of): hand lists, then the cached geosite
+    # sets, then the router's lookup, with local mode's escape-as-direct. Read
+    # off the hand lists alone it called an escape-routed npm URL direct, and
+    # then its verdict that both columns are one path (#s96).
+    _route_of "$(printf '%s' "$u" | sed -E 's#^[a-zA-Z]+://##; s#/.*$##; s#:[0-9]+$##' | tr 'A-Z' 'a-z')"
     read -r prs prok prn prc <<EOF
 $(_speed_cell "$u" 0 "$repeat")
 EOF
@@ -4245,9 +4359,9 @@ cmd_router() {
       [ -f "$HOST_CFG" ] || cmd_render
       ensure_singbox_host
       info "starting rule-router on 127.0.0.1:$PORT"
-      local _cfgsum; _cfgsum="$(cksum < "$HOST_CFG" 2>/dev/null || true)"; rm -f "$ROUTER_CFG_SUM"   # see ROUTER_CFG_SUM
+      local _cfgsum; _cfgsum="$(cksum < "$HOST_CFG" 2>/dev/null || true)"; rm -f "$ROUTER_CFG_SUM"; _router_by_clear   # see ROUTER_CFG_SUM
       _start_host_router 1
-      if _router_ready 5; then printf '%s\n' "$_cfgsum" > "$ROUTER_CFG_SUM"; _start_collector; _start_follow; echo "  ✓ running (pid $(cat "$(host_pidfile)"))"; return 0; fi
+      if _router_ready 5; then printf '%s\n' "$_cfgsum" > "$ROUTER_CFG_SUM"; _router_by_mark; _start_collector; _start_follow; echo "  ✓ running (pid $(cat "$(host_pidfile)"))"; return 0; fi
       # it didn't come up healthy (exited, or alive but the clash API never
       # answered = wedged). Show why, then retry ONCE after a settle, this time
       # with plain logging (rules out both a startup-network blip and the splitter).
@@ -4256,7 +4370,7 @@ cmd_router() {
       _router_stop   # clean up the failed process before retrying (proxy untouched)
       sleep 2
       _start_host_router 0
-      if _router_ready 5; then printf '%s\n' "$_cfgsum" > "$ROUTER_CFG_SUM"; _start_collector; _start_follow; echo "  ✓ running (pid $(cat "$(host_pidfile)"))  [plain log]"; return 0; fi
+      if _router_ready 5; then printf '%s\n' "$_cfgsum" > "$ROUTER_CFG_SUM"; _router_by_mark; _start_collector; _start_follow; echo "  ✓ running (pid $(cat "$(host_pidfile)"))  [plain log]"; return 0; fi
       err "router failed to come up healthy — see $HOST_LOG"; tail -8 "$HOST_LOG" >&2
       _ensure_no_limbo   # never leave the proxy pointing at a router that won't start
       return 1
@@ -5635,6 +5749,7 @@ Choose what goes where (edit anytime; a lane 'add' reaches a running router live
     $PROG corp   suggest                   list this network's internal domains (on corp LAN / VPN up)
     $PROG corp   sync                      mirror the corp VPN's DHCP domains + routed CIDRs into the corp lane
     $PROG block  add ads.example           sinkhole (ad/telemetry); a big ad set is on by default
+    $PROG direct add npmjs.org             straight out even where a geosite set would take it (npm ships here)
     $PROG hotspot add unitedwifi.com       a venue's captive portal: the OS reaches it WITHOUT the proxy, so its login page loads
     unlisted traffic → direct (physical NIC); private/overlay IPs → OS routing (unbound).  '$PROG explain <domain|ip>' shows a destination's lane.
 
@@ -5648,6 +5763,10 @@ Everyday:
     $PROG config export     move the setup to another Mac — 'config import' merges it in (holds secrets — encrypt)
     $PROG config export --to shadowrocket   the same lanes (and servers) for Shadowrocket on an iPhone
     $PROG down              stop everything
+
+If a command misbehaves since 3.9.0, when rowt-rs (the Rust CLI) became what runs:
+    ROWT_IMPL=bash $PROG <command>        the same command in the shell version
+    ROWT_IMPL=bash $PROG watch refresh    the watchdog too (remembered; ROWT_IMPL=rust moves it back)
 EOF
 
   # Installed docs (shipped alongside the tool) + per-command help.
@@ -5926,20 +6045,21 @@ _list_hit() {
   return 1
 }
 
-# Longest-suffix-wins across the three hand lists (mirrors the render: rowt emits
+# Longest-suffix-wins across the four hand lists (mirrors the render: rowt emits
 # one rule per suffix, most-specific-first). Echoes "<lane> <suffix>" for the
 # longest matching domain suffix, or returns nonzero if none match. Uses the same
 # plain-suffix test as _list_hit so this predictor matches the router.
 # -> "<lane> <exact|suffix> <entry>". An EXACT (`domain:`) hit beats every suffix
 # at any length, because the render emits the `domain` rules first and sing-box
 # is first-match-wins; among exacts the first lane seen wins, matching that same
-# emission order (escape -> corp -> block). Entries are compared ASCII-lowercased,
+# emission order (escape -> corp -> block -> direct; a suffix tie goes the same
+# way, so the direct lane loses one). Entries are compared ASCII-lowercased,
 # as the rule-sets hold them: sing-box lowercases the name it matches, so a
 # mixed-case entry reaches the router lowercased or not at all, and explain
 # lowercases the name it is asked (cmd_explain).
 _longest_domain_hit() { # $1=domain
   local val="$1" best_e="" best_lane="" ex_e="" ex_lane="" e lane f pair ent
-  for pair in "escape:$DOMAINS" "corp:$CORP_DOMAINS" "block:$BLOCK_DOMAINS"; do
+  for pair in "escape:$DOMAINS" "corp:$CORP_DOMAINS" "block:$BLOCK_DOMAINS" "direct:$DIRECT_DOMAINS"; do
     lane="${pair%%:*}"; f="${pair#*:}"
     [ -f "$f" ] || continue
     while IFS= read -r e; do
@@ -5996,32 +6116,88 @@ _hotspot_hit() { # $1=domain
   printf '%s\n' "$best"
 }
 
-# Explain which lane a destination takes. Mirrors the render exactly: hand-list
-# domain suffixes win by LONGEST match across all three lanes (block/corp/escape),
-# then corp ip_cidr (on the resolved IP), then final. (The geosite ad rule-set
-# also blocks, but it's a binary .srs we can't cheaply inspect — a hit there won't
-# show below; it's consulted after the hand lists, so an explicit entry overrides.)
-cmd_explain() {
-  local dest="${1:-}"; [ -n "$dest" ] || die "usage: $PROG explain <domain|ip>"
-  dest="$(printf '%s' "$dest" | sed -E 's#^[a-zA-Z]+://##; s#/.*$##; s#:[0-9]+$##' | tr 'A-Z' 'a-z')"
-  local lane="" why="" ip="" ip_note="" m hit unmatched=0
-  # The hotspot lane is not a routing lane: macOS takes these names off the
-  # proxy before rowt is handed the connection, so no lane applies and a probe
-  # THROUGH the router would say nothing about them. Answered first for that
-  # reason, and its probe goes direct — which is what the OS does.
-  if ! is_ipv4 "$dest" && m="$(_hotspot_hit "$dest")"; then
-    printf '%s  ->  BYPASS   (hotspot lane — macOS keeps it off the proxy; the OS resolver answers it)\n' "$dest"
-    echo "  matched: hotspot-domains entry '$m' — on the OS proxy bypass list, so rowt is not in the path"
-    # No -x here, so --noproxy '*' is the point rather than the mistake it
-    # would be alongside one: the path worth probing is the OS's.
-    local hcode; hcode="$(curl -sS -m 8 --noproxy '*' -o /dev/null -w '%{http_code}' "https://$dest/" 2>/dev/null || true)"; hcode="${hcode:-000}"
-    if [ "$hcode" = 000 ]; then
-      echo "  live:    NOT reachable bypassing the proxy — no response"
-    else
-      echo "  live:    reachable bypassing the proxy — origin answered HTTP $hcode for https://$dest/ (the site root; not a verdict on the lane)"
-    fi
-    return 0
-  fi
+# The cached geosite sets in the order the router checks them, one per line:
+# "<name> <lane> <path>" — the escape lane's, then the block lane's, then the
+# ad set, as render_host emits them. Each name once: a repeat can only repeat
+# a miss. rowt-rs: route::sets.
+_geosite_route_sets() {
+  local n l seen=" "
+  while read -r n l; do
+    [ -n "$n" ] && [ -f "$CACHE/geosite-$n.srs" ] || continue
+    case "$seen" in *" $n "*) continue ;; esac
+    seen="$seen$n "
+    printf '%s %s %s\n' "$n" "$l" "$CACHE/geosite-$n.srs"
+  done <<EOF
+$(geosites_of "$DOMAINS" | sed 's/$/ escape/'; geosites_of "$BLOCK_DOMAINS" | sed 's/$/ block/')
+EOF
+  case "$seen" in
+    *" category-ads-all "*) ;;
+    *) if [ -f "$ADS_SRS" ]; then printf '%s %s %s\n' category-ads-all block "$ADS_SRS"; fi ;;
+  esac
+  return 0
+}
+
+# The sets a lane names that are not cached, in file order, once each. The
+# render leaves them out, so they route nothing until `fetch host`.
+_geosite_uncached() {
+  local n seen=" "
+  while read -r n; do
+    [ -n "$n" ] && [ ! -f "$CACHE/geosite-$n.srs" ] || continue
+    case "$seen" in *" $n "*) continue ;; esac
+    seen="$seen$n "
+    printf '%s\n' "$n"
+  done <<EOF
+$(geosites_of "$DOMAINS"; geosites_of "$BLOCK_DOMAINS")
+EOF
+  return 0
+}
+
+# Does the set at $1 list the name $2? rc 0 yes, 1 no, 2 sing-box could not
+# read it. `rule-set match` exits 0 either way and says which on stderr
+# ("match rules.[N]: …"); it fails only on a set it cannot read.
+_rule_set_match() {
+  local said
+  [ -x "$SB" ] || return 2
+  said="$("$SB" rule-set match -f binary "$1" "$2" 2>&1 >/dev/null </dev/null)" || return 2
+  case "$said" in *"match rules."*) return 0 ;; esac
+  return 1
+}
+
+# Ask each cached set, in the router's order, about a name no hand list
+# matched; the first that lists it is the router's answer. Sets the caller's
+# geo_hit ("<name> <lane>", or empty) and geo_unread (the sets sing-box could
+# not read, comma-joined, in the order tried). rowt-rs: route::geosite_route.
+_geosite_route() { # $1=name
+  local n l p rc
+  geo_hit=""; geo_unread=""
+  while read -r n l p; do
+    [ -n "$n" ] || continue
+    rc=0; _rule_set_match "$p" "$1" || rc=$?
+    case "$rc" in
+      0) geo_hit="$n $l"; return 0 ;;
+      2) geo_unread="${geo_unread:+$geo_unread,}$n" ;;
+    esac
+  done <<EOF
+$(_geosite_route_sets)
+EOF
+  return 0
+}
+
+# Which lane a destination takes. Mirrors the render: hand-list domain suffixes
+# win by LONGEST match across all four lanes (escape/corp/block/direct), then the
+# cached geosite sets in render order (escape's, block's, the ad set), then
+# corp ip_cidr on the resolved IP, then final.
+#
+# The lane $1 (a normalized destination) takes on the main port, and why, as
+# the router decides it: what explain prints and speed labels a URL with.
+# rowt-rs's route::route. The hand lists, then the cached geosite sets (asked
+# through sing-box: until #s96 neither command looked, so a box whose escape
+# lane carries geosite:github was told npm went DIRECT while the router sent it
+# to escape), then the router's lookup. Sets the caller's lane, why, ip,
+# ip_note, unmatched, geo_hit, geo_unread and geo_uncached.
+_route_of() {
+  local dest="$1" m hit _rt_reached=0
+  lane=""; why=""; ip=""; ip_note=""; unmatched=0; geo_hit=""; geo_unread=""; geo_uncached=""
   if is_ipv4 "$dest"; then
     ip="$dest"
     if m="$(_list_hit "$dest" "$CORP_DOMAINS" cidr)"; then lane=corp; why="corp CIDR '$m'"
@@ -6034,13 +6210,23 @@ cmd_explain() {
       *)     why="longest-match ${lane}-domains suffix '$m'" ;;
     esac
   else
+    # A name no hand list matched reaches the cached geosite sets next, as it
+    # does in the router (render_host puts them before the resolve rule); a set
+    # that lists it routes it there, unresolved.
+    _rt_reached=1
+    _geosite_route "$dest"
+    geo_uncached="$(_geosite_uncached | paste -sd, - 2>/dev/null)"
+  fi
+  if [ -n "$geo_hit" ]; then
+    lane="${geo_hit#* }"; why="geosite:${geo_hit%% *} rule-set ($lane lane) — no hand-list entry names it"
+  elif [ "$_rt_reached" = 1 ]; then
     # A name no rule matched. When the final route is direct and there are
     # address rules to feed, the router RESOLVES it (the `resolve` rule the
     # renderer places after every name rule) at the direct lane's own resolver,
     # and the address rules route it — a name resolving into a corp CIDR or a
     # private/overlay range goes corp, as the address would. Ask exactly that
     # resolver, and only then (rowt_core::classify::router_resolves).
-    lane="$FINAL_ROUTE"; why="no block/corp/escape rule; final route = $FINAL_ROUTE"
+    lane="$FINAL_ROUTE"; why="no block/corp/escape/direct rule; final route = $FINAL_ROUTE"
     unmatched=1   # a NAME no lane rule matched: a port whose catch-all is escape never resolves it here
     local rns=""
     # The renderer's own test — its corp CIDR list non-empty, or the private default on.
@@ -6062,6 +6248,30 @@ cmd_explain() {
   if [ "$xmode" = "local" ] && [ "$lane" = "escape" ]; then
     lane=direct; why="$why — local mode: the escape lane routes direct"
   fi
+}
+
+cmd_explain() {
+  local dest="${1:-}"; [ -n "$dest" ] || die "usage: $PROG explain <domain|ip>"
+  dest="$(printf '%s' "$dest" | sed -E 's#^[a-zA-Z]+://##; s#/.*$##; s#:[0-9]+$##' | tr 'A-Z' 'a-z')"
+  local lane="" why="" ip="" ip_note="" m unmatched=0 geo_hit="" geo_unread="" geo_uncached=""
+  # The hotspot lane is not a routing lane: macOS takes these names off the
+  # proxy before rowt is handed the connection, so no lane applies and a probe
+  # THROUGH the router would say nothing about them. Answered first for that
+  # reason, and its probe goes direct — which is what the OS does.
+  if ! is_ipv4 "$dest" && m="$(_hotspot_hit "$dest")"; then
+    printf '%s  ->  BYPASS   (hotspot lane — macOS keeps it off the proxy; the OS resolver answers it)\n' "$dest"
+    echo "  matched: hotspot-domains entry '$m' — on the OS proxy bypass list, so rowt is not in the path"
+    # No -x here, so --noproxy '*' is the point rather than the mistake it
+    # would be alongside one: the path worth probing is the OS's.
+    local hcode; hcode="$(curl -sS -m 8 --noproxy '*' -o /dev/null -w '%{http_code}' "https://$dest/" 2>/dev/null || true)"; hcode="${hcode:-000}"
+    if [ "$hcode" = 000 ]; then
+      echo "  live:    NOT reachable bypassing the proxy — no response"
+    else
+      echo "  live:    reachable bypassing the proxy — origin answered HTTP $hcode for https://$dest/ (the site root; not a verdict on the lane)"
+    fi
+    return 0
+  fi
+  _route_of "$dest"
   local desc
   case "$lane" in
     escape) desc="personal tunnel — through the proxy" ;;
@@ -6085,15 +6295,34 @@ cmd_explain() {
     [ "$pf" = escape ] || [ "$lane" = "$FINAL_ROUTE" ] || continue
     printf '  %-9s%s\n' "$pn:" "via 127.0.0.1:$pp -> $(printf '%s' "$pd" | tr 'a-z' 'A-Z') (no rule matched; this port's catch-all$([ "$pd" = escape ] && ! is_ipv4 "$dest" && echo ', the name resolved at the far end'))"
   done <<<"$(_ports_rows)"
-  # Opaque binary rule-sets (the ad-block set, and any `geosite:<name>` a lane
-  # pulls) can't be inspected here, so they may route/block this beyond what the
-  # hand lists show.
-  if [ "$lane" != block ] && { [ -f "$ADS_SRS" ] || [ -n "$(all_geosites)" ]; }; then
-    local gs; gs="$(all_geosites | paste -sd, - 2>/dev/null)"
-    echo "  note:    a geosite rule-set may still match this (not shown — binary set)${gs:+: geosite:$gs}$([ -f "$ADS_SRS" ] && echo ' + ad-block')"
+  # What the sets could not say. On a hit: the sets ahead of it sing-box could
+  # not read, which the router checks first. For a name none of them listed:
+  # one sing-box could not read, or one a lane names that is not cached (and so
+  # not in the router: 'fetch host' caches it, a reload renders it in). Nothing
+  # for a name a hand list routed, or an address.
+  if [ -n "$geo_hit" ]; then
+    if [ -n "$geo_unread" ]; then
+      echo "  note:    the router checks geosite:$geo_unread first, and sing-box could not read it: that set may take this name instead"
+    fi
+  else
+    if [ "$lane" != block ] && [ -n "$geo_unread" ]; then
+      echo "  note:    a geosite rule-set may still match this (sing-box could not read it): geosite:$geo_unread"
+    fi
+    if [ -n "$geo_uncached" ]; then
+      echo "  note:    the router skips geosite:$geo_uncached — named on a lane but not cached ('$PROG fetch host' fetches it, then '$PROG reload' puts it in the router)"
+    fi
+  fi
+  # #s98: an upgrade seeds the direct lane, but the router keeps running the
+  # host.json it started from until a reload or a lane edit renders the lane's
+  # sets in. Every render since names `direct-exact`, empty or not.
+  local running=0
+  [ "$lane" != block ] && host_running && running=1
+  if [ "$running" = 1 ] && [ "$lane" = direct ] && [[ "$why" == *" direct-domains "* ]] \
+     && [ -f "$HOST_CFG" ] && ! grep -qF '"direct-exact"' "$HOST_CFG"; then
+    echo "  note:    the running router started before rowt had a direct lane, so it does not route by this entry yet: '$PROG reload' puts the lane in"
   fi
   if [ "$lane" = block ]; then echo "  live:    (skipped — blocked by design)"
-  elif host_running; then
+  elif [ "$running" = 1 ]; then
     # NOTE: do NOT pass --noproxy '*' here — it overrides -x and makes curl go
     # DIRECT (which fails in China), instead of through the router we're testing.
     # -x already beats any env *_proxy. '|| true' avoids a set -e abort on failure.
@@ -6278,11 +6507,14 @@ cmd_status() {
   [ -n "$svc" ] && printf 'system proxy: %s (%s)\n' "$(networksetup -getsecurewebproxy "$svc" 2>/dev/null | awk '/Enabled/{print $2}' | head -1)" "$svc"
   [ -n "$svc" ] && _proxy_pac_on "$svc" && echo "auto-proxy:   ⚠ a PAC is enabled on '$svc' and macOS resolves it BEFORE rowt's proxy — traffic may bypass the lanes ('$PROG proxy check' for detail)"
   [ "$(sget captive)" = 1 ] && echo "captive:      portal detected — proxy dropped until login clears (watchdog auto-restores)"
-  echo "buckets:      escape=$(( $(domains_json | jq length) + $(escape_exact_json | jq length) )) corp=$(( $(corp_domains_json | jq length) + $(corp_cidrs_json | jq length) + $(corp_exact_json | jq length) )) block=$(( $(block_domains_json | jq length) + $(block_exact_json | jq length) ))$([ -f "$ADS_SRS" ] && echo '+ads')$(g="$(all_geosites | paste -sd, - 2>/dev/null)"; [ -n "$g" ] && echo " +geosite:$g") final=$FINAL_ROUTE"
+  echo "buckets:      escape=$(( $(domains_json | jq length) + $(escape_exact_json | jq length) )) corp=$(( $(corp_domains_json | jq length) + $(corp_cidrs_json | jq length) + $(corp_exact_json | jq length) )) block=$(( $(block_domains_json | jq length) + $(block_exact_json | jq length) ))$([ -f "$ADS_SRS" ] && echo '+ads')$(g="$(all_geosites | paste -sd, - 2>/dev/null)"; [ -n "$g" ] && echo " +geosite:$g") direct=$(( $(direct_domains_json | jq length) + $(direct_exact_json | jq length) )) final=$FINAL_ROUTE"
   echo "corp lane:    $(_corp_view)"
   if [ -x "$SB" ] && [ -f "$HOST_CFG" ]; then
     "$SB" check -c "$HOST_CFG" >/dev/null 2>&1 && echo "config:       host.json OK" || echo "config:       host.json INVALID (run '$PROG render')"
   fi
+  # rowt #s104: the watchdog found that this rowt renders a different config
+  # than the one the running router started from.
+  _upgrade_status_line
   # rowt #s41: the escape lane's health, from what the watchdog and the
   # follower last observed — the `via proxy:` fetch only on --probe now
   # (Hong, #s42: passive by default).
@@ -6403,7 +6635,10 @@ FOLLOW_LAST="$CFG/follow.last"                 # rowt #s36: "<utc stamp><TAB><ta
 # diff would call it stale forever and rewrite on every tick.
 #   v2 = adds AbandonProcessGroup (without it launchd SIGKILLs the router a tick
 #        starts, the moment that tick exits — silent ~10-minute outages).
-WATCH_PLIST_VERSION="3"
+#   v4 = names ROWT_IMPL=bash as well as rust (rowt #s92). A watchdog put back
+#        on the shell under 3.8 has no key, which now means rowt-rs; the bump
+#        makes its first tick after the upgrade write the key.
+WATCH_PLIST_VERSION="4"
 WATCH_PLIST_MARK="rowt-watch-plist v$WATCH_PLIST_VERSION"
 WATCH_SELFHEAL="$CFG/watch.plistheal"        # epoch of the last plist self-heal (anti-loop)
 WATCH_CPU="$CFG/watch.cpu"                   # last CPU/traffic sample: "epoch cpusecs pid bytes"
@@ -6690,11 +6925,16 @@ _watch_shadow() {
       --argjson pinreach "${_SH2_PINREACH:-null}" --arg holdstamp "${_SH2_HOLDSTAMP:-}" \
       --argjson failover "${_SH2_FAILOVER:-false}" \
       --arg holdsince "${_SH_HOLDSINCE0:-}" --arg holdtag "${_SH_HOLDTAG0:-}" \
+      --arg spinlog "${_SH2_SPINLOG:-}" --arg spin "${_SH2_SPIN:-}" \
+      --arg upgv "${_SH2_UPG_VER:-}" --arg upgfrom "${_SH2_UPG_FROM:-}" --arg upgq "${_SH2_UPG_QUIET:-}" \
+      --argjson upgfresh "${_SH2_UPG_FRESH:-false}" \
       '{obs:{proxy_intent:"", captive:$cap, captive_check_disabled:$capoff, active_service:$svc, proxy_any_on:true,
              host_running:true, intent:"up", boot_matches:true, iface:$ifc,
              proxy_pointing_ok:$pointing, proxy_bypass_ok:$bypass,
              bound_iface:$cur, net_id:$nid, health_ok:$health, probe_offline:$poff, health_slow:$slow, health_flows:$flows, now:$now, gateway_ok:$gwok,
              pinned:(if $pin == "" then null else $pin end), pinned_addr:$pinaddr, pinned_reach:$pinreach, hold_stamp:$holdstamp, failover:$failover,
+             spin_log:(if $spinlog == "" then null else $spinlog end), spin:(if $spin == "" then null else $spin end),
+             upgrade:(if $upgv == "" then null else {version:$upgv, from:$upgfrom, quiet:$upgq, fresh:$upgfresh} end),
              mode:(if $mode == "" then "host" else $mode end)},
         state:{captive_flag:false, health_fails:$fails, last_net_id:$last,
                last_recovery:$lastrec, last_net_change:$lastnetchg,
@@ -6876,23 +7116,39 @@ _watch_spin() { # $1=pid
   local n; n="$(( $(cat "$WATCH_CPUSTREAK" 2>/dev/null || echo 0) + 1 ))"
   printf '%s\n' "$n" > "$WATCH_CPUSTREAK" 2>/dev/null || true
   if [ "$n" -lt "$CPU_SPIN_TICKS" ]; then
-    _watch_log "router busy but idle: ${pct}% cpu, ${bps} B/s ($n/$CPU_SPIN_TICKS)"
+    _spin_say "router busy but idle: ${pct}% cpu, ${bps} B/s ($n/$CPU_SPIN_TICKS)"
     return 0
   fi
   local last; last="$(cat "$WATCH_CPUHEAL" 2>/dev/null || echo 0)"
   if [ "$(( now - last ))" -lt "$CPU_HEAL_COOLDOWN" ]; then
-    _watch_log "router spinning (${pct}% cpu, ${bps} B/s) but already healed once $(( (now - last) / 60 ))m ago — leaving it (degraded beats flapping)"
+    _spin_say "router spinning (${pct}% cpu, ${bps} B/s) but already healed once $(( (now - last) / 60 ))m ago — leaving it (degraded beats flapping)"
+    return 0
+  fi
+  # A heal the recovery cooldown would hold back waits for it (#s106): no
+  # latch, no capture, so the first tick past the cooldown heals. The rule is
+  # _watch_recover's (rowt_core::watch::recovery_hold), asked with the
+  # observation's clock as the planner asks it, so the shadow replays the same
+  # numbers; _watch_recover reads a later clock and so never holds what passed.
+  local lr ln="${_SH2_NOW:-$now}"; lr="$(cat "$WATCH_RESTART" 2>/dev/null || echo 0)"
+  if [ "${lr:-0}" != 0 ] && [ "$(( ln - lr ))" -lt "$HEALTH_COOLDOWN" ]; then
+    _spin_say "router spinning (${pct}% cpu, ${bps} B/s) but the last recovery was $(( ln - lr ))s ago (< ${HEALTH_COOLDOWN}s cooldown) — healing once that has passed"
     return 0
   fi
   printf '%s\n' "$now" > "$WATCH_CPUHEAL" 2>/dev/null || true
   local cap; cap="$(_watch_capture_spin "$pid" "$pct")"
   local sbv why; sbv="$(sb_version "$SB")"; why="$(sb_known_bad "$sbv" || true)"
-  _watch_log "router spinning: ${pct}% cpu with ${bps} B/s over ${dt}s (sing-box ${sbv:-?}${why:+ — KNOWN BAD: $why}) — evidence in $cap"
+  _spin_say "router spinning: ${pct}% cpu with ${bps} B/s over ${dt}s (sing-box ${sbv:-?}${why:+ — KNOWN BAD: $why}) — evidence in $cap"
   # reload, not restart: reload re-renders, and render re-validates the engine
   # (ensure_singbox_host) — so a spin on a known-bad sing-box gets the pinned
   # version swapped in, instead of a restart that is good for ten seconds.
-  _watch_recover "router spinning (${pct}% cpu, no traffic)" cmd_reload
+  _SH2_SPIN="router spinning (${pct}% cpu, no traffic)"
+  _watch_recover "$_SH2_SPIN" cmd_reload
 }
+
+# The spin check's one line for the log, also recorded for the watchdog
+# shadow (rowt #s105): rowt-rs takes the same sample and hands the planner the
+# same line (`spin_log`), so a tick that says it must say it on both sides.
+_spin_say() { _watch_log "$*"; _wact "log $*"; _SH2_SPINLOG="$*"; }
 
 # Liveness check, called by 'watch tick' when the network did NOT change (a
 # change already triggers a full reload). $1 = active physical interface.
@@ -7183,6 +7439,135 @@ _watch_hold_row() { # the `rowt status` row while a hold names the server still 
   printf '%-14s%s\n' "escape:" "$tag is dead since $since UTC — the watchdog holds instead of reloading; $rem"
 }
 
+# rowt #s104: after an upgrade the router keeps running what the old rowt
+# rendered. Follows rowt-rs's upgrade.rs and rowt_core::watch step for step:
+# the same files, the same sysctl and clash API calls, in the same order.
+#
+# The host.json `cmd_render` would write, on stdout, with nothing written and
+# nothing said: no lane sets, no DoH, no warnings (rowt-rs build_host_with).
+_render_dry() {
+  (
+    _RENDER_DRY=1; _AUDIT_OP=""
+    m="$(sget mode)"; m="${m:-host}"
+    case "$m" in
+      local) assemble_host "$(build_escape_outbounds local)" "127.0.0.1" "127.0.0.1:$CLASH_PORT" ;;
+      vm)    assemble_host "$(build_escape_outbounds vm-host)" "127.0.0.1" "" ;;
+      *)     assemble_host "$(build_escape_outbounds host)" "127.0.0.1" "127.0.0.1:$CLASH_PORT" ;;
+    esac
+  ) 2>/dev/null
+}
+
+# rowt_core::watch::woke_quiet: the Mac woke within 10 minutes, from a sleep
+# of 5 minutes or more.
+_upgrade_woke() { # $1=now $2=kern.waketime $3=kern.sleeptime (seconds; 0 unknown)
+  [ "$2" -gt 0 ] && [ "$3" -gt 0 ] && [ "$2" -ge "$3" ] && [ $(( $2 - $3 )) -ge 300 ] \
+    && [ "$1" -ge "$2" ] && [ $(( $1 - $2 )) -le 600 ]
+}
+
+# rowt_core::watch::upgrade_quiet, line for line: is now quiet, and the sample
+# to keep. Prints `reason|epoch|total|quiet_since` (reason woke, idle or empty;
+# the sample empty when there is none). A counter that went down, a gap longer
+# than the window or a clock that went back starts the window over.
+_upgrade_quiet() { # $1=now $2=woke $3=slept $4..6=previous sample (or empty) $7=total (or empty) $8=bps
+  local now="$1" pep="$4" ptot="$5" pqs="$6" total="$7" bps="$8" gap nq=0
+  if _upgrade_woke "$now" "$2" "$3"; then printf 'woke|%s|%s|%s\n' "$pep" "$ptot" "$pqs"; return 0; fi
+  [ -n "$total" ] || { printf '|||\n'; return 0; }
+  if [ -z "$pep" ]; then printf '|%s|%s|0\n' "$now" "$total"; return 0; fi
+  gap=$(( now - pep ))
+  if [ "$total" -lt "$ptot" ] || [ "$gap" -le 0 ] || [ "$gap" -gt 600 ]; then printf '|%s|%s|0\n' "$now" "$total"; return 0; fi
+  if [ $(( total - ptot )) -lt $(( bps * gap )) ]; then
+    if [ "$pqs" -gt 0 ]; then nq="$pqs"; else nq="$pep"; fi
+  fi
+  if [ "$nq" -gt 0 ] && [ $(( now - nq )) -ge 600 ]; then printf 'idle|%s|%s|%s\n' "$now" "$total" "$nq"
+  else printf '|%s|%s|%s\n' "$now" "$total" "$nq"; fi
+}
+
+# `status`'s line while an upgrade's reload waits (upgrade::report and
+# status_line): the watchdog found this rowt's render different and waits for
+# a quiet moment, or its one reload for this version failed.
+_upgrade_status_line() {
+  local by v what from
+  by="$(cat "$ROUTER_BY" 2>/dev/null || true)"
+  [ "$by" != "$ROWT_VERSION" ] || return 0
+  v="$(head -n 1 "$UPGRADE_PENDING" 2>/dev/null | cut -f1 || true)"
+  if [ -n "$v" ] && [ "$v" = "$ROWT_VERSION" ]; then
+    what="the watchdog reloads once at a quiet moment"
+  elif [ "$(cat "$UPGRADE_RELOADED" 2>/dev/null || true)" = "$ROWT_VERSION" ]; then
+    what="the watchdog's one reload for it failed (see watch.log)"
+  else
+    return 0
+  fi
+  host_running || return 0
+  if [ -n "$by" ]; then from="rowt $by"; else from="an older rowt"; fi
+  echo "upgrade:      rowt $ROWT_VERSION renders a different config than the running one ($from rendered it) — $what; '$PROG reload' applies it now"
+}
+
+# Does an upgrade wait for a reload, and is now the moment? Asked where rowt-rs
+# asks: nothing reloads for the network's sake and the tunnel answered, or
+# local mode. The first tick after an upgrade renders dry and compares the
+# bytes with ROUTER_CFG_SUM: the same, recorded as this version's; different,
+# pending, and from then on each tick asks only whether now is quiet. Busy,
+# nothing happens (said once); quiet, marked, then reloaded: once per version.
+_watch_upgrade() {
+  local now="${_SH2_NOW:-$(date +%s)}" by run pend fresh=false t sum ws woke slept bps total=""
+  local pep="" ptot="" pqs="" qv="" ne="" nt="" nq="" from when l
+  by="$(cat "$ROUTER_BY" 2>/dev/null || true)"
+  [ "$by" = "$ROWT_VERSION" ] && return 0
+  run="$(cat "$ROUTER_CFG_SUM" 2>/dev/null || true)"
+  [ -n "$run" ] || return 0
+  [ "$(cat "$UPGRADE_RELOADED" 2>/dev/null || true)" = "$ROWT_VERSION" ] && return 0
+  pend="$(head -n 1 "$UPGRADE_PENDING" 2>/dev/null || true)"
+  if [ -n "$pend" ] && [ "$(printf '%s\n' "$pend" | cut -f1)" = "$ROWT_VERSION" ]; then
+    pep="$(printf '%s\n' "$pend" | cut -f3)"; ptot="$(printf '%s\n' "$pend" | cut -f4)"; pqs="$(printf '%s\n' "$pend" | cut -f5)"
+    [[ "$pep" =~ ^-?[0-9]+$ && "$ptot" =~ ^[0-9]+$ && "$pqs" =~ ^-?[0-9]+$ ]] || { pep=""; ptot=""; pqs=""; }
+  else
+    t="$(mktemp)" || return 0
+    if ! _render_dry > "$t"; then rm -f "${t:?}"; return 0; fi
+    sum="$(cksum < "$t")"; rm -f "${t:?}"
+    if [ "$sum" = "$run" ]; then _router_by_adopt; return 0; fi
+    fresh=true
+  fi
+  ws="$(sysctl -n kern.waketime kern.sleeptime 2>/dev/null || true)"
+  woke="$(printf '%s\n' "$ws" | sed -n '1s/[^0-9]*\([0-9][0-9]*\).*/\1/p')"; woke="${woke:-0}"
+  slept="$(printf '%s\n' "$ws" | sed -n '2s/[^0-9]*\([0-9][0-9]*\).*/\1/p')"; slept="${slept:-0}"
+  # Digits only, at most nine (what rowt-rs takes); anything else is the default.
+  bps="${ROWT_RELOAD_QUIET_BPS:-}"; case "$bps" in ''|*[!0-9]*|??????????*) bps=2048 ;; *) bps=$(( 10#$bps )) ;; esac
+  # The clash API only when the wake has not already answered.
+  _upgrade_woke "$now" "$woke" "$slept" || total="$(_router_bytes_total)"
+  IFS='|' read -r qv ne nt nq < <(_upgrade_quiet "$now" "$woke" "$slept" "$pep" "$ptot" "$pqs" "${total:-}" "$bps") || true
+  mkdir -p "$CFG/cache" 2>/dev/null || true
+  printf '%s\t%s\t%s\t%s\t%s\n' "$ROWT_VERSION" "$by" "$ne" "$nt" "$nq" > "$UPGRADE_PENDING" 2>/dev/null || true
+  # What the shadow's netcheck observation carries (`upgrade`).
+  _SH2_UPG_VER="$ROWT_VERSION"; _SH2_UPG_FROM="$by"; _SH2_UPG_QUIET="$qv"; _SH2_UPG_FRESH="$fresh"
+  # The planner's upgrade_reload: the same strings.
+  if [ -n "$by" ]; then from="rowt $by"; else from="an older rowt"; fi
+  case "$qv" in
+    woke) when="just after the Mac woke from sleep" ;;
+    idle) when="traffic has stayed low for 10 minutes" ;;
+    *)
+      if [ "$fresh" = true ]; then
+        l="rowt $ROWT_VERSION renders a different config than the one the router runs (rendered by $from) — the watchdog reloads once at a quiet moment (just after the Mac wakes from sleep, or once traffic has stayed low for 10 minutes); 'rowt reload' applies it now"
+        _watch_log "$l"; _wact "log $l"
+      fi
+      return 0 ;;
+  esac
+  l="rowt $ROWT_VERSION renders a different config than the one the router runs (rendered by $from) — reloading once, $when"
+  _watch_log "$l"; _wact "log $l"
+  _AUDIT_OP="watchdog: reload (upgrade to rowt $ROWT_VERSION)"
+  l="BEGIN watchdog reload — upgrade to rowt $ROWT_VERSION: the router runs what $from rendered; $when"
+  _audit "$l"; _wact "audit $l"
+  # Marked BEFORE the reload: whether it works or not, never again for this version.
+  _wact "mark-upgrade $ROWT_VERSION"
+  printf '%s\n' "$ROWT_VERSION" > "$UPGRADE_RELOADED" 2>/dev/null || true; rm -f "$UPGRADE_PENDING"
+  _wact "reload upgrade to rowt $ROWT_VERSION"
+  # Recorded before the reload, as the network reload does: one that dies
+  # midway must not leave a plan the shell never finished.
+  _wact "next stop"
+  cmd_reload >>"$WATCH_LOG" 2>&1 && { _watch_log "reload ok"; rm -f "$WATCH_HEALTH" "$WATCH_HOLD"; _audit "END   watchdog reload — ok"; } || { _watch_log "reload FAILED"; _audit "END   watchdog reload — FAILED"; }
+  _AUDIT_OP=""
+  exit 0
+}
+
 _watch_health() { # $1=iface  $2=captive verdict
   # Offline (no interface IP) — a restart can't help and a returning network
   # fires its own resolver-change reload, so just reset the streak and bail.
@@ -7348,17 +7733,20 @@ _watch_plist_body() {
   local envxml v val
   envxml="    <key>PATH</key><string>$agent_path</string>"
   for v in XDG_CONFIG_HOME ROWT_PORT ROWT_CLASH_PORT ROWT_FINAL ROWT_IFACE ROWT_DNS_DIRECT ROWT_DNS_LOCAL ROWT_GFW_CANARIES ROWT_GFW_TIMEOUT SINGBOX_VERSION ROWT_LOG_LEVEL ROWT_WATCH_INTERVAL ROWT_HEALTH_FAILS ROWT_HEALTH_COOLDOWN ROWT_HEALTH_TIMEOUT ROWT_HEALTH_URL ROWT_CAPTIVE_CHECK ROWT_CAPTIVE_URL ROWT_CAPTIVE_TIMEOUT ROWT_CAPTIVE_RETRY ROWT_CAPTIVE_FALLBACK ROWT_WATCH_SHADOW ROWT_RENDER_SHADOW ROWT_PPROF ROWT_CPU_SPIN_PCT ROWT_CPU_SPIN_BYTES ROWT_CPU_SPIN_TICKS ROWT_CPU_HEAL_COOLDOWN ROWT_AUTO_FOLLOW ROWT_AUTO_FOLLOW_EVERY ROWT_ESCAPE_DNS_MAX_AGE ROWT_LANES_HOT ROWT_CORP_HOT \
-           ROWT_AUTO_INTERVAL ROWT_AUTO_TOLERANCE ROWT_AUTO_INTERRUPT; do
+           ROWT_AUTO_INTERVAL ROWT_AUTO_TOLERANCE ROWT_AUTO_INTERRUPT ROWT_RELOAD_QUIET_BPS; do
     val="${!v:-}"; [ -n "$val" ] && envxml="$envxml
     <key>$v</key><string>$val</string>"
   done
   # Which implementation the tick runs: `watch install|refresh` remembers
-  # ROWT_IMPL in state (below), and only rust is written, because the front door
-  # reads anything else as the shell, so a plist nobody switched stays exactly
-  # what it was. From state rather than the environment, so the tick's own
-  # self-heal and a refresh with an empty environment write the same file.
-  [ "$(sget watch_impl)" = rust ] && envxml="$envxml
-    <key>ROWT_IMPL</key><string>rust</string>"
+  # ROWT_IMPL in state (below), and the plist names it whichever it is (rowt
+  # #s92): rowt-rs is the front door's default, so a watchdog put back on the
+  # shell must say bash to stay there, as one switched over says rust.
+  # Nothing remembered, nothing written: that agent follows the default. From
+  # state rather than the environment, so the tick's own self-heal and a
+  # refresh with an empty environment write the same file.
+  local wimpl; wimpl="$(sget watch_impl || true)"
+  case "$wimpl" in rust|bash) envxml="$envxml
+    <key>ROWT_IMPL</key><string>$wimpl</string>" ;; esac
   cat <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -7494,10 +7882,13 @@ cmd_watch() {
       # quietly end a shadow window at the next brew upgrade.
       [ -n "${ROWT_WATCH_SHADOW:-}" ]  && sset shadow_watch  "$ROWT_WATCH_SHADOW"
       [ -n "${ROWT_RENDER_SHADOW:-}" ] && sset shadow_render "$ROWT_RENDER_SHADOW"
-      # The same for which implementation the tick runs. ROWT_IMPL=rust reaches
-      # rowt-rs before this shell, so what normally lands here is bash: the way
-      # back, `ROWT_IMPL=bash rowt watch refresh`.
-      [ -n "${ROWT_IMPL:-}" ] && sset watch_impl "$([ "$ROWT_IMPL" = rust ] && echo rust || echo bash)"
+      # The same for which implementation the tick runs. rowt-rs is the front
+      # door's default (rowt #s92) and answers ROWT_IMPL=rust itself, so what
+      # normally lands here is bash: the way back, `ROWT_IMPL=bash rowt watch
+      # refresh`. Only those two words are recorded: any other value means the
+      # default at the front door, and recording it as either would pin the
+      # agent to something nobody chose.
+      case "${ROWT_IMPL:-}" in rust|bash) sset watch_impl "$ROWT_IMPL" ;; esac
       if [ "$refresh" = 1 ] && [ ! -f "$WATCH_PLIST" ]; then info "watch not installed — nothing to refresh"; return 0; fi
       local self; self="$(_watch_self)"
       [ -x "$self" ] || die "cannot resolve the rowt binary path ($self)"
@@ -7833,6 +8224,10 @@ cmd_watch() {
         # local mode has no tunnel to probe; leaving this on would fail every
         # tick and drive _watch_recover into a permanent reload loop.
         [ "$(sget mode)" = "local" ] || _watch_health "$ifc" "$cap" || true
+        # rowt #s104: an upgrade's reload, at a quiet moment, on a tick with
+        # nothing else to fix and an interface (rowt_core::watch::healthy).
+        # Not on a tick that healed a spin (#s105): that recovery reloaded.
+        if [ -n "$ifc" ] && [ -z "${_SH2_SPIN:-}" ] && { [ "$(sget mode)" = local ] || [ "${_SH2_HEALTH:-}" = ok ]; }; then _watch_upgrade || true; fi
         _wact "next stop"
         exit 0
       fi
@@ -8106,7 +8501,7 @@ diag_body() {
   else _d "  (none)"; fi
   _d "  subscriptions: $(sub_count)"
   [ -s "$SUBS_FILE" ] && sed -E 's#(https?://.{10}).*#  \1…(masked)#' "$SUBS_FILE" | grep -vE '^\s*#' || true
-  _d "  buckets: escape=$(( $(domains_json | jq length) + $(escape_exact_json | jq length) )) corp=$(( $(corp_domains_json | jq length) + $(corp_cidrs_json | jq length) + $(corp_exact_json | jq length) )) block=$(( $(block_domains_json | jq length) + $(block_exact_json | jq length) ))$([ -f "$ADS_SRS" ] && echo ' +geosite-ads')$(g="$(all_geosites | paste -sd, - 2>/dev/null)"; [ -n "$g" ] && echo " +geosite:$g")"
+  _d "  buckets: escape=$(( $(domains_json | jq length) + $(escape_exact_json | jq length) )) corp=$(( $(corp_domains_json | jq length) + $(corp_cidrs_json | jq length) + $(corp_exact_json | jq length) )) block=$(( $(block_domains_json | jq length) + $(block_exact_json | jq length) ))$([ -f "$ADS_SRS" ] && echo ' +geosite-ads')$(g="$(all_geosites | paste -sd, - 2>/dev/null)"; [ -n "$g" ] && echo " +geosite:$g") direct=$(( $(direct_domains_json | jq length) + $(direct_exact_json | jq length) ))"
   _d ""
   _d "----- generated configs -----"
   if [ -x "$SB" ]; then
@@ -8212,7 +8607,7 @@ c@routing lanes@escape <list|add|rm|import|clear|dump|errors>@edit the escape la
 o@routing lanes@corp <list|add|rm|import|clear|dump|errors|sync|suggest>@edit the corp lane; 'sync' mirrors an overlay VPN's routes (corp/Tailscale) into it
 o@routing lanes@block <list|add|rm|import|clear|dump|errors>@block lane (ad/telemetry sinkhole); 'errors' = what got blocked
 o@routing lanes@hotspot <list|add|rm|import|clear|dump>@captive-portal hosts the OS reaches WITHOUT the proxy, so a venue's login page loads while rowt is up
-o@routing lanes@direct <errors|log>@diagnose the pass-through lane; 'errors' = what failed direct (escape candidates)
+o@routing lanes@direct <errors|list|add|rm|import|clear|dump|log>@names sent straight out ahead of the geosite sets (npm ships here); 'errors' = what failed direct (escape candidates)
 o@routing lanes@port <add|rm|list>@named extra ports: main's rules, each with its own catch-all, for the clients on it (a VM, a container, one app)
 o@proxy@proxy <status|check|on|off|env>@macOS system proxy + CLI env exports
 a@internals@render@regenerate the sing-box configs from current state
@@ -8231,8 +8626,8 @@ $PROG — split traffic three ways from one local proxy (127.0.0.1:$PORT) while 
 corporate VPN keeps the default route:
   escape  domains in escape-domains.txt  -> your personal tunnel (e.g. google)
   corp    domains/CIDRs in corp-domains.txt -> into the corp VPN (e.g. intranet)
-  direct  everything else                -> straight out the physical NIC, bypassing
-                                            corp AND escape (e.g. baidu / China)
+  direct  everything else, and domains in -> straight out the physical NIC, bypassing
+          direct-domains.txt                corp AND escape (e.g. baidu / China, npm)
 
 Usage:  $PROG <command> [args]      ($PROG help, or no args, shows this)
 Detail: $PROG <command> --help      (or: $PROG help <command>)
@@ -8254,6 +8649,9 @@ Notes:
     it at a reachable tailnet-shared rowt (short names expand through Tailscale);
     rowt-remote-system-on <remote-host> / -off apply the remote proxy to macOS;
     rowt-share-on / -off / -status manage that share.
+  • Since 3.9.0 rowt answers through its Rust CLI, rowt-rs. ROWT_IMPL=bash in front of
+    a command runs the shell version instead; 'ROWT_IMPL=bash $PROG watch refresh' puts
+    the watchdog on it too, and 'ROWT_IMPL=rust $PROG watch refresh' moves it back.
 
 Edit which domains escape:  $DOMAINS
 Env: ROWT_PORT ($PORT)  ROWT_CLASH_PORT ($CLASH_PORT)  ROWT_IFACE (auto)  ROWT_DNS_DIRECT ($DNS_DIRECT)  SINGBOX_VERSION ($SINGBOX_VERSION)
@@ -8499,7 +8897,9 @@ $PROG metrics — per-domain traffic history (bytes in/out over time).
 An always-on collector runs as a sidecar of the router (started when the router
 comes up healthy, stopped with it) and records per-domain, per-lane bytes into a
 tiered SQLite store — 5-second resolution for the last hour, rolled up to daily
-for a year — at $CFG/metrics/traffic.db. Set ROWT_METRICS=off to disable it.
+for a year — at $CFG/metrics/traffic.db. Each row also names the port the bytes
+came in on (main, or a port from '$PROG port add'). Set ROWT_METRICS=off to
+disable it.
 
   $PROG metrics            collector status                             [default]
   $PROG metrics status     running? + last write, store path/size, row count
@@ -8510,7 +8910,7 @@ for a year — at $CFG/metrics/traffic.db. Set ROWT_METRICS=off to disable it.
 Read-only (even 'query' opens the DB read-only). The richer view is the monitor:
 '$PROG monitor', then press 'v' to
 flip the connections pane through live -> up-history -> down-history, with a
-'w'-selectable timescale band.
+'w'-selectable timescale band, and 'P' to show one port's traffic.
 EOF
 ;;
     config) cat <<EOF
@@ -8814,8 +9214,8 @@ $PROG $1 <subcommand> — edit the $1 lane$([ "$1" = escape ] && echo " (domains
                        scoped resolvers' domains, which are only candidates for
                        'corp add'). It sees them only on the corp LAN or VPN.")
 A domain lives in AT MOST one lane: 'add'/'import' here pulls the exact entry out
-of the other lanes (block/corp/escape), since the router matches block→corp→escape
-first-match-wins and a domain in two lists would be silently shadowed. The two rule
+of the other lanes (escape/corp/block/direct), since the router takes the first
+match and a domain in two lists would be silently shadowed. The two rule
 kinds are different entries, so 'z.com' and '--domain z.com' can sit in different
 lanes; the exact rule is emitted first and therefore wins for that one host.
 
@@ -8832,21 +9232,39 @@ not no traffic — for what's flowing right now, use '$PROG connections'.
 EOF
 ;;
     direct) cat <<EOF
-$PROG direct <errors|log> — diagnose the pass-through (direct) lane.
+$PROG direct [list | add | rm | import | clear | dump | errors | log] — the direct lane.
 
-'direct' is the default for unlisted traffic — you can't edit it, but you CAN see
-what it's failing on. sing-box logs a line per failed/refused connection with the
-outbound it used; the router captures those per lane. So after a web app misbehaves
-on the default DIRECT policy, this tells you exactly which domains it couldn't reach
-directly — your escape (or corp) candidates — without switching the default.
+'direct' is where unlisted traffic goes, and it is also a hand lane: names sent
+straight out even where a broader rule would take them elsewhere, above all a
+geosite set on the escape lane. rowt's default escape list carries geosite:github,
+which lists npm's domains; the shipped direct list (npmjs.org, npmjs.com,
+npm.community) takes those back out, while github.com stays on escape.
 
+  (no verb)            the same as 'errors'                          [default]
+  list                 list the lane
+  add <entry> [more]   add domain(s); each is pulled out of the other lanes
+  rm <entry> [more]    remove entries
+  --domain, --domain-suffix, --force   as on the other lanes ('$PROG help escape')
+  import <file>        batch-add one entry per line from a file (# comments ok)
+  clear                remove every entry (keeps the file's comment header)
+  dump [file]          print the lane (or write it to a file) for backup/versioning
   errors [5m|10m|1h|…|all]  domains that FAILED going direct in the window (default 10m)
   log                       live-tail the direct-lane error log
 
-Categories: timeout/reset/refused ⇒ likely blocked (add to escape); dns ⇒ often a
-transient resolver blip. Typical use: reproduce the app, then '$PROG direct errors 10m'
-and '$PROG escape add <domain>' the real ones. (For what's succeeding right now, see
-'$PROG connections'.)
+Entries rank with the other hand lists: the longest match wins across all four, so
+'registry.npmjs.org' in escape beats 'npmjs.org' here, and every hand list comes
+before the geosite sets and the ad set. geosite: entries and addresses are declined:
+a set is not sent direct wholesale, and an address goes direct already unless a
+corp CIDR claims it. Edits reach a running router like any lane edit.
+
+The diagnostics: sing-box logs a line per failed/refused connection with the
+outbound it used, and the router captures those per lane. So after a web app
+misbehaves on the default DIRECT policy, 'errors' tells you exactly which domains it
+couldn't reach directly — your escape (or corp) candidates — without switching the
+default. Categories: timeout/reset/refused ⇒ likely blocked (add to escape); dns ⇒
+often a transient resolver blip. Typical use: reproduce the app, then
+'$PROG direct errors 10m' and '$PROG escape add <domain>' the real ones. (For what's
+succeeding right now, see '$PROG connections'.)
 EOF
 ;;
     connections|conns) cat <<EOF
@@ -9153,11 +9571,19 @@ ages (older buckets roll up into the next tier):
   lane        TEXT      NOT NULL · escape | corp | direct | - · part of PK
   bytes_up    INTEGER   NOT NULL DEFAULT 0 · upload (↑)
   bytes_dn    INTEGER   NOT NULL DEFAULT 0 · download (↓)
-  (PRIMARY KEY (ts, domain, lane); tables are WITHOUT ROWID)
+  port        TEXT      NOT NULL DEFAULT '-' · main | <named port> | - · part of PK
+  (PRIMARY KEY (ts, domain, lane, port); tables are WITHOUT ROWID)
+
+port is the rowt port the bytes came in on, as 'rowt port list' names it: main
+(rowt's own listener) or a named port. '-' marks rows recorded before the store
+kept ports, and the '(unattributed)' rows.
 
 Also 'meta' (k TEXT PRIMARY KEY, v TEXT) — the collector heartbeat:
 schema_version, pid, started, last_write. Rows with domain '(unattributed)' hold
 sub-second traffic reconciled against the router's monotonic grand totals.
+
+Traffic per port over the last hour:
+  rowt metrics query "SELECT port, sum(bytes_up) up, sum(bytes_dn) dn FROM sample_5s GROUP BY port"
 EOF
       ;;
     query)
@@ -9186,7 +9612,7 @@ EOF
 #
 # Shadowrocket takes the first rule that matches, like sing-box, so the ORDER is
 # the render's (assemble_host): the hotspot lane first, since macOS bypasses those
-# hosts before rowt sees them; then exact hosts (escape, corp, block); then every
+# hosts before rowt sees them; then exact hosts (escape, corp, block, direct); then every
 # hand suffix, most specific first; then the geosite categories (escape, block);
 # then the corp and private ranges; then the ad set. Categories are expanded from
 # the cached .srs — Shadowrocket cannot read a sing-box rule-set — and their regex
@@ -9224,9 +9650,12 @@ _export_shadowrocket() { # $1 = output path, or - for stdout; $2 = 1 for rules o
     escape_exact_json | jq -r '.[] | "DOMAIN,\(ascii_downcase),PROXY"'
     corp_exact_json   | jq -r '.[] | "DOMAIN,\(ascii_downcase),DIRECT"'
     block_exact_json  | jq -r '.[] | "DOMAIN,\(ascii_downcase),REJECT"'
+    direct_exact_json | jq -r '.[] | "DOMAIN,\(ascii_downcase),DIRECT"'
     echo "# hand-listed suffixes, most specific first"
-    jq -rn --argjson e "$(domains_json)" --argjson c "$(corp_domains_json)" --argjson b "$(block_domains_json)" "$sr"'
-      (($b | map({s: ., p: "REJECT"})) + ($c | map({s: ., p: "DIRECT"})) + ($e | map({s: ., p: "PROXY"})))
+    jq -rn --argjson e "$(domains_json)" --argjson c "$(corp_domains_json)" --argjson b "$(block_domains_json)" \
+       --argjson d "$(direct_domains_json)" "$sr"'
+      (($d | map({s: ., p: "DIRECT"})) + ($b | map({s: ., p: "REJECT"})) + ($c | map({s: ., p: "DIRECT"}))
+       + ($e | map({s: ., p: "PROXY"})))
       | sort_by([(.s | split(".") | length), (.s | length)]) | reverse | .[] | . as $r | $r.s | sr($r.p)'
   } > "$t/rules"
   # Called directly, not in a subshell: it adds to $regex.
@@ -9250,7 +9679,7 @@ _export_shadowrocket() { # $1 = output path, or - for stdout; $2 = 1 for rules o
   {
     echo "# Shadowrocket config written by rowt $ROWT_VERSION ('$PROG config export --to shadowrocket'), $(date '+%Y-%m-%d %H:%M:%S')."
     echo "# Routing rules only: PROXY is whichever server is selected in Shadowrocket (no server is in this file)."
-    echo "#   escape -> PROXY   block -> REJECT   corp, hotspot -> DIRECT   everything else -> FINAL,DIRECT"
+    echo "#   escape -> PROXY   block -> REJECT   corp, direct, hotspot -> DIRECT   everything else -> FINAL,DIRECT"
     echo "# The order follows rowt's precedence (the first matching rule wins). Regenerate rather than edit."
     if [ "$regex" -gt 0 ]; then echo "# $regex regex entries from the geosite categories are not included: Shadowrocket has no domain-regex rule."; fi
     echo
@@ -9296,7 +9725,7 @@ _export_shadowrocket() { # $1 = output path, or - for stdout; $2 = 1 for rules o
     echo "wrote $sfile"
   fi
   {
-    echo "  $total rules: $proxy PROXY (escape), $reject REJECT (block), $direct DIRECT (corp, hotspot, ranges) + FINAL,DIRECT"
+    echo "  $total rules: $proxy PROXY (escape), $reject REJECT (block), $direct DIRECT (corp, direct, hotspot, ranges) + FINAL,DIRECT"
     if [ "$regex" -gt 0 ]; then echo "  $regex geosite regex entries left out (Shadowrocket has no domain-regex rule)"; fi
     if [ -n "$sfile" ]; then
       echo "  servers: $nlinks share link(s) + $nsubs subscription URL(s) in $sfile"
@@ -9321,7 +9750,7 @@ cmd_config() {
   # import brought which manual server) travel too. Neither holds a credential,
   # but both name servers, so --routes-only leaves them with the pool.
   local src=("$SERVERS" "$MANUAL" "$SR_REVIEW" "$SUBS_FILE" "$OUTBOUND" \
-             "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" "$HOTSPOT_DOMAINS" \
+             "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" "$DIRECT_DOMAINS" "$HOTSPOT_DOMAINS" \
              "$ESCAPE_DNS_CONF" "$SOURCES_TSV")
   case "${1:-list}" in
     list)
@@ -9392,7 +9821,7 @@ cmd_config() {
       # setup (no pool, empty escape) — exactly what --no-servers is for. The
       # other lane files close that. subs.txt / the secondary pool JSONs are not
       # distinctive enough to stand alone (a bare URL list is not a bundle).
-      tar tzf "$in" 2>/dev/null | grep -qE '(^|/)(servers\.json|(escape|corp|block|hotspot)-domains\.txt)$' \
+      tar tzf "$in" 2>/dev/null | grep -qE '(^|/)(servers\.json|(escape|corp|block|direct|hotspot)-domains\.txt)$' \
         || die "$in doesn't look like a rowt config bundle"
       mkdir -p "$CFG"
       if [ "$replace" = 1 ]; then
@@ -9423,7 +9852,7 @@ cmd_config() {
         xdg="$work/x"; stage="$xdg/rowt"; inx="$work/in"
         mkdir -p "$stage" "$inx"
         tar xzf "$in" -C "$inx" || { rm -rf "$work"; die "extract failed"; }
-        local lf; for lf in "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" "$HOTSPOT_DOMAINS"; do
+        local lf; for lf in "$DOMAINS" "$CORP_DOMAINS" "$BLOCK_DOMAINS" "$DIRECT_DOMAINS" "$HOTSPOT_DOMAINS"; do
           [ -f "$lf" ] && cp "$lf" "$stage/$(basename "$lf")"
         done
         # Fold each lane in. A child that FAILS aborts the whole merge with its own
@@ -9431,8 +9860,11 @@ cmd_config() {
         # this check a failed child would silently swap in the unchanged copy and
         # still report success — and under `set -e` exit mid-merge with the error
         # captured but never shown.)
+        # Each fold pulls its entries out of the other lanes, so the last fold
+        # keeps an entry two lanes of the bundle share. The direct lane folds
+        # first: in the router a tie goes to the other lane (#s98).
         local report="" pair lane name out rc
-        for pair in escape:escape-domains.txt corp:corp-domains.txt block:block-domains.txt hotspot:hotspot-domains.txt; do
+        for pair in direct:direct-domains.txt escape:escape-domains.txt corp:corp-domains.txt block:block-domains.txt hotspot:hotspot-domains.txt; do
           lane="${pair%%:*}"; name="${pair##*:}"
           [ -f "$inx/$name" ] || continue
           rc=0
@@ -9469,7 +9901,7 @@ $out"
             case "$ans" in y|Y|yes|YES) ;; *) echo "aborted."; rm -rf "$work"; return 1 ;; esac
           fi
         fi
-        for name in escape-domains.txt corp-domains.txt block-domains.txt hotspot-domains.txt; do
+        for name in escape-domains.txt corp-domains.txt block-domains.txt direct-domains.txt hotspot-domains.txt; do
           [ -f "$stage/$name" ] && mv "$stage/$name" "$CFG/$name"
         done
         rm -rf "$work"
@@ -9544,13 +9976,14 @@ run_command() {
 # The Rust CLI, located like the other companions. Brew puts it at
 # libexec/bin/rowt-rs (and symlinks it into the prefix as `rowt-rust`);
 # install.sh copies it to $PREFIX/bin/rowt-rust; a checkout builds it in
-# target/.
-_rust_cli() {
+# target/. `own` stops before PATH: only a rowt-rs of this install will do.
+_rust_cli() { # [own]
   local b
   for b in "$HERE/bin/rowt-rs" "$HERE/bin/rowt-rust" \
            "$HERE/target/release/rowt-rs" "$HERE/target/debug/rowt-rs"; do
     [ -x "$b" ] && { echo "$b"; return 0; }
   done
+  [ "${1:-}" = own ] && return 1
   command -v rowt-rust 2>/dev/null
 }
 
@@ -9609,9 +10042,11 @@ _setup_py_helpers() {
 _py_ok() { [ "${PY_HAVE:-0}" = 1 ]; }
 
 main() {
-  # §6.6 — ROWT_IMPL=rust hands the whole invocation to rowt-rs. BEFORE the
-  # preamble: rowt-rs migrates, rotates and audits for itself, and doing it on
-  # both sides would double every audit line.
+  # §6.6 — rowt-rs answers every command, and ROWT_IMPL=bash keeps this shell
+  # (rowt #s92: the default since 3.9.0, decided by the owner on 2026-11-14
+  # after the fourteen-day trial; before, only ROWT_IMPL=rust handed over).
+  # BEFORE the preamble: rowt-rs migrates, rotates and audits for itself, and
+  # doing it on both sides would double every audit line.
   #
   # Guarded on ROWT_DELEGATED but deliberately NOT setting it. That marker means
   # "rowt-rs sent this here", and rowt-rs REFUSES to delegate when it is already
@@ -9620,20 +10055,33 @@ main() {
   # Reading it and leaving it alone gives both properties — rust → bash → runs
   # natively, and no loop, because the second pass sees the marker and does not
   # switch again.
-  if [ "${ROWT_IMPL:-bash}" = rust ] && [ "${ROWT_DELEGATED:-}" != 1 ]; then
-    local _rb; _rb="$(_rust_cli)" || true
-    # Silence here would be the footgun §6.6 names: someone who asked for rust
-    # and is quietly handed bash collects a window's worth of evidence about the
-    # wrong implementation.
-    [ -n "$_rb" ] || { echo "error: ROWT_IMPL=rust but no rowt-rs found — build it (cargo build --release -p rowt-cli) or install it" >&2; exit 1; }
-    # The LaunchAgent must name the FRONT DOOR, never whichever binary happened
-    # to write it. rowt-rs is ad-hoc-signed and its cdhash changes every
-    # release, and a launch constraint pins code identity (PORTING.md §2.1) —
-    # but the plain reason is parity: without this the two implementations
-    # write a different <string> into the same plist. Hand over the same path
-    # `_watch_self` picks, so there is one answer.
-    export ROWT_SELF="${ROWT_SELF:-$(_watch_self)}"
-    exec "$_rb" "$@"
+  #
+  # ROWT_IMPL=rust, asked for by name, takes rowt-rs from anywhere it can be
+  # found, PATH included, and with none is an error: silence there would be the
+  # footgun §6.6 names, someone who asked for rust quietly handed bash. The
+  # default is not asked for, so it takes only a rowt-rs of this install (brew's
+  # libexec, install.sh's prefix, a checkout's target/) and with none runs this
+  # shell, as every rowt before 3.9.0 did. Not PATH: from a checkout nobody
+  # built, that is whatever brew installed, another version reading the same
+  # config. Any other ROWT_IMPL is the default too.
+  if [ "${ROWT_DELEGATED:-}" != 1 ] && [ "${ROWT_IMPL:-}" != bash ]; then
+    local _rb=""
+    if [ "${ROWT_IMPL:-}" = rust ]; then
+      _rb="$(_rust_cli)" || true
+      [ -n "$_rb" ] || { echo "error: ROWT_IMPL=rust but no rowt-rs found — build it (cargo build --release -p rowt-cli) or install it" >&2; exit 1; }
+    else
+      _rb="$(_rust_cli own)" || true
+    fi
+    if [ -n "$_rb" ]; then
+      # The LaunchAgent must name the FRONT DOOR, never whichever binary
+      # happened to write it. rowt-rs is ad-hoc-signed and its cdhash changes
+      # every release, and a launch constraint pins code identity (PORTING.md
+      # §2.1) — but the plain reason is parity: without this the two
+      # implementations write a different <string> into the same plist. Hand
+      # over the same path `_watch_self` picks, so there is one answer.
+      export ROWT_SELF="${ROWT_SELF:-$(_watch_self)}"
+      exec "$_rb" "$@"
+    fi
   fi
   _setup_py_helpers
   migrate

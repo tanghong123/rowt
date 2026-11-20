@@ -45,6 +45,24 @@ fn log(cfg: &Path, before: &str, after: &str, prefix: &str) {
     }
 }
 
+/// After seeding lanes the config lacked (`shell::seed_lists`, on any
+/// command): their entries, logged as `seeded: ` against the last logged
+/// state, which then holds them. Without it the next bracket would find them
+/// and log the upgrade's own seeding as an edit made outside rowt. No state
+/// yet (a new config) logs nothing, as `begin` does.
+pub fn seeded(cfg: &Path, lanes: &[(&str, String)]) {
+    if lanes.is_empty() {
+        return;
+    }
+    let Ok(prev) = std::fs::read_to_string(state(cfg)) else { return };
+    let mut now = prev.clone();
+    for (lane, body) in lanes {
+        now = lanestate::with_seeded(&now, lane, body);
+    }
+    log(cfg, &prev, &now, "seeded: ");
+    keep(cfg, &now);
+}
+
 /// Before a mutating command or a watchdog tick: what moved outside rowt.
 pub fn begin(cfg: &Path) {
     if !cfg.is_dir() {

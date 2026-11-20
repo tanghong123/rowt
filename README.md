@@ -163,7 +163,11 @@ network change, but only while the router is up, and skips when nothing actually
 moved. `rowt watch status` shows whether it's active; `rowt watch uninstall`
 removes it. (It installs a scoped passwordless-sudo rule for just the
 `networksetup` proxy toggles so a Wi-Fi↔Ethernet switch doesn't prompt; that's
-removed on uninstall.)
+removed on uninstall.) After a `brew upgrade` it also notices when the new rowt
+renders a different config than the running router's, and reloads once at a
+quiet moment: just after the Mac wakes from sleep, or once traffic has stayed
+low for 10 minutes. Until then `rowt status` says so on an `upgrade:` line;
+`rowt reload` applies it at once.
 
 Forgot where you left off? **`rowt onboard`** (or just `rowt` with no arguments)
 prints a checklist of these steps with the exact next command to run.
@@ -471,6 +475,10 @@ $ rowt escape add cloudfront.net
 
 A specific domain always beats a `geosite:` rule (suffix rules are matched first),
 so keeping individual domains alongside a broad category is safe and deterministic.
+To take a few names *out* of a set, put them in the **direct** lane:
+`geosite:github` lists npm's domains, and the shipped direct list
+(`npmjs.org`, `npmjs.com`, `npm.community`) sends npm straight out while the rest of
+GitHub stays on escape. `rowt direct add <domain>` does the same for any other name.
 
 Fixing the tunnel-uplink problem (so escape traffic doesn't get swallowed by the
 corp tunnel) is done two ways, picked automatically by `probe`:
@@ -496,46 +504,36 @@ brew install tanghong123/tap/rowt
 rowt version
 ```
 
-### `rowt-rust` — the same tool, in Rust (preview)
+### The Rust CLI, and the way back to the shell
 
-A second command, `rowt-rust`, ships alongside `rowt` on Apple Silicon. It is a
-Rust port of the whole CLI, and it is a **preview you can ignore**: nothing runs
-it unless you ask (below), and removing it changes nothing.
+Since 3.9.0 `rowt` hands every command to its Rust CLI, `rowt-rs` (also on your
+PATH as `rowt-rust`). It is a port of the whole tool and answers all 41 command
+arms. Every one is compared against the shell — stdout, exit status, the config
+tree with file modes, the argv trace and the audit log — over 500 cases
+(`tests/parity/`), and it ran as the everyday `rowt`, watchdog included, for a
+fourteen-day trial before it became the default. A rowt with no Rust CLI of
+its own install (a checkout nobody built) runs the shell, as every version
+before 3.9.0 did.
 
-It exists so the two can be run side by side on the same config:
-
-```sh
-rowt status          # the shell
-rowt-rust status     # the port, same config, same output
-```
-
-All 41 command arms answer natively, and every one is compared against the shell — stdout, exit status, the
-config tree with file modes, the argv trace and the audit log — over 500 cases
-(`tests/parity/`). What is NOT yet proven is time
-on real networks, which is what the preview is for. If the two ever disagree on
-your machine, that is worth reporting: the whole design of the port is that they
-should not.
-
-Two smaller binaries ship next to it, `rowt-render` and `rowt-watch-tick`. Those
-are inert unless you turn a comparison on (`ROWT_RENDER_SHADOW=1`,
-`ROWT_WATCH_SHADOW=1`), which makes `rowt` record where the Rust would have
-disagreed with it, and act on its own answer regardless.
-
-**Trying it as your everyday `rowt`.** `export ROWT_IMPL=rust` (in `~/.zshrc`)
-makes `rowt` itself hand each command to the Rust version; the few it does not
-answer yet come back to the shell on their own. The watchdog never reads your
-shell's settings, so it stays on the shell until you run `rowt watch refresh`
-from a shell with `ROWT_IMPL=rust` set. rowt remembers that choice, so an
-upgrade keeps it. The way back:
+The shell still ships, and one variable brings it back:
 
 ```sh
+export ROWT_IMPL=bash               # this terminal: rowt runs the shell
 ROWT_IMPL=bash rowt watch refresh   # the watchdog, back on the shell
-export ROWT_IMPL=bash               # this terminal; delete the export for new ones
 ```
 
-A watchdog on the Rust version is no longer compared with anything: the
-watchdog comparison (`ROWT_WATCH_SHADOW`) checks the shell's tick, and the
-shell's tick has stopped running.
+The watchdog never reads your shell's settings, so it has its own switch:
+`rowt watch refresh` with `ROWT_IMPL=bash` set puts it on the shell, rowt
+remembers that through upgrades, and `ROWT_IMPL=rust rowt watch refresh` puts it
+back on the Rust CLI. If the two ever disagree on your machine, that is worth
+reporting: the whole design of the port is that they should not.
+
+On the shell, two smaller binaries can check it against the Rust: `rowt-render`
+and `rowt-watch-tick` are inert unless you turn a comparison on
+(`ROWT_RENDER_SHADOW=1`, `ROWT_WATCH_SHADOW=1`), which makes the shell record
+where the Rust would have disagreed with it, and act on its own answer
+regardless. The watchdog comparison checks the shell's tick, so it runs only
+where the watchdog is on the shell.
 
 The installer is **version-guarded**: re-running it does nothing if the installed
 copy is the same or newer than the source (`--force` overrides; `--uninstall`
@@ -976,13 +974,13 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 | `down` | tear everything down: system proxy off, **kill sing-box** (incl. strays), VM down. |
 | `restart` | bounce the tunnel in place (host or vm, whichever is active) — no re-render, no proxy change. Use if sing-box is stuck/high-CPU. |
 | `reload` | re-detect the network interface, re-render, restart, re-apply the proxy — run after switching Wi-Fi ↔ wired ↔ hotspot. |
-| `watch <install\|uninstall\|status>` | install/remove a LaunchAgent that (a) runs `reload` on every network change (debounced; a no-op when neither the interface nor the active-service proxy moved) and (b) on a timer **probes the escape tunnel** and auto-recovers it — a *wedged* tunnel (router up, not carrying traffic; 3 failed probes) or a *crashed* one (router down while your intent is up, same boot), via `reload`, cooldown-gated and verified by a re-probe — and **held off** while the network itself reaches nothing (its own unproxied probe failing), since no reload fixes an uplink; `watch.log` then says what the NIC and its gateway answered, in the words of `rowt status`'s `uplink:` line. Likewise held off when the **pinned server itself is dead** (`use <tag>`, and a direct TCP connect from the NIC to it fails): a reload would land on the same dead server, so the watchdog says so once (`watch.log`, `audit`, an `escape:` row in `status`) and points at `rowt use auto`, which fails over by itself. It also runs once at **login**: if rowt isn't running but the system proxy is still set to `127.0.0.1:7890`, it clears it, so rowt's proxy effect never outlives a reboot. `install` also adds a scoped passwordless-sudo rule for the `networksetup` proxy toggles (so a Wi-Fi↔Ethernet switch doesn't prompt); `uninstall` removes both. Recoveries are recorded in `audit`. It further (c) restarts a router that is **up and answering but spinning** — high CPU with no traffic — which the liveness probe alone cannot see, and (d) **re-syncs its own agent plist** when that plist was written by an older rowt. `status` reports a stale agent instead of just `LOADED`. |
+| `watch <install\|uninstall\|status>` | install/remove a LaunchAgent that (a) runs `reload` on every network change (debounced; a no-op when neither the interface nor the active-service proxy moved) and (b) on a timer **probes the escape tunnel** and auto-recovers it — a *wedged* tunnel (router up, not carrying traffic; 3 failed probes) or a *crashed* one (router down while your intent is up, same boot), via `reload`, cooldown-gated and verified by a re-probe — and **held off** while the network itself reaches nothing (its own unproxied probe failing), since no reload fixes an uplink; `watch.log` then says what the NIC and its gateway answered, in the words of `rowt status`'s `uplink:` line. Likewise held off when the **pinned server itself is dead** (`use <tag>`, and a direct TCP connect from the NIC to it fails): a reload would land on the same dead server, so the watchdog says so once (`watch.log`, `audit`, an `escape:` row in `status`) and points at `rowt use auto`, which fails over by itself. It also runs once at **login**: if rowt isn't running but the system proxy is still set to `127.0.0.1:7890`, it clears it, so rowt's proxy effect never outlives a reboot. `install` also adds a scoped passwordless-sudo rule for the `networksetup` proxy toggles (so a Wi-Fi↔Ethernet switch doesn't prompt); `uninstall` removes both. Recoveries are recorded in `audit`. It further (c) restarts a router that is **up and answering but spinning** — high CPU with no traffic — which the liveness probe alone cannot see, (d) **re-syncs its own agent plist** when that plist was written by an older rowt, and (e) after an **upgrade** whose rowt renders a different config than the running router's, **reloads once at a quiet moment** — within 10 minutes of the Mac waking from a sleep of 5 minutes or more, or once the router has moved under 2048 B/s for 10 minutes (`ROWT_RELOAD_QUIET_BPS`) — and waits for one of those however long it takes; until then `status` shows an `upgrade:` line (`status --json`: `config.upgrade_reload`). `status` reports a stale agent instead of just `LOADED`. |
 | `status [--json] [--probe]` | mode, servers, proxy state, the escape lane's health (`escape:`, from the watchdog's and the follower's last records; `--probe` fetches live) **and config validity** — rowt itself; `--json` is the same as one object, schema 1 (`skills/rowt/references/status-json.md`). Its `corp lane:` line says which tunnel rowt would route corp traffic into, and is **not a VPN health check**: a corp tunnel exists throughout exactly the outages that matter. For the VPN's health it shows a dedicated checker's verdict when one is published — corp-route's `<epoch> <ok\|fail\|down\|untested> <id>` file (`ROWT_CORP_HEALTH`), "no opinion" once older than `ROWT_CORP_HEALTH_STALE` (300 s) — and otherwise says the VPN's health is not rowt's to judge. `rowt doctor` prints the same line as its `corp` row. |
-| `explain <domain\|ip>` | explain which lane a destination takes — `escape` (proxy), `corp` (into the corp VPN), `block`, or `direct` (pass-through) — and which rule matched. Mirrors the real routing: a `--domain` (whole-host) entry wins outright, else hand-list domain suffixes win by **longest match** across all three lanes, then — for a name no rule matched, when the final route is direct — the address the router resolves it to at its own resolver, checked against the corp CIDRs and the private/overlay ranges (a hit routes it corp), then final. A name that resolver cannot answer gets a note with both hand fixes (`corp add` for an intranet name, `hotspot add` for an overlay zone only the OS resolves). Adds a live HTTP check if the router is running. (`route` still works as a hidden alias.) |
+| `explain <domain\|ip>` | explain which lane a destination takes — `escape` (proxy), `corp` (into the corp VPN), `block`, or `direct` (pass-through) — and which rule matched. Mirrors the real routing: a `--domain` (whole-host) entry wins outright, else hand-list domain suffixes win by **longest match** across all four hand lists (the direct lane's included), then the cached `geosite:` rule-sets in the order the router checks them (the escape lane's, the block lane's, the ad set), asked through sing-box's own `rule-set match`, so a name only a set lists — `registry.npmjs.org`, which `geosite:github` carries — shows that set's lane; then — for a name no rule matched, when the final route is direct — the address the router resolves it to at its own resolver, checked against the corp CIDRs and the private/overlay ranges (a hit routes it corp), then final. A name that resolver cannot answer gets a note with both hand fixes (`corp add` for an intranet name, `hotspot add` for an overlay zone only the OS resolves); a set sing-box could not read (also on a hit, when that set comes first), or one a lane names that is not cached (so the router skips it until `fetch host` and a reload), gets a note too. Adds a live HTTP check if the router is running. (`route` still works as a hidden alias.) |
 | `report` | full offline diagnostic (deps, configs, per-server reachability, DNS, through-proxy tests, log + audit tail) → `~/.config/rowt/diag-*.txt`, **secrets masked**, for sharing. |
-| `audit [-n N\|all\|path\|clear]` | the **mutation trail** — one line per state-changing op, whether you ran it or the `watch` agent did, with `BEGIN`/`END`/`ABORT`, timing, and a `by=<parent>(<tty>)` field that says whether it was hands-on (`by=zsh`) or the watchdog (`by=launchd`). `BEGIN` is written before the work, so even a command that hangs leaves a trace. Read-only commands aren't recorded. Every **lane membership change** is in it too, as `LANE <from> -> <to> (<n>): <entries>` — an add, an `rm`, every entry of an `import`, a monitor route, a `corp sync` — and an edit made to a lane file outside rowt is logged as `outside rowt` at the next command or watchdog tick. `direct` means "in no lane"; entries are written exactly as in the lane file, so reversing a line is `rowt <lane> add|rm` of the same text. → `~/.config/rowt/log/audit.log`. |
-| `metrics [status\|top\|path\|query]` | **per-domain traffic history** — a `collector` sidecar records bytes in/out per domain/lane into a tiered SQLite store (5s → 1y). `status` shows liveness; `top [secs]` the heaviest domains; `path` the store path + schema; `query "<SQL>"` a read-only SQL passthrough. Surfaced interactively in `monitor` via the `v` flip. See [Traffic metrics](#traffic-metrics). |
-| `config [list\|export\|import]` | **back up / move the whole setup** to another machine — or, with `export --to shadowrocket`, hand it to Shadowrocket on your iPhone (see [Your rules on the iPhone](#your-rules-on-the-iphone-shadowrocket)). `export [--no-servers]` bundles the source-of-truth files (server pool, subscriptions, escape/corp/block/hotspot lane rules, `escape-dns.txt`, `manual-sources.tsv`) into a `.tgz` — `--no-servers` omits the pool and those two (they name servers), so the lane rules are safe to share or commit. `import <file>` **merges** the bundle's lane lists into yours by default (union, deduped, single-lane; entries the bundle would pull into another lane are listed and confirmed first) and leaves your server pool as-is; `--replace` overwrites the matching files instead — a whole-bundle restore. Either re-renders after. Skips the machine-specific `host.json`/`state`/binary — those regenerate via `render`/`up`. Bundle holds credentials: move it encrypted. |
+| `audit [-n N\|all\|path\|clear]` | the **mutation trail** — one line per state-changing op, whether you ran it or the `watch` agent did, with `BEGIN`/`END`/`ABORT`, timing, and a `by=<parent>(<tty>)` field that says whether it was hands-on (`by=zsh`) or the watchdog (`by=launchd`). `BEGIN` is written before the work, so even a command that hangs leaves a trace. Read-only commands aren't recorded. Every **lane membership change** is in it too, as `LANE <from> -> <to> (<n>): <entries>` — an add, an `rm`, every entry of an `import`, a monitor route, a `corp sync` — and an edit made to a lane file outside rowt is logged as `outside rowt` at the next command or watchdog tick. `none` means "in no lane" and `direct` the direct lane (a line from before rowt had a direct lane says `direct` for "in no lane"); entries are written exactly as in the lane file, so reversing a line is `rowt <lane> add|rm` of the same text. → `~/.config/rowt/log/audit.log`. |
+| `metrics [status\|top\|path\|query]` | **per-domain traffic history** — a `collector` sidecar records bytes in/out per domain/lane/port into a tiered SQLite store (5s → 1y). `status` shows liveness; `top [secs]` the heaviest domains; `path` the store path + schema; `query "<SQL>"` a read-only SQL passthrough. Surfaced interactively in `monitor` via the `v` flip. See [Traffic metrics](#traffic-metrics). |
+| `config [list\|export\|import]` | **back up / move the whole setup** to another machine — or, with `export --to shadowrocket`, hand it to Shadowrocket on your iPhone (see [Your rules on the iPhone](#your-rules-on-the-iphone-shadowrocket)). `export [--no-servers]` bundles the source-of-truth files (server pool, subscriptions, escape/corp/block/direct/hotspot lane rules, `escape-dns.txt`, `manual-sources.tsv`) into a `.tgz` — `--no-servers` omits the pool and those two (they name servers), so the lane rules are safe to share or commit. `import <file>` **merges** the bundle's lane lists into yours by default (union, deduped, single-lane; entries the bundle would pull into another lane are listed and confirmed first) and leaves your server pool as-is; `--replace` overwrites the matching files instead — a whole-bundle restore. Either re-renders after. Skips the machine-specific `host.json`/`state`/binary — those regenerate via `render`/`up`. Bundle holds credentials: move it encrypted. |
 | `monitor` | **full-screen TUI** (`htop`-style) — the live view of everything at once: connections + throughput, errors/blocked over a rolling window, and server health, plus confirmed, reversible controls (server switch, lane routing, proxy toggle). See [Monitor (TUI)](#monitor-tui). |
 | `run <command> [args…]` | run a command through whatever proxy path actually reaches the internet — probes, in order, the current shell proxy env → the macOS system proxy → rowt's port (if the router is up and the system proxy is off) → direct, and execs the command with the first where the target host answers (default `https://www.google.com/`; override `ROWT_RUN_TARGET`). Aborts without running if none work. Handy for CLI tools (`claude`, `git`, `npm`…) that ignore the system proxy: `rowt run claude`. |
 
@@ -1005,13 +1003,14 @@ Every command has detailed help: `rowt <command> --help` (or `rowt help <command
 | `ping [tag]` | **parallel** latency test through the tunnel (fastest first, `*`=active). Each server is sampled **three times** and the **median** is shown — the same figure `rowt monitor` shows (two answers give their mean, one gives itself). With no answer the row says which kind: `no answer in 8s` when every try ran out of time (a slow link reads exactly like a dead server, so it says nothing about which; raise `ROWT_PING_TIMEOUT`), `unreachable` when a try failed outright. One sample over a lossy link spikes or fails on its own. `auto` still switches on sing-box's own figure, the latest single sample. `ROWT_PING_URL` (default Google's `generate_204`) / `ROWT_PING_TIMEOUT` (8s per sample). |
 | `probe` | with corp VPN up, test all servers (default route vs physical NIC) and pick `host` or `vm`. |
 
-**Routing lanes** — `escape` and `corp` share the same verbs:
+**Routing lanes** — `escape`, `corp`, `block` and `direct` share the same verbs:
 
 | command | what it does |
 | --- | --- |
-| `escape` / `corp` / `block` (no verb) | list the lane. |
+| `escape` / `corp` / `block` (no verb) | list the lane. (`direct` with no verb is `direct errors`.) |
+| `direct <list\|add\|rm\|import\|clear\|dump>` | **names sent straight out the physical NIC even where a broader rule would take them elsewhere** — above all a `geosite:` set on the escape lane. A name no rule matches goes direct already; this lane is for the names a set or the ad set would catch. rowt's default escape list carries `geosite:github`, which lists npm's domains, so the shipped direct list holds `npmjs.org`, `npmjs.com` and `npm.community`: npm goes direct while github.com stays on escape (`rowt direct rm npmjs.org npmjs.com npm.community` sends npm back through the set). Entries rank with the other hand lists by longest match, ahead of every geosite set; a tie with another lane goes to the other lane. Declines `geosite:` entries and addresses. A box upgraded from a rowt without this lane gets the file seeded at its next command, less any npm entry another lane already holds (logged in the audit as `LANE seeded: …`), and the router picks the npm entries up at the next `rowt reload` (or the first lane edit). |
 | `hotspot <list\|add\|rm\|import\|clear\|dump>` | **captive-portal hosts — and overlay DNS zones — that bypass the proxy at the OS level**, so a venue's login page loads while rowt is up: each entry goes on macOS's proxy bypass list as `x.com` *and* `*.x.com` (`.x.com` or `*.x.com` = the `*.x.com` form alone; `--domain` = that exact host only; an IP/CIDR as written). Not a routing lane — nothing is rendered, an edit re-applies the bypass list (where rowt owns the proxy) instead of restarting the router, `corp sync` stops mirroring a DHCP-advertised domain that sits here, and `proxy env`/`run` export the list as `no_proxy`. Same single-lane rule as the others. `corp sync` also WRITES here, in its own auto-managed block: the DNS zones only an overlay resolver answers (a tailnet's, say), which no lane can resolve — see [Tailnet names](#tailnet-names-and-any-other-scoped-only-zone--automatic). See [Captive portals](#captive-portals-hotel--airplane-wi-fi). |
-| `… add <d>…` / `… rm <d>…` | add / remove domains (corp also takes CIDRs). A running router picks the change up **live**, no restart, no dropped connection — see below. |
+| `… add <d>…` / `… rm <d>…` | add / remove domains (corp also takes CIDRs). Each add pulls the entry out of the other lanes. A running router picks the change up **live**, no restart, no dropped connection — see below. |
 | `… add --domain <d>…` | match the **whole host only**, not its subdomains — stored as `domain:<host>`, rendered as a sing-box `domain` rule instead of `domain_suffix`. `--domain-suffix` names the default explicitly. Applies to every entry of that `add`/`rm`, from any position. |
 | `… add --force <d>…` | add an entry that is a **whole namespace**. Lane entries are suffixes, so `com` is every `.com` and `co.uk` is every `.co.uk`; both are declined unless you say `--force`. |
 | `… import <file>` | batch-add one domain per line from a file (merges; never replaces). |
@@ -1133,6 +1132,13 @@ reports its background wrongly, or if you switch light/dark mid-session.
   - The header rows are a **per-lane aggregate** of whatever the pane shows (all /
     escape / corp / direct), and stay all-lanes even when `f` filters the detail
     list. Block-lane traffic is excluded.
+  - Press **`P`** to show **one port's traffic**: `main` (rowt's own
+    127.0.0.1:7890), then each port from `rowt port add`, then every port again.
+    Unlike `f`, the port scopes the whole pane, header rates included, as if that
+    port were the only one: live rows, the per-lane rates and the upload/download
+    history. The caption names it (`live connections · port vm`). The errors pane
+    stays all ports, since the router's logs don't say which port a line came in
+    on. `esc` clears it, after the lane filter.
   - Press **`/`** to search hosts by **regex** (case-insensitive; a literal-substring
     fallback if it doesn't compile). It filters the detail rows of **both** panes at
     once and composes **AND** with the lane filter, but — like `f` — never touches
@@ -1152,7 +1158,7 @@ its selection) · `←→`/`hl` switch pane / pick a server (wrapping at the end
 · `g` toggle scroll/list
 · `Tab` cycle focus (connections → errors → health)
 · `v` flip the connections pane (live / ↑ upload / ↓ download) · `s` span (the
-metrics timescale band) · `f` (or `1`/`2`/`3`, `0`) lane filter · `/` search
+metrics timescale band) · `f` (or `1`/`2`/`3`, `0`) lane filter · `P` port · `/` search
 hosts (regex, filters both panes; `↵` commit, `esc` clear) · `w` / `[` `]`
 errors window · `y` copy the selected domain · `p` pause · `?` help · `q` quit —
 all focus-independent. Mouse: wheel scrolls the list
@@ -1214,8 +1220,9 @@ installed alongside `rowt` (also runnable standalone as `rowt-monitor`).
 ## Traffic metrics
 
 A lightweight **always-on collector** records per-domain, per-lane bytes in/out
-over time — so you can see where your bandwidth actually went, from the last five
-seconds to the last year. It runs as a **sidecar of the router** (started once the
+over time, kept apart by the port they came in on — so you can see where your
+bandwidth actually went, and through which port, from the last five seconds to
+the last year. It runs as a **sidecar of the router** (started once the
 router comes up healthy, stopped with it — no separate service to manage), holding
 the clash API's `/connections` websocket and diffing each connection's cumulative
 counters into 5-second buckets. Set `ROWT_METRICS=off` to disable it.
@@ -1230,10 +1237,12 @@ consolidated RRD-style so it stays tiny (well under ~15 MB):
 | `sample_1h` | 1 hour    | 90 days |
 | `sample_1d` | 1 day     | 1 year |
 
-Each row is `(ts, domain, lane, bytes_up, bytes_dn)`; a `meta` table holds the
-collector heartbeat. Bytes moved by connections too short-lived to sample land in
-an `(unattributed)` row, reconciled against the router's monotonic grand totals so
-the books always balance.
+Each row is `(ts, domain, lane, bytes_up, bytes_dn, port)`; a `meta` table holds
+the collector heartbeat. `port` is the port the bytes came in on, as
+`rowt port list` names it: `main` for rowt's own 127.0.0.1:7890, or a named
+port's name. Rows recorded before rowt kept ports say `-`. Bytes moved by
+connections too short-lived to sample land in an `(unattributed)` row, reconciled
+against the router's monotonic grand totals so the books always balance.
 
 ```sh
 rowt metrics                     # collector status: running? last write, size, rows
@@ -1249,9 +1258,17 @@ collector's data. Example — total bytes moved today:
 rowt metrics query "SELECT sum(bytes_up) up, sum(bytes_dn) dn FROM sample_1m"
 ```
 
+Per port over the last hour, and the heaviest domains on one port (each tier
+holds its own span, so a longer window sums several tiers, as the monitor does):
+
+```sh
+rowt metrics query "SELECT port, sum(bytes_up) up, sum(bytes_dn) dn FROM sample_5s GROUP BY port"
+rowt metrics query "SELECT domain, lane, sum(bytes_dn) dn FROM sample_5s WHERE port='vm' GROUP BY domain, lane ORDER BY dn DESC LIMIT 10"
+```
+
 The richer, interactive view is the monitor: `rowt monitor`, then **`v`** to flip
-the connections pane through the upload/download history (see
-[Monitor](#monitor-tui)).
+the connections pane through the upload/download history, and **`P`** to show one
+port's traffic (see [Monitor](#monitor-tui)).
 
 ## How it decides (probe)
 

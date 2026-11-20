@@ -57,6 +57,7 @@ walks the rules **top to bottom, first match wins**:
 | `domain_suffix` in `block-domains.txt` | **block** | refused instantly — no DNS, no dial (kills the ad/tracker retry storm) |
 | `domain_suffix` in `corp-domains.txt` | **corp** | resolved to an intranet IP (see §4), sent via the **routing table** → matches the corp route → into `utunN` → corp network |
 | `domain_suffix` in `escape-domains.txt` | **escape** | VLESS socket **bound to en0** → home router → VPS → the VPS reaches Google |
+| `domain_suffix` in `direct-domains.txt` | **direct** | the same socket as the final route below, **bound to en0** — but ahead of the geosite sets and the ad set, so it takes a name a broader rule would catch. The shipped list holds npm's domains (`npmjs.org`, `npmjs.com`, `npm.community`), which `geosite:github` on the escape lane lists: npm goes direct while github.com stays on escape. No `geosite:` and no addresses (an address goes direct already unless a corp CIDR claims it) |
 | `geosite:<name>` in `escape-domains.txt` / `block-domains.txt` (e.g. `geosite:google`) | that lane | a maintained sing-geosite category, pulled as a `rule_set` — covers a whole service (all ccTLDs) without enumerating suffixes; runs after the hand lists, before the ad set. Escape + block only (corp is domains/CIDRs); a specific suffix always wins over it |
 | `geosite-category-ads-all` rule-set | **block** | broad ad/tracker blocklist (opaque, so it runs *after* the hand lists — and before the address rules below, so an ad domain is never resolved) |
 | **resolve** a name no rule above matched (only when `final` is `direct`) | — | not a lane: the router looks the name up at the direct lane's own resolver (`dns-direct`, `prefer_ipv4`), so the two address rules below can route it. One lookup, the one the direct lane would have made anyway, reused by the outbound. Never emitted for an `escape`/`block` final, whose names must not be looked up locally. A name that does not resolve fails here, logged as `router: lookup …` and filed under the direct lane |
@@ -65,12 +66,15 @@ walks the rules **top to bottom, first match wins**:
 | no match → `final` (default `direct`) | **direct** | direct socket **bound to en0** → home router → the public internet, corp untouched |
 
 **Longest suffix wins, not lane order.** rowt does *not* emit one rule per lane
-(which would make an earlier lane shadow a later one). It flattens the three hand
+(which would make an earlier lane shadow a later one). It flattens the four hand
 lists into **one rule per suffix, ordered most-specific-first** (more labels, then
 longer). So `api.foo.com` in escape beats `foo.com` in block for `api.foo.com`,
 while `www.foo.com` still lands in block. A suffix lives in **at most one lane** —
-`rowt escape/corp/block add` pulls the entry out of the other two — so there are
-never two lanes fighting over the same suffix. The opaque geosite rule-set can't
+`rowt escape/corp/block/direct add` pulls the entry out of the other lanes — so
+there are never two lanes fighting over the same suffix. A file edited by hand can
+still hold a twin; then the lane order escape, corp, block, direct breaks the tie,
+so the direct lane loses it (the shipped npm entries never override a person's own
+escape entry for the same name). The opaque geosite rule-set can't
 be interleaved by specificity, so it sits after the hand lists (explicit intent
 overrides the broad blocklist) but before `final`.
 
@@ -282,7 +286,7 @@ into:
   Every lane rule, hand entries and synced DHCP domains alike, renders as a
   local sing-box rule-set under `rule-sets/` beside `host.json`, which only
   points at the files: one set per lane per label count, bare and dot-led
-  entries apart, the exact entries ahead — 48 sets that keep longest-suffix-wins
+  entries apart, the exact entries ahead — 64 sets that keep longest-suffix-wins
   for every entry of up to eight labels, lane order among deeper ones
   (`rowt_core::render::RULE_SETS_DIR` has the argument) — plus one set
   for the corp CIDRs. sing-box watches a local rule-set file and swaps its rules
@@ -705,6 +709,16 @@ field and would fail the whole config.
   "is it loaded" question names the gui domain, the one `watch install`
   bootstraps into: `launchctl list <label>` answers for the caller's own
   session, so over SSH a running watchdog read as NOT loaded (rowt #s77).
+
+  The agent runs whichever rowt `rowt` itself runs: since 3.9.0 that is
+  rowt-rs, the Rust CLI. `ROWT_IMPL=bash rowt watch refresh` puts it on the
+  shell instead, and `ROWT_IMPL=rust` puts it back. The choice is kept in
+  `state` (`watch_impl`) and written into the plist as `ROWT_IMPL`, because
+  launchd starts the agent with no shell profile to read it from; with no
+  choice recorded the plist names none and the agent follows the default. Both
+  ticks carry the self-heal above. A change to the plist reaches an installed
+  agent only through it, so a tick without it would leave every upgraded Mac
+  on its old plist, shown as stale, for good.
 - **Captive portals (hotel/airport Wi-Fi).** Pre-login walled gardens make the
   login popup vanish and the portal page unloadable while the proxy is on. rowt
   handles this automatically — probe hosts on the proxy bypass so the popup
@@ -744,6 +758,57 @@ field and would fail the whole config.
   …)`, in `watch.log` and in the audit log. The two implementations build the
   same three strings; `parity watch-shadow`'s `watch-proxy-repoint` case holds
   them to it.
+
+  **A third cause: an upgrade changed the render (#s104).** A `brew upgrade`
+  swaps the binary and leaves the router running the config the old rowt
+  rendered, so a fix that lives in `host.json` (3.10's direct lane) does
+  nothing until someone runs `rowt reload`, and nobody is told. Hong chose the
+  answer on #s102: "Watchdog reloads at a quiet moment, and status flags it
+  until then". So:
+
+  - Every render that puts `host.json` in place stamps `host.json.by` with
+    its version, and wherever `host.running` is written, `host.running.by`
+    copies that stamp (and goes when it goes): it names the rowt whose render
+    the router runs. A copy, not the starting rowt's own version, because a
+    restart starts the file on disk without rendering it: after `rowt restart`
+    right after an upgrade, the router still runs the old render, and the
+    watchdog still finds it. A router running a render from before 3.11 has
+    no `host.running.by`, whoever started it.
+  - On a tick with nothing else to fix (no network move, the proxy pointing at
+    rowt, the tunnel answering, or local mode) and `host.running.by` naming
+    another version (or none), the watchdog renders **dry** (nothing written: no lane
+    sets, no DoH, no warnings) and compares the bytes with `host.running`.
+    The same: it records its own version (and stamps `host.json.by` too when
+    host.json is what runs, so a restart keeps it), and nothing more happens.
+    Different:
+    the verdict goes to `cache/upgrade-pending`, `watch.log` says once that the
+    reload waits, and `status` prints an `upgrade:` line (`status --json`:
+    `config.upgrade_reload` is `waiting`) until it happens. The verdict is not
+    checked again: if the difference goes away before the quiet moment, the
+    one reload still happens, and changes nothing.
+  - It reloads only at a **quiet moment**: within 10 minutes of the Mac waking
+    from a sleep of 5 minutes or more (`kern.waketime`/`kern.sleeptime`; a
+    sleep that long has already dropped what a reload would), or once the
+    router has moved under 2048 B/s from tick to tick for 10 minutes (the clash
+    API's byte totals; `ROWT_RELOAD_QUIET_BPS`). A counter that went down, a
+    gap longer than the window or a clock that went back starts the window
+    over. There is no deadline: a router that is never quiet keeps the flag,
+    and `rowt reload` applies it whenever its owner likes.
+  - **Once per version**, whatever happens: `cache/upgrade-reloaded` is written
+    before the reload (the planner's `mark-upgrade` action), so a reload that
+    fails is not retried; `status` then says the reload failed
+    (`upgrade_reload: failed`) until the router runs this version's render. Any
+    reload, by any route, settles it. A tick with no interface does not look at
+    all: a render with none to bind would differ for that alone.
+
+  A render can also differ for reasons that are not the upgrade: what
+  `build_host` reads may have moved while the router kept running (a launchd
+  environment unlike the shell that ran `up`, a guarded escape name, a
+  `geosite` set fetched since). The dry render cannot tell those apart, so the
+  one reload applies them too; it is still bounded to once per version. The
+  decision is `rowt_core::watch::upgrade_quiet` and `netcheck`'s
+  `upgrade_reload`; the shell's `_watch_upgrade` follows them, and `parity
+  watch-shadow` holds the two to it (`watch-upgrade-busy`, `-woke`, `-idle`).
 
 - **A lane that is reachable but far too slow (`rowt speed`).** Every other
   signal here is reachability — a small request completes or it does not — and
@@ -791,20 +856,23 @@ field and would fail the whole config.
   `block import my-list.txt` ran, not what it added — on 2026-10-06, finding
   why one site's bot-defence host was blocked meant digging a month-old import
   file off the disk. Now each command's bracket also diffs every `(lane, entry)`
-  pair across the four lane files and logs one line per transition:
+  pair across the five lane files and logs one line per transition:
 
   ```
   … BEGIN block rm att-api.example --no-reload
-  … LANE block -> direct (1): att-api.example
+  … LANE block -> none (1): att-api.example
   … END   block rm att-api.example --no-reload rc=0 (0s)
-  … LANE direct -> block (336): a.example b.example …     # one import, in full
+  … LANE none -> block (336): a.example b.example …       # one import, in full
   … LANE escape -> block (1): moved.example               # an add's pull-out
-  … LANE outside rowt: direct -> block (1): hand.example  # edited behind rowt's back
-  … LANE watchdog corp sync: direct -> corp (2): 10.9.0.0/16 …
+  … LANE escape -> direct (1): npmjs.org                  # the direct lane took it
+  … LANE outside rowt: none -> block (1): hand.example    # edited behind rowt's back
+  … LANE watchdog corp sync: none -> corp (2): 10.9.0.0/16 …
   ```
 
-  `direct` means "in no lane". The monitor's routing keys are covered for free —
-  they shell out to `rowt <lane> add|rm` — and of the four `rm`s a `d` sends,
+  `none` means "in no lane", and `direct` is the direct lane. Until the direct
+  lane existed, "in no lane" was spelled `direct`, so in an older line
+  `block -> direct` is an unroute. The monitor's routing keys are covered for free —
+  they shell out to `rowt <lane> add|rm` — and of the `rm`s a `d` sends,
   only the lane that held the host logs, by name. Entries are kept as written
   (`domain:x`, `*.x`), so reversing a line is re-adding exactly that text, and
   the list is never truncated (`AUDIT_MAX` counts lines, so a long line costs

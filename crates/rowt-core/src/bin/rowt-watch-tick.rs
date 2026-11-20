@@ -11,6 +11,7 @@
 //!   captive-proxy-off <svc> | captive-proxy-on <svc> | clear-stale-proxy <svc>
 //!   open-portal <url>
 //!   recover <reason> | corp-sync | write-net-id <id> | reload <reason>
+//!   mark-upgrade <version>
 //!   next <stop|settle>
 
 use rowt_core::watch::{guard, netcheck, Action, CaptiveState, Config, Next, Observation, State};
@@ -43,6 +44,7 @@ fn render(a: &Action) -> String {
         Action::CorpSync => "corp-sync".to_string(),
         Action::WriteNetId(n) => format!("write-net-id {n}"),
         Action::Reload(r) => format!("reload {r}"),
+        Action::MarkUpgrade(v) => format!("mark-upgrade {v}"),
     }
 }
 
@@ -106,6 +108,17 @@ fn run() -> Result<String, String> {
         failover: b(o, "failover"),
         hold_stamp: s(o, "hold_stamp"),
         now: o.get("now").and_then(|x| x.as_i64()).unwrap_or(0),
+        // rowt #s104. Absent (every case before it) or null: no upgrade waits.
+        upgrade: o.get("upgrade").filter(|u| u.is_object()).map(|u| rowt_core::watch::Upgrade {
+            version: s(u, "version"),
+            from: s(u, "from"),
+            quiet: s(u, "quiet"),
+            fresh: b(u, "fresh"),
+        }),
+        // rowt #s105. Absent (every case before it) or null: the spin check
+        // had nothing to say and no heal to ask for.
+        spin_log: opt(o, "spin_log"),
+        spin: opt(o, "spin"),
     };
     let empty = Value::Object(Default::default());
     let sv = v.get("state").unwrap_or(&empty);

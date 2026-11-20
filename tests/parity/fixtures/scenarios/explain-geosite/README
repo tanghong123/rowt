@@ -1,0 +1,19 @@
+Cached geosite sets that explain asks through sing-box (#s96). The router
+checks them after the hand lists and before it resolves a name, in render
+order: the escape lane's (apple, github), then the block lane's, then the ad
+set. The sandbox sing-box answers `rule-set match` from env/match-geosite-<set>,
+the names that set lists:
+  - github lists registry.pkg.example, so explain names the escape lane and
+    the set, and does no lookup;
+  - the ad set lists tracker.pixel.example, so that goes to block;
+  - apple is cached but ships no answer, so it takes the "sing-box could not
+    read it" path. A name no set lists reports it in a note; so does a hit
+    (both hits here), since apple comes first and might have taken the name;
+  - nocache is named on the escape lane with no .srs, so the router skips it,
+    and a name no set lists gets a note saying so.
+The direct lane (#s98) names npm.example, and the github set lists
+registry.npm.example too: the hand list comes first, so explain says DIRECT by
+the direct lane and asks no set. (The scenario's direct-domains.txt replaces
+the base fixture's.)
+The .srs files are placeholders: only the stub reads them, and only to check
+that they exist.

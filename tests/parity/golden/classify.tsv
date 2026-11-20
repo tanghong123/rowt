@@ -1,37 +1,37 @@
 example.com	ESCAPE	longest-match escape-domains suffix 'example.com'	escape: exact suffix
 sub.example.com	ESCAPE	longest-match escape-domains suffix 'example.com'	escape: subdomain of the suffix
 deep.sub.example.com	ESCAPE	longest-match escape-domains suffix 'example.com'	escape: deep subdomain
-xexample.com	DIRECT	no block/corp/escape rule; final route = direct	no match: no dot boundary before the suffix
-example.com.example	DIRECT	no block/corp/escape rule; final route = direct	no match: suffix appears as a prefix
-example.co	DIRECT	no block/corp/escape rule; final route = direct	no match: truncated suffix
-example.example	DIRECT	no block/corp/escape rule; final route = direct	no match: first label only
+xexample.com	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: no dot boundary before the suffix
+example.com.example	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: suffix appears as a prefix
+example.co	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: truncated suffix
+example.example	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: first label only
 sub.example.net	ESCAPE	longest-match escape-domains suffix 'sub.example.net'	escape: exact suffix
 sub.sub.example.net	ESCAPE	longest-match escape-domains suffix 'sub.example.net'	escape: subdomain of the suffix
 deep.sub.sub.example.net	ESCAPE	longest-match escape-domains suffix 'sub.example.net'	escape: deep subdomain
-xsub.example.net	DIRECT	no block/corp/escape rule; final route = direct	no match: no dot boundary before the suffix
-sub.example.net.example	DIRECT	no block/corp/escape rule; final route = direct	no match: suffix appears as a prefix
-sub.example.ne	DIRECT	no block/corp/escape rule; final route = direct	no match: truncated suffix
-sub.example	DIRECT	no block/corp/escape rule; final route = direct	no match: first label only
+xsub.example.net	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: no dot boundary before the suffix
+sub.example.net.example	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: suffix appears as a prefix
+sub.example.ne	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: truncated suffix
+sub.example	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: first label only
 spaced.example.org	ESCAPE	longest-match escape-domains suffix 'spaced.example.org'	escape: exact suffix
 sub.spaced.example.org	ESCAPE	longest-match escape-domains suffix 'spaced.example.org'	escape: subdomain of the suffix
 deep.sub.spaced.example.org	ESCAPE	longest-match escape-domains suffix 'spaced.example.org'	escape: deep subdomain
-xspaced.example.org	DIRECT	no block/corp/escape rule; final route = direct	no match: no dot boundary before the suffix
-spaced.example.org.example	DIRECT	no block/corp/escape rule; final route = direct	no match: suffix appears as a prefix
-spaced.example.or	DIRECT	no block/corp/escape rule; final route = direct	no match: truncated suffix
-spaced.example	DIRECT	no block/corp/escape rule; final route = direct	no match: first label only
+xspaced.example.org	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: no dot boundary before the suffix
+spaced.example.org.example	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: suffix appears as a prefix
+spaced.example.or	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: truncated suffix
+spaced.example	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: first label only
 corp.example	CORP	longest-match corp-domains suffix 'corp.example'	corp: exact suffix
 sub.corp.example	CORP	longest-match corp-domains suffix 'corp.example'	corp: subdomain of the suffix
 deep.sub.corp.example	CORP	longest-match corp-domains suffix 'corp.example'	corp: deep subdomain
-xcorp.example	DIRECT	no block/corp/escape rule; final route = direct	no match: no dot boundary before the suffix
-corp.example.example	DIRECT	no block/corp/escape rule; final route = direct	no match: suffix appears as a prefix
-corp.exampl	DIRECT	no block/corp/escape rule; final route = direct	no match: truncated suffix
+xcorp.example	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: no dot boundary before the suffix
+corp.example.example	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: suffix appears as a prefix
+corp.exampl	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: truncated suffix
 intranet.corp.example	CORP	longest-match corp-domains suffix 'intranet.corp.example'	corp: exact suffix
 sub.intranet.corp.example	CORP	longest-match corp-domains suffix 'intranet.corp.example'	corp: subdomain of the suffix
 deep.sub.intranet.corp.example	CORP	longest-match corp-domains suffix 'intranet.corp.example'	corp: deep subdomain
 xintranet.corp.example	CORP	longest-match corp-domains suffix 'corp.example'	no match: no dot boundary before the suffix
-intranet.corp.example.example	DIRECT	no block/corp/escape rule; final route = direct	no match: suffix appears as a prefix
-intranet.corp.exampl	DIRECT	no block/corp/escape rule; final route = direct	no match: truncated suffix
-intranet.example	DIRECT	no block/corp/escape rule; final route = direct	no match: first label only
+intranet.corp.example.example	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: suffix appears as a prefix
+intranet.corp.exampl	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: truncated suffix
+intranet.example	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: first label only
 198.51.99.255	DIRECT	no corp CIDR matched; final route = direct	no match: one below 198.51.100.0/24
 198.51.100.0	CORP	corp CIDR '198.51.100.0/24'	corp: network address of 198.51.100.0/24
 198.51.100.1	CORP	corp CIDR '198.51.100.0/24'	corp: first host of 198.51.100.0/24
@@ -47,16 +47,31 @@ intranet.example	DIRECT	no block/corp/escape rule; final route = direct	no match
 ads.example	BLOCK	longest-match block-domains suffix 'ads.example'	block: exact suffix
 sub.ads.example	BLOCK	longest-match block-domains suffix 'ads.example'	block: subdomain of the suffix
 deep.sub.ads.example	BLOCK	longest-match block-domains suffix 'ads.example'	block: deep subdomain
-xads.example	DIRECT	no block/corp/escape rule; final route = direct	no match: no dot boundary before the suffix
-ads.example.example	DIRECT	no block/corp/escape rule; final route = direct	no match: suffix appears as a prefix
-ads.exampl	DIRECT	no block/corp/escape rule; final route = direct	no match: truncated suffix
+xads.example	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: no dot boundary before the suffix
+ads.example.example	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: suffix appears as a prefix
+ads.exampl	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: truncated suffix
 tracker.example.net	BLOCK	longest-match block-domains suffix 'tracker.example.net'	block: exact suffix
 sub.tracker.example.net	BLOCK	longest-match block-domains suffix 'tracker.example.net'	block: subdomain of the suffix
 deep.sub.tracker.example.net	BLOCK	longest-match block-domains suffix 'tracker.example.net'	block: deep subdomain
-xtracker.example.net	DIRECT	no block/corp/escape rule; final route = direct	no match: no dot boundary before the suffix
-tracker.example.net.example	DIRECT	no block/corp/escape rule; final route = direct	no match: suffix appears as a prefix
-tracker.example.ne	DIRECT	no block/corp/escape rule; final route = direct	no match: truncated suffix
-tracker.example	DIRECT	no block/corp/escape rule; final route = direct	no match: first label only
+xtracker.example.net	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: no dot boundary before the suffix
+tracker.example.net.example	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: suffix appears as a prefix
+tracker.example.ne	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: truncated suffix
+tracker.example	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: first label only
+direct.example	DIRECT	longest-match direct-domains suffix 'direct.example'	direct: exact suffix
+sub.direct.example	DIRECT	longest-match direct-domains suffix 'direct.example'	direct: subdomain of the suffix
+deep.sub.direct.example	DIRECT	longest-match direct-domains suffix 'direct.example'	direct: deep subdomain
+xdirect.example	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: no dot boundary before the suffix
+direct.example.example	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: suffix appears as a prefix
+direct.exampl	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: truncated suffix
+dl.example.com	DIRECT	longest-match direct-domains suffix 'dl.example.com'	direct: exact suffix
+sub.dl.example.com	DIRECT	longest-match direct-domains suffix 'dl.example.com'	direct: subdomain of the suffix
+deep.sub.dl.example.com	DIRECT	longest-match direct-domains suffix 'dl.example.com'	direct: deep subdomain
+xdl.example.com	ESCAPE	longest-match escape-domains suffix 'example.com'	no match: no dot boundary before the suffix
+dl.example.com.example	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: suffix appears as a prefix
+dl.example.co	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: truncated suffix
+dl.example	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: first label only
+mirror.sub.example.net	DIRECT	exact direct-domains match 'mirror.sub.example.net'	direct: exact host (--domain)
+sub.mirror.sub.example.net	ESCAPE	longest-match escape-domains suffix 'sub.example.net'	not direct: an exact host does not cover the names under it
 9.255.255.255	DIRECT	no corp CIDR matched; final route = direct	no match: one below 10.0.0.0/8
 10.0.0.0	CORP	private/overlay range '10.0.0.0/8' — defaults to unbound (OS routing)	corp (private fall-through): network address of 10.0.0.0/8
 10.0.0.1	CORP	private/overlay range '10.0.0.0/8' — defaults to unbound (OS routing)	corp (private fall-through): first host of 10.0.0.0/8
@@ -87,6 +102,6 @@ tracker.example	DIRECT	no block/corp/escape rule; final route = direct	no match:
 169.254.255.254	CORP	private/overlay range '169.254.0.0/16' — defaults to unbound (OS routing)	corp (private fall-through): last host of 169.254.0.0/16
 169.254.255.255	CORP	private/overlay range '169.254.0.0/16' — defaults to unbound (OS routing)	corp (private fall-through): broadcast address of 169.254.0.0/16
 169.255.0.0	DIRECT	no corp CIDR matched; final route = direct	no match: one above 169.254.0.0/16
-unlisted.example	DIRECT	no block/corp/escape rule; final route = direct	no match: not in any list
+unlisted.example	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: not in any list
 203.0.113.7	DIRECT	no corp CIDR matched; final route = direct	no match: public address in no CIDR
-xn--80ak6aa92e.example	DIRECT	no block/corp/escape rule; final route = direct	no match: IDN punycode, not listed
+xn--80ak6aa92e.example	DIRECT	no block/corp/escape/direct rule; final route = direct	no match: IDN punycode, not listed

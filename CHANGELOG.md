@@ -5,6 +5,133 @@ release is cut; everything under Unreleased ships with the next one.
 
 ## Unreleased
 
+- **A spin heal that has to wait no longer gives up for a day.** When the
+  watchdog had recovered the router less than 10 minutes before
+  (`ROWT_HEALTH_COOLDOWN`), a heal for a spinning router was held back, yet
+  it was recorded as done (`watch.cpuheal`), so the router spun on for a day
+  with the log saying "already healed once". Now the heal waits for the
+  cooldown without recording a heal, and the first tick past it heals.
+  Both watchdogs (rowt-rs and the shell) had this.
+
+## 3.11.0 — 2026-11-18
+
+- **The watchdog reloads once after an upgrade, at a quiet moment.** A
+  `brew upgrade` leaves the router running the config the old rowt rendered,
+  so a fix that lives in that config did nothing until someone ran
+  `rowt reload`. Now the watchdog renders without writing anything and
+  compares: when the new rowt renders a different config, it reloads once,
+  just after the Mac wakes from a sleep of 5 minutes or more, or once traffic
+  has stayed under 2048 B/s for 10 minutes (`ROWT_RELOAD_QUIET_BPS`). It waits
+  for one of those however long it takes, and never reloads twice for one
+  version. Until it does, `rowt status` says so on an `upgrade:` line (and if
+  that one reload failed, says that), and `status --json` has
+  `config.upgrade_reload` and `config.running_by`; `rowt reload` applies it at
+  once. A render now records which rowt made it (`host.json.by`), and the
+  router which render it runs (`host.running.by`); a router an older rowt
+  started is checked by the checksum of the config it started from, so the
+  upgrade to this release is covered too.
+- **The watchdog restarts a spinning router again.** Since 3.9.0 the default
+  watchdog (rowt-rs) never ran the spin check: a router that burns CPU while
+  carrying no traffic, which the liveness probe cannot see, was left spinning,
+  and the `ROWT_CPU_SPIN_*` and `ROWT_CPU_HEAL_COOLDOWN` knobs did nothing.
+  It samples the router on every healthy tick again (`watch.cpu`), and after
+  two idle ticks at high CPU it writes the evidence to `log/spin-*.txt` and
+  reloads, once: a router still spinning after that is left alone for a day.
+  The shell always did this.
+- The shell (`ROWT_IMPL=bash`) leaves a lane file that is a dangling link as it
+  is and lists that lane as empty, as rowt-rs does. It used to remove the link
+  at the first command, and `rowt <lane> list` stopped with no output while a
+  lane could not be read.
+
+## 3.10.1 — 2026-11-18
+
+- **A direct lane: `rowt direct add|rm|list|import|clear|dump`.** Names in
+  `direct-domains.txt` go straight out the physical network even where a
+  broader rule would take them elsewhere, above all a geosite set on the
+  escape lane. It ships with npm's domains (`npmjs.org`, `npmjs.com`,
+  `npm.community`): rowt's default escape list carries `geosite:github`, which
+  lists them, so npm went through the escape server; now it goes direct while
+  github.com stays on escape. `rowt direct rm npmjs.org npmjs.com
+  npm.community` puts npm back through the set. The lane's entries rank with
+  the other hand lists by longest match, ahead of every geosite set and the ad
+  set, and a tie with another lane goes to the other lane, so a box that
+  already routed npm by hand keeps its own entry. It declines `geosite:`
+  entries and addresses. The file is seeded at the first command after the
+  upgrade; the router uses it from the next `rowt reload` or lane edit. Bare
+  `rowt direct` is still `rowt direct errors`. The seeding leaves out an npm
+  entry another lane already holds, and the audit log records it as
+  `LANE seeded: …`. Around it:
+  - the audit's lane lines spell "in no lane" `none` (it was `direct`), so
+    `LANE escape -> direct` means the entry moved into the direct lane; older
+    lines keep the old spelling;
+  - `rowt status --json` gains `lanes.direct`, and the buckets line in
+    `status` and `report` gains `direct=N`;
+  - `config export` bundles `direct-domains.txt` and `config import` merges
+    it, ahead of the other lanes, so an entry a bundle holds twice keeps the
+    router's choice; `config export --to shadowrocket` writes its entries as `DIRECT` rules
+    ranked with the other hand lists;
+  - `explain` says "no block/corp/escape/direct rule" when no hand list
+    matches;
+  - `corp sync` leaves a direct entry alone, as it does the other lanes' hand
+    entries;
+  - the monitor's `d` takes the host out of the direct lane too, and says
+    "taken out of every lane" rather than "→ direct";
+  - the render's warning about one entry in two lanes no longer says "in
+    different case" when the case is the same.
+- `rowt explain` and `rowt speed` name the lane the router really takes for a
+  host only a geosite rule-set lists. They used to stop at the hand lists, so
+  with `geosite:github` on the escape lane (rowt's default list has it),
+  `rowt explain registry.npmjs.org` said DIRECT while the router sent npm
+  through the escape server, because the GitHub set lists npm's domains. Both
+  now ask the bundled sing-box about each cached set, in the order the router
+  checks them, and explain names the set. explain also notes a set sing-box
+  could not read, and one a lane names that is not cached yet (`rowt fetch
+  host`, then `rowt reload`).
+- `rowt help` and `rowt onboard` say what 3.9.0 changed: rowt runs its Rust
+  CLI, rowt-rs, and `ROWT_IMPL=bash` in front of a command runs the shell
+  version instead. `ROWT_IMPL=bash rowt watch refresh` puts the watchdog on the
+  shell too. Until now only the README and the rowt skill said so.
+
+## 3.9.0 — 2026-11-15
+
+- **rowt-rs is the default.** `rowt` hands every command to its Rust CLI,
+  which answers all 41 commands and ran as the everyday `rowt`, watchdog
+  included, through a fourteen-day trial with nothing to explain. The shell
+  still ships: `ROWT_IMPL=bash` runs it, and `ROWT_IMPL=bash rowt watch
+  refresh` puts the watchdog on it, remembered through upgrades
+  (`ROWT_IMPL=rust rowt watch refresh` puts it back). A watchdog nobody
+  switched follows the default from its first tick after the upgrade. A rowt with no
+  Rust CLI of its own install, such as a checkout nobody built, runs the shell
+  as before. A watchdog put back on the shell now carries `ROWT_IMPL=bash` in
+  its plist, and every watchdog's plist is rewritten once, by its first tick
+  after the upgrade, so one put back under 3.8 gets the key. That rewrite
+  used to happen only on the shell's tick; rowt-rs's tick does it too now, or
+  no change to the plist would ever reach an agent again. Any `ROWT_IMPL`
+  other than `bash` or `rust` is read as the default and no longer recorded
+  for the watchdog.
+- Traffic metrics record the port each byte came in on: `main`, or a named
+  port from `rowt port add`. `traffic.db` moves to schema 2, which adds a
+  `port` column to every tier; the upgrade migrates the store in place, and
+  rows from before it read as port `-`. `rowt metrics path` shows the new
+  column and a per-port query. A downgrade to 3.8.40 or earlier leaves the
+  store at schema 2, which the older collector cannot write to: nothing is
+  recorded until rowt is upgraded again.
+- The monitor's `P` key shows one port's traffic: it cycles all ports, `main`,
+  then each named port, and back. The header's rates, the live connections and
+  their history follow the choice; the errors pane stays on all ports and says
+  so. With only `main`, `P` says how to add a port.
+
+## 3.8.40 — 2026-11-10
+
+- The monitor's control keys (`R`, `u`, `a`, `o`, and the lane keys) keep
+  working after `brew upgrade`. Under `ROWT_IMPL=rust`, `rowt monitor`
+  told the monitor to run its keys through rowt-rs by its versioned Homebrew
+  path, which the upgrade deletes; a monitor left open (it switches itself to
+  the new build) then failed every key with "…/rowt-rs: No such file or
+  directory". rowt-rs now hands over Homebrew's stable `opt/rowt` path, and
+  the monitor finds the installed rowt itself when the path it was given is
+  gone or belongs to an older install. The shell version was not affected.
+
 ## 3.8.39 — 2026-11-07
 
 - `rowt status` says `no answer at HH:MM:SS` of an escape server whose last

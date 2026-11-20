@@ -11,7 +11,7 @@
 
 use crate::lifecycle::{self, Ctx};
 use crate::{die, env_or, read, PROG};
-use rowt_core::watch::{guard, netcheck, Action, CaptiveState, Config, Hold, Next, Observation, State};
+use rowt_core::watch::{guard, netcheck, spin_reason, spin_step, Action, CaptiveState, Config, CpuSample, Hold, Next, Observation, Rec, SpinKnobs, State};
 use rowt_platform::{Mac, Platform};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -22,7 +22,10 @@ pub const LABEL: &str = "club.annaslife.rowt.watch";
 /// older rowt is recognised as stale and re-synced. A marker beats diffing the
 /// body, which legitimately varies with the installing shell's ROWT_* env.
 ///   v2 = adds AbandonProcessGroup.
-pub const PLIST_MARK: &str = "rowt-watch-plist v3";
+///   v4 = names ROWT_IMPL=bash as well as rust (rowt #s92). A watchdog put
+///        back on the shell under 3.8 has no key, which now means rowt-rs; the
+///        bump makes its first tick after the upgrade write the key.
+pub const PLIST_MARK: &str = "rowt-watch-plist v4";
 
 /// Was the installed agent written by an older rowt (different plist shape)?
 pub fn plist_stale(plist: &Path) -> bool {
@@ -83,6 +86,138 @@ fn cfg_of(ctx: &Ctx) -> Config {
 
 fn watch_log_path(ctx: &Ctx) -> PathBuf {
     ctx.logdir().join("watch.log")
+}
+
+/// The spin detector's knobs, as the shell reads them (`CPU_SPIN_PCT` …).
+fn spin_knobs() -> SpinKnobs {
+    let d = SpinKnobs::default();
+    SpinKnobs {
+        pct: env_or("ROWT_CPU_SPIN_PCT", "80").parse().unwrap_or(d.pct),
+        bytes: env_or("ROWT_CPU_SPIN_BYTES", "65536").parse().unwrap_or(d.bytes),
+        ticks: env_or("ROWT_CPU_SPIN_TICKS", "2").parse().unwrap_or(d.ticks),
+        cooldown: env_or("ROWT_CPU_HEAL_COOLDOWN", "86400").parse().unwrap_or(d.cooldown),
+    }
+}
+
+/// `_proc_cpu_secs`: a process's cumulative CPU seconds from `ps -o time=`
+/// (`[dd-][hh:]mm:ss.ss`), truncated as the shell's awk `%d` does. None when
+/// `ps` has no such process.
+fn proc_cpu_secs(pid: &str) -> Option<i64> {
+    let o = out("ps", &["-p", pid, "-o", "time="]);
+    let t = o.lines().find_map(|l| l.split_whitespace().next())?;
+    let (d, t) = match t.split_once('-') {
+        Some((d, r)) => (d.parse::<f64>().unwrap_or(0.0), r),
+        None => (0.0, t),
+    };
+    let b: Vec<f64> = t.split(':').map(|x| x.parse().unwrap_or(0.0)).collect();
+    let s = if b.len() == 3 { b[0] * 3600.0 + b[1] * 60.0 + b[2] } else { b[0] * 60.0 + b.get(1).copied().unwrap_or(0.0) };
+    Some((d * 86400.0 + s) as i64)
+}
+
+/// `_router_bytes_total`: the router's byte counter, up plus down, from the
+/// clash API (`(.downloadTotal // 0) + (.uploadTotal // 0) | floor`). None
+/// when the API did not answer.
+pub(crate) fn router_bytes_total(ctx: &Ctx) -> Option<u64> {
+    let v: serde_json::Value = serde_json::from_str(&lifecycle::clash_curl(ctx, "GET", "/connections", None)?).ok()?;
+    if !(v.is_object() || v.is_null()) {
+        return None;
+    }
+    let n = |k: &str| v.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0);
+    Some((n("downloadTotal") + n("uploadTotal")).max(0.0).floor() as u64)
+}
+
+/// `_watch_spin` (rowt #s105): on a healthy tick, sample the router's CPU and
+/// traffic, keep `watch.cpu`, `watch.cpustreak` and `watch.cpuheal` as the
+/// shell does, and let `rowt_core::watch::spin_step` decide. On a heal the
+/// evidence is written first (`_watch_capture_spin`), since the reload
+/// destroys it. Returns the line for the log and the heal's recovery reason,
+/// both for the planner. In the shell's order: `ps`, then the clash API, then
+/// the check that `ps` answered. `held` is whether the recovery cooldown would
+/// hold a heal back (`recovery_hold`, #s106), from the planner's own numbers.
+fn spin_check(ctx: &Ctx, held: Option<(i64, i64)>) -> (Option<String>, Option<String>) {
+    let pid = read(&ctx.pidfile()).trim().to_string();
+    if pid.is_empty() {
+        return (None, None);
+    }
+    let now: i64 = crate::sh_date("+%s").parse().unwrap_or(0);
+    let cpu = proc_cpu_secs(&pid);
+    let bytes = router_bytes_total(ctx).unwrap_or(0) as i64;
+    let Some(cpu) = cpu else { return (None, None) };
+    let f = |n: &str| ctx.cfg.join(n);
+    let prev = CpuSample::parse(&read(&f("watch.cpu")));
+    let _ = std::fs::write(f("watch.cpu"), CpuSample { epoch: now, cpu, pid: pid.clone(), bytes }.line());
+    let num = |n: &str| read(&f(n)).trim().parse::<i64>().unwrap_or(0);
+    let k = spin_knobs();
+    let st = spin_step(now, &pid, cpu, bytes, prev.as_ref(), num("watch.cpustreak"), num("watch.cpuheal"), held, &k);
+    for (name, r) in [("watch.cpustreak", st.streak), ("watch.cpuheal", st.healed)] {
+        match r {
+            Rec::Keep => {}
+            Rec::Remove => { let _ = std::fs::remove_file(f(name)); }
+            Rec::Write(v) => { let _ = std::fs::write(f(name), format!("{v}\n")); }
+        }
+    }
+    let Some((pct, bps, dt)) = st.heal else { return (st.log, None) };
+    let cap = capture_spin(ctx, &pid, pct, &k);
+    let sbv = crate::fetch::sb_version(&ctx.sb());
+    let line = spin_heal_line(pct, bps, dt, &sbv, crate::fetch::sb_known_bad(&sbv), &cap);
+    (Some(line), Some(spin_reason(pct)))
+}
+
+/// The heal's line in the watch log, the shell's `_spin_say "router spinning:
+/// …"`: an unknown sing-box version reads `?`, and the known-bad reason is
+/// there only when there is one (`${why:+ — KNOWN BAD: $why}`).
+fn spin_heal_line(pct: i64, bps: i64, dt: i64, sbv: &str, why: Option<&str>, cap: &Path) -> String {
+    let why = why.filter(|w| !w.is_empty()).map(|w| format!(" — KNOWN BAD: {w}")).unwrap_or_default();
+    format!("router spinning: {pct}% cpu with {bps} B/s over {dt}s (sing-box {}{why}) — evidence in {}",
+            if sbv.is_empty() { "?" } else { sbv }, cap.display())
+}
+
+/// `_watch_capture_spin`: everything worth having about a spinning router,
+/// written before the heal restarts it, or the self-heal destroys the only
+/// evidence and the bug stays unreportable. `sample` needs no configuration;
+/// the goroutine dump is far more useful but exists only when `ROWT_PPROF` was
+/// set at render time. Keeps the newest five.
+fn capture_spin(ctx: &Ctx, pid: &str, pct: i64, k: &SpinKnobs) -> PathBuf {
+    let dir = ctx.logdir();
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(format!("spin-{}.txt", crate::sh_date("+%Y%m%d-%H%M%S")));
+    let head = |s: &str, n: usize| s.lines().take(n).map(|l| format!("{l}\n")).collect::<String>();
+    let mut s = format!("rowt {} — router spin capture {}\n", env!("ROWT_SHELL_VERSION"), crate::sh_date("+%F %T %z"));
+    s += &format!("pid={pid}  interval-average cpu={pct}%  threshold={}%\n", k.pct);
+    s += "\n== ps ==\n";
+    s += &out("ps", &["-p", pid, "-o", "pid,pcpu,etime,time,rss,command"]);
+    s += "\n== clash connections ==\n";
+    if let Some(v) = lifecycle::clash_curl(ctx, "GET", "/connections", None)
+        .and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok()) {
+        let j = |k: &str| serde_json::to_string(v.get(k).unwrap_or(&serde_json::Value::Null)).unwrap_or_default();
+        let n = v.get("connections").map(|c| c.as_array().map(|a| a.len()).or(c.as_object().map(|o| o.len())).unwrap_or(0)).unwrap_or(0);
+        s += &format!("{{\"downloadTotal\":{},\"uploadTotal\":{},\"n\":{n}}}\n", j("downloadTotal"), j("uploadTotal"));
+    }
+    let pprof = env_or("ROWT_PPROF", "");
+    if pprof.is_empty() {
+        s += "\n== pprof: not enabled (render with ROWT_PPROF=<port> to name the spinning goroutine) ==\n";
+    } else {
+        s += "\n== pprof goroutine dump ==\n";
+        let o = Command::new("curl").args(["--noproxy", "*", "-sS", "-m", "10", &format!("http://127.0.0.1:{pprof}/debug/pprof/goroutine?debug=2")])
+            .output().map(|o| format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))).unwrap_or_default();
+        s += &head(&o, 400);
+    }
+    s += "\n== sample (native frames; Go stacks are invisible to it) ==\n";
+    s += &head(&out("sample", &[pid, "5", "-file", "/dev/stdout"]), 250);
+    let _ = std::fs::write(&path, s);
+    // The latch makes these rare, but a diagnostic dump must never grow the
+    // config tree without bound.
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        let mut caps: Vec<(std::time::SystemTime, PathBuf)> = rd.flatten()
+            .filter(|e| e.file_name().to_str().is_some_and(|n| n.starts_with("spin-") && n.ends_with(".txt")))
+            .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+            .collect();
+        caps.sort_by(|a, b| b.0.cmp(&a.0));
+        for (_, p) in caps.into_iter().skip(5) {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+    path
 }
 
 /// WHY a probe came back the way it did — the shell's `_captive_log`.
@@ -172,7 +307,9 @@ fn plist_body(ctx: &Ctx, self_bin: &Path) -> String {
               // the live apply of a lane edit or corp sync on a watchdog tick,
               // so it honours ROWT_LANES_HOT=0 (ROWT_CORP_HOT: its first name).
               "ROWT_LANES_HOT", "ROWT_CORP_HOT",
-              "ROWT_AUTO_INTERVAL", "ROWT_AUTO_TOLERANCE", "ROWT_AUTO_INTERRUPT"] {
+              "ROWT_AUTO_INTERVAL", "ROWT_AUTO_TOLERANCE", "ROWT_AUTO_INTERRUPT",
+              // rowt #s104: the quiet threshold of an upgrade's reload.
+              "ROWT_RELOAD_QUIET_BPS"] {
         // bin/rowt defaults SINGBOX_VERSION into its own shell variable, so the
         // plist ALWAYS carries the pin; reading only the environment left it
         // out whenever the user had not exported one.
@@ -187,12 +324,14 @@ fn plist_body(ctx: &Ctx, self_bin: &Path) -> String {
             }
         }
     }
-    // Which implementation the tick runs, remembered by `install|refresh`. Only
-    // rust is written (the front door reads anything else as the shell), and it
-    // comes from state, so the tick's self-heal writes the same file as the
-    // refresh that chose it.
-    if ctx.sget("watch_impl") == "rust" {
-        envxml.push_str("\n    <key>ROWT_IMPL</key><string>rust</string>");
+    // Which implementation the tick runs, remembered by `install|refresh`, and
+    // written whichever it is (rowt #s92): rowt-rs is the front door's
+    // default, so a watchdog someone put back on the shell must say bash to
+    // stay there, as one switched to rowt-rs says rust. Nothing remembered,
+    // nothing written: that agent follows the default. From state, so the
+    // tick's self-heal writes the same file as the refresh that chose it.
+    if let v @ ("rust" | "bash") = ctx.sget("watch_impl").as_str() {
+        envxml.push_str(&format!("\n    <key>ROWT_IMPL</key><string>{v}</string>"));
     }
     let interval = env_or("ROWT_WATCH_INTERVAL", "120");
     format!(r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -739,6 +878,10 @@ fn observe(ctx: &Ctx, cap: Option<CaptiveState>, portal: Option<String>, portal_
         // at that moment and not otherwise.
         hold_stamp: if pinned_reach == Some(false) { crate::best::utc(None) } else { String::new() },
         now: crate::sh_date("+%s").parse().unwrap_or(0),
+        upgrade: None,
+        // Taken by the tick itself, where the shell takes it (`spin_check`).
+        spin_log: None,
+        spin: None,
     }
 }
 
@@ -1006,6 +1149,7 @@ fn perform(ctx: &Ctx, actions: &[Action]) {
             Action::WriteNetId(n) => {
                 let _ = std::fs::write(ctx.cfg.join("watch.net"), format!("{n}\n"));
             }
+            Action::MarkUpgrade(v) => crate::upgrade::mark_reloaded(ctx, v),
         }
     }
 }
@@ -1361,13 +1505,17 @@ pub fn cmd(ctx: &Ctx, self_bin: &Path, action: &str) -> Result<String, String> {
                     }
                 }
             }
-            // And which implementation the tick runs. Through the front door
-            // ROWT_IMPL=rust lands here, never in the shell, so this is the side
-            // that switches the watchdog over; `ROWT_IMPL=bash rowt watch
-            // refresh` reaches the shell and switches it back.
+            // And which implementation the tick runs. rowt-rs is the front
+            // door's default (rowt #s92), so a plain refresh lands here and
+            // records nothing: the agent follows the default. `ROWT_IMPL=bash
+            // rowt watch refresh` reaches the shell and puts the watchdog there;
+            // ROWT_IMPL=rust, here, brings it back. Only those two words are
+            // recorded: any other value means the default at the front door,
+            // and recording it as either would pin the agent to something
+            // nobody chose.
             if let Ok(v) = std::env::var("ROWT_IMPL") {
-                if !v.is_empty() {
-                    lifecycle::sset(ctx, "watch_impl", if v == "rust" { "rust" } else { "bash" });
+                if v == "rust" || v == "bash" {
+                    lifecycle::sset(ctx, "watch_impl", &v);
                 }
             }
             if refresh && !plist.is_file() {
@@ -1476,7 +1624,7 @@ pub fn cmd(ctx: &Ctx, self_bin: &Path, action: &str) -> Result<String, String> {
             std::process::exit(1);
         }
         "tick" => {
-            tick(ctx);
+            tick(ctx, self_bin);
             Ok(String::new())
         }
         // Internal: the router starts this in `auto` (lifecycle::start_follow).
@@ -1500,7 +1648,87 @@ fn finish_tick(ctx: &Ctx, lock: &Path) {
     let _ = std::fs::remove_dir(lock);
 }
 
-fn tick(ctx: &Ctx) {
+/// The detached half of the plist self-heal, word for word the shell's in
+/// `_watch_selfheal_plist`: wait for the old job to be GONE (bootout is
+/// asynchronous; a bootstrap issued while launchd still tears the job down
+/// fails), with a ceiling, then bootstrap the rewritten plist and write the
+/// VERIFIED outcome to watch.log — the tick that spawned it is gone by then, so
+/// nothing else can. A job that will not leave is reported and left alone.
+const SELFHEAL_RELOAD_SH: &str = r#"
+    uid="$1"; label="$2"; plist="$3"; log="$4"; ver="$5"
+    say() { printf "%s  %s\n" "$(date "+%Y-%m-%d %H:%M:%S")" "$*" >> "$log" 2>/dev/null || true; }
+    sleep 2
+    launchctl bootout "gui/$uid/$label" >/dev/null 2>&1 || true
+    n=0
+    while launchctl print "gui/$uid/$label" >/dev/null 2>&1; do
+      n=$((n + 1))
+      if [ "$n" -ge 20 ]; then
+        say "self-heal: agent $label did not unload within 10s — NOT bootstrapping over it. Watchdog state unknown; fix: rowt watch refresh"
+        exit 0
+      fi
+      sleep 0.5
+    done
+    out="$(launchctl bootstrap "gui/$uid" "$plist" 2>&1)"; rc=$?
+    if launchctl print "gui/$uid/$label" >/dev/null 2>&1; then
+      say "self-heal: agent re-bootstrapped for rowt $ver — loaded"
+    else
+      say "self-heal FAILED: bootstrap rc=$rc${out:+ ($out)} — WATCHDOG NOT LOADED. Fix: rowt watch refresh"
+    fi
+  "#;
+
+/// Rewrite an agent an older rowt wrote — the shell's `_watch_selfheal_plist`.
+/// The marker bump (PLIST_MARK) is the only way a plist change reaches an
+/// agent already on disk: brew's post_install never refreshes the agent, so a
+/// tick noticing its own marker is out of date is the whole delivery
+/// mechanism. rowt-rs's tick lacked it until 3.9.0 (#s92), when rowt-rs became
+/// the front door's default and so the tick nearly every agent runs: without
+/// it the v4 plist, and every later fix to the plist, would never arrive.
+///
+/// Rate-limited to once an hour (watch.plistheal) so a plist that somehow never
+/// takes cannot loop. The reload is handed to `reload`, the detached launchctl
+/// dance in the field and a recorder in tests: no parity case can run it, since
+/// the child outlives the case and would reach the real launchctl, and the real
+/// agent's label, once the sandbox's shims are cleaned up.
+fn selfheal_plist(ctx: &Ctx, self_bin: &Path, plist: &Path, reload: impl FnOnce(&Path)) -> bool {
+    if !plist_stale(plist) {
+        return false;
+    }
+    let stamp = ctx.cfg.join("watch.plistheal");
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let last: i64 = crate::read(&stamp).trim().parse().unwrap_or(0);
+    if now - last < 3600 {
+        return false;
+    }
+    let _ = std::fs::write(&stamp, format!("{now}\n"));
+    let body = plist_body(ctx, self_bin);
+    if !body.contains(PLIST_MARK) {
+        return false;
+    }
+    let tmp = PathBuf::from(format!("{}.new.{}", plist.display(), std::process::id()));
+    if std::fs::write(&tmp, &body).is_err() || std::fs::rename(&tmp, plist).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return false;
+    }
+    watch_log(ctx, &format!("agent plist was written by an older rowt — rewrote it for {}; re-bootstrapping the agent out-of-band (outcome follows)", env!("ROWT_SHELL_VERSION")));
+    reload(plist);
+    true
+}
+
+/// The reload, detached: `launchctl bootout` kills this tick's process group,
+/// so done inline it would unload the agent and never reach `bootstrap`. A new
+/// session (perl, as the shell does it: macOS ships no setsid binary) outlives
+/// the tick. Waits only for perl's parent, which exits as soon as it forks.
+fn selfheal_reload_detached(ctx: &Ctx, plist: &Path) {
+    let _ = Command::new("perl")
+        .args(["-e", "use POSIX (); my $p = fork(); exit 0 if $p; POSIX::setsid(); exec @ARGV",
+               "/bin/sh", "-c", SELFHEAL_RELOAD_SH, "_",
+               &uid(), LABEL, &plist.to_string_lossy(), &watch_log_path(ctx).to_string_lossy(),
+               env!("ROWT_SHELL_VERSION")])
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+        .status();
+}
+
+fn tick(ctx: &Ctx, self_bin: &Path) {
     if crate::pool::subscription_update_busy(&ctx.cfg) { return; }
     // The debounce lock is taken UP FRONT, so the crash-recovery, stale-proxy
     // and reload paths can never overlap a concurrent tick — a StartInterval
@@ -1527,6 +1755,9 @@ fn tick(ctx: &Ctx) {
         finish_tick(ctx, &lock);
         return;
     }
+    // Before anything else, as the shell does: if this agent predates the
+    // current plist shape, rewrite it. Costs a read on a healthy tick.
+    selfheal_plist(ctx, self_bin, &plist_path(), |p| selfheal_reload_detached(ctx, p));
     let cfg = cfg_of(ctx);
     let mut st = load_state(ctx);
     let mut disk = st.clone();
@@ -1650,7 +1881,7 @@ fn tick(ctx: &Ctx) {
         let (ip, port) = a.rsplit_once(':').unwrap_or((a, ""));
         crate::diag::tcp_reaches(&ifc, ip, port)
     });
-    let obs2 = observe(ctx, Some(cap), portal, portal_host, hb, offline, slow, flows, pinned, paddr.unwrap_or_default(), reach);
+    let mut obs2 = observe(ctx, Some(cap), portal, portal_host, hb, offline, slow, flows, pinned, paddr.unwrap_or_default(), reach);
     // Where the shell enters `_watch_health` (phase two, nothing to reload for
     // the network's sake, a tunnel to probe), it also throws away a malformed
     // `watch.hold`; see `hold_file_malformed`.
@@ -1672,6 +1903,25 @@ fn tick(ctx: &Ctx) {
                 else { ("fail", None) };
             obs_write(ctx, "watch.last", "watchdog", &probe_target(ctx), result, delay);
         }
+        // rowt #s105: the spin heal's sample, where `_watch_health` takes it:
+        // the probe answered, so the network and the tunnel both work. The
+        // cooldown is asked with netcheck's clock and state, so a heal it lets
+        // through is never held by `recover_or_hold` (#s106).
+        if !iface_moved && !proxy_wrong && obs2.mode != "local" && online && hb {
+            let held = rowt_core::watch::recovery_hold(obs2.now, st.last_recovery, cfg.health_cooldown);
+            let (log, heal) = spin_check(ctx, held);
+            obs2.spin_log = log;
+            obs2.spin = heal;
+        }
+    }
+    // rowt #s104: does an upgrade wait for a reload? Asked only where the
+    // planner could act on it, as the shell asks right after `_watch_health`
+    // answered: nothing reloads for the network's sake and the tunnel answers
+    // (or local mode). The dry render, `sysctl` and the clash API are argv the
+    // shell runs under exactly this condition. Not on a tick that heals a
+    // spin (#s105): its recovery reloads, and the shell's hook skips it too.
+    if !rowt_core::watch::reload_needed(&obs2) && rowt_core::watch::healthy(&obs2) && obs2.spin.is_none() {
+        obs2.upgrade = crate::upgrade::observe(ctx, obs2.now);
     }
     let n = netcheck(&obs2, &st, &cfg);
     perform_planned(ctx, &n.actions);
@@ -1682,6 +1932,20 @@ fn tick(ctx: &Ctx) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The heal's log line, word for word the shell's (#s105): no gate
+    /// compares rowt-rs's own watch log with the shell's, so this does.
+    #[test]
+    fn the_spin_heal_line_reads_as_the_shells() {
+        let cap = Path::new("/c/log/spin-20261118-101500.txt");
+        assert_eq!(spin_heal_line(97, 120, 300, "1.13.14", None, cap),
+                   "router spinning: 97% cpu with 120 B/s over 300s (sing-box 1.13.14) — evidence in /c/log/spin-20261118-101500.txt");
+        assert_eq!(spin_heal_line(97, 0, 300, "", None, cap),
+                   "router spinning: 97% cpu with 0 B/s over 300s (sing-box ?) — evidence in /c/log/spin-20261118-101500.txt");
+        assert_eq!(spin_heal_line(150, 0, 60, "1.14.2", Some("why"), cap),
+                   "router spinning: 150% cpu with 0 B/s over 60s (sing-box 1.14.2 — KNOWN BAD: why) — evidence in /c/log/spin-20261118-101500.txt");
+        assert_eq!(spin_heal_line(150, 0, 60, "1.14.2", Some(""), cap), spin_heal_line(150, 0, 60, "1.14.2", None, cap));
+    }
 
     /// `_watch_fresh_flows`'s filter: escape lane, opened at or after the stamp,
     /// and bytes RECEIVED — a connection still dialing can already count the
@@ -2012,6 +2276,71 @@ mod tests {
         std::fs::remove_file(&p).unwrap();
         assert!(!plist_stale(&p));
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// rowt #s92. The plist names the implementation state remembers, either
+    /// one, and nothing when nobody chose — the agent then follows the front
+    /// door's default. A watchdog put back on the shell that lost its key would
+    /// move to rowt-rs at the next refresh and say nothing.
+    #[test]
+    fn the_plist_names_the_implementation_state_remembers() {
+        let dir = std::env::temp_dir().join(format!("rowt-plist-impl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = Ctx::new(dir.clone());
+        let key = |v: &str| format!("<key>ROWT_IMPL</key><string>{v}</string>");
+        for (state, want) in [("watch_impl=rust\n", Some("rust")), ("watch_impl=bash\n", Some("bash")),
+                              ("mode=host\n", None), ("watch_impl=python\n", None)] {
+            std::fs::write(dir.join("state"), state).unwrap();
+            let body = plist_body(&ctx, Path::new("/opt/homebrew/bin/rowt"));
+            match want {
+                Some(v) => assert!(body.contains(&key(v)), "{state:?} must write {}", key(v)),
+                None => assert!(!body.contains("<key>ROWT_IMPL</key>"), "{state:?} must write no ROWT_IMPL"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// rowt #s92. The tick's self-heal, now on rowt-rs's side too: a plist from
+    /// an older rowt is rewritten with this rowt's marker and the remembered
+    /// implementation, logged, and handed to the reload once; within the hour,
+    /// or for a current plist or none, nothing happens.
+    #[test]
+    fn a_tick_rewrites_an_agent_from_an_older_rowt_once_an_hour() {
+        let dir = std::env::temp_dir().join(format!("rowt-selfheal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = Ctx::new(dir.clone());
+        std::fs::write(dir.join("state"), "watch_impl=bash\n").unwrap();
+        let plist = dir.join("agent.plist");
+        let me = Path::new("/opt/homebrew/bin/rowt");
+        let mut reloads = Vec::new();
+
+        // No agent at all: nothing to heal, and no stamp taken.
+        assert!(!selfheal_plist(&ctx, me, &plist, |p| reloads.push(p.to_path_buf())));
+        assert!(!dir.join("watch.plistheal").exists());
+
+        // An agent from 3.8: rewritten, with the bash key it never had.
+        std::fs::write(&plist, "<!-- rowt-watch-plist v3 --><plist/>").unwrap();
+        assert!(selfheal_plist(&ctx, me, &plist, |p| reloads.push(p.to_path_buf())));
+        let body = std::fs::read_to_string(&plist).unwrap();
+        assert!(body.contains(PLIST_MARK) && !plist_stale(&plist));
+        assert!(body.contains("<key>ROWT_IMPL</key><string>bash</string>"));
+        assert_eq!(reloads, vec![plist.clone()], "the reload runs once, on the rewritten plist");
+        let log = std::fs::read_to_string(dir.join("log/watch.log")).unwrap();
+        assert!(log.contains("agent plist was written by an older rowt — rewrote it for"), "{log}");
+        assert!(std::fs::read_dir(&dir).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().contains(".new.")),
+                "no temp file left behind");
+
+        // Current now: a healthy tick changes nothing.
+        assert!(!selfheal_plist(&ctx, me, &plist, |p| reloads.push(p.to_path_buf())));
+        // Stale again within the hour (a plist that never takes): left alone.
+        std::fs::write(&plist, "<!-- rowt-watch-plist v3 --><plist/>").unwrap();
+        assert!(!selfheal_plist(&ctx, me, &plist, |p| reloads.push(p.to_path_buf())));
+        // …and healed again once the hour has passed.
+        std::fs::write(dir.join("watch.plistheal"), "1000\n").unwrap();
+        assert!(selfheal_plist(&ctx, me, &plist, |p| reloads.push(p.to_path_buf())));
+        assert_eq!(reloads.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

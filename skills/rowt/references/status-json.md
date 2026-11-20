@@ -35,6 +35,7 @@ The one key a fleet check needs is `.escape.state`: alert on `down` and
   "router":   {"running": true, "pid": 4242, "port": 7890, "engine": "1.13.14", "engine_pinned": true},
   "proxy":    {"system": true, "service": "Wi-Fi", "pac": false},   // null each with no active service
   "captive":  false,                    // the watchdog dropped the proxy for a portal
+  "config":   {"running_by": "3.10.1", "upgrade_reload": "waiting"},  // which rowt rendered what the router runs (null: stopped, or an older rowt rendered it); after an upgrade whose render differs: "waiting" (the watchdog reloads at a quiet moment) or "failed" (its one reload did not take: run `rowt reload`), else null (3.11+)
   "watchdog": {"loaded": true, "installed": true, "interval_s": 120, "last_observation_at": "2026-10-30 07:19:40"},
   "follower": {"running": true, "every_s": 15, "last_observation_at": "2026-10-30 07:20:05"},
   "escape": {
@@ -60,7 +61,7 @@ The one key a fleet check needs is `.escape.state`: alert on `down` and
       {"tag": "osaka-2", "type": "vless", "alive": true,  "last_delay_ms": 83,   "last_test_at": "2026-10-30 07:19:25"}
     ]                                   // alive false: its last test got no answer; alive null: never tested; empty when the router is down
   },
-  "lanes": {"escape": 212, "corp": 48, "block": 9, "ads": true, "geosites": ["google"], "final": "direct"},
+  "lanes": {"escape": 212, "corp": 48, "block": 9, "direct": 3, "ads": true, "geosites": ["google"], "final": "direct"},
   "ports": [{"name": "vm", "port": 7891, "unmatched": "direct", "rendered": true}]
 }
 ```

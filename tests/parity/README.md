@@ -37,8 +37,12 @@ tests/parity/bin/selftest                # break each gate; every one must fire
 ```
 
 The shell side of every gate runs the shell, whatever `ROWT_IMPL` the calling
-terminal exports — a terminal on the everyday-rowt trial would otherwise put
-rowt-rs on both sides and every gate would pass. To run the shell side through
+terminal exports, and even though bin/rowt has handed every command to
+rowt-rs by default since 3.9.0. Either would otherwise put rowt-rs on both
+sides, and every gate would pass. `parity run` and the gates built on it pin `ROWT_IMPL=bash`;
+cli-diff holds its shell side with `ROWT_DELEGATED=1` instead, because
+`watch install|refresh` records an explicit `ROWT_IMPL` and rowt-rs, run
+directly, would record nothing (selftest 54). To run the shell side through
 the rowt-rs front door on purpose, say so: `PARITY_BASH_IMPL=rust parity …`
 for the whole run, or `parity run -- ROWT_IMPL=rust <args>` for one command.
 
@@ -113,7 +117,10 @@ on both sides, which no shim touches. The sing-box both sides run is
 at once on `run` unless the scenario says otherwise, and decompiles a rule-set
 only from a canned `env/decompile-<set>.json` — exit 1 without one, as the
 real tool fails on a file it cannot read — which is what a `geosite:` lane
-entry becomes in `config export --to shadowrocket`.
+entry becomes in `config export --to shadowrocket`. Its `rule-set match`, which
+explain and speed ask each cached set (#s96), answers from `env/match-<set>`,
+the names that set lists, one per line; without one it fails the same way, so
+a cached set with no answer takes the "sing-box could not read it" path.
 
 A response is normally static: the same call always gets the same answer. A
 `<key>.seq` file is a sequence instead — each call gets its next line, and an
@@ -291,7 +298,7 @@ reconcile and the watchdog's decision table. Each has a gate:
 | `watch-diff` | decisions, read back from watch.log + trace; a case file names its phase with `_phase` (`guard` unless it says `netcheck`) | 8 cases |
 | `platform-diff` | the argv the platform layer produces | 12 cases |
 | `cli-diff` | stdout, status, the config tree + rc files + LaunchAgent plist (content + mode), argv trace, audit log | 561 cases |
-| `live-fixtures` | each scenario whose committed host.json spells `@CFG@` is still a render of that scenario, byte for byte (vm.json too) | 4 scenarios |
+| `live-fixtures` | each scenario whose committed host.json spells `@CFG@` is still a render of that scenario, byte for byte (vm.json too) | 16 scenarios |
 
 `merge-diff` is the only gate whose primary artifact is a file written in
 place: `cmd_import` reads the accumulation straight back with jq, and a human
@@ -412,6 +419,38 @@ Three limits, stated rather than implied:
   alone (`lanes-live`, `corp-vpn-running`). That holds only while the committed
   host.json IS what the scenario renders; `parity live-fixtures` checks it, and
   `--update` regenerates it after a deliberate render change.
+* **"Now" and "this rowt" are filled in.** The watchdog's upgrade reload
+  (#s104) reads when the Mac woke (a canned `sysctl`) and its own traffic
+  sample (`cache/upgrade-pending`) against the clock, and the sample names the
+  installed version. A scenario writes `@NOW-<seconds>@` and `@ROWT_VERSION@`
+  in its `config/` or `env/` files, and `make_sandbox` fills in each sandbox's
+  own when it builds it (`watch-upgrade-woke`, `watch-upgrade-idle`,
+  `upgrade-pending-status`, `upgrade-failed-status`).
+* **The spin heal's records name the stand-in.** `watch.cpu` holds the
+  router's last CPU and traffic sample, `epoch cpusecs pid bytes`, and a
+  scenario that seeds one names the stand-in as `@ROUTER_PID@`, which
+  `make_sandbox` fills once the `sleep` runs (#s105). The two runs of a case
+  are seconds apart with two different stand-ins, so the tree compare
+  (`snap_norm`) masks `watch.cpu`'s pid, and an epoch in `watch.cpu`,
+  `watch.cpuheal` or `watch.restart` only when it is the run's own stamp
+  (within five minutes of now). The seeds carry nonzero CPU seconds and
+  bytes, which a fresh sample of the stand-in never has, and a heal or a
+  recovery already done is stamped in 2100, the same in both runs: so a
+  sample left unwritten, or a latch rewritten, still shows, and a heal that
+  really recovers compares in cli-diff too (`watch-spin-heal`). So a case
+  that seeds one of these stamps seeds it outside that window (2100, or
+  `@NOW-600@` and older): a seed inside it would be masked, and a side that
+  wrongly re-stamped it would compare equal.
+* **A scenario can take a base file away.** Its overlay can only add files, so
+  a scenario's `absent` lists, one per line, the base fixture's config files
+  `make_sandbox` removes after the overlay (`direct-seed`: no
+  `direct-domains.txt`, so the first command seeds it from the template, as on
+  a box last run by a rowt from before the direct lane).
+* **Links are part of the tree.** The snapshot records each symlink in the
+  config tree with its target, outside `log/`, `cache/` and `bin/` as for
+  files. A link is not a file to `find -type f`, so before this one side
+  removing a lane's dangling link and the other keeping it read as agreement
+  (`direct-dangling`, selftest 55).
 * **A purge leaves nothing to compare, and that is agreement.** `diff -q` on
   two files that are both absent exits 2, which reads like "differs" — so the
   lane-file check asks whether either side still has the file before it

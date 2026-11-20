@@ -1,0 +1,8 @@
+A config with no direct-domains.txt yet, as on a box last run by a rowt from
+before the direct lane (#s98). The base fixture's copy is taken away (`absent`),
+so the first command seeds the lane from config/direct-domains.txt, npm's three
+domains, the way the other lanes are seeded — less NPMjs.org, which this box's
+escape lane already holds (in other case), so the seeding leaves no twin.
+cache/lane-state.tsv is the last logged lane state, so the seeding is logged
+as `LANE seeded: none -> direct (2): …` and the next bracket finds nothing
+outside rowt. Both sides must write the same file and the same audit lines.

@@ -1,0 +1,2 @@
+# npm.example beats geosite:github, which lists registry.npm.example
+npm.example

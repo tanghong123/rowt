@@ -405,6 +405,25 @@ fn draw_caption(buf: &mut Buffer, corner: u16, y: u16, label: &str, app: &App, p
     x += 3;
     put(buf, x, y, label, cstyle);
     x += dw(label);
+    // The port scope (`P`): named on the connections pane, which it scopes, and
+    // on the errors pane a reminder that it does not (the lane logs carry no
+    // port). Bright whatever the focus: every number in the pane changes with it.
+    if let Some(p) = app.port_scope.as_deref() {
+        // A port name may run to 32 characters; past 12 it would push the
+        // caption into the next pane's.
+        let p = truncate(p, 12);
+        let compact = label == "conns" || label == "errors";
+        let chip = match which {
+            Focus::Conn if compact => Some((format!(" · {p}"), theme::bold(theme::bright()))),
+            Focus::Conn => Some((format!(" · port {p}"), theme::bold(theme::bright()))),
+            Focus::Err if !compact => Some((" · all ports".to_string(), theme::fg(theme::dimmer()))),
+            _ => None,
+        };
+        if let Some((chip, style)) = chip {
+            put(buf, x, y, &chip, style);
+            x += dw(&chip);
+        }
+    }
     // Active lane filter chip — shown on both panes, since the filter now scopes
     // the connections list AND the errors pane.
     let _ = which;
@@ -1182,6 +1201,8 @@ fn draw_help(buf: &mut Buffer, area: Rect) {
         "  v          flip pane · live / ↑ upload / ↓ download",
         "  s          span — metrics band (recent/days/year); from Live, opens ↑ upload",
         "  f 1 2 3 0  lane filter / jump / clear",
+        "  P          port — one port's traffic (main, named",
+        "             ports, all); errors stay all ports",
         "  /          search hosts (regex) · esc clears",
         "  w [ ]      errors window (rolling)",
         "  y          copy the selected domain",
@@ -1325,9 +1346,9 @@ pub fn draw_footer(buf: &mut Buffer, area: Rect, app: &App) {
 
     // Normal: global group, then a contextual group when something is live.
     let global = if app.paused {
-        " ↑↓←→ navigate · v flip · s span · f lane · / search · w window · o proxy · a auto · r reprobe · R subs · p resume · g servers · ? help · q quit "
+        " ↑↓←→ navigate · v flip · s span · f lane · P port · / search · w window · o proxy · a auto · r reprobe · R subs · p resume · g servers · ? help · q quit "
     } else {
-        " ↑↓←→ navigate · v flip · s span · f lane · / search · w window · o proxy · a auto · r reprobe · R subs · p pause · g servers · ? help · q quit "
+        " ↑↓←→ navigate · v flip · s span · f lane · P port · / search · w window · o proxy · a auto · r reprobe · R subs · p pause · g servers · ? help · q quit "
     };
     // Leave room for contextual route/select keys on medium-width terminals.
     let global = if area.width < dw(global) + 35 {

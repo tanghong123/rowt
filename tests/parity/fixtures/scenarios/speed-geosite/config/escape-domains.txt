@@ -1,0 +1,3 @@
+# fixture (#s96): speed labels a URL the geosite set routes with its lane
+example.com
+geosite:github

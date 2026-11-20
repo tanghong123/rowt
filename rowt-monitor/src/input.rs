@@ -71,6 +71,7 @@ pub fn key(k: KeyEvent, app: &App) -> Option<Action> {
         KeyCode::Char('g') => Action::ToggleServers,
         KeyCode::Char('v') => Action::ConnViewCycle,
         KeyCode::Char('s') => Action::BandCycle,
+        KeyCode::Char('P') => Action::PortCycle,
         KeyCode::Char('w') => Action::WindowCycle,
         KeyCode::Char(']') => Action::WindowStep(1),
         KeyCode::Char('[') => Action::WindowStep(-1),

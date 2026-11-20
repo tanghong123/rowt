@@ -1,0 +1,8 @@
+rowt #s104: watch-upgrade-busy, but the Mac woke 60 s ago from an hour's sleep
+(`sysctl -n kern.waketime kern.sleeptime`, filled in from each sandbox's own
+clock through @NOW-<s>@). A quiet moment: the tick marks this version and
+reloads.
+
+sing-box-run-stays and curl_http_127_0_0_1_9090_version (router-restart-ok's)
+let the restart come back, so the case runs with ROWT_METRICS=off
+ROWT_AUTO_FOLLOW=0, as router-restart-ok's cases do.

@@ -13,7 +13,7 @@ and a corp VPN coexist because nothing fights over the default route:
 |---|---|---|---|
 | **escape** | `escape-domains.txt` | the user's own server, bound to the physical NIC | google, github, AI APIs |
 | **corp** | `corp-domains.txt` (domains **and** CIDRs) | the OS routing table, i.e. into the corp VPN | intranet |
-| **direct** | everything unlisted | out the physical NIC, around both VPNs | local sites |
+| **direct** | everything unlisted, plus `direct-domains.txt` | out the physical NIC, around both VPNs | local sites; npm (taken out of `geosite:github`) |
 | **block** | `block-domains.txt` + a built-in ad set | sinkholed: no DNS, no dial | ads, telemetry |
 
 Unlisted **private/overlay IPs** (RFC 1918, `100.64/10`, link-local) take the corp lane,
