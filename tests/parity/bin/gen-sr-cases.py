@@ -50,6 +50,7 @@ addresses; no real store, credential or rule file is ever read.
 from __future__ import annotations
 
 import datetime
+import io
 import os
 import plistlib
 import random
@@ -327,7 +328,8 @@ def server_entry(rng: random.Random, objs: list) -> dict:
         else:
             e["pluginParam"] = ref(rng.choice(["/plugin", "", None]))
     if rng.random() < (0.7 if hy2 else 0.3):
-        e["allowInsecure"] = ref(rng.choice([True, False, 1, 0, "0", "", None]))
+        # Typed as the user typed it: only 1 or true, in any case, means on.
+        e["allowInsecure"] = ref(rng.choice([True, False, 1, 0, "0", "", None, "1", "true", "TRUE", "false", "False", 1.0, 2]))
     if rng.random() < 0.25:
         e["data"] = ref(rng.choice(["upload=1", "", None, b"raw"]))
     if rng.random() < 0.1:
@@ -390,11 +392,58 @@ def store_bytes(rng: random.Random) -> bytes:
 
 
 DAMAGE_BYTES = [x for x in range(256) if not 0x15 <= x <= 0x1F]
+WIDE_INT = range(0x15, 0x20)
+
+
+def reads_a_wide_int(data: bytes) -> bool:
+    """Whether plistlib, reading `data`, takes an integer marker wider than 16
+    bytes (0x15-0x1f) for some object: the one gap bplist.rs keeps by design.
+    No flip writes such a byte (DAMAGE_BYTES), but damage elsewhere can still
+    send the reader to one that is already there: a flipped offset, a flipped
+    ref, or a truncation that makes the trailer out of other bytes. A ref to
+    object 21-31 is such a byte."""
+    if not data.startswith(b"bplist00"):
+        return False
+    hit = False
+
+    class Probe(plistlib._BinaryPlistParser):
+        def _read_object(self, ref: int) -> object:
+            nonlocal hit
+            try:
+                if self._objects[ref] is plistlib._undefined:
+                    hit = hit or data[self._object_offsets[ref]] in WIDE_INT
+            except (IndexError, TypeError):
+                pass
+            return super()._read_object(ref)
+
+    # Each level costs the probe two frames to plistlib's one, so give it the
+    # room plistlib has. Catch only what plistlib's parse lets out, so a Python
+    # that renames the private names above fails here loudly instead of
+    # switching the guard off.
+    limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(limit * 2 + 50)
+    try:
+        Probe(dict_type=dict).parse(io.BytesIO(data))
+    except (plistlib.InvalidFileException, RecursionError, MemoryError):
+        pass
+    finally:
+        sys.setrecursionlimit(limit)
+    return hit
 
 
 def damaged(rng: random.Random, data: bytes) -> bytes:
     """A plist that has been through something. Both implementations must agree
-    on which of these are still readable."""
+    on which of these are still readable. Damage that would have plistlib read
+    an integer wider than 16 bytes is drawn again: that tests bplist.rs's
+    documented refusal, not parity. Other damage draws exactly as before."""
+    for _ in range(8):
+        out = _damage(rng, data)
+        if not reads_a_wide_int(out):
+            return out
+    return data
+
+
+def _damage(rng: random.Random, data: bytes) -> bytes:
     kind = rng.random()
     b = bytearray(data)
     if kind < 0.3 and len(b) > 40:
