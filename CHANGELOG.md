@@ -5,6 +5,8 @@ release is cut; everything under Unreleased ships with the next one.
 
 ## Unreleased
 
+## 3.11.4 — 2026-11-23
+
 - **Local mode starts without a server.** `rowt up local` on a Mac with no
   servers stopped with "generated vm.json failed validation", although local
   mode needs no server. Every render also built the VM guest's config, whose
