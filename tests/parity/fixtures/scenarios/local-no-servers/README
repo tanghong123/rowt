@@ -1,0 +1,5 @@
+Local mode on a Mac that never added a server (rowt #s117): servers.json is
+absent, and a vm.json is left from before the last server went. `render`
+must write host.json, leave the VM guest config unrendered and remove the
+stale one; `reload`, `restart` and `up local` must not refuse for want of
+servers. The empty-pool twin is local-empty-pool (`[]`, no vm.json).

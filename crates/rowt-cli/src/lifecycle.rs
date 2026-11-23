@@ -545,18 +545,29 @@ pub fn cmd_render(ctx: &Ctx) -> Result<String, String> {
 
     let servers: Vec<Value> =
         serde_json::from_str(&read(&ctx.cfg.join("servers.json"))).unwrap_or_default();
-    let selected = crate::best::escape_sel(ctx);
-    let guest = group(&servers, "", &selected, &urltest(ctx));
-    let vm = render_vm(&guest, "0.0.0.0", (ctx.port + 1) as u64,
-                       &format!("0.0.0.0:{}", ctx.clash_port + 1),
-                       &clash_secret(ctx), &env_or("ROWT_LOG_LEVEL", "warn"));
+    // rowt #s117: the VM guest's whole config is the escape group, and with no
+    // server that group is a selector over nothing, which `sing-box check`
+    // refuses ("missing tags"). Local mode promises no server is needed, and the
+    // guest is only ever run in vm mode, so there it is simply not rendered —
+    // "no servers" meaning servers.json holds no array of them: missing, `[]`
+    // (what removing the last one leaves) or unreadable. Host and vm mode still
+    // render it and still fail, as they did.
+    let guest_wanted = mode != "local" || !servers.is_empty();
+    let mut out = vec![(ctx.host_cfg(), host)];
+    if guest_wanted {
+        let selected = crate::best::escape_sel(ctx);
+        let guest = group(&servers, "", &selected, &urltest(ctx));
+        out.push((ctx.vm_cfg(), render_vm(&guest, "0.0.0.0", (ctx.port + 1) as u64,
+                                          &format!("0.0.0.0:{}", ctx.clash_port + 1),
+                                          &clash_secret(ctx), &env_or("ROWT_LOG_LEVEL", "warn"))));
+    }
 
     // Written to a temp file and moved into place: a plain truncate-then-write
     // lets a concurrent reader — sing-box starting while this re-renders — see
     // an empty file and die on "decode config EOF".
-    for (path, val) in [(ctx.host_cfg(), &host), (ctx.vm_cfg(), &vm)] {
+    for (path, val) in out {
         let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, serde_json::to_string_pretty(val).unwrap() + "\n")
+        fs::write(&tmp, serde_json::to_string_pretty(&val).unwrap() + "\n")
             .map_err(|e| format!("write {}: {e}", tmp.display()))?;
         // Before the check, not after the rename: these hold the escape
         // server's credentials, and the window where they are world-readable
@@ -581,6 +592,14 @@ pub fn cmd_render(ctx: &Ctx) -> Result<String, String> {
         }
     }
     lanes_prev_clear(ctx);
+    if !guest_wanted {
+        // Only now, with host.json validated and in place: a render that fails
+        // leaves both files as they were. A guest config left from before the
+        // last server went would hold that server's credentials, and `diag`
+        // would call it OK.
+        let _ = fs::remove_file(ctx.vm_cfg());
+        return Ok(format!("  host: {}\n  vm:   not rendered (local mode, no servers)", ctx.host_cfg().display()));
+    }
     Ok(format!("  host: {}\n  vm:   {}", ctx.host_cfg().display(), ctx.vm_cfg().display()))
 }
 
@@ -1300,6 +1319,14 @@ fn has_servers(ctx: &Ctx) -> bool {
     fs::metadata(ctx.cfg.join("servers.json")).map(|m| m.is_file() && m.len() > 0).unwrap_or(false)
 }
 
+/// Whether `reload` and `restart` have a router to bring back: servers, or
+/// local mode, which needs none (rowt #s117). The watchdog recovers through
+/// `cmd_reload`, so without the second half a local-mode router with an empty
+/// pool could never be recovered. `port`'s apply step asks the same.
+fn has_router_to_bounce(ctx: &Ctx) -> bool {
+    ctx.sget("mode") == "local" || has_servers(ctx)
+}
+
 fn pkill(pattern: &str) {
     let _ = Command::new("pkill").arg("-f").arg(pattern)
         .stdout(Stdio::null()).stderr(Stdio::null()).status();
@@ -1334,7 +1361,7 @@ pub fn cmd_revert(ctx: &Ctx, here: &Path) -> Result<String, String> {
 
 /// `cmd_reload` — re-detect the network, re-render, bounce, re-apply the proxy.
 pub fn cmd_reload(ctx: &Ctx, here: &Path) -> Result<String, String> {
-    if !has_servers(ctx) {
+    if !has_router_to_bounce(ctx) {
         return Err(format!("nothing to reload — run '{} up' first", crate::PROG));
     }
     eprintln!("==> reloading for the current network…");
@@ -1515,7 +1542,7 @@ pub fn cmd_setup(ctx: &Ctx, here: &Path, args: &[String]) -> Result<String, Stri
 /// only once the router is confirmed up. A failed bounce leaves the proxy off,
 /// which is safe; leaving it on would point the machine at a dead port.
 pub fn cmd_restart(ctx: &Ctx, here: &Path) -> Result<String, String> {
-    if !has_servers(ctx) {
+    if !has_router_to_bounce(ctx) {
         return Err(format!("nothing to restart — run '{} up' first", crate::PROG));
     }
     eprintln!("==> restart: turning the system proxy off first…");

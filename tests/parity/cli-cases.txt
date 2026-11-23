@@ -322,6 +322,13 @@ PARITY_SCENARIO=render-vm-mode conns escape
 # servers.json has bytes, so `[]` renders rather than refusing (PORTING.md §6.7).
 render
 PARITY_SCENARIO=render-empty-servers render
+# Local mode with no servers (rowt #s117): the VM guest config is not rendered
+# — its escape group would be a selector over nothing, which a real sing-box
+# refuses and this sandbox's fake does not — and a stale one is removed. A
+# missing servers.json is a Mac that never added a server; `[]` is what removing
+# the last one leaves.
+PARITY_SCENARIO=local-no-servers render
+PARITY_SCENARIO=local-empty-pool render
 
 # help routing: the systematic '<cmd> --help' as well as 'help <cmd>'
 --help
@@ -1272,6 +1279,14 @@ PARITY_UNORDERED=1 up
 down
 reload
 restart
+# Local mode needs no servers, so with none it still has a router to bounce
+# (rowt #s117). Both used to refuse a missing servers.json with "nothing to
+# reload/restart", and the watchdog recovers through `reload`.
+PARITY_SCENARIO=local-no-servers up local
+PARITY_SCENARIO=local-no-servers reload
+PARITY_SCENARIO=local-empty-pool reload
+PARITY_SCENARIO=local-no-servers restart
+PARITY_SCENARIO=local-empty-pool restart
 
 # proxy on/off — safe to gate because BOTH sides funnel every system-proxy
 # write through one guarded choke point, and the sandbox has no service anyway.

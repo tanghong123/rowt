@@ -1,0 +1,12 @@
+{
+  "log": {"level": "warn", "timestamp": true},
+  "inbounds": [{"type": "mixed", "tag": "in", "listen": "0.0.0.0", "listen_port": 7891}],
+  "outbounds": [
+    {"type": "vless", "tag": "alpha", "server": "203.0.113.10", "server_port": 443,
+     "uuid": "00000000-0000-4000-8000-000000000001"},
+    {"type": "selector", "tag": "escape", "outbounds": ["alpha"], "default": "alpha"},
+    {"type": "direct", "tag": "direct"},
+    {"type": "block", "tag": "block"}
+  ],
+  "route": {"final": "escape"}
+}

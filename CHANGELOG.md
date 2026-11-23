@@ -5,6 +5,17 @@ release is cut; everything under Unreleased ships with the next one.
 
 ## Unreleased
 
+- **Local mode starts without a server.** `rowt up local` on a Mac with no
+  servers stopped with "generated vm.json failed validation", although local
+  mode needs no server. Every render also built the VM guest's config, whose
+  escape group is the servers, and sing-box refuses an empty one. Now, in
+  local mode with no servers, no guest config is rendered (it only runs in vm
+  mode), one left from before is removed, and `rowt render` says
+  `vm: not rendered (local mode, no servers)`. `rowt reload` and
+  `rowt restart` no longer refuse local mode for want of servers either, so
+  the watchdog can recover a router running that way. Both rowt-rs and the
+  shell had this, ever since local mode shipped.
+
 ## 3.11.2 — 2026-11-20
 
 - **A spin heal that has to wait no longer gives up for a day.** When the

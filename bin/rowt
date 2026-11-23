@@ -65,7 +65,7 @@
 set -euo pipefail
 
 # ---------- paths & constants ------------------------------------------------
-ROWT_VERSION="3.11.3"
+ROWT_VERSION="3.11.4"
 # Resolve symlinks so an installed 'rowt' symlink still finds config/, lima/, etc.
 _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do
@@ -2558,7 +2558,11 @@ cmd_render() {
   _auto_tolerance >/dev/null \
     || die "ROWT_AUTO_TOLERANCE wants whole milliseconds from 0 to 99999 (got '$AUTO_TOLERANCE')"
   ensure_singbox_host
-  info "rendering configs (mode=$mode, port=$PORT, servers=$(jq length "$SERVERS"))"
+  # How many servers the pool holds: 0 for a missing, empty or unreadable file
+  # as much as for `[]` (rowt #s117 — the guest config below hangs on it).
+  local nsrv; nsrv="$(jq 'if type == "array" then length else 0 end' "$SERVERS" 2>/dev/null)" || nsrv=0
+  nsrv="${nsrv:-0}"
+  info "rendering configs (mode=$mode, port=$PORT, servers=$nsrv)"
   # The escape servers' names, re-checked over DoH when stale, so this render
   # guards what it can (see _escape_dns).
   if [ "$mode" = host ]; then _escape_dns refresh || true; fi
@@ -2567,7 +2571,13 @@ cmd_render() {
   # reader — sing-box starting up on a restart while the watchdog re-renders —
   # can read an empty file and die with "decode config EOF". mv is atomic on the
   # same filesystem, so readers only ever see a complete old-or-new file.
-  local th tv; th="$(mktemp "$HOST_CFG.XXXXXX")"; tv="$(mktemp "$VM_CFG.XXXXXX")"
+  # rowt #s117: the VM guest's whole config is the escape group, and with no
+  # server that group is a selector over nothing, which `sing-box check`
+  # refuses ("missing tags"). Local mode promises no server is needed and the
+  # guest only ever runs in vm mode, so there it is not rendered at all. Host
+  # and vm mode still render it and still fail, as they did.
+  local guest=1; [ "$mode" = local ] && [ "$nsrv" = 0 ] && guest=
+  local th tv=""; th="$(mktemp "$HOST_CFG.XXXXXX")"; [ -z "$guest" ] || tv="$(mktemp "$VM_CFG.XXXXXX")"
   if [ "$mode" = "local" ]; then
     assemble_host "$(build_escape_outbounds local)" "127.0.0.1" "127.0.0.1:$CLASH_PORT" > "$th"
   elif [ "$mode" = "vm" ]; then
@@ -2577,15 +2587,18 @@ cmd_render() {
     assemble_host "$(build_escape_outbounds host)" "127.0.0.1" "127.0.0.1:$CLASH_PORT" > "$th"
   fi
   # VM guest config (used only in mode vm): selector + clash API bound to the LAN
-  assemble_vm "$(build_escape_outbounds vm-guest)" "0.0.0.0" "0.0.0.0:$VM_CLASH" > "$tv"
-  "$SB" check -c "$th" || { rm -f "$th" "$tv"; _lane_sets_restore; die "generated host config failed validation"; }   # and the lane sets as they were
-  "$SB" check -c "$tv" || { rm -f "$th" "$tv"; die "generated vm config failed validation"; }
+  [ -z "$guest" ] || assemble_vm "$(build_escape_outbounds vm-guest)" "0.0.0.0" "0.0.0.0:$VM_CLASH" > "$tv"
+  "$SB" check -c "$th" || { rm -f "$th" ${tv:+"$tv"}; _lane_sets_restore; die "generated host config failed validation"; }   # and the lane sets as they were
+  [ -z "$guest" ] || "$SB" check -c "$tv" || { rm -f "$th" "$tv"; die "generated vm config failed validation"; }
   mv -f "$th" "$HOST_CFG"; _render_by_stamp   # which rowt rendered it (rowt #s104)
-  mv -f "$tv" "$VM_CFG"
+  # Without a guest, a vm.json left from before the last server went would hold
+  # that server's credentials, and diag would call it OK: removed, but only now,
+  # so a render that fails leaves both files as they were.
+  if [ -n "$guest" ]; then mv -f "$tv" "$VM_CFG"; else rm -f "${VM_CFG:?}"; fi
   _lane_sets_prev_clear   # validated: the previous lane sets are done with
   [ "${ROWT_RENDER_SHADOW:-$(sget shadow_render)}" = 1 ] && _render_shadow "$mode" || true
   echo "  host: $HOST_CFG"
-  echo "  vm:   $VM_CFG"
+  if [ -n "$guest" ]; then echo "  vm:   $VM_CFG"; else echo "  vm:   not rendered (local mode, no servers)"; fi
 }
 
 # ---------- import / subscribe / servers ------------------------------------
@@ -6559,7 +6572,8 @@ cmd_status() {
 # Bounce the tunnel in place — restart whichever mode is active, no re-render,
 # no proxy change. Use when sing-box is stuck; use 'reload' after a network change.
 cmd_restart() {
-  [ -s "$SERVERS" ] || die "nothing to restart — run '$PROG up' first"
+  # Local mode needs no servers, so it has a router to bounce without them (rowt #s117).
+  [ "$(sget mode)" = local ] || [ -s "$SERVERS" ] || die "nothing to restart — run '$PROG up' first"
   # Strict order so a mid-way failure never leaves an inconsistent state: system
   # proxy OFF first, bounce the components, then proxy back ON only once the router
   # is confirmed up. If the bounce fails, the proxy stays OFF (safe, not limbo).
@@ -6580,7 +6594,8 @@ cmd_restart() {
 # Re-detect the network interface, re-render, restart, re-apply the proxy.
 # Run this after switching networks (Wi-Fi <-> wired <-> USB hotspot).
 cmd_reload() {
-  [ -s "$SERVERS" ] || die "nothing to reload — run '$PROG up' first"
+  # Local mode needs no servers, and the watchdog recovers through this (rowt #s117).
+  [ "$(sget mode)" = local ] || [ -s "$SERVERS" ] || die "nothing to reload — run '$PROG up' first"
   info "reloading for the current network…"
   rm -f "$WATCH_HOLD"                     # rowt #s36: any reload is a fresh start for the watchdog's hold
   if [ "$(sget mode)" = "vm" ] && vm_running; then
